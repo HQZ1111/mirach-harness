@@ -19,8 +19,15 @@
 }
 
 .flexlayout-host .flexlayout__tabset_tabbar_outer {
-  height: 28px;
-  min-height: 28px;
+  height: 100px;
+  min-height: 100px;
+  align-items: flex-end; /* 页签行沉到条底，上部留给 logo/文字（用户定稿） */
+}
+
+.flexlayout-host .flexlayout__tabset_tabbar_inner,
+.flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
+  height: 100px;
+  align-items: flex-end;
 }
 
 /* ── 横向页签（hermes PaneTab，token 见 tokens.css） ──
@@ -66,10 +73,11 @@
    令牌，否则 主区/检查/文件/终端 这些单页签 zone 的标签是 16px 默认字
    （"终端的标签样式没统一"的根源）。 */
 .flexlayout-host .flexlayout__tab_button_stretch {
+  align-items: flex-end; /* 拉伸头栏 100 高：文字沉底，上部留白（logo/文字区） */
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
-  padding: 0 var(--tab-pad-x);
+  padding: 0 var(--tab-pad-x) 10px;
   text-transform: uppercase;
 }
 

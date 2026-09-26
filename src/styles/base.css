@@ -35,27 +35,35 @@ body {
 body.in-browser { background: var(--surface); }
 
 /* ── 标题栏 ── */
+/* 标题栏 = 100px 透明浮层（用户定稿：页签条加高 100 覆盖标题栏区域）：
+   容器穿透（页签条可点），仅按钮与顶部拖拽带可交互；MIRACH logo 由左栏
+   页签条上部承载（RailLogo），标题栏不再重复。 */
 .app-titlebar {
-  align-items: center;
+  align-items: flex-start;
   background: transparent;
-  border-bottom: 1px solid var(--stroke-soft);
-  color: var(--text-2);
   display: flex;
-  flex: none;
-  font-size: 12px;
-  gap: 8px;
-  height: 36px;
-  padding: 0 12px;
+  height: 100px;
+  justify-content: flex-end;
+  left: 0;
+  padding: 4px 10px 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  top: 0;
   user-select: none;
+  z-index: 50;
 }
 
-.app-name {
-  color: var(--text);
-  font-weight: 600;
-  letter-spacing: 0.08em;
-}
+.app-titlebar > * { pointer-events: auto; }
 
-.app-titlebar-spacer { flex: 1; }
+.tb-drag-strip {
+  height: 36px;
+  left: 0;
+  pointer-events: auto;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
 
 .app-titlebar-btn {
   background: rgba(0, 0, 0, 0.04);
