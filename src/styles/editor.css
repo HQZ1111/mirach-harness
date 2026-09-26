@@ -1,0 +1,406 @@
+/* ============================================================
+ * editor.css — 布局编辑面板（.ep-*，edit-palette.tsx）+ Zone 编辑器
+ * （.ze-*，zone-editor.tsx）。harness 没有 Tailwind，.ep-* 逐条翻译
+ * hermes 的 tailwind 类。z 序：在 edit veil（55）与投放 overlay（60）之上。
+ * ============================================================ */
+
+/* ── 布局编辑面板（hermes TreeEditBar + LayoutPicker） ── */
+.ep-card {
+  background: var(--surface);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 25px 50px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  width: 26rem;
+  max-width: calc(100% - 2rem);
+  z-index: 70;
+}
+
+.ep-card[data-centered] {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.ep-header {
+  align-items: flex-start;
+  cursor: grab;
+  display: flex;
+  flex-shrink: 0;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 16px 8px;
+  user-select: none;
+}
+
+.ep-header:active { cursor: grabbing; }
+
+.ep-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.ep-hint {
+  color: var(--text-3);
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+
+.ep-kbd {
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 4px;
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  padding: 0 4px;
+}
+
+.ep-header-actions {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.ep-btn {
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.ep-btn:hover { background: rgba(0, 0, 0, 0.05); }
+
+.ep-btn-outline { border: 1px solid rgba(0, 0, 0, 0.12); }
+.ep-btn-outline:hover { border-color: rgba(0, 0, 0, 0.24); }
+.ep-btn:disabled { cursor: default; opacity: 0.4; }
+
+.ep-body { padding: 0 16px 16px; }
+
+.ep-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ep-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ep-label {
+  color: var(--text-4);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.ep-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ep-preset { position: relative; }
+
+.ep-preset-btn {
+  background: transparent;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  text-align: left;
+  transition: border-color 120ms, background-color 120ms;
+  width: 100%;
+}
+
+.ep-preset-btn:hover {
+  background: rgba(0, 0, 0, 0.03);
+  border-color: rgba(0, 0, 0, 0.24);
+}
+
+.ep-preset-active,
+.ep-preset-active:hover {
+  background: color-mix(in srgb, var(--accent) 6%, #ffffff);
+  border-color: var(--accent);
+}
+
+.ep-preset-thumb {
+  display: flex;
+  height: 48px;
+  width: 100%;
+  color: #3c3c46;
+}
+
+.ep-thumb-row {
+  display: flex;
+  flex: 1;
+  gap: 1px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ep-thumb-horz { flex-direction: row; }
+.ep-thumb-vert { flex-direction: column; }
+
+.ep-thumb-cell {
+  display: flex;
+  flex: 1 1 0px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ep-thumb-zone {
+  border-radius: 2px;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ep-preset-name {
+  color: var(--text-3);
+  font-size: 0.68rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ep-preset-active .ep-preset-name { color: var(--text); }
+
+.ep-preset-del {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.05);
+  border: none;
+  border-radius: 6px;
+  color: var(--text-3);
+  cursor: pointer;
+  display: grid;
+  font-size: 13px;
+  height: 20px;
+  justify-content: center;
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  transition: opacity 120ms;
+  width: 20px;
+  z-index: 10;
+}
+
+.ep-preset-del:hover { background: rgba(0, 0, 0, 0.09); color: var(--text); }
+
+.ep-preset:hover .ep-preset-del,
+.ep-preset-del:focus-visible { opacity: 1; }
+
+.ep-new-grid {
+  background: transparent;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  border-radius: 8px;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 12px;
+  height: 32px;
+  width: 100%;
+}
+
+.ep-new-grid:hover { border-color: rgba(0, 0, 0, 0.32); color: var(--text); }
+
+.ep-save-reveal {
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 0;
+}
+
+.ep-save-reveal:hover { color: var(--text); }
+
+.ep-save-form {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.ep-input {
+  background: var(--surface);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+  color: var(--text);
+  flex: 1;
+  font-size: 12px;
+  height: 28px;
+  outline: none;
+  padding: 0 8px;
+}
+
+.ep-input:focus { border-color: var(--accent); }
+
+.min-w-0 { min-width: 0; }
+
+/* ── Zone 编辑器（hermes「New grid layout」） ── */
+.ze-backdrop {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.32);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+  z-index: 120;
+}
+
+.ze-card {
+  background: var(--surface);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100% - 4rem);
+  max-height: calc(100% - 4rem);
+  padding: 16px;
+  width: 44rem;
+}
+
+.ze-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.ze-hint {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0 0 10px;
+}
+
+.ze-warn { color: #d8a24c; }
+
+.ze-canvas {
+  background: #fafafb;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  flex: 1;
+  min-height: 320px;
+  overflow: auto;
+  padding: 8px;
+}
+
+.ze-split {
+  display: flex;
+  flex: 1;
+  gap: 4px;
+  min-height: 120px;
+}
+
+.ze-horz { flex-direction: row; }
+.ze-vert { flex-direction: column; }
+
+.ze-cell {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.ze-cell-actions {
+  flex: 0 0 auto;
+  flex-direction: row;
+  gap: 6px;
+  justify-content: center;
+}
+
+.ze-group {
+  background: #f3f3f5;
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  border-radius: 6px;
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 96px;
+  padding: 8px;
+}
+
+.ze-empty {
+  color: var(--text-4);
+  font-size: 11.5px;
+}
+
+.ze-chip {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 5px;
+  color: var(--text);
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  padding: 3px 8px;
+}
+
+.ze-chip-x {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+
+.ze-chip-x:hover { color: var(--text); }
+
+.ze-add { flex-basis: 100%; }
+
+.ze-select {
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 5px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  padding: 2px 6px;
+}
+
+.ze-mini {
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 5px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.ze-mini:hover { border-color: var(--accent); color: var(--text); }
+
+.ze-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.ze-apply:disabled {
+  cursor: default;
+  opacity: 0.4;
+}

@@ -1,0 +1,305 @@
+/* ============================================================
+ * flexlayout.css — flexlayout 覆写：宿主 / 页签 / 轨道 / 竖轨
+ * 取值全部来自 tokens.css（--tab-* / --rail-* / --flexlayout-*）。
+ * ============================================================ */
+
+/* ── FlexLayout 宿主 ── */
+/* flexlayout 的 .flexlayout__layout 是 position:absolute; inset:0，
+   锚定到最近的定位祖先——宿主必须 relative，否则盖住标题栏/状态栏。 */
+/* 手感对齐 hermes（pane-shell tree-split.tsx 的 Sash）：
+   - 常驻 1px 发丝线，hover/拖动全亮 accent；
+   - 命中区 8px（::before 提供，不占布局）；
+   - tabDragSpeed：拖拽幻影跟随光标的过渡（0.08 比默认 0.3 跟手）。 */
+.flexlayout-host {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.flexlayout-host .flexlayout__tabset_tabbar_outer {
+  height: 28px;
+  min-height: 28px;
+}
+
+/* ── 横向页签（hermes PaneTab，token 见 tokens.css） ──
+   9px 大写宽字距、激活=白表面+2px 主题色下划线（唯一缝）、
+   未激活 hover 加深、✕ 悬停淡入、多选=accent 14% 渐变洗。 */
+.flexlayout-host .flexlayout__tab_button {
+  border-left: 1px solid var(--tab-separator);
+  border-radius: 0;
+  font-size: var(--tab-font-size);
+  font-weight: var(--tab-font-weight);
+  letter-spacing: var(--tab-tracking);
+  padding: 0 var(--tab-pad-x);
+  text-transform: uppercase;
+  transition: background-color 100ms, color 100ms;
+}
+
+.flexlayout-host .flexlayout__tab_button:first-child,
+.flexlayout-host .flexlayout__tab_button_stretch { border-left: none; }
+
+/* 激活：白色表面 + 主题色下划线（hermes TAB_ACTIVE_UNDERLINE，唯一缝） */
+.flexlayout-host .flexlayout__tab_button--selected,
+.flexlayout-host .flexlayout__tab_button_stretch {
+  background-color: var(--tab-active-bg);
+  box-shadow: inset 0 -2px 0 var(--tab-accent);
+}
+
+/* 未激活 hover 加深（浅色下用黑 6%） */
+.flexlayout-host .flexlayout__tab_button--unselected:hover {
+  background-color: var(--tab-hover-bg);
+  color: var(--tab-text-active);
+}
+
+/* 多选页签：accent 14% 渐变洗压在任何表面上（hermes TAB_SELECTED） */
+.flexlayout-host .flexlayout__tab_button.fl-tab-selected,
+.flexlayout-host .flexlayout__border_button.fl-tab-selected {
+  background-image: linear-gradient(var(--tab-accent-wash), var(--tab-accent-wash));
+  box-shadow: none;
+  color: var(--tab-text-active);
+}
+
+/* ── 拉伸头栏（tabSetEnableSingleTabStretch：单页签 zone 的头栏） ──
+   **关键：它不带基础 tab_button 类**——字号/内边距必须在这里单独接
+   令牌，否则 主区/检查/文件/终端 这些单页签 zone 的标签是 16px 默认字
+   （"终端的标签样式没统一"的根源）。 */
+.flexlayout-host .flexlayout__tab_button_stretch {
+  font-size: var(--tab-font-size);
+  font-weight: var(--tab-font-weight);
+  letter-spacing: var(--tab-tracking);
+  padding: 0 var(--tab-pad-x);
+  text-transform: uppercase;
+}
+
+/* ── zone 头部最小化按钮（onRenderTabSet 注入） ──
+   悬停 zone 才显形；还原钮（fl-restore-btn）在 border/竖轨里没有
+   hover 上下文，常显——后写覆盖。 */
+.fl-min-btn {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--tab-text);
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  height: 20px;
+  justify-content: center;
+  line-height: 1;
+  margin-left: 4px;
+  padding: 0;
+  width: 20px;
+}
+
+.fl-min-btn:hover {
+  background: var(--tab-hover-bg);
+  color: var(--tab-text-active);
+}
+
+.flexlayout-host .fl-min-btn { opacity: 0; transition: opacity 120ms; }
+.flexlayout-host .flexlayout__tabset:hover .fl-min-btn { opacity: 1; }
+
+/* 离家一级窗格：✕ 常显（点击 = 回家，非关闭）——sync 给页签打 fl-tab-away
+   类（flexlayout 默认 hover 才显示 trailing 关闭钮，用户定稿要常显）。
+   单页签拉伸头栏（tab_button_stretch）同样带该类，一并覆盖。 */
+.flexlayout-host .fl-tab-away .flexlayout__tab_button_trailing {
+  visibility: visible;
+}
+
+/* 拉伸头栏的回家钮（onRenderTab 注入，离家人级窗格专用）：常显 */
+/* 拉伸头栏的回家钮 / 关闭钮（onRenderTab 注入）：常显 */
+.flexlayout-host .fl-home-btn,
+.flexlayout-host .fl-stretch-close {
+  opacity: 1;
+  color: var(--tab-text);
+}
+
+/* 拖拽幽灵线（flexlayout 非 clamp 状态的跟手轮廓）：实时缩放 + onAction
+   钳制下它是"第二条会动的手柄线"，纯干扰——但**只能 visibility 隐藏，
+   绝不能 display:none**：flexlayout 拖拽以幽灵线的 offsetLeft/offsetTop
+   作为拖拽位置输入，display:none 会让 offset 变 0 → 每次拖动都按"缝在
+   最左"重算，宽度/高度拖动全部失效、只会跳（2026-09-26 实测）。
+   visibility 保留几何、仅不可见。 */
+.flexlayout-host .flexlayout__splitter_drag {
+  visibility: hidden !important;
+}
+
+/* ── 三种轨道页签同一形态（用户定稿：文字横向直立、字号字重字距与横向
+   页签完全一致，取值全部来自令牌）── flexlayout 的 border 页签原生整行
+   旋转 90°（字形侧躺），摆正为纵向排列的普通页签：文字直立 + 还原钮
+   上下堆叠、全部交叉轴居中。 */
+.flexlayout-host .flexlayout__border_inner_tab_container_left,
+.flexlayout-host .flexlayout__border_inner_tab_container_right {
+  align-items: center;
+  flex-direction: column !important;
+  left: 0 !important;
+  position: absolute !important;
+  right: 0 !important;
+  top: 0 !important;
+  transform: none !important;
+}
+.flexlayout-host .flexlayout__border_button {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: auto !important;
+  justify-content: flex-start;
+  margin: 0;
+  max-width: var(--rail-width);
+  overflow: hidden;
+  padding: var(--tab-pad-y) 2px;
+  width: var(--rail-width);
+}
+.flexlayout-host .flexlayout__border_button,
+.flexlayout-host .flexlayout__border_button_content {
+  font-size: var(--tab-font-size);
+  font-weight: var(--tab-font-weight);
+  letter-spacing: var(--tab-tracking);
+  text-transform: uppercase;
+}
+/* 折叠轨道文字 90°（用户 2026-09-26 定稿：与 flexlayout 原生折叠轨道
+   的旋转观感一致——此前"文字横向"轮的摆正撤销） */
+.flexlayout-host .flexlayout__border_button_content {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  line-height: 1.4;
+  max-height: 100%;
+  overflow: hidden;
+  writing-mode: vertical-rl;
+}
+.flexlayout-host .flexlayout__border_button + .flexlayout__border_button {
+  border-top: 1px solid var(--tab-separator);
+}
+
+/* ── 栏级竖轨（v3 定稿：整栏页签导航）──
+   竖轨 = 该栏外缘一条 20px 原生空轨 tabset（真占位、零重叠）；经
+   onTabSetPlaceHolder 对它渲染 RailNav：该栏全部分栏的全部页签（90°
+   竖排、行下关闭图标、分栏之间留缝）、点行=切换显示（页签常驻）、
+   行纵向拖=轨内重排、横向拖出=搬去别的大栏、顶部切横轨钮、底部「+」。 */
+.zone-rail {
+  align-items: center;
+  bottom: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  left: 0;
+  overflow-y: auto;
+  padding: var(--tab-pad-y) 2px;
+  position: absolute;
+  right: 0;
+  scrollbar-width: none;
+  top: 0;
+}
+.zone-rail::-webkit-scrollbar { display: none; }
+.zone-rail .fl-min-btn { margin-left: 0; opacity: 1; }
+.zone-rail-btn {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--tab-text);
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  height: var(--rail-btn-size);
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+  width: var(--rail-btn-size);
+}
+.zone-rail-btn:hover {
+  background: var(--tab-hover-bg);
+  color: var(--tab-text-active);
+}
+/* 分栏分组：同分栏的页签连排；相邻组之间**一条**分割线（相邻选择器）。
+   此前组自带上下边框 + 组间 gap 线，两组之间渲染出三根线（用户实测
+   打回）。 */
+.zone-rail-group {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  width: 100%;
+}
+.zone-rail-group + .zone-rail-group {
+  border-top: 1px solid var(--tab-separator);
+  margin-top: 4px;
+}
+.zone-rail-cell {
+  align-items: center;
+  border-radius: 4px;
+  box-sizing: border-box;
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 1px;
+  width: 100%;
+}
+.zone-rail-cell:hover { background: var(--tab-hover-bg); }
+.zone-rail-cell.active { background: var(--tab-accent-wash); }
+.zone-rail-cell.dragging { opacity: 0.4; }
+.zone-rail-label {
+  color: var(--tab-text);
+  font-size: var(--tab-font-size);
+  font-weight: var(--tab-font-weight);
+  letter-spacing: var(--tab-tracking);
+  overflow: hidden;
+  text-transform: uppercase;
+  white-space: nowrap;
+  writing-mode: vertical-rl;
+}
+.zone-rail-cell.active .zone-rail-label { color: var(--tab-text-active); }
+.zone-rail-insert {
+  flex: none;
+  height: 2px;
+  left: 2px;
+  position: absolute;
+  right: 2px;
+  background: var(--tab-accent);
+}
+.zone-rail-add { flex: none; padding-bottom: 2px; }
+
+/* ── 「+」弹出菜单（PaneAddButton：多可开类型时选择） ── */
+.zone-add-menu {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  position: fixed;
+  transform: translateX(-100%);
+  z-index: 90;
+}
+.zone-add-item {
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+.zone-add-item:hover { background: var(--hover-wash); }
+
+/* ── 边框轨道（折叠栏）宽度：flexlayout 用 border_sizer 元素实测
+   定栏宽，sizer 去掉上下 padding、按钮 var(--rail-width) 即得栏宽。 */
+.flexlayout-host .flexlayout__border_sizer { padding-top: 0; padding-bottom: 0; }
+
+/* ── 左栏标签条：顶部让出 logo 带的高度（logo 带正下方就是标签） ── */
+.flexlayout-host .rail-tabstrip {
+  margin-top: 40px;
+}

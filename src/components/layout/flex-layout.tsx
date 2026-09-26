@@ -1,0 +1,1747 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Layout, Model, Actions, TabNode, TabSetNode, TabGroupNode, RowNode, BorderNode, DockLocation, Orientation, showPopupMenu, type Action, type Node, type PopupMenuEntry, type ILayoutApi } from 'flexlayout-react'
+import 'flexlayout-react/style/light.css'
+
+import { Titlebar } from '@/app/shell/titlebar'
+import { StatusBar } from '@/app/shell/statusbar'
+import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
+import { MainTint, RailLogo } from './chrome-overlays'
+import { ChevronDownIcon, ChevronUpIcon } from '@/components/ui/codicons'
+import { DropOverlay } from './drop-overlay'
+import { startPaneDrag } from './drag-session'
+import { EditPalette } from './edit-palette'
+import { EditVeils } from './edit-veils'
+import { useLayoutStore, bumpLayoutRev, closeEditMode, closeZoneEditor, openZoneEditor, removeUserPreset, setActivePreset, setAppliedTree, setSideCollapsed, storeUserPreset, toggleEditMode } from '@/store/layout-store'
+import { appWindow, inTauri } from '@/lib/tauri-window'
+import { LogicalSize } from '@tauri-apps/api/dpi'
+import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
+import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, closePane, type PaneType, type Region } from './pane-registry'
+import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
+import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
+import { ZoneEditor } from './zone-editor'
+
+import { BotsPane } from '@/components/panes/bots-pane'
+import { FilesPane } from '@/components/panes/files-pane'
+import { ReviewPane } from '@/components/panes/review-pane'
+import { SessionsPane } from '@/components/panes/sessions-pane'
+import { TerminalPane } from '@/components/panes/terminal-pane'
+import { WorkspacePane } from '@/components/panes/workspace-pane'
+
+// ── 窗格组件注册表（按**类型**分发；多实例共用同一组件） ─────────────────────
+
+const COMPONENTS: Record<string, React.ComponentType<{ tabName?: string }>> = {
+  sessions: SessionsPane,
+  bots: BotsPane,
+  workspace: WorkspacePane,
+  session: WorkspacePane, // 多开会话暂用同一占位，接 pi 后换 ChatView
+  files: FilesPane,
+  review: ReviewPane,
+  terminal: TerminalPane,
+}
+
+/** 一级窗格类型（不可关闭；非家乡位置的关闭 = 回家） */
+const PRIMARY_TYPES = new Set(
+  Object.entries(PANE_TYPES)
+    .filter(([, d]) => d.primary)
+    .map(([t]) => t),
+)
+
+// 布局预设与各栏约束在 layout-presets.ts（docs/layout-design.md §2 数值）。
+
+/** 设计窗宽（与 src-tauri/main.rs 的 DESIGN_W、tauri.conf 一致） */
+const DESIGN_WIDTH = 1800
+
+/** 自适应窗宽（用户 2026-09-26 定稿）：Σ(各列聚合 min) + 轨 + 缝 > 当前
+ *  窗宽（装不下新栏/约束溢出）→ 窗宽自动长到 need（钳到屏幕可用宽）；
+ *  关栏/合并腾出空间（need ≤ 设计宽 1800，且仅结构动作触发）→ 回 1800。
+ *  仅 Tauri 生效；窄屏抽屉模式不参与（窄屏下侧栏撤成 overlay，根行 Σmin
+ *  本来就小）。 */
+const fitWindowWidth = (m: Model, allowRevert: boolean) => {
+  if (!inTauri || !appWindow) return
+  if (useLayoutStore.getState().narrowViewport) return
+  const rootRow = m.getRootRow()
+  const kids = rootRow?.getChildren() ?? []
+  if (kids.length === 0) return
+  let minSum = 0
+  for (const k of kids) {
+    const cfg = regionCfgOfNode(k)
+    if (cfg?.track) {
+      minSum += TRACK_W
+      continue
+    }
+    minSum += widthBounds(k, k instanceof RowNode).min
+  }
+  const gaps = SPLITTER_PX * Math.max(kids.length - 1, 0)
+  const need = minSum + gaps + 2 /*壳 1px 边框 ×2 = 所需 inner 宽*/
+  const curInner = window.innerWidth
+  const outerDelta = Math.max(window.outerWidth - window.innerWidth, 0)
+  let target: number
+  if (need > curInner) {
+    target = need + outerDelta
+  } else if (allowRevert && curInner > DESIGN_WIDTH + 2 && need <= DESIGN_WIDTH) {
+    target = DESIGN_WIDTH + outerDelta
+  } else {
+    return
+  }
+  const availW = window.screen?.availWidth ?? target
+  const finalW = Math.max(900, Math.min(target, availW))
+  if (Math.abs(finalW - window.outerWidth) <= 4) return
+  void appWindow.setSize(new LogicalSize(finalW, window.outerHeight)).catch(() => {})
+}
+
+const makeDefaultLayout = () => presetToModelJson(LAYOUT_PRESETS[0])
+
+// v6：v3 架构（region/track 走 tabset.config；v5 及更早的存档带着三轮
+// 废弃竖轨实验的残骸——停车轨/吸收区/合并式轨——整体作废，直接默认布局）
+const STORAGE_KEY = 'mirach.harness.layout.v6'
+
+// ── zone 的 region / 形态 / 约束（docs/layout-design.md §2/§5/§12） ─────────
+// region 约束数值（REGION_LIMITS）与窗格类型表都在 pane-registry.ts。
+
+// ── 根行解析式配重（竖轨引入的 20px 节点会触发权重归一化重排——
+// 富余被顶到各分栏 max 钳制后 flexbox 无人吸收 → 白带）。按记忆 px
+// 直接定根行权重：track=20、左右栏=记忆值（钳进约束）、主栏吃剩余。
+const rootPxMem: Record<Region, number> = { left: 350, main: 746, right: 700 }
+
+const regionCfgOfNode = (n: Node): { region: Region; track: boolean } | undefined => {
+  if (n instanceof TabSetNode) {
+    const cfg = zoneConfigOf(n)
+    return cfg ? { region: cfg.region, track: cfg.track === true } : undefined
+  }
+  if (n instanceof RowNode) {
+    // flexlayout 的行属性**不含 config**（JSON 里的 row.config 被解析丢弃，
+    // 2026-09-26 实测踩过：右列 row 被当无身份 → px=0 → 主栏吸收区吃下
+    // 全部富余）——下钻子树取第一个带配置的 tabset
+    const walk = (kids: Node[]): { region: Region; track: boolean } | undefined => {
+      for (const c of kids) {
+        if (c instanceof TabSetNode) {
+          const cfg = zoneConfigOf(c)
+          if (cfg) return { region: cfg.region, track: cfg.track === true }
+        } else if (c instanceof RowNode) {
+          const deep = walk(c.getChildren())
+          if (deep) return deep
+        }
+      }
+      return undefined
+    }
+    return walk(n.getChildren())
+  }
+  return undefined
+}
+
+/** 根行子节点的实测 px 宽：**直接取 flexlayout 布局矩形**（getRect 由库
+ *  在布局时维护，与 getSplitterBounds 同源），不再查 DOM——行/页签集通
+ *  用，且天然规避 data-layout-path 选择器的转义与失效风险。布局未就绪
+ *  （rect 为空）时返回 0，由调用方的就绪守卫兜住。 */
+const measuredPxWidth = (n: Node): number => {
+  try {
+    const r = (n as { getRect?: () => { width: number } }).getRect?.()
+    return r?.width ?? 0
+  } catch {
+    return 0
+  }
+}
+
+/** 根行可用宽：宿主宽 − 可见左右边框轨条（折叠轨占位；autoHide 空轨为
+ *  0/不渲染）。window.innerWidth 会把壳边框与折叠轨条都算进去，配重就
+ *  会多出一条缝（AGENTS 记载的 +6px 偏置同源）。 */
+const rootAvailPx = (): number => {
+  const host = document.querySelector('.flexlayout-host') as HTMLElement | null
+  if (!host) return 0
+  let avail = host.clientWidth
+  for (const side of ['left', 'right']) {
+    const bar = document.querySelector(`.flexlayout__border_${side}`) as HTMLElement | null
+    if (bar) avail -= bar.offsetWidth
+  }
+  return avail
+}
+
+/** 记忆根行各列的当前 px（onModelChange/boot/resize 时刷新） */
+const measureRootPx = (m: Model) => {
+  const root = m.getRootRow()
+  for (const k of root?.getChildren() ?? []) {
+    const cfg = regionCfgOfNode(k)
+    if (!cfg || cfg.track) continue
+    const w = measuredPxWidth(k)
+    if (w > 40) rootPxMem[cfg.region] = w
+  }
+}
+
+/** 子树沿宽度轴的聚合约束：tabset=大栏限制（轨=20 固定）；行按方向
+ * 聚合——垂直行（子项横跨整行）宽 min=MAX(子)/max=MIN(子)，水平行
+ * （并排）宽 min=Σ/max=Σ。行的方向按深度交替（根=水平，子行=垂直）。 */
+const widthBounds = (n: Node, vert: boolean): { min: number; max: number } => {
+  if (n instanceof TabSetNode) {
+    const cfg = zoneConfigOf(n)
+    if (cfg?.track) return { min: TRACK_W, max: TRACK_W }
+    // 读节点**实际生效**的 min/max（sync 已按堆叠语境清过：垂直堆叠
+    // 分栏宽度跟随所在列 [0,∞]——不能回头按大栏限制表钳，否则右列
+    // 会被终端的 420 上限整列钳死）
+    return { min: n.getMinWidth(), max: Math.min(n.getMaxWidth(), 99999) }
+  }
+  if (n instanceof RowNode) {
+    const kids = n.getChildren()
+    const gaps = 1 * Math.max(kids.length - 1, 0)
+    let min = 0
+    let max = 99999
+    if (vert) {
+      for (const c of kids) {
+        const b = widthBounds(c, false)
+        min = Math.max(min, b.min)
+        max = Math.min(max, b.max)
+      }
+    } else {
+      max = 0
+      for (const c of kids) {
+        const b = widthBounds(c, true)
+        min += b.min
+        max += b.max
+      }
+      min += gaps
+      max += gaps
+    }
+    return { min, max: Math.min(max, 99999) }
+  }
+  return { min: 0, max: 99999 }
+}
+
+const applyRootWeights = (m: Model) => {
+  const root = m.getRootRow()
+  const kids = root?.getChildren() ?? []
+  if (!root || kids.length < 2) return
+  const avail = rootAvailPx() - SPLITTER_PX * (kids.length - 1)
+  if (avail < 300) return // 窗口不可信（最小化/CDP 伪影），配重会烙进存档
+  // 布局未就绪守卫（同 absorbSurplus）：flexlayout 首次布局前
+  // calculatedMin/Max 全 0，widthBounds = {0,0} 会把左右栏目标钳成 0、
+  // 主栏吃满全部可用宽（weight 100）——量不到就整体放弃
+  const ready = kids.every((k) => {
+    if (regionCfgOfNode(k)?.track) return true
+    const b = widthBounds(k, k instanceof RowNode)
+    return Number.isFinite(b.min) && Number.isFinite(b.max) && b.max > 0
+  })
+  if (!ready) return
+  const px: number[] = kids.map(() => 0)
+  let rest = avail
+  kids.forEach((k, i) => {
+    const cfg = regionCfgOfNode(k)
+    if (cfg?.track) {
+      px[i] = TRACK_W
+      rest -= TRACK_W
+      return
+    }
+    if (cfg?.region === 'main') return // 主栏吃剩余
+    const b = widthBounds(k, k instanceof RowNode)
+    const mem = cfg ? rootPxMem[cfg.region] : 700
+    px[i] = Math.min(Math.max(mem, b.min), b.max)
+    rest -= px[i]
+  })
+  const mainKids = kids.filter((k) => {
+    const c = regionCfgOfNode(k)
+    return c?.region === 'main' && !c.track
+  })
+  if (mainKids.length > 0) {
+    // 主栏（可能多分栏并列）按当前权重比例分吃剩余，每栏不低于 min 395
+    const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
+    const wSum = mainKids.reduce((s, k) => s + (weightOf(k) > 0 ? weightOf(k) : 100), 0)
+    for (const k of mainKids) {
+      const i = kids.indexOf(k)
+      px[i] = Math.max((rest * weightOf(k)) / wSum, REGION_LIMITS.main.minW)
+    }
+  } else {
+    // 主栏整栏折叠（无吸收者）：富余给最后一个非轨列——分栏内部由
+    // 各自的 max 钳制接管，这里只保证根行权重总量正确
+    let last = kids.length - 1
+    while (last >= 0 && regionCfgOfNode(kids[last])?.track) last--
+    if (last >= 0) px[last] += Math.max(rest, 0)
+  }
+  // 逐节点显式设 weight（Actions.adjustWeights 的数组映射实测会把权重
+  // 写到错误的兄弟头上——2026-09-26 吸收区被加上右列权重的复现）
+  if (typeof window !== 'undefined' && (window as { __flDbg?: boolean }).__flDbg) {
+    console.log('[applyRootWeights] kids=', kids.map((k, i) => `${k.getId().slice(0, 6)}:${regionCfgOfNode(k)?.region ?? '?'}${regionCfgOfNode(k)?.track ? 'T' : ''}=${Math.round(px[i])}`).join(' '), 'avail=', avail)
+  }
+  kids.forEach((k, i) => {
+    const w = (px[i] / avail) * 100
+    if (Number.isFinite(w) && w > 0) {
+      if (typeof window !== 'undefined' && (window as { __flDbg?: boolean }).__flDbg) {
+        console.log('[applyRootWeights] set', k.getId().slice(0, 6), '->', Math.round(w * 100) / 100)
+      }
+      m.doAction(Actions.updateNodeAttributes(k.getId(), { weight: w }))
+    }
+  })
+}
+
+/** 富余兜底（常跑版）：量测根行各列实际 px，非主栏列钳进聚合约束
+ *  [min,max] 后把差额全部交给主栏分栏。两个入口都靠它：
+ *  ① Σ < 可用宽（无人吸收的富余/行尾留白）；② 列超出**聚合 max**——
+ *  子分栏全顶到 max 后列内部留白（用户截图实锤：检查|文件树 347/320，
+ *  列 1100，行内空 375——根行 Σ=可用宽，deficit 探测不到，必须把列收
+ *  回 max、富余还给主栏）。写入权重与渲染真相对齐，消掉 flexbox 的
+ *  min/max 钉住态；变化 <2px 的列不动（防噪声 churn）。 */
+const absorbSurplus = (m: Model) => {
+  const root = m.getRootRow()
+  const kids = root?.getChildren() ?? []
+  if (!root || kids.length < 2) return
+  const availTotal = rootAvailPx()
+  if (availTotal < 300) return // 窗口不可信（最小化/CDP 伪影）
+  const avail = availTotal - SPLITTER_PX * (kids.length - 1)
+  // 布局未就绪守卫（boot 冷启动实测踩过）：flexlayout 要到首次布局才算
+  // calculatedMin/Max（fromJson 后全 0），DOM 也可能未量得——此时 widthBounds
+  // = {0,0}、各列目标全被钳成 0，主栏会吃到"rest = 全部可用宽"（权重 100），
+  // 左右栏被钳到最小 = 用户截图的右侧空白。任何一列量不到或约束无上限意义
+  // 时整体放弃，等下一次触发（90ms/resize/rAF）再做。
+  const measured = kids.map((k) => measuredPxWidth(k))
+  if (measured.some((w) => w <= 0)) return
+  const boundsOk = kids.every((k) => {
+    if (regionCfgOfNode(k)?.track) return true
+    const b = widthBounds(k, k instanceof RowNode)
+    return Number.isFinite(b.min) && Number.isFinite(b.max) && b.max > 0
+  })
+  if (!boundsOk) return
+  const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
+  // 目标 px：轨=20 固定；主栏=-1（吸收者标记）；其余列钳进聚合约束
+  const px = kids.map((k, i) => {
+    const c = regionCfgOfNode(k)
+    if (c?.track) return TRACK_W
+    if (c?.region === 'main' && !c.track) return -1
+    const b = widthBounds(k, k instanceof RowNode)
+    return Math.min(Math.max(measured[i], b.min), b.max)
+  })
+  const rest = avail - px.reduce((s, v) => s + Math.max(v, 0), 0)
+  // 吸收者：主栏分栏按当前权重比例分吃 rest（各不低于实际生效 min——
+  // sync 的过承诺缩让值）；没有主栏分栏 → 无上限列 → 最后一个非轨列
+  // （右栏的 20px 轨贴在行尾，不能当吸收者）
+  let mains: number[] = []
+  kids.forEach((_, i) => {
+    if (px[i] === -1) mains.push(i)
+  })
+  if (mains.length === 0) {
+    let cand = -1
+    for (let i = 0; i < kids.length; i++) {
+      if (regionCfgOfNode(kids[i])?.track) continue
+      if (widthBounds(kids[i], kids[i] instanceof RowNode).max >= 9999) {
+        cand = i
+        break
+      }
+    }
+    if (cand === -1) {
+      cand = kids.length - 1
+      while (cand >= 0 && regionCfgOfNode(kids[cand])?.track) cand--
+    }
+    if (cand >= 0) {
+      mains = [cand]
+      px[cand] = -1
+    }
+  }
+  if (mains.length === 0 || !(rest > 0)) return
+  const wSum = mains.reduce((s, i) => s + Math.max(weightOf(kids[i]), 1), 0)
+  for (const i of mains) {
+    const minW = kids[i] instanceof TabSetNode ? Math.max((kids[i] as TabSetNode).getMinWidth(), 40) : 40
+    px[i] = Math.max((rest * Math.max(weightOf(kids[i]), 1)) / wSum, Math.min(minW, Math.max(rest, 40)))
+  }
+  kids.forEach((k, i) => {
+    const target = px[i]
+    if (!(target > 0)) return
+    const w = (target / avail) * 100
+    if (!Number.isFinite(w) || w <= 0) return
+    if (Math.abs(target - measured[i]) < 2 && Math.abs(w - weightOf(k)) < 0.05) return
+    m.doAction(Actions.updateNodeAttributes(k.getId(), { weight: w }))
+  })
+}
+
+/** 高度轴的聚合界限（clampRowWeights 用于 VERT 行）：tabset=实际生效的
+ *  min/maxHeight；行按方向聚合——VERT（子项纵向堆叠）高度=Σ，HORZ
+ *  （子项并排）高度=MAX(min)/MIN(max)。与 widthBounds 互为转置。 */
+const heightBounds = (n: Node): { min: number; max: number } => {
+  if (n instanceof TabSetNode) return { min: n.getMinHeight(), max: Math.min(n.getMaxHeight(), 99999) }
+  if (n instanceof RowNode) {
+    const kids = n.getChildren()
+    const gaps = SPLITTER_PX * Math.max(kids.length - 1, 0)
+    if (n.getOrientation() === Orientation.VERT) {
+      let min = 0
+      let max = 0
+      for (const c of kids) {
+        const b = heightBounds(c)
+        min += b.min
+        max += b.max
+      }
+      return { min: min + gaps, max: max + gaps }
+    }
+    let min = 0
+    let max = 99999
+    for (const c of kids) {
+      const b = heightBounds(c)
+      min = Math.max(min, b.min)
+      max = Math.min(max, b.max)
+    }
+    return { min, max: Math.min(max, 99999) }
+  }
+  return { min: 0, max: 99999 }
+}
+
+/** 拖拽实时钳制：flexlayout 的 calculateSplit 只按 MIN 侧钳位，**不钳聚
+ *  合 MAX**——手柄把右栏拖过聚合上限后，DOM 的内联 max-width 把列钉住、
+ *  富余甩给别的列，松手权重提交又跳回，跟限制"打架闪烁"（用户实测）。
+ *  逐子项钳进 [minAlong, maxAlong]，差额交给有容量（未顶格）的子项
+ *  ——主栏/无上限列容量最大，自然承担吸收者角色。返回修正后的权重；
+ *  无需修正返回 null。**按行方向取轴**：HORZ 行钳宽度、VERT 行钳高度
+ *  （此前 VERT 行被按宽度轴钳，高度拖拽被错误界限卡死）。 */
+const clampRowWeights = (row: RowNode, weights: number[]): number[] | null => {
+  const kids = row.getChildren()
+  if (kids.length !== weights.length || kids.length < 2) return null
+  const horz = row.getOrientation() === Orientation.HORZ
+  const rect = row.getRect()
+  const avail = (horz ? rect.width : rect.height) - SPLITTER_PX * (kids.length - 1)
+  if (!(avail > 50)) return null
+  const sum = weights.reduce((s, w) => s + (Number.isFinite(w) ? w : 0), 0)
+  if (!(sum > 0)) return null
+  const minPx: number[] = []
+  const maxPx: number[] = []
+  for (const k of kids) {
+    const b = horz ? widthBounds(k, k instanceof RowNode) : heightBounds(k)
+    minPx.push(b.min)
+    maxPx.push(Math.min(b.max, avail))
+  }
+  if (minPx.some((m) => !Number.isFinite(m)) || maxPx.some((m) => !Number.isFinite(m))) return null
+  // 纯逐子项钳制：越界的子项钳回 [min,max]，其余不动——flexbox 会把省下
+  // 的空间按 grow 归一给未钳子项（主栏/无上限列自然吸收），**不做水填充
+  // 再分配**：按"容量"分差额在界限过期时会放大拖拽、把别的子项推向边界
+  // （2026-09-26 实测：宽/高拖拽都出现过向 min/max 的过冲）。
+  const clamped = weights.map((w, i) => {
+    const px = (w / sum) * avail
+    const c = Math.min(Math.max(px, minPx[i]), maxPx[i])
+    return (c / avail) * 100
+  })
+  let changed = false
+  for (let i = 0; i < clamped.length; i++) {
+    if (Math.abs(clamped[i] - weights[i]) > 0.05) changed = true
+  }
+  return changed ? clamped : null
+}
+
+/**
+ * 约束引擎 v4（docs/layout-design.md）——**限制跟随状态**：列 identity 由
+ * 一级窗格锚定（含 sessions=左栏、workspace=主栏、files=右栏），分栏的
+ * 宽度限制/关闭钮跟随其所在列动态推导（拖进哪栏继承哪栏，回家自动变
+ * 回来）。**diff 门控**：属性一致的 tabset 不发动作。
+ */
+const syncTabsetConstraints = (m: Model) => {
+  // 竖轨形态由**轨**决定（railByRegion = 该栏有没有 20px 轨）——分栏自身
+  // 不携带形态；有轨的大栏，其分栏横向条统一隐藏、内容向上充满
+  const railByRegion: Record<Region, boolean> = { left: false, main: false, right: false }
+  m.visitNodes((node) => {
+    if (!(node instanceof TabSetNode)) return
+    const cfg = zoneConfigOf(node)
+    if (cfg?.rail && cfg.track) railByRegion[cfg.region] = true
+  })
+  // 过承诺防护（"右栏被挤出窗口"的根治）：Σ(各大栏最小宽) > 可用宽时，
+  // 主栏分栏的 min 按比例缩让——主栏是吸收者，富余归它，亏空也只能归它
+  // （左右栏的 240 底线不让）。多开主栏分栏（395×n）或窗口变窄时触发；
+  // 宽度恢复后这里自动回 395（diff 门控双向生效）。flexbox 的内联
+  // min-width 钳死了权重层的一切缩让，min 必须在这里改。
+  const rootRow = m.getRootRow()
+  const rootKids = rootRow?.getChildren() ?? []
+  // ── 列 region 推导（"宽度限制跟随状态"的核心，用户 2026-09-26 定稿）──
+  // 来源优先级：①config 戳（有戳列 identity 永久保持——防夺锚：拖入别
+  // 的一级窗格、或原锚离开，都不改变列身份）；②列子树内第一个一级窗格
+  // （全新列由它锚定，如拖出的主会话新列 = 主栏）；③**最近邻已推导列**
+  // （拖出的非一级新分栏继承来源列——v4 曾丢失此规则，机器人拖出双栏
+  // 并列后错继承 main）；④main。轨不参与（无 region 条目）。
+  const kidRegion = new Map<string, Region>()
+  const primaryRegionOf = (k: Node): Region | undefined => {
+    let r: Region | undefined
+    const walk = (n: Node) => {
+      if (r) return
+      if (n instanceof TabNode) {
+        const t = paneTypeOf(n.getId())
+        const def = t ? PANE_TYPES[t] : undefined
+        if (def?.primary) r = def.region
+        return
+      }
+      for (const c of n.getChildren()) walk(c)
+    }
+    walk(k)
+    return r
+  }
+  const nonTrackKids = rootKids.filter((k) => !regionCfgOfNode(k)?.track)
+  for (const k of nonTrackKids) {
+    const stamped = regionCfgOfNode(k)?.region
+    if (stamped) kidRegion.set(k.getId(), stamped)
+  }
+  // 邻居传播：仍无 region 的列从最近邻（左先右后）继承，直到收敛
+  let propagated = true
+  while (propagated) {
+    propagated = false
+    for (let i = 0; i < nonTrackKids.length; i++) {
+      const k = nonTrackKids[i]
+      if (kidRegion.get(k.getId())) continue
+      const leftR = i > 0 ? kidRegion.get(nonTrackKids[i - 1].getId()) : undefined
+      const rightR = i < nonTrackKids.length - 1 ? kidRegion.get(nonTrackKids[i + 1].getId()) : undefined
+      const r = leftR ?? rightR
+      if (r) {
+        kidRegion.set(k.getId(), r)
+        propagated = true
+      }
+    }
+  }
+  for (const k of nonTrackKids) {
+    if (!kidRegion.get(k.getId())) kidRegion.set(k.getId(), primaryRegionOf(k) ?? 'main')
+  }
+  let mainMinW = REGION_LIMITS.main.minW
+  if (nonTrackKids.length > 0 && window.innerWidth >= 600) {
+    const avail = rootAvailPx() - SPLITTER_PX * Math.max(rootKids.length - 1, 0)
+    if (avail > 300) {
+      let nonMainMin = 0
+      let mainTabs = 0
+      for (const k of nonTrackKids) {
+        if (kidRegion.get(k.getId()) === 'main') mainTabs++
+        else nonMainMin += widthBounds(k, k instanceof RowNode).min
+      }
+      const scaled = mainTabs > 0 ? Math.floor((avail - nonMainMin) / mainTabs) : REGION_LIMITS.main.minW
+      mainMinW = scaled >= REGION_LIMITS.main.minW ? REGION_LIMITS.main.minW : Math.max(scaled, 40)
+    }
+  }
+  // 主栏吸收者是否在场——不在场时非主栏 max 放开、只留 min
+  // （用户 2026-09-26 定稿："最大宽度限制应该变没有"）
+  const hasMainKid = [...kidRegion.values()].some((r) => r === 'main')
+  m.visitNodes((node) => {
+    if (!(node instanceof TabSetNode)) return
+    // 空分栏跳过；空轨（20px 导航轨）必须过——它的 min/max 在这里修
+    if (node.getChildren().length === 0 && !zoneConfigOf(node)?.track) return
+    const isTrack = zoneConfigOf(node)?.track === true
+    // 列 region：沿父链上溯到根行直接子项，查列 region 表
+    let rootKid: Node = node
+    for (;;) {
+      const p = rootKid.getParent()
+      if (!p || p === rootRow) break
+      rootKid = p
+    }
+    const region = kidRegion.get(rootKid.getId()) ?? regionCfgOfNode(node)?.region ?? 'main'
+    const limits = REGION_LIMITS[region]
+    const rail = railByRegion[region]
+    const patch: Record<string, unknown> = {}
+    // config 跟随状态重钉：分栏现在的 region = 它所在列的 region（"标签
+    // 要知道自己被拖进哪一栏"，回家后自动变回来）。**轨必须跳过重钉**：
+    // updateNodeAttributes 的 config 是整对象替换，重钉 {region, rail} 会
+    // 把轨的 track:true 身份抹掉 → findRailTabset 失效 → 每次切竖轨都新建
+    // 一条轨，积累成两排 20px 竖条（2026-09-26 用户截图实锤）。
+    const oldCfg = zoneConfigOf(node)
+    if (!isTrack && (!oldCfg || oldCfg.region !== region || oldCfg.rail)) {
+      patch.config = { region, rail: false }
+    }
+    const parent = node.getParent()
+    const parentRow = parent instanceof RowNode ? parent : undefined
+    const alongWidth = parentRow ? parentRow.getOrientation() === Orientation.HORZ : true
+    // 纵向堆叠列的**第一个（顶部）分栏**保留列宽度限制，其余跟随上部
+    // （[0,∞]）——列的聚合 min=MAX(子 min)=列 min、max=MIN(子 max)=列 max，
+    // 列限制得保（终端这类柔性子项不受影响）。
+    const stackedFirst = !alongWidth && !!parentRow && parentRow.getChildren()[0] === node
+    if (isTrack) {
+      // 竖轨（栏外缘 20px 导航轨）：固定宽，不受大栏限制管
+      if (node.getMinWidth() !== TRACK_W) patch.minWidth = TRACK_W
+      if (node.getMaxWidth() !== TRACK_W) patch.maxWidth = TRACK_W
+    } else if (alongWidth || stackedFirst) {
+      // 主栏 min 用过承诺缩让值（正常宽度下 = 395）
+      const minW = region === 'main' ? mainMinW : limits.minW
+      if (node.getMinWidth() !== minW) patch.minWidth = minW
+      // 主栏不在场（无吸收者）→ 非主栏 max 放开、只留 min——否则列顶到
+      // max 后无人吸收富余又是行尾留白；主栏回来后 diff 门控自动恢复
+      const maxW = !hasMainKid ? 99999 : (limits.maxW ?? 99999)
+      if (node.getMaxWidth() !== maxW) patch.maxWidth = maxW
+    } else {
+      if (node.getMinWidth() !== 0) patch.minWidth = 0
+      if (node.getMaxWidth() !== 99999) patch.maxWidth = 99999
+    }
+    const wantStrip = !rail
+    if (node.isEnableTabStrip() !== wantStrip) patch.enableTabStrip = wantStrip
+    // 高度：垂直堆叠语境不设限（min 由标题条天然保证，max 无——"最大高度
+    // 没限制"）；历史遗留的 min/max 清回默认（白带类 bug 的根源随之消失）
+    if (parentRow && parentRow.getOrientation() === Orientation.VERT) {
+      if (node.getMinHeight() !== 0) patch.minHeight = 0
+      if (node.getMaxHeight() !== 99999) patch.maxHeight = 99999
+    }
+    if (Object.keys(patch).length > 0) {
+      m.doAction(Actions.updateNodeAttributes(node.getId(), patch))
+    }
+    // 一级窗格页签的关闭钮（回家语义）：离家显示 ✕（点击=回家），在家隐藏；
+    // **离家的 ✕ 要常显**（用户 2026-09-26 定稿：flexlayout 默认 hover 才
+    // 显示）——打 fl-tab-away 类，CSS 强制 visible
+    for (const c of node.getChildren()) {
+      if (!(c instanceof TabNode)) continue
+      const ptype = paneTypeOf(c.getId())
+      const pdef = ptype ? PANE_TYPES[ptype] : undefined
+      if (!pdef?.primary) continue
+      const wantClose = region !== pdef.region
+      if (c.isEnableClose() !== wantClose) {
+        m.doAction(Actions.updateNodeAttributes(c.getId(), { enableClose: wantClose }))
+      }
+      const wantCls = wantClose ? 'fl-tab-away' : undefined
+      if (c.getClassName() !== wantCls) {
+        m.doAction(Actions.updateNodeAttributes(c.getId(), { className: wantCls }))
+      }
+    }
+  })
+}
+
+// ── 主组件 ───────────────────────────────────────────────────────────────────
+
+export function FlexLayoutShell() {
+  // 模型配置：全局属性压回（旧存档防御）+ 竖轨投放保护
+  const configure = (m: Model) => {
+    m.doAction(Actions.updateModelAttributes({ enableEdgeDock: false, borderEnableAutoHide: true }))
+    // 竖轨是导航（空轨）——页签投进轨里会被"吞掉"，一律拒绝；
+    // 贴着轨的分裂/插入也拒（新栏会挤在轨和分栏之间 = 用户实测的
+    // "拖进竖轨还能把竖轨分栏"——轨贴大栏外缘，旁边不开新栏）
+    m.setOnAllowDrop((dragNode, dropInfo) => {
+      const isTrack = (n: unknown) => n instanceof TabSetNode && zoneConfigOf(n)?.track
+      if (isTrack(dropInfo.node)) return false
+      if (dropInfo.node instanceof RowNode) {
+        // 行空隙投放：插入位与轨相邻 → 拒
+        const sibs = dropInfo.node.getChildren()
+        const i = typeof dropInfo.index === 'number' ? dropInfo.index : -1
+        if (i >= 0 && (isTrack(sibs[i - 1]) || isTrack(sibs[i]))) return false
+      }
+      if (dropInfo.node instanceof TabSetNode && dropInfo.location != null && dropInfo.location !== DockLocation.CENTER) {
+        // 分栏边缘分裂：新栏落点一侧紧贴轨 → 拒
+        const p = dropInfo.node.getParent()
+        if (p instanceof RowNode) {
+          const sibs = p.getChildren()
+          const i = sibs.indexOf(dropInfo.node)
+          if (i >= 0) {
+            const side =
+              dropInfo.location === DockLocation.LEFT || dropInfo.location === DockLocation.TOP ? sibs[i - 1] : sibs[i + 1]
+            if (isTrack(side)) return false
+          }
+        }
+      }
+      return true
+    })
+    return m
+  }
+
+  const [model, setModel] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY)
+      if (saved) return configure(Model.fromJson(JSON.parse(saved)))
+    } catch {
+      // 不可信输入 → 默认布局
+    }
+    return configure(Model.fromJson(makeDefaultLayout()))
+  })
+
+  // 启动自愈：region 继承/约束按 v2.1 规则修正（持久化布局可能来自旧版本）
+  // + 过承诺 min 缩让 + 富余兜底（旧存档的权重残骸在第一帧就被修正）。
+  // absorb 必须等 flexlayout 首次布局（calcMinMaxSize/DOM 量测）之后——
+  // 同步跑会拿到 0 量测，把主栏权重写成"吃满全部可用宽"（2026-09-26
+  // 实测踩过，右侧空白的根因），双 rAF 保证在首次布局之后。
+  useEffect(() => {
+    syncTabsetConstraints(model)
+    const sides = useLayoutStore.getState().sideCollapsed
+    if (sides.left) collapseSide('left')
+    if (sides.right) collapseSide('right')
+    measureRootPx(model)
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        if (modelRef.current === model) absorbSurplus(model)
+      })
+    })
+    // 只在挂载时跑一次（模型替换走 applyJson 自己的 re-apply）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+    }
+  }, [])
+
+  // 布局状态在 layout-store（Zustand）；flexlayout Model 只是渲染器持有的活动树。
+  const editMode = useLayoutStore(s => s.editMode)
+  const activePresetId = useLayoutStore(s => s.activePresetId)
+  const userPresets = useLayoutStore(s => s.userPresets)
+  const sideCollapsed = useLayoutStore(s => s.sideCollapsed)
+  const zoneEditorOpen = useLayoutStore(s => s.zoneEditorOpen)
+
+  const persist = useCallback((m: Model) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(m.toJson()))
+    } catch {}
+  }, [])
+
+  // 拖拽/迁移的再入护栏：迁移本身触发 onModelChange，别递归
+  const migratingRef = useRef(false)
+
+  // 根行 px 记忆的时效守卫（延迟量测——onModelChange 时 DOM 还是旧渲染）
+  const modelRef = useRef(model)
+  modelRef.current = model
+
+  // 布局变化 → 持久化；手动拖动后清除激活预设标记 + bump 版本（徽标刷新）。
+  // 用回调传入的 m（applyJson 在 setModel 前做程序化动作，闭包 model 是旧的）。
+  // 结构性动作后同步约束（region 继承/宽度限制/堆叠高度）——diff 门控。
+  const rebalanceTimerRef = useRef(0)
+  const rebalanceStructuralRef = useRef(false)
+  const splitterDraggingRef = useRef(false)
+  // 串行重排通道（评审 #3/#11：多路 setTimeout 互相覆盖 → 单一防抖任务，
+  // 固定顺序 量测 → sync → absorb，后到取消先到；卸载时随清理作废）。
+  // **分隔条拖拽进行中必须推迟**：sync 的重渲会把拖拽中的 DOM 权重重置，
+  // 下一帧的 calculateSplit 以重置后尺寸为新基线，逐帧复利放大（实测
+  // 拖 40px 缝跑到边界）。拖拽结束后再排一次。
+  const scheduleRebalance = useCallback((structural: boolean) => {
+    window.clearTimeout(rebalanceTimerRef.current)
+    rebalanceStructuralRef.current = rebalanceStructuralRef.current || structural
+    rebalanceTimerRef.current = window.setTimeout(() => {
+      if (splitterDraggingRef.current) {
+        scheduleRebalance(rebalanceStructuralRef.current)
+        return
+      }
+      const m = modelRef.current
+      if (!m) return
+      const allowRevert = rebalanceStructuralRef.current
+      rebalanceStructuralRef.current = false
+      // 自适应窗宽（用户 2026-09-26 定稿）：Σ(各列聚合 min) + 轨 + 缝装不
+      // 下当前窗口 → 窗宽自动长到 need；关闭/合并腾出空间（结构动作触发
+      // 且 need ≤ 1800）→ 回 1800 设计宽。先于 sync（长窗后缩让不误触发）
+      fitWindowWidth(m, allowRevert)
+      measureRootPx(m)
+      syncTabsetConstraints(m)
+      absorbSurplus(m)
+    }, 90)
+  }, [])
+  const onModelChange = useCallback(
+    (m: Model, action?: Action) => {
+      try {
+        if (action?.type === Actions.ADJUST_WEIGHTS) {
+          const prev = JSON.parse(localStorage.getItem('__wlog') ?? '[]')
+          prev.push(JSON.stringify(action.data.weights?.map((w: number) => Math.round(w * 10) / 10)))
+          localStorage.setItem('__wlog', JSON.stringify(prev.slice(-16)))
+        }
+      } catch {}
+      persist(m)
+      setActivePreset(null)
+      bumpLayoutRev()
+      if (
+        action?.type === Actions.ADJUST_WEIGHTS ||
+        action?.type === Actions.MOVE_NODE ||
+        action?.type === Actions.DELETE_TAB ||
+        action?.type === 'FlexLayout_AddNode'
+      ) {
+        scheduleRebalance(action?.type !== Actions.ADJUST_WEIGHTS)
+      }
+      if (migratingRef.current) return
+      if (
+        action?.type === Actions.MOVE_NODE ||
+        action?.type === Actions.DELETE_TAB ||
+        action?.type === 'FlexLayout_AddNode'
+      ) {
+        syncTabsetConstraints(m)
+      }
+    },
+    [persist, scheduleRebalance],
+  )
+
+  const applyJson = useCallback(
+    (json: unknown, presetId: string | null) => {
+      try {
+        const next = configure(Model.fromJson(json as import('flexlayout-react').IJsonModel))
+        // 约束先修（其间 onModelChange 会 setActivePreset(null)/persist(next)——
+        // 无妨），再记预设标记，避免被程序化动作的 onModelChange 清掉
+        syncTabsetConstraints(next)
+        setModel(next)
+        setActivePreset(presetId)
+        setAppliedTree(json)
+        persist(next)
+        bumpLayoutRev()
+      } catch {
+        // 不可信预设 JSON → 忽略
+      }
+      // 换预设 = 布局回到模板声明宽：清掉旧会话攒下的记忆宽（评审 #1：
+      // rootPxMem 是模块级记忆，切预设/fullReset 必须显式回落）
+      Object.assign(rootPxMem, REGION_DEFAULT_W)
+    },
+    [persist],
+  )
+
+  const applyTemplate = useCallback(
+    (id: string) => {
+      const preset = LAYOUT_PRESETS.find((p) => p.id === id)
+      if (!preset) return
+      applyJson(presetToModelJson(preset), id)
+      closeEditMode()
+    },
+    [applyJson],
+  )
+
+  // 全重置（hermes resetLayoutTree："Reset restores EVERYTHING"）。
+  const fullReset = useCallback(() => {
+    applyJson(presetToModelJson(LAYOUT_PRESETS[0]), 'default')
+  }, [applyJson])
+
+  const applyUser = useCallback(
+    (id: string) => {
+      const preset = userPresets.find((p) => p.id === id)
+      if (!preset) return
+      applyJson(preset.json, id)
+      closeEditMode()
+    },
+    [applyJson, userPresets],
+  )
+
+  const saveCurrent = useCallback(
+    (title: string) => {
+      if (!title) return
+      storeUserPreset(title, model.toJson())
+    },
+    [model],
+  )
+
+  const removeUser = useCallback((id: string) => {
+    removeUserPreset(id)
+  }, [])
+
+  // 关闭窗格（docs/layout-design.md §7）：一级窗格非家乡位置 → 回家；其余
+  // 真关闭（子分栏最后一签关闭 = 分栏消失，tidy 语义）。
+  const closePaneById = useCallback(
+    (paneId: string) => {
+      const out = closePane(model, paneId)
+      if (out !== 'refused') {
+        persist(model)
+        bumpLayoutRev()
+      }
+    },
+    [model, persist],
+  )
+
+  // UI ✕/Ctrl+Delete 的真删除拦截（docs/layout-design.md §7）：一级窗格
+  // 离家点 ✕ = 回家（sendPaneHome），已在家 = 拒绝。返回 undefined 拦掉
+  // 原动作。程序化 doAction 不经过这里（closePaneById 已按同语义路由）。
+  // 拖拽提交帧修复：记录最后一帧实时权重（所见即所得），松手提交时采用
+  const lastAdjustRef = useRef<{ nodeId: string; weights: number[] } | null>(null)
+  const onAction = useCallback(
+    (action: Action): Action | undefined => {
+      if (action.type === Actions.ADJUST_WEIGHTS) {
+        // 拖拽实时钳制（含 adjusting 中间帧）：把权重钳进各子项的
+        // [minAlong, maxAlong]，手柄到 max 就推不动，不再和限制打架闪烁。
+        // **提交帧采用最后一帧实时权重**（所见即所得）：实测 flexlayout 的
+        // 非 adjusting 提交帧会以不同状态重算，把拖好的列砸回 min（2026-
+        // 09-26 逐帧日志实锤：实时帧 [15.4,37.8,46.8] → 提交帧 [13.4,…]）。
+        const data = action.data as { nodeId?: string; weights?: number[] }
+        const adjusting = (action as unknown as { isAdjusting?: () => boolean }).isAdjusting?.() ?? false
+        const row = model.getNodeById(data.nodeId ?? '')
+        if (adjusting) {
+          lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: data.weights ?? [] }
+          if (row instanceof RowNode && Array.isArray(data.weights) && (window as { __noClamp?: boolean }).__noClamp !== true) {
+            const corrected = clampRowWeights(row, data.weights)
+            if (corrected) return Actions.adjustWeights(row.getId(), corrected).setAdjusting(true)
+          }
+          return action
+        }
+        // 非 adjusting = 松手提交帧
+        const last = lastAdjustRef.current
+        lastAdjustRef.current = null
+        if (last && last.nodeId === data.nodeId && last.weights.length > 0) {
+          return Actions.adjustWeights(last.nodeId, last.weights)
+        }
+        if (row instanceof RowNode && Array.isArray(data.weights) && (window as { __noClamp?: boolean }).__noClamp !== true) {
+          const corrected = clampRowWeights(row, data.weights)
+          if (corrected) return Actions.adjustWeights(row.getId(), corrected)
+        }
+        return action
+      }
+      if (action.type !== Actions.DELETE_TAB) return action
+      const id = (action.data as { node?: string }).node ?? ''
+      const ptype = paneTypeOf(id)
+      if (!ptype || !PANE_TYPES[ptype].primary) return action
+      const tab = model.getNodeById(id)
+      if (!(tab instanceof TabNode)) return undefined
+      const cfg = zoneConfigOf(tab.getParent())
+      if (cfg && cfg.region !== PANE_TYPES[ptype].region) {
+        migratingRef.current = true
+        try {
+          sendPaneHome(model, id)
+          syncTabsetConstraints(model)
+          applyRootWeights(model)
+        } finally {
+          migratingRef.current = false
+        }
+        persist(model)
+        bumpLayoutRev()
+      }
+      return undefined
+    },
+    [model, persist],
+  )
+
+  // ── 整侧收起（标题栏 positional toggles）——当前住在该侧大栏分栏里的页签
+  // 全部折进对应 border 轨道（被拖去别栏的不抓），展开回同 region 分栏。
+  const collapseSide = useCallback(
+    (side: 'left' | 'right') => {
+      const borderId = side === 'left' ? 'border_left' : 'border_right'
+      let idx = 0
+      const ids: string[] = []
+      model.visitNodes((n) => {
+        if (!(n instanceof TabNode)) return
+        const ptype = paneTypeOf(n.getId())
+        if (!ptype || PANE_TYPES[ptype].region !== side) return
+        const set = n.getParent()
+        if (set instanceof BorderNode) return
+        const cfg = zoneConfigOf(set)
+        if (cfg?.track) return // 已折进竖轨（停车轨就是收起态）
+        if (cfg?.region !== side) return
+        ids.push(n.getId())
+      })
+      for (const id of ids) {
+        model.doAction(Actions.moveNode(id, borderId, DockLocation.CENTER, idx++))
+      }
+    },
+    [model],
+  )
+
+  const expandSide = useCallback(
+    (side: 'left' | 'right'): boolean => {
+      const borderId = side === 'left' ? 'border_left' : 'border_right'
+      const border = model.getNodeById(borderId)
+      if (!(border instanceof BorderNode)) return false
+      const tabs = border.getChildren().filter((c): c is TabNode => c instanceof TabNode)
+      if (tabs.length === 0) return false
+      // 目标分栏：同 region 的现有分栏；无 → 大栏边缘重建（region 显式补上）。
+      // 返回是否**重建**了分栏——重建产生默认权重的新 tabset，需要记忆
+      // 配重收尾；并入现有分栏则不需要（权重漂移由 absorb 兜底）。
+      let rebuilt = false
+      let target: TabSetNode | undefined
+      model.visitNodes((n) => {
+        if (target || !(n instanceof TabSetNode) || n.getChildren().length === 0) return
+        if (zoneConfigOf(n)?.region === side) target = n
+      })
+      const lead = tabs[0]
+      if (target) {
+        model.doAction(Actions.moveNode(lead.getId(), target.getId(), DockLocation.CENTER, target.getChildren().length))
+      } else {
+        rebuilt = true
+        const root = model.getRootRow()
+        // 重建锚点候选排除竖轨（轨贴大栏外缘，不参与锚点）
+        const kids = (root?.getChildren() ?? []).filter(
+          (k) => !(k instanceof TabSetNode && zoneConfigOf(k)?.track),
+        )
+        if (kids.length === 0) return false
+        // 重建锚点：左栏贴最左、右栏贴最右（此前都锚第一个子节点——两侧
+        // 同收再展开时右栏被插到左栏旁边，主栏被挤到最后 = "栏的位置自己
+        // 变"，2026-09-26 窄视口往返实测抓到）
+        const anchor = (side === 'left' ? kids[0] : kids[kids.length - 1]) as TabSetNode | RowNode
+        model.doAction(
+          Actions.moveNode(
+            lead.getId(),
+            anchor.getId(),
+            side === 'left' ? DockLocation.LEFT : DockLocation.RIGHT,
+            0,
+          ),
+        )
+        const newSet = lead.getParent()
+        if (newSet instanceof TabSetNode) {
+          // 重建分栏直接按记忆宽写权重（常量表钳制，不依赖延迟计算——
+          // 否则 flexbox 默认权重会被 max 钳住、measureRootPx 又把钳制值
+          // 记回记忆，来回都是 420）
+          const lim = REGION_LIMITS[side]
+          const memW = Math.min(Math.max(rootPxMem[side], lim.minW), lim.maxW ?? 99999)
+          const availNow = Math.max(rootAvailPx() - SPLITTER_PX * kids.length, 1)
+          model.doAction(
+            Actions.updateNodeAttributes(newSet.getId(), {
+              config: { region: side, rail: false },
+              weight: (memW / availNow) * 100,
+            }),
+          )
+        }
+      }
+      for (const t of tabs.slice(1)) {
+        const host = lead.getParent()
+        if (host instanceof TabSetNode) {
+          model.doAction(Actions.moveNode(t.getId(), host.getId(), DockLocation.CENTER, host.getChildren().length))
+        }
+      }
+      return rebuilt
+    },
+    [model],
+  )
+
+  const toggleSide = useCallback(
+    (side: 'left' | 'right') => {
+      const collapsed = useLayoutStore.getState().sideCollapsed[side]
+      migratingRef.current = true
+      try {
+        if (collapsed) {
+          if (useLayoutStore.getState().narrowViewport) {
+            setSideCollapsed(side, false)
+          } else {
+            expandSide(side)
+            setSideCollapsed(side, false)
+          }
+        } else {
+          collapseSide(side)
+          setSideCollapsed(side, true)
+        }
+      } finally {
+        migratingRef.current = false
+      }
+      persist(model)
+      bumpLayoutRev()
+    },
+    [model, persist, collapseSide, expandSide],
+  )
+
+  // 竖轨 ⇄ 横向 双形态切换（v3 定稿）：竖轨 = 该栏外缘一条 **20px 空轨**
+  // （原生 tabset，真占位、零重叠），工厂对它渲染整栏页签导航（RailNav）；
+  // 该栏各分栏保持原样（不合并、不挪页签），横向条由 sync 统一隐藏、
+  // 内容向上充满。
+  // 横向→竖轨：建轨。竖轨→横向：**拆轨**——不用快照（快照会把折叠期间
+  // 关掉的页签原样带回来=「关闭的标签又加回来了」，且残骸布局下还原前后
+  // 看不出变化=「没反应」）；拆轨 = 翻 enableDeleteWhenEmpty 后加假页签
+  // 再删，tidy 收走空轨，分栏横向条由 sync 自动恢复。
+  const toggleRegionForm = useCallback(
+    (region: Region) => {
+      const track = findRailTabset(model, region)
+      if (track) {
+        model.doAction(
+          Actions.updateNodeAttributes(track.getId(), { enableDeleteWhenEmpty: true, enableClose: true }),
+        )
+        const spacerId = `${region}-unfold-spacer`
+        model.doAction(
+          Actions.addNode(
+            { type: 'tab' as const, id: spacerId, component: 'external', name: '', enableClose: true },
+            track.getId(),
+            DockLocation.CENTER,
+            0,
+          ),
+        )
+        model.doAction(Actions.deleteTab(spacerId))
+      } else {
+        // 轨锚点：左栏=根行最左（LEFT）、右栏=根行最右（RIGHT）、
+        // 主栏=主栏第一个分栏左缘（"主栏在左栏的左边"）
+        let anchor: TabSetNode | RowNode | undefined
+        if (region === 'main') {
+          model.visitNodes((n) => {
+            if (anchor || !(n instanceof TabSetNode) || n.getChildren().length === 0) return
+            if (zoneConfigOf(n)?.region === 'main') anchor = n
+          })
+        } else {
+          const root = model.getRootRow()
+          const kids = root?.getChildren() ?? []
+          if (kids.length === 0) return
+          anchor = (region === 'left' ? kids[0] : kids[kids.length - 1]) as TabSetNode | RowNode
+        }
+        if (!anchor) return
+        // flexlayout 没有建空 tabset 的动作——假页签建轨即删
+        // （enableDeleteWhenEmpty:false 保轨不 tidy）
+        const spacerId = `${region}-track-spacer`
+        model.doAction(
+          Actions.addNode(
+            { type: 'tab' as const, id: spacerId, component: 'external', name: '', enableClose: true },
+            anchor.getId(),
+            region === 'right' ? DockLocation.RIGHT : DockLocation.LEFT,
+            0,
+          ),
+        )
+        const set = model.getNodeById(spacerId)?.getParent()
+        if (!(set instanceof TabSetNode)) return
+        model.doAction(
+          Actions.updateNodeAttributes(set.getId(), {
+            config: { region, rail: true, track: true },
+            enableTabStrip: false,
+            minWidth: TRACK_W,
+            maxWidth: TRACK_W,
+            enableDeleteWhenEmpty: false,
+          }),
+        )
+        model.doAction(Actions.deleteTab(spacerId))
+      }
+      syncTabsetConstraints(model)
+      applyRootWeights(model)
+      persist(model)
+      bumpLayoutRev()
+    },
+    [model, persist],
+  )
+
+  // 「+」新建窗格（docs/layout-design.md §6）：横向形态 → 堆叠页签进
+  // 该分栏；竖轨形态 → **并列新分栏**（"竖标签下，点击加的是直接多加
+  // 一栏"）——左/主栏向右分、右栏向左分（竖轨贴外缘不动）。region 继承
+  // 由 sync 兜底（新分栏落进竖轨栏自动同样无横向条）。
+  const createPane = useCallback(
+    (tabset: TabSetNode, type: PaneType) => {
+      const id = nextInstanceId(model, type)
+      model.doAction(Actions.addNode(paneTabJson(id), tabset.getId(), DockLocation.CENTER, tabset.getChildren().length))
+      model.doAction(Actions.selectTab(id))
+      syncTabsetConstraints(model)
+      persist(model)
+      bumpLayoutRev()
+    },
+    [model, persist],
+  )
+
+  const createPaneInRegion = useCallback(
+    (region: Region, type: PaneType) => {
+      // 竖轨态「+」= 与横向同语义：**堆叠进该栏的分栏**（用户 2026-09-26
+      // 二次定稿，覆盖早前"直接多加一栏"——"多个会话应该收进主栏的标签
+      // 组中，可以拖出"）：轨内出现多行同类型标签，点行切换内容；要并列
+      // 分栏就把它拖出去。宿主分栏 = 一级窗格所在栏，无则第一个分栏。
+      const zones: TabSetNode[] = []
+      model.visitNodes((n) => {
+        if (!(n instanceof TabSetNode) || n.getChildren().length === 0) return
+        const cfg = zoneConfigOf(n)
+        if (cfg?.region === region && !cfg.track) zones.push(n)
+      })
+      if (zones.length === 0) return
+      const primaryType = PRIMARY_PANE[region]
+      const host =
+        zones.find((z) => z.getChildren().some((c) => c instanceof TabNode && paneTypeOf(c.getId()) === primaryType)) ??
+        zones[0]
+      const id = nextInstanceId(model, type)
+      model.doAction(Actions.addNode(paneTabJson(id), host.getId(), DockLocation.CENTER, host.getChildren().length))
+      model.doAction(Actions.selectTab(id))
+      syncTabsetConstraints(model)
+      persist(model)
+      bumpLayoutRev()
+    },
+    [model, persist],
+  )
+
+  // zone 头部按钮（onRenderTabSet）：+ 只渲染在**一级栏**（宿含本大栏的
+  // 一级窗格——"分出的其他栏没有 + 号"），且本大栏有可开类型；每个 zone
+  // 都有 [切竖轨] 钮（切换整栏形态）
+  const onRenderTabSet = useCallback(
+    (node: TabSetNode | BorderNode, renderValues: import('flexlayout-react').ITabSetRenderValues) => {
+      if (!(node instanceof TabSetNode)) return
+      const cfg = zoneConfigOf(node)
+      if (!cfg) return
+      const isPrimaryZone = node.getChildren().some(
+        (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
+      )
+      const openable = openableTypesForRegion(model, cfg.region)
+      renderValues.buttons.push(
+        <PaneAddButton key="add" items={isPrimaryZone ? openable : []} onCreate={(t) => createPane(node, t)} />,
+      )
+      renderValues.buttons.push(
+        <button
+          key="form"
+          className="fl-min-btn"
+          title="切换为竖轨"
+          onClick={(e) => {
+            e.stopPropagation()
+            toggleRegionForm(cfg.region)
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          type="button"
+        >
+          <ChevronDownIcon />
+        </button>,
+      )
+    },
+    [model, toggleRegionForm, createPane],
+  )
+
+  // 镜像翻转（hermes ⌘\ mirrorLayoutTree → mirrorTreeHorizontal）：
+  // 水平行 children 反转，垂直行不动
+  const mirror = useCallback(() => {
+    applyJson(mirrorLayoutJson(model.toJson()), null)
+  }, [applyJson, model])
+
+  // 窄屏（hermes $narrowViewport）：两侧栏撤出网格 → 左右边框 overlay 抽屉；
+  // 恢复宽屏 → 收编回同 region 分栏。整侧收起状态优先（窄屏不自动展开）。
+  const narrow = useLayoutStore(s => s.narrowViewport)
+  // 两个门控（2026-09-26 复审补）：①borderType 写前先比对——无差别 doAction
+  // 会让 onModelChange 把刚应用的预设标记立刻清掉（applyJson → setModel →
+  // 本 effect 重跑 → setActivePreset(null)）；②applyRootWeights 只在确实
+  // **重建**了分栏时跑——否则会用旧记忆覆盖刚应用的预设权重。
+  useEffect(() => {
+    const borderOf = (side: 'left' | 'right') =>
+      model.getNodeById(side === 'left' ? 'border_left' : 'border_right')
+    if (narrow) {
+      migratingRef.current = true
+      try {
+        collapseSide('left')
+        collapseSide('right')
+        for (const side of ['left', 'right'] as const) {
+          const b = borderOf(side)
+          if (b instanceof BorderNode && !b.isOverlay()) {
+            model.doAction(Actions.updateNodeAttributes(b.getId(), { borderType: 'overlay' }))
+          }
+        }
+      } finally {
+        migratingRef.current = false
+      }
+    } else {
+      const sides = useLayoutStore.getState().sideCollapsed
+      let rebuilt = false
+      migratingRef.current = true
+      try {
+        if (!sides.left) rebuilt = expandSide('left') || rebuilt
+        if (!sides.right) rebuilt = expandSide('right') || rebuilt
+        for (const side of ['left', 'right'] as const) {
+          const b = borderOf(side)
+          if (b instanceof BorderNode && b.isOverlay()) {
+            model.doAction(Actions.updateNodeAttributes(b.getId(), { borderType: 'split' }))
+          }
+        }
+      } finally {
+        migratingRef.current = false
+      }
+      if (rebuilt) {
+        // 重建的分栏是默认权重且新节点约束未算好（就绪守卫会拦掉同步
+        // 配重）——延迟到首次布局之后按记忆宽重排 + 富余兜底
+        window.setTimeout(() => {
+          if (modelRef.current === model) {
+            applyRootWeights(model)
+            absorbSurplus(model)
+          }
+        }, 120)
+      }
+    }
+    persist(model)
+    bumpLayoutRev()
+  }, [narrow, model, persist])
+
+  // 窗口 resize 自愈：min 缩让（sync，防 Σmin > 可用宽把末栏挤出窗口）
+  // + 富余兜底（absorb，防钳制态留白）。flexlayout 权重是相对值、resize
+  // 按比例放大，但 min 钳制态（全最小）下比例失效，必须重跑这两步——
+  // 统一走串行重排通道（防抖由其 clearTimeout 链承担）
+  useEffect(() => {
+    const onResize = () => scheduleRebalance(false)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 双击分隔条 → 所属 split 回默认权重（hermes resetBoundary）。**不能用
+  // onDoubleClick**：flexlayout 的 splitter 在 pointerdown 里 preventDefault，
+  // 浏览器不合成后续 click/dblclick（2026-09-26 复审实测：dblclick 从未到
+  // 达宿主）——改在 host 捕获段检测指针双击，第二击 stopPropagation 拦掉
+  // flexlayout 起拖并执行重置。
+  const resetSplitToDefault = useCallback(
+    (splitter: HTMLElement) => {
+      const r = splitter.getBoundingClientRect()
+      const cx = r.x + r.width / 2
+      const cy = r.y + r.height / 2
+      // 拥有这条缝的 split = 恰好 ≥2 个子节点、矩形含缝心、且没有任何子
+      // 矩形含缝心的最深 row
+      let best: RowNode | undefined
+      model.visitNodes((node) => {
+        if (!(node instanceof RowNode) || node.getChildren().length < 2) return
+        const rect = node.getRect()
+        if (cx < rect.x || cx > rect.x + rect.width || cy < rect.y || cy > rect.y + rect.height) return
+        // 子矩形判定要**向内缩 3px**：flexlayout 的相邻子项矩形互相重叠
+        // 1-2px（子项矩形把分隔条空间包在里面），缝心永远同时严格落在
+        // 相邻两个子矩形内部 → insideChild 恒 true → best 永远找不到
+        // （2026-09-26 复审实测，此功能此前从未生效）
+        const INS = 3
+        const insideChild = node.getChildren().some((c) => {
+          const cr = c.getRect()
+          return (
+            cx > cr.x + INS && cx < cr.x + cr.width - INS && cy > cr.y + INS && cy < cr.y + cr.height - INS
+          )
+        })
+        if (!insideChild && (!best || rect.width * rect.height < best.getRect().width * best.getRect().height)) {
+          best = node
+        }
+      })
+      if (!best) return
+      const applied = useLayoutStore.getState().appliedTree as { layout?: { children?: unknown[] } } | null
+      // 在已应用预设树里按 split id 找该行的**子项权重数组**（hermes
+      // resetBoundary：恢复原始权重；用户新开的分叉没有 id → 均分）。
+      const findSplit = (node: { id?: string; children?: { id?: string; weight?: number; children?: unknown[] }[] }): number[] | null => {
+        if (node.id === best!.getId()) {
+          const kids = (node.children ?? []) as { weight?: number }[]
+          return kids.map((c) => c.weight ?? 0)
+        }
+        for (const c of node.children ?? []) {
+          if (typeof c === 'object' && c !== null && 'children' in (c as object)) {
+            const r2 = findSplit(c as { id?: string; children?: { id?: string; weight?: number; children?: unknown[] }[] })
+            if (r2 !== null) return r2
+          }
+        }
+        return null
+      }
+      const presetWeights = applied ? findSplit((applied.layout ?? {}) as never) : null
+      const kids = best.getChildren()
+      const restore = (fn: (i: number) => number) => {
+        kids.forEach((k, i) => {
+          const w = fn(i)
+          if (Number.isFinite(w) && w > 0) {
+            model.doAction(Actions.updateNodeAttributes(k.getId(), { weight: w }))
+          }
+        })
+      }
+      if (presetWeights && presetWeights.length === kids.length) {
+        const sum = presetWeights.reduce((s, w) => s + w, 0)
+        if (sum > 0) {
+          restore((i) => (presetWeights[i] / sum) * 100)
+          return
+        }
+      }
+      restore(() => 100 / kids.length)
+    },
+    [model],
+  )
+
+  // 双击检测挂 **document 原生捕获**：flexlayout 起拖会把指针捕获到 host
+  // 之外的元素，第二次 pointerdown 被捕获重定向、不经过宿主 React 捕获段
+  // （2026-09-26 实测：宿主只能收到一击）——只有 document 级捕获必然在
+  // 派发路径上。检测到双击 → stopPropagation 拦掉 flexlayout 起拖 → 重置。
+  // **必须是"两次点击"状态机而非"两次按下"**：按下→拖动→松手是拖拽，其
+  // 后的再次按下是新拖拽的起点——否则快速连续拖动全被误判成双击吞掉
+  // （2026-09-26 用户实测："所有宽度拉动全部失效"）。
+  useEffect(() => {
+    let lastClick: { t: number; x: number; y: number } | null = null
+    let down: { t: number; x: number; y: number } | null = null
+    let moved = false
+    const splitterOf = (e: { target: EventTarget | null }) =>
+      (e.target as HTMLElement)?.closest?.('.flexlayout__splitter') as HTMLElement | null
+    const onDocPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      const splitterHit = splitterOf(e)
+      if (!splitterHit) {
+        lastClick = null
+        down = null
+        return
+      }
+      splitterDraggingRef.current = true
+      const now = performance.now()
+      if (lastClick && now - lastClick.t < 450 && Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 10) {
+        // 真双击：上一击是"未拖动的点击"，且本次按下紧随其后
+        lastClick = null
+        down = null
+        e.stopPropagation()
+        resetSplitToDefault(splitterHit)
+        return
+      }
+      down = { t: now, x: e.clientX, y: e.clientY }
+      moved = false
+    }
+    const onDocPointerMove = (e: PointerEvent) => {
+      if (!down) return
+      if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) moved = true
+    }
+    const onDocPointerUp = (e: PointerEvent) => {
+      if (down || splitterDraggingRef.current) {
+        // 拖拽结束（无论是否组成双击）：清"待双击"状态，允许挂起的重排执行
+        splitterDraggingRef.current = false
+        if (!down) return
+        const now = performance.now()
+        if (!moved && now - down.t < 400) {
+          // 一次"点击"（未拖动的按下）→ 记录，可能与下一次按下组成双击
+          lastClick = { t: now, x: e.clientX, y: e.clientY }
+        } else {
+          // 拖拽结束：不算点击，下一次按下是全新拖拽
+          lastClick = null
+        }
+        down = null
+      }
+    }
+    document.addEventListener('pointerdown', onDocPointerDown, true)
+    document.addEventListener('pointermove', onDocPointerMove, true)
+    document.addEventListener('pointerup', onDocPointerUp, true)
+    return () => {
+      document.removeEventListener('pointerdown', onDocPointerDown, true)
+      document.removeEventListener('pointermove', onDocPointerMove, true)
+      document.removeEventListener('pointerup', onDocPointerUp, true)
+    }
+  }, [model, resetSplitToDefault])
+
+  // 离家一级窗格的"回家"钮（onRenderTab 注入）：拉伸头栏（单页签分栏）
+  // **不渲染**原生 trailing 关闭钮（实测 hasTrailing=false），CSS 常显方案
+  // 对它无效——只对拉伸头栏注入自定义钮；多页签条走原生 trailing
+  // （fl-tab-away CSS 常显）。点击 = 回家（非关闭）。
+  const sendHomeFromUi = useCallback(
+    (paneId: string) => {
+      const tab = model.getNodeById(paneId)
+      if (!(tab instanceof TabNode)) return
+      const ptype = paneTypeOf(paneId)
+      const pdef = ptype ? PANE_TYPES[ptype] : undefined
+      if (!pdef?.primary) return
+      const cfg = zoneConfigOf(tab.getParent())
+      if (cfg && cfg.region === pdef.region) return // 已在家
+      migratingRef.current = true
+      try {
+        sendPaneHome(model, paneId)
+        syncTabsetConstraints(model)
+        applyRootWeights(model)
+      } finally {
+        migratingRef.current = false
+      }
+      persist(model)
+      bumpLayoutRev()
+    },
+    [model, persist],
+  )
+
+  const onRenderTab = useCallback(
+    (node: TabNode, renderValues: import('flexlayout-react').ITabRenderValues) => {
+      const set = node.getParent()
+      if (!(set instanceof TabSetNode)) return
+      // 拉伸头栏（单页签分栏）**不渲染原生 trailing 关闭钮**（flexlayout 缺
+      // 口，实测 hasTrailing=false）——可关页签在这里注入 ✕（真关闭）；
+      // 多页签条走原生 trailing（hover 显示，离家一级由 fl-tab-away 常显）
+      const stretched = set.getChildren().length === 1 && set.isEnableSingleTabStretch()
+      if (!stretched) return
+      const ptype = paneTypeOf(node.getId())
+      const pdef = ptype ? PANE_TYPES[ptype] : undefined
+      const cfg = zoneConfigOf(set)
+      if (pdef?.primary) {
+        // 一级窗格：离家 → 回家钮（点击回到家乡大栏）；在家 → 不渲染（不可关）
+        if (!cfg || cfg.region === pdef.region) return
+        const regionName: Record<Region, string> = { left: '左栏', main: '主栏', right: '右栏' }
+        renderValues.buttons.push(
+          <button
+            key="home"
+            className="fl-min-btn fl-home-btn"
+            title={`回到${regionName[pdef.region]}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              sendHomeFromUi(node.getId())
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            type="button"
+          >
+            ×
+          </button>,
+        )
+        return
+      }
+      if (node.isEnableClose()) {
+        renderValues.buttons.push(
+          <button
+            key="close"
+            className="fl-min-btn fl-stretch-close"
+            title="关闭"
+            onClick={(e) => {
+              e.stopPropagation()
+              closePaneById(node.getId())
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            type="button"
+          >
+            ×
+          </button>,
+        )
+      }
+    },
+    [model, sendHomeFromUi, closePaneById],
+  )
+
+  // ── ② Chrome 页签多选语法 + ③ pointer-capture 拖拽接管 ─────────────────────
+  // flexlayout 页签按钮 id = flexlayout-tabbutton-<tabId>（tabset 与 border
+  // 按钮同前缀）。捕获段跑在 flexlayout 的 onClick（selectTab）之前：
+  //   Shift 点 = 范围选；⌥/Ctrl 点 = 进出选区；普通点 = 进拖拽会话
+  //   （4px 阈值内松开是普通点击：原生 click 照常激活，onTap 收拢选区）。
+  // pointerdown preventDefault 压掉 flexlayout 的原生 HTML5 页签拖拽
+  // （Chromium：pointerdown 默认被取消 → 不派发 mousedown → 不起拖拽），
+  // 修饰键编辑后吞掉合成 click，激活不会误发。
+  const TAB_BUTTON_ID = 'flexlayout-tabbutton-'
+
+  const onHostPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return
+      const target = e.target as HTMLElement
+      // 双击分隔条的检测不在本 handler（见上方 document 捕获段的说明：
+      // 第二击被指针捕获重定向，宿主 React 捕获段收不到）。
+      // 关闭按钮/回家钮/改名输入框/工具栏：原生行为优先
+      if (target.closest('.flexlayout__tab_button_trailing, .flexlayout__border_button_trailing, .fl-home-btn, input, textarea')) return
+      const btn = target.closest(`[id^="${TAB_BUTTON_ID}"]`) as HTMLElement | null
+      if (!btn) return
+      const tabId = btn.id.slice(TAB_BUTTON_ID.length)
+      const tab = model.getNodeById(tabId)
+      if (!(tab instanceof TabNode)) return
+
+      // groupId/条带序：住在 tabset → {groupId, 条带序}；折叠在 border →
+      // groupId 用 border id（无 reorder 上下文，起手就是 zone 模式）
+      const parent = tab.getParent()
+      const inTabset = parent instanceof TabSetNode
+      const groupId = parent?.getId()
+      if (!groupId) return
+      const ordered = (parent?.getChildren() ?? [])
+        .filter((c): c is TabNode => c instanceof TabNode)
+        .map((c) => c.getId())
+      const activeId = parent instanceof TabSetNode ? parent.getSelectedNode()?.getId() : parent instanceof BorderNode ? parent.getSelectedNode()?.getId() : undefined
+
+      // Chrome 的语法在 activate/drag 之前：这两类按"点即选区编辑"，既不
+      // 激活也不起拖（hermes tree-group onPointerDown 同序）
+      const grammarEdit = (edit: () => void) => {
+        e.preventDefault()
+        e.stopPropagation()
+        edit()
+        // 吞掉松手后的合成 click——flexlayout 的按钮 onClick 会 selectTab。
+        // click 在 pointerup 之后的任务里才来，不能立刻拆除（一次即可，
+        // 宽限定时器兜底"永远没松手"的泄漏）。
+        const swallow = (ev: MouseEvent) => {
+          ev.preventDefault()
+          ev.stopPropagation()
+        }
+        window.addEventListener('click', swallow, { capture: true, once: true })
+        window.setTimeout(() => window.removeEventListener('click', swallow, true), 1500)
+      }
+
+      if (e.shiftKey) {
+        grammarEdit(() => selectTabRange(groupId, ordered, tabId, activeId ?? tabId))
+        return
+      }
+      if (isToggleSelectClick(e)) {
+        grammarEdit(() => toggleTabSelected(groupId, tabId, activeId ?? tabId))
+        return
+      }
+
+      // 拖着已选中的页签 = 整组一起走（拖未选中的 = 单页签拖）
+      const dragSelection = selectionFor(groupId, ordered, tabId)
+      startPaneDrag(model, tabId, e, {
+        onTap: () => clearTabSelection(),
+        reorder: inTabset ? { groupId } : undefined,
+        ghostLabel: dragSelection ? `${dragSelection.length} 个页签` : tab.getName(),
+        selection: dragSelection ?? undefined,
+      })
+    },
+    [model],
+  )
+
+  // 选区高亮：给选中页签的按钮元素挂 class（hermes PaneTab 的 selected 视觉）。
+  // 依赖 $layoutRev——flexlayout 重渲按钮会重建 class，模型每次变更后再刷。
+const selection = useTabSelection()
+const layoutRev = useLayoutStore(s => s.layoutRev)
+  useEffect(() => {
+    const ids = selection?.ids
+    for (const el of document.querySelectorAll('.flexlayout__tab_button, .flexlayout__border_button')) {
+      const id = el.id.startsWith(TAB_BUTTON_ID) ? el.id.slice(TAB_BUTTON_ID.length) : ''
+      el.classList.toggle('fl-tab-selected', ids?.has(id) ?? false)
+    }
+  }, [selection, layoutRev, model])
+
+  // 工厂：component name → React 组件（tabName 注入占位标题——多实例
+  // 窗格内容相同，靠名字区分"切没切"）；external = OS 拖入的文件占位。
+  // 竖轨形态的分栏（横向条已隐藏）同样直接渲染内容——竖轨本身是栏外缘
+  // 的空轨 tabset，其导航由 onTabSetPlaceHolder 渲染（RailNav）。
+  const factory = useCallback(
+    (node: TabNode) => {
+      const componentName = node.getComponent() ?? ''
+      const Comp = COMPONENTS[componentName]
+      if (Comp) return <Comp tabName={node.getName()} />
+      if (componentName === 'external') {
+        const cfg = node.getConfig() as { fileName?: string } | undefined
+        return (
+          <div className="pane-placeholder">
+            <h2>{cfg?.fileName ?? node.getName()}</h2>
+            <p>外部内容占位（OS 拖入）——预览渲染待接。</p>
+          </div>
+        )
+      }
+      return <div className="pane-placeholder"><p>未知窗格: {componentName}</p></div>
+    },
+    [],
+  )
+
+  // 空栏占位：竖轨（空轨 tabset）→ RailNav（整栏页签导航）；其余空栏
+  // 走普通提示
+  const onTabSetPlaceHolder = useCallback(
+    (node?: TabSetNode) => {
+      const cfg = node ? zoneConfigOf(node) : undefined
+      if (cfg?.track) {
+        return (
+          <RailNav
+            model={model}
+            region={cfg.region}
+            addItems={openableTypesForRegion(model, cfg.region)}
+            onToggle={() => toggleRegionForm(cfg.region)}
+            onSelect={(id) => {
+              model.doAction(Actions.selectTab(id))
+              persist(model)
+              bumpLayoutRev()
+            }}
+            onClose={closePaneById}
+            onCreate={(t) => createPaneInRegion(cfg.region, t)}
+            onReorder={(tabId, zoneId, index) => {
+              model.doAction(Actions.moveNode(tabId, zoneId, DockLocation.CENTER, index))
+              persist(model)
+              bumpLayoutRev()
+            }}
+            onDragOut={(e, id, name) => {
+              startPaneDrag(model, id, e, { ghostLabel: name })
+            }}
+          />
+        )
+      }
+      return (
+        <div className="pane-placeholder">
+          <p>空栏 — 从「+」打开窗格，或把页签拖进来。</p>
+        </div>
+      )
+    },
+    [model, toggleRegionForm, closePaneById, createPaneInRegion, persist],
+  )
+
+  // 右键菜单（hermes closeOtherTreeTabs/closeTreeTabsToRight/closeAllTreeTabs
+  // 的矩阵），用 flexlayout 的 showPopupMenu 实现。
+  // 菜单项按可关性过滤：一级窗格不给关闭类动作。
+  const isCloseableTab = useCallback((c: Node): c is TabNode => {
+    if (!(c instanceof TabNode)) return false
+    const t = paneTypeOf(c.getId())
+    return t ? !PANE_TYPES[t].primary : true
+  }, [])
+
+  const onTabContextMenu = useCallback(
+    (node: TabNode | TabSetNode | BorderNode | TabGroupNode, event: React.MouseEvent) => {
+      event.preventDefault()
+      if (!(node instanceof TabNode)) return
+      const ptype = paneTypeOf(node.getId())
+      const pdef = ptype ? PANE_TYPES[ptype] : undefined
+      const closeable = pdef ? !pdef.primary : true
+      const tabsetId = (node.getParent() as TabSetNode)?.getId()
+      const items: PopupMenuEntry[] = []
+      if (closeable) items.push({ key: 'close', label: '关闭' })
+      items.push({ key: 'rename', label: '重命名' })
+      items.push({ key: 'pin', label: '钉住' })
+      if (closeable && tabsetId) {
+        const siblings = (model.getNodeById(tabsetId) as TabSetNode).getChildren().filter(isCloseableTab)
+        if (siblings.length > 1) {
+          items.push({ type: 'divider', key: 'd1' })
+          items.push({ key: 'closeOthers', label: '关闭其他' })
+          items.push({ key: 'closeRight', label: '关闭右侧' })
+          items.push({ key: 'closeAll', label: '全部关闭' })
+        }
+      }
+      showPopupMenu({
+        anchor: { x: event.clientX, y: event.clientY },
+        items,
+        onClose: () => {},
+        onSelect: (item) => {
+          const id = node.getId()
+          if (item.key === 'close') {
+            closePaneById(id)
+          } else if (item.key === 'rename') {
+            layoutRef.current?.editTabName(id)
+          } else if (item.key === 'pin') {
+            model.doAction(Actions.setTabPinned(id, !node.isPinned()))
+          } else if (tabsetId) {
+            const tabset = model.getNodeById(tabsetId) as TabSetNode
+            const siblings = tabset.getChildren().filter(isCloseableTab)
+            const idx = siblings.findIndex((c) => c.getId() === id)
+            const targets =
+              item.key === 'closeOthers'
+                ? siblings.filter((c) => c.getId() !== id)
+                : item.key === 'closeRight'
+                  ? siblings.slice(idx + 1)
+                  : siblings
+            for (const t of targets) closePaneById(t.getId())
+          }
+        },
+      })
+    },
+    [model, closePaneById, isCloseableTab],
+  )
+
+  // 中键关闭页签（hermes 页签行为的标配；一级窗格不受影响）
+  const onAuxMouseClick = useCallback(
+    (node: TabNode | TabSetNode | BorderNode | TabGroupNode, event: React.MouseEvent) => {
+      if (event.button !== 1 || !(node instanceof TabNode)) return
+      const ptype = paneTypeOf(node.getId())
+      if (ptype && PANE_TYPES[ptype].primary) return
+      closePaneById(node.getId())
+    },
+    [closePaneById],
+  )
+
+  // OS 文件拖入布局 → 建外部内容页签（flexlayout 原生 onExternalDrag）
+  const onExternalDrag = useCallback(
+    (event: React.DragEvent) => {
+      const files = event.dataTransfer?.files
+      if (!files || files.length === 0) return undefined
+      return {
+        json: {
+          type: 'tab' as const,
+          component: 'external',
+          name: files[0].name,
+          enableClose: true,
+          config: { fileName: files[0].name, size: files[0].size },
+        },
+        onDrop: () => {
+          persist(model)
+          bumpLayoutRev()
+        },
+      }
+    },
+    [model, persist],
+  )
+
+  const layoutRef = useRef<ILayoutApi>(null)
+
+  // 键位（hermes：⌘\ 镜像翻转；⌘⇧\ 布局编辑模式；mod = ctrl|meta）。
+  // Escape 退出编辑模式/编辑器——hermes edit-mode.tsx "owns Escape-to-exit"。
+  // escape-layers 分层：拖拽会话注册更高优先级（drag=50），拖拽中的 Esc
+  // 只中止拖拽，不会连带退编辑模式/关编辑器（hermes escape-layers 契约）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (e.defaultPrevented) return
+        if (useLayoutStore.getState().zoneEditorOpen) {
+          if (!isTopEscapeLayer(ESCAPE_PRIORITY.zoneEditor)) return
+          closeZoneEditor()
+          e.preventDefault()
+          return
+        }
+        if (useLayoutStore.getState().editMode) {
+          if (!isTopEscapeLayer(ESCAPE_PRIORITY.layoutEdit)) return
+          closeEditMode()
+          e.preventDefault()
+          return
+        }
+        return
+      }
+      if (!(e.ctrlKey || e.metaKey) || e.key !== '\\') return
+      e.preventDefault()
+      if (e.shiftKey) {
+        toggleEditMode()
+      } else {
+        mirror()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [mirror])
+
+  return (
+    <div className="app-shell">
+      {/* 自绘标题栏（app/shell/titlebar.tsx）：布局处理器以 props 注入 */}
+      <Titlebar
+        sideCollapsed={sideCollapsed}
+        onToggleSide={toggleSide}
+        onMirror={mirror}
+        onFullReset={fullReset}
+      />
+      <div className="app-main flexlayout-host" onPointerDownCapture={onHostPointerDown}>
+        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} />        {/* ③ FancyZones 投放预览：拖拽中亮 zone sheet + 页签条插入符 */}
+        <DropOverlay />
+        {/* 装饰叠片：主区调色层（E9EEEF@40%）+ 左栏 logo 带（上 logo 下标签） */}
+        <MainTint model={model} />
+        <RailLogo model={model} />
+        {/* hermes 编辑模式画布面：zone body 变拖拽把手（veil） */}
+        <EditVeils
+          model={model}
+          onVeilPointerDown={(e, activeId, title) => {
+            startPaneDrag(model, activeId, e, { ghostLabel: title })
+          }}
+        />
+        {editMode && (
+          <EditPalette
+            activePresetId={activePresetId}
+            userPresets={userPresets}
+            currentJson={() => model.toJson()}
+            onApplyTemplate={applyTemplate}
+            onApplyUser={applyUser}
+            onSaveCurrent={saveCurrent}
+            onDeleteUser={removeUser}
+            onOpenZoneEditor={openZoneEditor}
+            onClose={closeEditMode}
+          />
+        )}
+        {zoneEditorOpen && (
+          <ZoneEditor
+            onApply={(json) => applyJson(json, null)}
+            onClose={closeZoneEditor}
+          />
+        )}
+      </div>
+      <StatusBar />
+    </div>
+  )
+}

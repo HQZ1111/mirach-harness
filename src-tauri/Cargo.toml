@@ -1,0 +1,12 @@
+[package]
+name = "mirach-harness"
+version = "0.1.0"
+description = "Mirach harness — layout testbed Tauri shell"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# features 与主工程一致（unstable），最大化复用 cargo 缓存
+tauri = { version = "2", features = ["unstable", "tray-icon"] }

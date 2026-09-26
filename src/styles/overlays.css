@@ -1,0 +1,132 @@
+/* ============================================================
+ * overlays.css — 宿主层绝对定位面：装饰叠片（chrome-overlays.tsx）+
+ * 布局编辑 veil（edit-veils.tsx）+ FancyZones 投放预览（drop-overlay.tsx）
+ * ============================================================ */
+
+/* ── 装饰叠片 ──
+   主区调色层：E9EEEF @ 40%，pointer-events none 点击穿透；
+   左栏 logo 带：40px，叠在左栏 tabset 顶部——标签条经 .rail-tabstrip
+   的 margin-top 让位到 logo 带正下方（上 logo、下标签条）。z 在窗格
+   内容之上、veil/投放预览之下。 */
+.main-tint {
+  background: rgba(233, 238, 239, 0.4);
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+}
+
+.rail-logo {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  padding: 0 14px;
+  pointer-events: none;
+  position: absolute;
+  z-index: 21;
+}
+
+.rail-logo-mark {
+  /* 品牌 logo 图（圆形蓝底白脸）：方图配 50% 圆角裁切，去掉色块占位的背景 */
+  border-radius: 50%;
+  flex: none;
+  height: 22px;
+  object-fit: cover;
+  width: 22px;
+}
+
+.rail-logo-word {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+/* ── 布局编辑画布面（hermes edit veil）——浅色 scrim ── */
+.fl-edit-veils {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 55;
+}
+
+.fl-edit-veil {
+  align-items: center;
+  /* scrim：accent 混白（浅色主题压内容用白洗） */
+  background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.62));
+  backdrop-filter: blur(2px);
+  cursor: grab;
+  display: flex;
+  justify-content: center;
+  outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -4px;
+  pointer-events: auto;
+  position: absolute;
+}
+
+.fl-edit-veil:active { cursor: grabbing; }
+
+.fl-edit-chip {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+  color: #3c3c46;
+  display: flex;
+  font-size: 10px;
+  font-weight: 600;
+  gap: 6px;
+  letter-spacing: 0.16em;
+  max-width: calc(100% - 1rem);
+  overflow: hidden;
+  padding: 3px 8px;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── FancyZones 投放预览——浅色 sheet ── */
+.fl-drop-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 60;
+}
+
+.fl-drop-zone-anchor {
+  position: absolute;
+}
+
+.fl-drop-sheet {
+  border: 1.5px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 8px;
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 5%, rgba(255, 255, 255, 0.55));
+  transition:
+    top 150ms ease-out,
+    right 150ms ease-out,
+    bottom 150ms ease-out,
+    left 150ms ease-out,
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    opacity 150ms ease-out;
+}
+
+.fl-drop-sheet-active {
+  border-color: color-mix(in srgb, var(--accent) 75%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, rgba(255, 255, 255, 0.5));
+}
+
+@keyframes fl-drop-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 页签条插入符（hermes StripDropCaret）：浅色下用深色线 */
+.fl-drop-caret {
+  background: var(--text);
+  pointer-events: none;
+  position: absolute;
+  transform: translateX(-50%);
+  width: 2px;
+  z-index: 50;
+}

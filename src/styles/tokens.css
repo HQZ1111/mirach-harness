@@ -1,0 +1,90 @@
+/* ============================================================
+ * mirach-harness 设计令牌（Design Tokens）——唯一样式取值处
+ * ============================================================
+ * 架构（src/styles/）：
+ *   tokens.css      本文件：全部自定义属性（令牌）定义，禁止写规则
+ *   base.css        窗体/壳/标题栏/状态栏/窗口控制钮（应用壳层）
+ *   flexlayout.css  flexlayout 覆写：页签（横向/拉伸头栏/轨道/竖轨）+ 分隔条
+ *   panes.css       窗格内容（占位窗格）
+ *   editor.css      布局编辑面板 + Zone 编辑器（.ep-* / .ze-*）
+ *   overlays.css    装饰叠片 + 编辑 veil + 投放预览（宿主层绝对定位面）
+ * 导入顺序（main.tsx）：tokens → base → flexlayout → panes → editor → overlays。
+ * 规则文件里**禁止另写字号/颜色/间距字面值**——先来这里加令牌再引用。
+ * 令牌名对齐 hermes 的语义（注释里标 hermes 对应物）。
+ * ============================================================ */
+
+:root {
+  color-scheme: light;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+
+  /* ── 全局色板（浅色主题） ─────────────────────────────────
+     --text: 主文字（hermes foreground）
+     --text-2: 次级（hermes --ui-text-secondary）
+     --text-3: 三级（hermes --ui-text-tertiary）
+     --text-4: 弱化（badge/占位提示）
+     --stroke: 常规描边；--stroke-soft: 弱分隔线（标题栏/状态栏缝） */
+  --text: #1f1f28;
+  --text-2: #5c5c66;
+  --text-3: #8f8f9c;
+  --text-4: #a0a0ac;
+  --stroke: rgba(0, 0, 0, 0.1);
+  --stroke-soft: rgba(0, 0, 0, 0.06);
+  --hover-wash: rgba(0, 0, 0, 0.07);
+  --surface: #ffffff;
+  --accent: #4c6fff;                          /* hermes --theme-primary */
+
+  /* ── 页签系统（hermes PaneTab，pane-tab.tsx 的浅色等值） ─────────
+     横向页签 / 拉伸头栏 / 左右轨道 / 主栏竖轨共用这一套——
+     改页签样式=只改这里。 */
+  --tab-font-size: 9px;                       /* hermes text-[9px] */
+  --tab-font-weight: 500;                     /* hermes font-medium */
+  --tab-tracking: 0.025em;                    /* hermes tracking-wide */
+  --tab-pad-x: 8px;                           /* 横向页签左右 */
+  --tab-pad-y: 8px;                           /* hermes py-2（轨道页签上下） */
+  --tab-text: var(--text-3);                  /* 未激活 */
+  --tab-text-active: var(--text);             /* 激活 */
+  --tab-active-bg: var(--surface);            /* hermes 编辑器表面 */
+  --tab-accent: var(--accent);
+  --tab-accent-wash: rgba(76, 111, 255, 0.14);/* hermes TAB_SELECTED 14% */
+  --tab-hover-bg: rgba(0, 0, 0, 0.06);        /* hermes hover darken */
+  --tab-separator: rgba(0, 0, 0, 0.07);       /* hermes --ui-stroke-quaternary 系 */
+
+  /* ── 折叠轨道（左右 border 轨道）+ 栏级竖轨（RegionRails） ────── */
+  --rail-width: 20px;                         /* 用户定值 */
+  --rail-btn-size: 14px;                      /* 轨道钮 */
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.14);  /* 弹出菜单投影 */
+
+  /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
+     必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被
+     .flexlayout__layout 上的定义静默压掉） ────────────────────── */
+  --flexlayout-splitter-size: 1px;            /* 1px 发丝线，命中带 8px 由 ::before 提供 */
+  --flexlayout-splitter-active-size: 8px;
+  --flexlayout-color-splitter: rgba(0, 0, 0, 0.12);
+  --flexlayout-color-splitter-hover: var(--accent);
+  --flexlayout-color-splitter-drag: var(--accent);
+  --flexlayout-color-splitter-handle: transparent;
+  /* 背景：layout/tabset/tab content 全透明，白底透出（用户：背景全透明） */
+  --flexlayout-color-background: transparent;
+  --flexlayout-color-tab-content: transparent;
+  --flexlayout-color-tabset-background: transparent;
+  --flexlayout-color-tabset-background-selected: transparent;
+  --flexlayout-color-tabset-background-maximized: transparent;
+  --flexlayout-color-tabset-divider-line: var(--tab-separator);
+  /* 页签配色（浅色：深字） */
+  --flexlayout-color-tab-selected-background: var(--tab-active-bg);
+  --flexlayout-color-tab-selected: var(--tab-text-active);
+  --flexlayout-color-tab-unselected: var(--tab-text);
+  --flexlayout-color-tab-unselected-background: transparent;
+  --flexlayout-color-tab-textbox: var(--tab-text-active);
+  --flexlayout-color-tab-textbox-background: var(--tab-active-bg);
+  /* 边框轨道（折叠栏）：透明底、深字 */
+  --flexlayout-color-border-background: transparent;
+  --flexlayout-color-border-tab-content: transparent;
+  --flexlayout-color-border: var(--tab-text-active);
+  --flexlayout-color-border-divider-line: var(--tab-separator);
+  --flexlayout-color-border-tab-selected: var(--tab-text-active);
+  --flexlayout-color-border-tab-selected-background: transparent;
+  --flexlayout-color-border-tab-unselected: var(--tab-text);
+  --flexlayout-color-border-tab-unselected-background: transparent;
+}

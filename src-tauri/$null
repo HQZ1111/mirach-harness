@@ -1,0 +1,8 @@
+Get-Content : 找不到路径“G:\MIRACH\mirach-harness\src-tauri\src\lib.rs”，因为该路径不存在。
+所在位置 行:1 字符: 41
++ ... ent src\main.rs -Encoding UTF8; Get-Content src\lib.rs -Encoding UTF8
++                                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (G:\MIRACH\mirac...auri\src\lib.rs:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
