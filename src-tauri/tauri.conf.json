@@ -16,7 +16,7 @@
         "title": "Mirach Harness",
         "width": 1800,
         "height": 1000,
-        "minWidth": 900,
+        "minWidth": 600,
         "minHeight": 600,
         "center": true,
         "dragDropEnabled": false,

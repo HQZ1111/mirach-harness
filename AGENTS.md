@@ -1351,6 +1351,16 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     发）；窄屏抽屉模式跳过。**需要 caps `core:window:allow-set-size`**
     （加权限后必须重建 exe）。无锚列不夺锚：有 config 戳的列 identity 永
     久保持（拖入一级窗格、原锚离开均不变）。
+  - **挤压级联 + 自适应窗宽（用户定稿，PowerShell 缩窗实测）**：窗口缩小时
+    级联 = ①各列挤到 min → ②装不下（inner+2 < Σ聚合min）→ 每大栏合并所
+    有分栏进家乡一级分栏（一级不在家并入第一个分栏），单向不自动拆回 →
+    ③仍装不下 → 隐藏左右栏（撤 overlay 抽屉）→ 最终窗宽下限 600（conf
+    minWidth 900→600）。实现：mergeZonesPerColumn + updateNarrowViewport
+    （动态阈值=根行聚合 min+边框折叠侧栏 min，替代 640 matchMedia；最小
+    化 innerHeight≤240 不改判）。fitWindowWidth 长窗/回位仅结构动作触发
+    （手动缩窗走挤压不长窗）。**无边框窗 resize 手柄**：8 条命中带
+    （四边+四角）pointerdown → startResizeDragging（caps 需
+    allow-start-resize-dragging）。
   - "整个标签栏能拖出来" = SingleTabStretch 视觉（单页签分栏的头栏就是页
     签），拖它 = 拖该页签，规格行为；flexlayout 无整栏拖拽（grep 证实）。
 - **2026-09-26 五轮（用户截图：切竖轨后满屏 20px 竖条）——v4 重钉自伤**：

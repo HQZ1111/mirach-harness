@@ -15,7 +15,7 @@ import { useLayoutStore, bumpLayoutRev, closeEditMode, closeZoneEditor, openZone
 import { appWindow, inTauri } from '@/lib/tauri-window'
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
-import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, closePane, type PaneType, type Region } from './pane-registry'
+import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
 import { ZoneEditor } from './zone-editor'
@@ -55,8 +55,9 @@ const DESIGN_WIDTH = 1800
  *  窗宽（装不下新栏/约束溢出）→ 窗宽自动长到 need（钳到屏幕可用宽）；
  *  关栏/合并腾出空间（need ≤ 设计宽 1800，且仅结构动作触发）→ 回 1800。
  *  仅 Tauri 生效；窄屏抽屉模式不参与（窄屏下侧栏撤成 overlay，根行 Σmin
- *  本来就小）。 */
-const fitWindowWidth = (m: Model, allowRevert: boolean) => {
+ *  本来就小）。allowGrowRevert = 结构动作触发（手动缩窗走挤压级联，不长
+ *  窗）。 */
+const fitWindowWidth = (m: Model, allowGrowRevert: boolean) => {
   if (!inTauri || !appWindow) return
   if (useLayoutStore.getState().narrowViewport) return
   const rootRow = m.getRootRow()
@@ -76,9 +77,9 @@ const fitWindowWidth = (m: Model, allowRevert: boolean) => {
   const curInner = window.innerWidth
   const outerDelta = Math.max(window.outerWidth - window.innerWidth, 0)
   let target: number
-  if (need > curInner) {
+  if (allowGrowRevert && need > curInner) {
     target = need + outerDelta
-  } else if (allowRevert && curInner > DESIGN_WIDTH + 2 && need <= DESIGN_WIDTH) {
+  } else if (allowGrowRevert && curInner > DESIGN_WIDTH + 2 && need <= DESIGN_WIDTH) {
     target = DESIGN_WIDTH + outerDelta
   } else {
     return
@@ -378,6 +379,68 @@ const heightBounds = (n: Node): { min: number; max: number } => {
   return { min: 0, max: 99999 }
 }
 
+/** 根行装下所需的最小宽：Σ(各列聚合 min) + Σ(轨 20) + 缝 */
+const rootNeededMin = (m: Model): number => {
+  const kids = m.getRootRow()?.getChildren() ?? []
+  let sum = 0
+  for (const k of kids) {
+    const cfg = regionCfgOfNode(k)
+    if (cfg?.track) {
+      sum += TRACK_W
+      continue
+    }
+    sum += widthBounds(k, k instanceof RowNode).min
+  }
+  return sum + SPLITTER_PX * Math.max(kids.length - 1, 0)
+}
+
+/** 挤压合并（用户定稿）：窗口装不下各列 min 时，每一大栏把所有分栏
+ *  合并进家乡一级窗格所在分栏的页签组（一级不在家 → 并入第一个分栏），
+ *  空分栏 tidy——"左栏中有了三个栏"的逆操作，单向（不自动拆回）。 */
+const mergeZonesPerColumn = (m: Model) => {
+  const columns = m.getRootRow()?.getChildren() ?? []
+  for (const col of columns) {
+    if (regionCfgOfNode(col)?.track) continue
+    const zones: TabSetNode[] = []
+    const walkZ = (n: Node) => {
+      if (n instanceof TabSetNode && n.getChildren().length > 0) zones.push(n)
+      for (const c of n.getChildren()) walkZ(c)
+    }
+    walkZ(col)
+    if (zones.length < 2) continue
+    const region = regionCfgOfNode(col)?.region ?? 'main'
+    const target =
+      zones.find((z) => zonePaneTypes(m, z).includes(PRIMARY_PANE[region])) ?? zones[0]
+    for (const z of zones) {
+      if (z.getId() === target.getId()) continue
+      for (const t of [...z.getChildren()]) {
+        if (t instanceof TabNode) {
+          m.doAction(Actions.moveNode(t.getId(), target.getId(), DockLocation.CENTER, target.getChildren().length))
+        }
+      }
+    }
+  }
+}
+
+/** 动态窄屏判定（替代 640 matchMedia）：根行装不下"合并后各列 min"→
+ *  左右栏自动隐藏（撤成 overlay 抽屉）。最小化瞬态（innerHeight ≤ 240）
+ *  不改判；折叠在边框轨里的侧栏页签按其 region min 计入需求。 */
+const updateNarrowViewport = (m: Model) => {
+  if (window.innerHeight <= 240) return
+  const rootRow = m.getRootRow()
+  if (!rootRow) return
+  let needed = widthBounds(rootRow, false).min
+  // 折叠在边框轨里的侧栏页签也计入（回归时需要空间），避免隐藏态反复横跳
+  m.visitNodes((n) => {
+    if (!(n instanceof TabNode)) return
+    if (!(n.getParent() instanceof BorderNode)) return
+    const t = paneTypeOf(n.getId())
+    const def = t ? PANE_TYPES[t] : undefined
+    if (def && (def.region === 'left' || def.region === 'right')) needed += REGION_LIMITS[def.region].minW
+  })
+  useLayoutStore.setState({ narrowViewport: window.innerWidth < needed + 2 })
+}
+
 /** 拖拽实时钳制：flexlayout 的 calculateSplit 只按 MIN 侧钳位，**不钳聚
  *  合 MAX**——手柄把右栏拖过聚合上限后，DOM 的内联 max-width 把列钉住、
  *  富余甩给别的列，松手权重提交又跳回，跟限制"打架闪烁"（用户实测）。
@@ -582,6 +645,39 @@ const syncTabsetConstraints = (m: Model) => {
   })
 }
 
+// ── 无边框窗的边缘 resize 手柄（用户定稿：四周+四角可拖调宽高）──
+// Tauri 原生 startResizeDragging（capabilities 需 allow-start-resize-dragging）。
+type ResizeDir = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West'
+const RESIZE_HANDLES: { dir: ResizeDir; style: React.CSSProperties }[] = [
+  { dir: 'North', style: { top: 0, left: 12, right: 12, height: 6, cursor: 'ns-resize' } },
+  { dir: 'South', style: { bottom: 0, left: 12, right: 12, height: 6, cursor: 'ns-resize' } },
+  { dir: 'West', style: { left: 0, top: 12, bottom: 12, width: 6, cursor: 'ew-resize' } },
+  { dir: 'East', style: { right: 0, top: 12, bottom: 12, width: 6, cursor: 'ew-resize' } },
+  { dir: 'NorthWest', style: { top: 0, left: 0, width: 16, height: 16, cursor: 'nwse-resize' } },
+  { dir: 'NorthEast', style: { top: 0, right: 0, width: 16, height: 16, cursor: 'nesw-resize' } },
+  { dir: 'SouthWest', style: { bottom: 0, left: 0, width: 16, height: 16, cursor: 'nesw-resize' } },
+  { dir: 'SouthEast', style: { bottom: 0, right: 0, width: 16, height: 16, cursor: 'nwse-resize' } },
+]
+
+function ResizeHandles() {
+  if (!inTauri || !appWindow) return null
+  return (
+    <>
+      {RESIZE_HANDLES.map((h) => (
+        <div
+          key={h.dir}
+          onPointerDown={(e) => {
+            if (e.button !== 0 || !appWindow) return
+            e.stopPropagation()
+            void appWindow.startResizeDragging(h.dir).catch(() => {})
+          }}
+          style={{ position: 'fixed', zIndex: 300, ...h.style }}
+        />
+      ))}
+    </>
+  )
+}
+
 // ── 主组件 ───────────────────────────────────────────────────────────────────
 
 export function FlexLayoutShell() {
@@ -700,20 +796,18 @@ export function FlexLayoutShell() {
       // 下当前窗口 → 窗宽自动长到 need；关闭/合并腾出空间（结构动作触发
       // 且 need ≤ 1800）→ 回 1800 设计宽。先于 sync（长窗后缩让不误触发）
       fitWindowWidth(m, allowRevert)
+      // 挤压级联①：装不下各列 min → 每大栏合并分栏进一级栏（单向，用户
+      // 定稿："机器人在会话栏右边单独开一栏，这一栏属于左栏的一部分"）
+      if (window.innerWidth + 2 < rootNeededMin(m)) mergeZonesPerColumn(m)
       measureRootPx(m)
       syncTabsetConstraints(m)
       absorbSurplus(m)
+      // 挤压级联②：合并后仍装不下 → 隐藏左右栏（撤成 overlay 抽屉）
+      updateNarrowViewport(m)
     }, 90)
   }, [])
   const onModelChange = useCallback(
     (m: Model, action?: Action) => {
-      try {
-        if (action?.type === Actions.ADJUST_WEIGHTS) {
-          const prev = JSON.parse(localStorage.getItem('__wlog') ?? '[]')
-          prev.push(JSON.stringify(action.data.weights?.map((w: number) => Math.round(w * 10) / 10)))
-          localStorage.setItem('__wlog', JSON.stringify(prev.slice(-16)))
-        }
-      } catch {}
       persist(m)
       setActivePreset(null)
       bumpLayoutRev()
@@ -1701,6 +1795,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
 
   return (
     <div className="app-shell">
+      <ResizeHandles />
       {/* 自绘标题栏（app/shell/titlebar.tsx）：布局处理器以 props 注入 */}
       <Titlebar
         sideCollapsed={sideCollapsed}
