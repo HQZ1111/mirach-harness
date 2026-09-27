@@ -172,6 +172,8 @@
   right: 0 !important;
   top: 0 !important;
   transform: none !important;
+  /* 折叠轨道与栏级竖轨同规：上下各避 100（页签条带 + 圆角） */
+  padding: 100px 0;
 }
 .flexlayout-host .flexlayout__border_button {
   align-items: center;
@@ -223,7 +225,9 @@
   gap: 2px;
   left: 0;
   overflow-y: auto;
-  padding: var(--tab-pad-y) 2px;
+  /* 上下各避 100（用户 2026-09-27：顶部让开 100px 页签条/标题栏带，
+     底部让开圆角曲线——20px 轨贴大栏外缘，两头都会撞） */
+  padding: 100px 2px;
   position: absolute;
   right: 0;
   scrollbar-width: none;

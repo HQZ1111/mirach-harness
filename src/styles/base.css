@@ -182,7 +182,7 @@ body.in-browser { background: var(--surface); }
   font-size: 11px;
 }
 
-/* ── 状态栏（用户：高度 20） ── */
+/* ── 状态栏（用户：高度 20；内容左右 50 避开 50px 圆角区域）── */
 .app-statusbar {
   align-items: center;
   background: transparent;
@@ -193,7 +193,7 @@ body.in-browser { background: var(--surface); }
   font-size: 11.5px;
   gap: 6px;
   height: 20px;
-  padding: 0 10px;
+  padding: 0 50px;
 }
 
 .statusbar-pill {

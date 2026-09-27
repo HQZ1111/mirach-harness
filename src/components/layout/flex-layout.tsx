@@ -51,6 +51,10 @@ const PRIMARY_TYPES = new Set(
 /** 设计窗宽（与 src-tauri/main.rs 的 DESIGN_W、tauri.conf 一致） */
 const DESIGN_WIDTH = 1800
 
+/** 最小窗宽（用户 2026-09-27 定稿：挤压级联到底=600；高度 min 600 上不限
+ *  在 tauri.conf）。与 tauri.conf minWidth 同步。 */
+const MIN_WINDOW_WIDTH = 600
+
 /** 自适应窗宽（用户 2026-09-26 定稿）：Σ(各列聚合 min) + 轨 + 缝 > 当前
  *  窗宽（装不下新栏/约束溢出）→ 窗宽自动长到 need（钳到屏幕可用宽）；
  *  关栏/合并腾出空间（need ≤ 设计宽 1800，且仅结构动作触发）→ 回 1800。
@@ -85,7 +89,7 @@ const fitWindowWidth = (m: Model, allowGrowRevert: boolean) => {
     return
   }
   const availW = window.screen?.availWidth ?? target
-  const finalW = Math.max(900, Math.min(target, availW))
+  const finalW = Math.max(MIN_WINDOW_WIDTH, Math.min(target, availW))
   if (Math.abs(finalW - window.outerWidth) <= 4) return
   void appWindow.setSize(new LogicalSize(finalW, window.outerHeight)).catch(() => {})
 }
@@ -647,12 +651,13 @@ const syncTabsetConstraints = (m: Model) => {
 
 // ── 无边框窗的边缘 resize 手柄（用户定稿：四周+四角可拖调宽高）──
 // Tauri 原生 startResizeDragging（capabilities 需 allow-start-resize-dragging）。
+// 四边手柄离角 50（用户：避开 50px 圆角区域；四角归 16px 角手柄管）。
 type ResizeDir = 'East' | 'North' | 'NorthEast' | 'NorthWest' | 'South' | 'SouthEast' | 'SouthWest' | 'West'
 const RESIZE_HANDLES: { dir: ResizeDir; style: React.CSSProperties }[] = [
-  { dir: 'North', style: { top: 0, left: 12, right: 12, height: 6, cursor: 'ns-resize' } },
-  { dir: 'South', style: { bottom: 0, left: 12, right: 12, height: 6, cursor: 'ns-resize' } },
-  { dir: 'West', style: { left: 0, top: 12, bottom: 12, width: 6, cursor: 'ew-resize' } },
-  { dir: 'East', style: { right: 0, top: 12, bottom: 12, width: 6, cursor: 'ew-resize' } },
+  { dir: 'North', style: { top: 0, left: 50, right: 50, height: 6, cursor: 'ns-resize' } },
+  { dir: 'South', style: { bottom: 0, left: 50, right: 50, height: 6, cursor: 'ns-resize' } },
+  { dir: 'West', style: { left: 0, top: 50, bottom: 50, width: 6, cursor: 'ew-resize' } },
+  { dir: 'East', style: { right: 0, top: 50, bottom: 50, width: 6, cursor: 'ew-resize' } },
   { dir: 'NorthWest', style: { top: 0, left: 0, width: 16, height: 16, cursor: 'nwse-resize' } },
   { dir: 'NorthEast', style: { top: 0, right: 0, width: 16, height: 16, cursor: 'nesw-resize' } },
   { dir: 'SouthWest', style: { bottom: 0, left: 0, width: 16, height: 16, cursor: 'nesw-resize' } },
@@ -1613,6 +1618,23 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
       el.classList.toggle('fl-tab-selected', ids?.has(id) ?? false)
     }
   }, [selection, layoutRev, model])
+
+  // 页签条本体的原生拖拽关闭（用户：条拖出来和标题栏打架，只要里面的
+  // 标签能拖）：tabstrip 容器 draggable=true，空白处按住拖 = 整栏拖出/
+  // 浮动。捕获段拦 dragstart——目标不在页签按钮内（含拉伸头栏）一律
+  // 取消；页签按钮的拖拽由 pointer 引擎接管（pointerdown preventDefault
+  // 后原生 dragstart 本就不会发起），不受影响。
+  useEffect(() => {
+    const onDragStart = (e: DragEvent) => {
+      const t = e.target as HTMLElement | null
+      if (!t?.closest('.flexlayout-host')) return
+      if (t.closest('.flexlayout__tab_button, .flexlayout__border_button, .flexlayout__tab_button_stretch')) return
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    document.addEventListener('dragstart', onDragStart, true)
+    return () => document.removeEventListener('dragstart', onDragStart, true)
+  }, [])
 
   // 工厂：component name → React 组件（tabName 注入占位标题——多实例
   // 窗格内容相同，靠名字区分"切没切"）；external = OS 拖入的文件占位。

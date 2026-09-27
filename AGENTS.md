@@ -1362,7 +1362,9 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     （四边+四角）pointerdown → startResizeDragging（caps 需
     allow-start-resize-dragging）。
   - "整个标签栏能拖出来" = SingleTabStretch 视觉（单页签分栏的头栏就是页
-    签），拖它 = 拖该页签，规格行为；flexlayout 无整栏拖拽（grep 证实）。
+    签），拖它 = 拖该页签，规格行为。【2026-09-27 修正：flexlayout 其实
+    **有**整栏拖拽——tabstrip 容器 draggable=true，空白处拖 = 整栏拖出/
+    浮动；当日已关闭，见「2026-09-27 轮」。】
 - **2026-09-26 五轮（用户截图：切竖轨后满屏 20px 竖条）——v4 重钉自伤**：
   sync v4 的 config 重钉 `patch.config = { region, rail: false }` 是**整对象
   替换**，把竖轨的 `track: true` 身份抹掉了 → findRailTabset 永远找不到
@@ -1371,7 +1373,8 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
   config 是整对象替换，重钉时必须保留/跳过带 track 身份的节点**。
   - 拖拽幽灵线（flexlayout__splitter_drag）定性：realtimeResize 默认开启
     （实时缩放），幽灵线是非实时模式的遗留指示物，本方案下"不该有"——
-    CSS display:none 隐藏是正解（flexlayout 无条件创建它，无法阻止）。
+    【2026-09-27 修正：display:none 不是正解——它是拖拽位置输入，见下
+    「六轮」；正确写法 visibility:hidden。本条作废留痕】。
   - 用户实例恢复：CDP 清 mirach.* 存档 + 重载（污染的多轨布局不可修，
     直接重置）+ 程序化验证切轨生命周期：on=1 轨/off=0/on=1 不累积 ✓。
 - **2026-09-26 六轮（用户："宽度拖动没用，只会跳"）——幽灵线 display:none
@@ -1381,6 +1384,36 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
   拖动全部砸向边界、只会跳。修：改 `visibility: hidden`（保留几何、仅不
   可见）。实测拖拽精确跟随（350→270 精确）、连续拖动正常、高度 -40 精确。
   **教训：隐藏库元素的拖拽指示物前，先确认库是否用它做位置输入。**
+- **2026-09-27 轮（用户四项：条拖拽打架 / 竖轨避 100 / 底栏避圆角 /
+  最小窗宽 600）**：
+  1. **页签条本体拖拽关闭**（用户："条拖出来和标题栏打架，只要里面的
+     标签能拖"）。根因实锤：flexlayout 的 tabstrip 容器
+     `draggable: true + onDragStart`（bundle 里 path+"/tabstrip" 两处），
+     空白处按住拖 = HTML5 拖整栏（拖出/浮动）——**五轮"flexlayout 无整
+     栏拖拽"的结论是错的**。修：document 捕获段拦 dragstart，目标不在
+     页签按钮内（tab_button / border_button / tab_button_stretch）一律
+     preventDefault+stopPropagation；页签按钮拖拽本就由 pointer 引擎
+     接管（pointerdown preventDefault → 原生 dragstart 不发起）。
+  2. **竖轨标签上下避 100**：`.zone-rail` 与左右折叠轨道
+     （border_inner_tab_container_left/right）padding 上下各 100——顶部
+     让开 100px 页签条/标题栏带，底部让开圆角曲线。实测轨内首行 offset
+     =100、切轨往返无残留。
+  3. **底栏/手柄避圆角**：状态栏内容左右 padding 50；resize 四边手柄
+     离角 50（South left/right 50 等，四角 16px 归角手柄）——圆角 50px
+     区域全部让位。
+  4. **最小窗宽 600**：tauri.conf minWidth 已是 600（上轮）；本轮补
+     fitWindowWidth 的钳制下限 900→600（MIN_WINDOW_WIDTH 常量，注释
+     标了与 conf 同步）。
+  - 验证（CDP 9223）：条 dragstart prevented=true 且 flexlayout 的
+    onDragStart **未执行**（无 setData 报错=拦截在库 handler 之前）；
+    页签/拉伸头栏 dragstart 放行（真拖拽走 pointer 引擎）；状态栏
+    padding 50/50、pill 左缘 51；手柄几何 [50..1750]×6 四边 + 16px 四角；
+    竖轨 100/100；拆轨 500ms 内干净、存档无 track 残留；tsc 0。
+  - **测试方法论两坑**：①合成 DragEvent 无 dataTransfer → flexlayout
+    onDragStart 里 setData 抛 TypeError——这是合成事件伪影不是 bug，
+    反过来"条分发无报错"恰是拦截生效的证据；②程序化 el.click() 不会关
+    「+」弹出的类型菜单——后续点击被菜单吞掉，曾误判"拆轨失效"（复现
+    失败 + 无菜单路径干净即证）。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 
