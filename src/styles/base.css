@@ -56,13 +56,27 @@ body.in-browser { background: var(--surface); }
 
 .app-titlebar > * { pointer-events: auto; }
 
-.tb-drag-strip {
-  height: 36px;
+/* ── 窗口拖拽带（flex-layout.tsx 渲染，仅 Tauri）：0-60px 盖在页签条上部
+   空白区，z 40——在 flexlayout 内容之上、标题栏按钮(50 容器内)与 resize
+   手柄(300)之下。pointerdown → startDragging（双击=最大化切换）。
+   页签行(y 60-95)与条尾工具钮在带之下不受影响。 */
+.titlebar-drag-band {
+  cursor: default;
+  height: 60px;
   left: 0;
-  pointer-events: auto;
   position: absolute;
   right: 0;
   top: 0;
+  z-index: 40;
+}
+
+/* 标题栏按钮画在拖拽带**之上**（拖拽带是 absolute 定位，静置按钮会被它
+   盖住——指针命中的是拖拽带，图标悬停/点击全失效且 hover 反复横跳=闪）。
+   relative 提升绘制层级：按钮区域归按钮，其余归拖拽带。 */
+.app-titlebar > button,
+.app-titlebar > .win-controls,
+.app-titlebar > .tb-divider {
+  position: relative;
 }
 
 .app-titlebar-btn {

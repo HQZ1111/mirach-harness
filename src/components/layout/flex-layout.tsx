@@ -1236,6 +1236,25 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
   return (
     <div className="app-shell">
       <ResizeHandles />
+      {/* 窗口拖拽带（0-60px，用户定稿：标题栏整带可拖）：盖在页签条上部
+          空白区（logo/文字区），z 40 在标题栏按钮与页签行之下——按下即
+          startDragging 交还 OS 移动窗口；双击 = 最大化切换。不用
+          data-tauri-drag-region（页签按钮盖满条带且我方引擎会
+          preventDefault pointerdown，原生拖拽区脚本收不到 mousedown）。 */}
+      {inTauri && (
+        <div
+          className="titlebar-drag-band"
+          onPointerDown={(e) => {
+            if (e.button !== 0 || !appWindow) return
+            e.stopPropagation()
+            if (e.detail === 2) {
+              void appWindow.toggleMaximize().catch(() => {})
+              return
+            }
+            void appWindow.startDragging().catch(() => {})
+          }}
+        />
+      )}
       {/* 自绘标题栏（app/shell/titlebar.tsx）：布局处理器以 props 注入 */}
       <Titlebar
         sideCollapsed={sideCollapsed}

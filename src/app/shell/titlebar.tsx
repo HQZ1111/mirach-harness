@@ -26,9 +26,9 @@ export function Titlebar({
   const editMode = useLayoutStore(s => s.editMode)
   return (
     <div className="app-titlebar">
-      {/* 顶部拖拽带（0-36px）：MIRACH logo 由左栏页签条上部承载（RailLogo），
-          标题栏只保留拖拽与按钮。按钮 z 在拖拽带之上，保证可点。 */}
-      <div className="tb-drag-strip" data-tauri-drag-region="" />
+      {/* 顶部拖拽带（tb-drag-strip）已由 flex-layout 的 titlebar-drag-band
+          （0-60px）替代：拖拽面积更大且不盖标题栏按钮。按钮 z 在拖拽带
+          之上，保证可点。 */}
       {/* hermes 标题栏工具面（titlebar-controls.tsx）：左栏/右栏 positional
           toggles + flip 互换（箭头交换）。收起=整侧折进轨道，展开=收编回位。 */}
       <button

@@ -1535,6 +1535,26 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     几何即钳制目标（420/420/841、主栏 605 吃富余）、松手稳定无弹回、
     默认布局无挤压。升级 flexlayout 先核对上游是否已修，已修则删除
     flexlayout-rowfix.ts。
+  - **单测基建**（2026-09-27，UI 阶段前置）：vitest 4.1.10 + vitest
+    .config.ts（node 环境、@ 别名）+ vitest.setup.ts（localStorage Map
+    替身）。constraints(14)/flexlayout-rowfix(3)/pane-registry(4) 全绿；
+    npm test / npm run test:watch。假节点 = Object.create(真原型)+自有
+    字段（instanceof 真实、行为可控）。
+  - **2026-09-27 二轮（窗口外框交互：拖拽区/图标闪/resize 手柄）**：
+    1. **四周 resize 手柄无反应**：capabilities 里**没有
+       allow-start-resize-dragging**（上轮说加了、实际没落盘）——
+       startResizeDragging 被拒且 .catch 吞掉。已补；caps 编译进 exe，
+       须重启应用（实测 invoke DENIED→OK）。
+    2. **标题栏图标悬停闪**：tb-drag-strip（absolute 0-36）盖住按钮
+       （y 4-28）——hover 命中在拖拽带上反复横跳。修：标题栏按钮
+       relative 提升到拖拽带之上。
+    3. **拖拽区覆盖 100px 条带**：tb-drag-strip（36）换成
+       titlebar-drag-band（0-60、z 40，flex-layout 渲染、仅 Tauri）：
+       pointerdown → startDragging（双击=最大化）。不走
+       data-tauri-drag-region（页签按钮盖满条带且我方引擎 preventDefault
+       pointerdown，原生拖拽区脚本收不到 mousedown）。z 40 在 flexlayout
+       内容之上、标题栏按钮(50 容器)与手柄(300)之下；页签行(60-95)与
+       条尾工具钮不受影响。实测：真点击标题栏按钮打开布局编辑器 ✓。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 
