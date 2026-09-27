@@ -569,6 +569,25 @@ const syncTabsetConstraints = (m: Model) => {
   for (const k of nonTrackKids) {
     if (!kidRegion.get(k.getId())) kidRegion.set(k.getId(), primaryRegionOf(k) ?? 'main')
   }
+  // 空区竖轨清理（用户 2026-09-27：竖轨里关闭区内最后一个窗格后，空轨
+  // 不残留——原"空轨保留"设计作废）：某区的轨还在、但该区已无任何分栏
+  // → 拆轨（区丢失后回种走回家/拖缘/+，不依赖空轨）。
+  for (const k of rootKids) {
+    const cfg = regionCfgOfNode(k)
+    if (!cfg?.track) continue
+    if (nonTrackKids.some((z) => kidRegion.get(z.getId()) === cfg.region)) continue
+    m.doAction(Actions.updateNodeAttributes(k.getId(), { enableDeleteWhenEmpty: true, enableClose: true }))
+    const spacerId = `${cfg.region}-prune-spacer`
+    m.doAction(
+      Actions.addNode(
+        { type: 'tab' as const, id: spacerId, component: 'external', name: '', enableClose: true },
+        k.getId(),
+        DockLocation.CENTER,
+        0,
+      ),
+    )
+    m.doAction(Actions.deleteTab(spacerId))
+  }
   let mainMinW = REGION_LIMITS.main.minW
   if (nonTrackKids.length > 0 && window.innerWidth >= 600) {
     const avail = rootAvailPx() - SPLITTER_PX * Math.max(rootKids.length - 1, 0)

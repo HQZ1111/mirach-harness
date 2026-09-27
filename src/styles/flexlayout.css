@@ -96,13 +96,21 @@
    令牌，否则 主区/检查/文件/终端 这些单页签 zone 的标签是 16px 默认字
    （"终端的标签样式没统一"的根源）。 */
 /* ── 会话页签条 leading：logo 50 + MIRACH 30/black/#006fff/字距2
-   （用户定稿），位于条顶；页签行沉底（条 100 = leading 区 + 页签行）── */
+   （用户定稿），位于条顶；页签行沉底（条 100 = leading 区 + 页签行）──
+   高度 = 条高（占满）：条容器是 flex-end 沉底链，70 高的块会被压到条底
+   （实测 logo 顶距条顶 44）——占满后 padding 即 logo 的真实上/左间距
+   （用户 2026-09-27：上/左各 20）。竖轨形态内容顶带同用（.rail-pane-
+   railform 内高度一致，窗格内容从条高之下开始，与横向形态对齐）。 */
 .flexlayout-host .rail-logo-leading {
-  align-items: center;
+  align-items: flex-start; /* 顶对齐：logo 上间距 = padding-top（居中会被余量压低） */
+  box-sizing: border-box;
   display: flex;
   gap: 12px;
-  height: 70px;
-  padding: 10px 0 0 14px;
+  height: var(--logo-strip-h);
+  padding: 20px 0 0 20px;
+}
+.flexlayout-host .rail-logo-leading .rail-logo-word {
+  line-height: var(--logo-size); /* 文字与 50px logo 互相对中 */
 }
 
 .flexlayout-host .rail-logo-leading .rail-logo-mark {

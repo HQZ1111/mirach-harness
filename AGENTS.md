@@ -1443,6 +1443,26 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     把条降到 36、文字居中、rail-logo-leading 强制隐藏（退化保护）。
     实测（CDP）：tint bg/radius 40/z -1/topGap 精确 100（横+竖轨）、终端
     条 36+低标而顶带三条 100、截图目检文字在层上圆角可见。
+  - **logo 20/20 + 空区竖轨清理**（用户 2026-09-27）：
+    ①**logo 上/左间距 20**：实测原 logo 顶距条顶 44——条容器是 flex-end
+    沉底链，70 高的 leading 被压到条底（30-100），padding-top 10 只是
+    其中偏移。修：leading 高度 = var(--logo-strip-h)（占满条，沉底失效）
+    + padding 20/20 + **align-items: flex-start**（行内 logo+文字整体
+    垂直居中会把 logo 再压到 34，顶对齐后 .rail-logo-word 加
+    line-height: var(--logo-size) 与 50px logo 互相对中）。实测 mark
+    距条顶 19/左 22（1-2px 是 tabset 边框）。
+    ②**空区竖轨清理**：原设计"空轨保留"作废——竖轨里关闭区内最后一个
+    窗格后空轨残留（用户实测报 bug）。修：sync 在 region 推导完成后
+    prune——某区的轨还在但 nonTrackKids 里已无该区分栏 → 拆轨（翻
+    enableDeleteWhenEmpty + 假页签即删，同 toggleRegionForm 拆路径）。
+    区回种不依赖空轨：回家（一级列缘重建）/拖缘/别的栏的 +。全链路
+    CDP 实测：会话拖进主栏（withWorkspace true）→ 左栏只剩机器人切竖轨
+    → 竖轨里关机器人 → railGone true、根行 [main, right]、存档无 track。
+  - **CDP 拖拽新坑**：会话页签按钮的中心点会被条尾 **tab_toolbar 覆盖**
+    （logo leading 217 + 两页签 + 工具钮 > 350，条内过挤——按钮左段
+    ~219-251 是无覆盖区）——CDP 按页签要按按钮**左段**（x = rect.left
+    +15），按中心点命中的是工具钮、拖拽不发生（elementFromPoint 实证）。
+    条内拥挤是已知形态代价（用户定的 logo 进条方案），未修。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 
