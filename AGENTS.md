@@ -1485,6 +1485,17 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     折叠轨道（BorderNode 早退）天然无点。令牌 --tab-dot-size:5px /
     --tab-dot-color:#bfc3cc。实测：左栏两签 1 点、交界居中、单签区与
     轨道 0 点、截图目检 ✓。
+  - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
+    撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
+    close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入
+    同一图标；③拉伸头栏 ✕/回家钮与竖轨行 ✕ 换 CloseIcon、类统一
+    **fl-close-btn**（不再挂 fl-min-btn，那套 20px 盒留给条尾工具钮）；
+    ④令牌 --tab-close-size:12px / --tab-close-hit:16px /
+    --tab-close-color:text-3 / --tab-close-color-hover:品牌色；⑤显隐：
+    悬停**所在页签/行**才出现——flexlayout 默认让选中页签 trailing 常显，
+    已 CSS 压成 hover 才显；fl-tab-away 类保留但只作语义标记（CSS 常显
+    规则删除）。实测：native trailing CloseIcon+hidden、stretch/竖轨钮
+    opacity 0、hover 规则在案、截图无任何常显 ✕。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 

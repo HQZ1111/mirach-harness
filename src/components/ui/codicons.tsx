@@ -20,3 +20,12 @@ export function ChevronUpIcon({ size = 12 }: { size?: number }) {
     </svg>
   )
 }
+
+/** codicon "close"——页签/竖轨行的统一关闭钮图标（样式走 --tab-close-* 令牌） */
+export function CloseIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg aria-hidden fill="currentColor" height={size} viewBox="0 0 16 16" width={size}>
+      <path d="M8 8.707l3.646 3.647.708-.707L8.707 8l3.647-3.646-.707-.708L8 7.293 4.354 3.646l-.708.708L7.293 8l-3.647 3.646.708.707L8 8.707z" />
+    </svg>
+  )
+}

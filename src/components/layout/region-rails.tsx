@@ -17,7 +17,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Model, TabNode, TabSetNode } from 'flexlayout-react'
 
-import { ChevronUpIcon } from '@/components/ui/codicons'
+import { ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
 
 import { PANE_TYPES, instancesOfType, zoneConfigOf, type PaneType, type Region } from './pane-registry'
 import { useLayoutStore } from '@/store/layout-store'
@@ -281,7 +281,7 @@ export function RailNav({
                 <span className="zone-rail-label">{r.name}</span>
                 {r.closable && (
                   <button
-                    className="zone-rail-btn zone-rail-close"
+                    className="zone-rail-btn zone-rail-close fl-close-btn"
                     title={(() => {
                       const pt = r.id.replace(/-\d+$/, '')
                       return PANE_TYPES[pt as PaneType]?.primary ? '回到所属大栏' : '关闭'
@@ -293,7 +293,7 @@ export function RailNav({
                     onPointerDown={(e) => e.stopPropagation()}
                     type="button"
                   >
-                    ×
+                    <CloseIcon />
                   </button>
                 )}
               </div>

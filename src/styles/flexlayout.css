@@ -202,19 +202,51 @@
 .flexlayout-host .fl-min-btn { opacity: 0; transition: opacity 120ms; }
 .flexlayout-host .flexlayout__tabset:hover .fl-min-btn { opacity: 1; }
 
-/* 离家一级窗格：✕ 常显（点击 = 回家，非关闭）——sync 给页签打 fl-tab-away
-   类（flexlayout 默认 hover 才显示 trailing 关闭钮，用户定稿要常显）。
-   单页签拉伸头栏（tab_button_stretch）同样带该类，一并覆盖。 */
-.flexlayout-host .fl-tab-away .flexlayout__tab_button_trailing {
-  visibility: visible;
+/* ── 页签关闭/回家钮（用户 2026-09-27：统一图标+令牌，仅悬停显形——
+   撤销"离家 ✕ 常显"）── 四处同一形态：多页签条原生 trailing（icons.close
+   注入 CloseIcon）、拉伸头栏注入钮（fl-stretch-close / fl-home-btn）、
+   竖轨行（zone-rail-close）。显隐：悬停**所在页签/行**才出现。 */
+.fl-close-btn {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--tab-close-color);
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  height: var(--tab-close-hit);
+  justify-content: center;
+  padding: 0;
+  width: var(--tab-close-hit);
 }
-
-/* 拉伸头栏的回家钮（onRenderTab 注入，离家人级窗格专用）：常显 */
-/* 拉伸头栏的回家钮 / 关闭钮（onRenderTab 注入）：常显 */
-.flexlayout-host .fl-home-btn,
-.flexlayout-host .fl-stretch-close {
+.fl-close-btn svg {
+  height: var(--tab-close-size);
+  width: var(--tab-close-size);
+}
+.fl-close-btn:hover {
+  background: var(--tab-hover-bg);
+  color: var(--tab-close-color-hover);
+}
+/* 显形 = 悬停所在页签（拉伸头栏钮在按钮内部、原生 trailing 由
+   flexlayout 自己的 hover 规则管） */
+.flexlayout-host .fl-close-btn {
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.flexlayout-host .flexlayout__tab_button_stretch:hover .fl-close-btn,
+.flexlayout-host .flexlayout__tab_button:hover .fl-close-btn,
+.zone-rail-cell:hover .fl-close-btn {
   opacity: 1;
-  color: var(--tab-text);
+}
+/* 原生 trailing：flexlayout 默认让**选中页签**的 ✕ 常显——同样压成
+   仅悬停显形（用户 2026-09-27：关闭钮不常显） */
+.flexlayout-host .flexlayout__tab_button--selected .flexlayout__tab_button_trailing {
+  visibility: hidden;
+}
+.flexlayout-host .flexlayout__tab_button:hover .flexlayout__tab_button_trailing,
+.flexlayout-host .flexlayout__tab_button--selected:hover .flexlayout__tab_button_trailing {
+  visibility: visible;
 }
 
 /* 拖拽幽灵线（flexlayout 非 clamp 状态的跟手轮廓）：实时缩放 + onAction
@@ -302,7 +334,6 @@
   top: 0;
 }
 .zone-rail::-webkit-scrollbar { display: none; }
-.zone-rail .fl-min-btn { margin-left: 0; opacity: 1; }
 .zone-rail-btn {
   align-items: center;
   background: transparent;

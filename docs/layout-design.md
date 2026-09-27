@@ -133,6 +133,10 @@ min 按比例缩让**（底线 40px），宽度恢复后自动回 395。左右�
   5px #BFC3CC 圆点（--tab-dot-size/--tab-dot-color，onRenderTab 对非
   首签注入 leading、CSS 绝对定位骑交界对文字中线）；单页签 zone 与
   折叠轨道无。
+- **关闭/回家钮统一**（2026-09-27）：同一图标（CloseIcon，原生 trailing
+  经 icons.close 注入）、同一令牌（--tab-close-size/hit/color/
+  color-hover，类 fl-close-btn）、**仅悬停所在页签才显形**（含选中页签
+  ——flexlayout 默认选中页签 ✕ 常显已压制；撤销此前"离家 ✕ 常显"）。
 - **条内左对齐**：logo 带（.flexlayout__tabset_leading 包裹层）绝对定位
   在条顶（满宽、pointer-events none），页签行不再被它顶右——容器
   padding-left 10 + 页签 padding 10，文字与 logo 同一左线（20）。

@@ -90,6 +90,12 @@
   --tab-dot-size: 5px;                        /* 横向多页签之间的分隔圆点（用户 2026-09-27） */
   --tab-dot-color: #bfc3cc;                   /* 圆点色 */
 
+  /* ── 页签关闭/回家钮（用户 2026-09-27：统一图标+令牌，仅悬停显形）── */
+  --tab-close-size: 12px;                     /* 图标线宽 */
+  --tab-close-hit: 16px;                      /* 命中盒 */
+  --tab-close-color: var(--text-3);           /* 常态灰 */
+  --tab-close-color-hover: var(--tab-text-active); /* hover 品牌色 */
+
   /* ── 折叠轨道（左右 border 轨道）+ 栏级竖轨（RegionRails） ────── */
   --rail-width: 20px;                         /* 用户定值 */
   --rail-btn-size: 14px;                      /* 轨道钮 */

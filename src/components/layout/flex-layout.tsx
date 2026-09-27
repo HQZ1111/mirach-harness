@@ -6,7 +6,7 @@ import { Titlebar } from '@/app/shell/titlebar'
 import { StatusBar } from '@/app/shell/statusbar'
 import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
 import { MainTint } from './chrome-overlays'
-import { ChevronDownIcon, ChevronUpIcon } from '@/components/ui/codicons'
+import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
 import { DropOverlay } from './drop-overlay'
 import { startPaneDrag } from './drag-session'
 import { EditPalette } from './edit-palette'
@@ -672,8 +672,7 @@ const syncTabsetConstraints = (m: Model) => {
       m.doAction(Actions.updateNodeAttributes(node.getId(), patch))
     }
     // 一级窗格页签的关闭钮（回家语义）：离家显示 ✕（点击=回家），在家隐藏；
-    // **离家的 ✕ 要常显**（用户 2026-09-26 定稿：flexlayout 默认 hover 才
-    // 显示）——打 fl-tab-away 类，CSS 强制 visible
+    // 显隐统一走 hover（用户 2026-09-27 撤销常显）——fl-tab-away 仅作语义标记
     for (const c of node.getChildren()) {
       if (!(c instanceof TabNode)) continue
       const ptype = paneTypeOf(c.getId())
@@ -1501,9 +1500,9 @@ export function FlexLayoutShell() {
   }, [model, resetSplitToDefault])
 
   // 离家一级窗格的"回家"钮（onRenderTab 注入）：拉伸头栏（单页签分栏）
-  // **不渲染**原生 trailing 关闭钮（实测 hasTrailing=false），CSS 常显方案
+  // **不渲染**原生 trailing 关闭钮（实测 hasTrailing=false）
   // 对它无效——只对拉伸头栏注入自定义钮；多页签条走原生 trailing
-  // （fl-tab-away CSS 常显）。点击 = 回家（非关闭）。
+  // 点击 = 回家（非关闭）。
   const sendHomeFromUi = useCallback(
     (paneId: string) => {
       const tab = model.getNodeById(paneId)
@@ -1539,7 +1538,7 @@ export function FlexLayoutShell() {
       }
       // 拉伸头栏（单页签分栏）**不渲染原生 trailing 关闭钮**（flexlayout 缺
       // 口，实测 hasTrailing=false）——可关页签在这里注入 ✕（真关闭）；
-      // 多页签条走原生 trailing（hover 显示，离家一级由 fl-tab-away 常显）
+      // 多页签条走原生 trailing（显隐统一 hover）
       const stretched = set.getChildren().length === 1 && set.isEnableSingleTabStretch()
       if (!stretched) return
       const ptype = paneTypeOf(node.getId())
@@ -1552,7 +1551,7 @@ export function FlexLayoutShell() {
         renderValues.buttons.push(
           <button
             key="home"
-            className="fl-min-btn fl-home-btn"
+            className="fl-close-btn fl-home-btn"
             title={`回到${regionName[pdef.region]}`}
             onClick={(e) => {
               e.stopPropagation()
@@ -1561,7 +1560,7 @@ export function FlexLayoutShell() {
             onPointerDown={(e) => e.stopPropagation()}
             type="button"
           >
-            ×
+            <CloseIcon />
           </button>,
         )
         return
@@ -1570,7 +1569,7 @@ export function FlexLayoutShell() {
         renderValues.buttons.push(
           <button
             key="close"
-            className="fl-min-btn fl-stretch-close"
+            className="fl-close-btn fl-stretch-close"
             title="关闭"
             onClick={(e) => {
               e.stopPropagation()
@@ -1579,7 +1578,7 @@ export function FlexLayoutShell() {
             onPointerDown={(e) => e.stopPropagation()}
             type="button"
           >
-            ×
+            <CloseIcon />
           </button>,
         )
       }
@@ -1910,11 +1909,11 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         onFullReset={fullReset}
       />
       <div className="app-main flexlayout-host" onPointerDownCapture={onHostPointerDown}>
-        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} />        {/* ③ FancyZones 投放预览：拖拽中亮 zone sheet + 页签条插入符 */}
+        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} icons={{ close: <CloseIcon /> }} />        {/* ③ FancyZones 投放预览：拖拽中亮 zone sheet + 页签条插入符 */}
         <DropOverlay />
         {/* 装饰叠片：主区调色层（E9EEEF@40%）+ 左栏 logo 带（上 logo 下标签） */}
         <MainTint model={model} />
-        {/* 离家一级标签 ✕ 常显/回家钮（onRenderTab）+ logo/文字由
+        {/* 离家一级标签 回家钮（onRenderTab）+ logo/文字由
             onRenderTabSet 的 leading 注入会话页签条（RailLogo 浮层已退役） */}
         {/* hermes 编辑模式画布面：zone body 变拖拽把手（veil） */}
         <EditVeils
