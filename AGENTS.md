@@ -419,6 +419,22 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
 
 - 现有文件就三层：`src/components/layout/flex-layout.tsx`（模型+壳）、
   `src/components/panes/*.tsx`（6 个占位窗格）、`src/lib/storage.ts`。
+- **【2026-09-27 模块化】flex-layout.tsx（原 1957 行）已按职责拆分**（纯
+  搬运零行为变更，tsc+全场景回归验证）：
+  - `flex-layout.tsx`（~1284 行）= React 壳：FlexLayoutShell、工厂、
+    onAction/onRenderTab*/onTabSetPlaceHolder、拖拽接管/双击/键盘/引导
+    effect、scheduleRebalance 调度（定时器只在这一层）；
+  - `constraints.ts` = 纯几何约束：widthBounds/heightBounds 聚合、
+    clampRowWeights（保险网）、rootAvailPx/measuredPxWidth/rootNeededMin、
+    isTopBand、regionCfgOfNode——无 React 无动作提交；
+  - `constraints-sync.ts` = syncTabsetConstraints 约束应用器（§2 引擎 v4：
+    列 identity 三级推导/过承诺缩让/空区竖轨清理/低条/关闭钮语义）；
+  - `rebalance.ts` = 串行通道的模型级操作：applyRootWeights/absorbSurplus/
+    fitWindowWidth/mergeZonesPerColumn/updateNarrowViewport/measureRootPx
+    （rootPxMem 模块态在此）；DESIGN_WIDTH/MIN_WINDOW_WIDTH 在此；
+  - `resize-handles.tsx`（无边框窗手柄）、`rail-logo-leading.tsx`（logo 带，
+    横向条 leading 与竖轨内容顶带共用）；
+  - 调试句柄：`window.__flModel`（活动 Model）、`window.__flDragLog`。
 - **布局即 JSON**（`Model.fromJson`）：weight 是相对父 row 的百分比；
   嵌套 row 方向自动交替（根水平=三列，主列 row 垂直=主区/终端上下）。
 - **Tauri 壳已加**（2026-09-21）：`mirach-harness/src-tauri/` 最小壳（无命令
