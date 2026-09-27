@@ -8,6 +8,8 @@ import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
 import { MainTint } from './chrome-overlays'
 import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
 import { DropOverlay } from './drop-overlay'
+// flexlayout 0.11.1 行节点 max 聚合缺陷的运行时修正（须先于布局执行，见文件头）
+import './flexlayout-rowfix'
 import { startPaneDrag } from './drag-session'
 import { EditPalette } from './edit-palette'
 import { EditVeils } from './edit-veils'
@@ -485,10 +487,10 @@ const clampRowWeights = (row: RowNode, weights: number[]): number[] | null => {
     maxPx.push(Math.min(b.max, avail))
   }
   if (minPx.some((m) => !Number.isFinite(m)) || maxPx.some((m) => !Number.isFinite(m))) return null
-  // 纯逐子项钳制：越界的子项钳回 [min,max]，其余不动——flexbox 会把省下
-  // 的空间按 grow 归一给未钳子项（主栏/无上限列自然吸收），**不做水填充
-  // 再分配**：按"容量"分差额在界限过期时会放大拖拽、把别的子项推向边界
-  // （2026-09-26 实测：宽/高拖拽都出现过向 min/max 的过冲）。
+  // 纯逐子项钳制（保险网）：行的聚合上限由 flexlayout-rowfix 修正后的
+  // 引擎原生执行（内联 max-width + calculateSplit 对被拖子项的自钳），
+  // 正常拖拽到不了这里；本函数只兜非拖拽路径的权重越界。不做差额回填
+  // （flexbox 归一化的越界渲染已由内联上限在 DOM 层硬钳）。
   const clamped = weights.map((w, i) => {
     const px = (w / sum) * avail
     const c = Math.min(Math.max(px, minPx[i]), maxPx[i])
@@ -811,6 +813,12 @@ export function FlexLayoutShell() {
   const userPresets = useLayoutStore(s => s.userPresets)
   const sideCollapsed = useLayoutStore(s => s.sideCollapsed)
   const zoneEditorOpen = useLayoutStore(s => s.zoneEditorOpen)
+
+  // 调试句柄（CDP 探针用）：window.__flModel = 活动布局模型
+  useEffect(() => {
+    (window as { __flModel?: Model }).__flModel = model
+    return () => { if ((window as { __flModel?: Model }).__flModel === model) (window as { __flModel?: Model }).__flModel = undefined }
+  }, [model])
 
   const persist = useCallback((m: Model) => {
     try {

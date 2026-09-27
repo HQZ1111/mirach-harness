@@ -71,6 +71,17 @@
 一列的最小宽 = 内部分栏 min 的**最大值**（并排取 Σ）。实现见
 `widthBounds`/`heightBounds`。
 
+**引擎层执行（2026-09-27 工程修复）**：flexlayout 0.11.1 的
+`RowNode.calcMinMaxSize` 对沿轴 max 的聚合从 `DefaultMax(99999)` 起算再
+累加子项 → 任何行节点的聚合上限都被污染成 ≥99999（形同虚设），拖拽
+calculateSplit 的自钳失效 → 拖宽度能越过聚合上限、松手被串行通道钳回
+（"能多拉、松手弹回"）。修复 = `flexlayout-rowfix.ts` 运行时按官方语义
+重写该方法（沿轴 Σ 从 0 起算、跨轴 MIN/MAX 首项直赋）——行节点获得真实
+聚合上限后：DOM 内联 max-width 生效（flexbox 层硬钳）、
+getSplitterBounds/calculateSplit 原生把拖拽钳在上限内。钳制器
+（clampRowWeights）退化为非拖拽路径的保险网。升级 flexlayout 先核对上游
+是否已修，已修则删除该文件。
+
 ### 2.4 无主栏时：非主栏 max 放开，吸收者唯一
 
 主栏不在场（根行没有主栏分栏）时，非主栏列**最大宽限制放开、只保留最小

@@ -1496,6 +1496,26 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     已 CSS 压成 hover 才显；fl-tab-away 类保留但只作语义标记（CSS 常显
     规则删除）。实测：native trailing CloseIcon+hidden、stretch/竖轨钮
     opacity 0、hover 规则在案、截图无任何常显 ✕。
+  - **【工程修复】行节点聚合上限缺陷（用户 2026-09-27："下面一栏上面两栏
+    拖宽度能多拉、松手弹回——结构性弱点要从底层解决，补的不对"）**：
+    根因在 flexlayout 0.11.1 库内——RowNode.calcMinMaxSize 的沿轴 max
+    聚合从 DefaultMax(99999) **起算**再累加子项（ HORZ 行 maxW =
+    99999+Σ、VERT 行 maxH 同病），运行时实证：内行 maxW=100840、
+    spl-root=300419——行节点永远无有效上限 → calculateSplit 对被拖行
+    子项的自钳失效 → 拖拽越过聚合上限渲染（flexbox 归一化）→ 松手被
+    absorb 按正确聚合钳回（=弹回）。此前纯钳制/water-fill 都是在我方
+    钳制器里打补丁，错层。**修复 = flexlayout-rowfix.ts**：运行时按
+    官方语义重写 RowNode.calcMinMaxSize（沿轴 Σ 从 0 起算、跨轴
+    MAX(min)/MIN(max) 首项直赋、末尾 max≥min 收口；node_modules 的
+    dist 手工补丁已还原，patch-package 因环境 npm install-scripts 受限
+    + 临时安装失败不可用）。修复后行节点获得真实聚合上限：DOM 内联
+    max-width 硬钳（flexbox 层）、getSplitterBounds/calculateSplit
+    原生钳拖拽、clampRowWeights 退化为非拖拽路径保险网（water-fill
+    已回退为纯钳制）。另加调试句柄 window.__flModel（活动 Model）。
+    实测（CDP，拖拽中+松手后三个时间点）：行 maxW 99999→841、拖拽中
+    几何即钳制目标（420/420/841、主栏 605 吃富余）、松手稳定无弹回、
+    默认布局无挤压。升级 flexlayout 先核对上游是否已修，已修则删除
+    flexlayout-rowfix.ts。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 
