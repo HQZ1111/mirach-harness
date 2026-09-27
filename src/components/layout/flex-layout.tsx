@@ -685,6 +685,16 @@ function ResizeHandles() {
 
 // ── 主组件 ───────────────────────────────────────────────────────────────────
 
+/** 会话分栏的 logo 带（logo 50 + MIRACH 30/black/#006fff/字距2，用户定稿）：
+ *  横向形态渲染在页签条 leading（onRenderTabSet）；竖轨形态横向条被隐藏，
+ *  工厂把它补在分栏内容顶部（.rail-pane-railform）——两处共用一个组件。 */
+const RailLogoLeading = () => (
+  <div className="rail-logo-leading">
+    <img alt="" className="rail-logo-mark" src="/brand/logo.png" />
+    <span className="rail-logo-word">MIRACH</span>
+  </div>
+)
+
 export function FlexLayoutShell() {
   // 模型配置：全局属性压回（旧存档防御）+ 竖轨投放保护
   const configure = (m: Model) => {
@@ -1213,12 +1223,7 @@ export function FlexLayoutShell() {
       if (!cfg) return
       // 会话分栏（左栏一级栏）：logo/文字注入 leading
       if (node.getChildren().some((c) => c.getId() === 'sessions')) {
-        renderValues.leading = (
-          <div className="rail-logo-leading">
-            <img alt="" className="rail-logo-mark" src="/brand/logo.png" />
-            <span className="rail-logo-word">MIRACH</span>
-          </div>
-        )
+        renderValues.leading = <RailLogoLeading />
       }
       const isPrimaryZone = node.getChildren().some(
         (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
@@ -1640,21 +1645,40 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
   // 窗格内容相同，靠名字区分"切没切"）；external = OS 拖入的文件占位。
   // 竖轨形态的分栏（横向条已隐藏）同样直接渲染内容——竖轨本身是栏外缘
   // 的空轨 tabset，其导航由 onTabSetPlaceHolder 渲染（RailNav）。
+  // **竖轨形态的 logo**：logo 是 sessions 窗格的附属物（§6），平时住在
+  // 会话分栏横向条的 leading 里；竖轨形态横向条被 sync 隐藏 → 工厂在
+  // 内容顶部补同一条 logo 带（横向形态条内 leading 仍在，不会双 logo）。
   const factory = useCallback(
     (node: TabNode) => {
       const componentName = node.getComponent() ?? ''
       const Comp = COMPONENTS[componentName]
-      if (Comp) return <Comp tabName={node.getName()} />
-      if (componentName === 'external') {
+      let content: React.ReactNode
+      if (Comp) content = <Comp tabName={node.getName()} />
+      else if (componentName === 'external') {
         const cfg = node.getConfig() as { fileName?: string } | undefined
-        return (
+        content = (
           <div className="pane-placeholder">
             <h2>{cfg?.fileName ?? node.getName()}</h2>
             <p>外部内容占位（OS 拖入）——预览渲染待接。</p>
           </div>
         )
+      } else {
+        content = <div className="pane-placeholder"><p>未知窗格: {componentName}</p></div>
       }
-      return <div className="pane-placeholder"><p>未知窗格: {componentName}</p></div>
+      const parent = node.getParent()
+      if (
+        parent instanceof TabSetNode &&
+        !parent.isEnableTabStrip() &&
+        parent.getChildren().some((c) => c.getId() === 'sessions')
+      ) {
+        return (
+          <div className="rail-pane-railform">
+            <RailLogoLeading />
+            <div className="rail-pane-railform-body">{content}</div>
+          </div>
+        )
+      }
+      return content
     },
     [],
   )

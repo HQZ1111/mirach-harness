@@ -1414,6 +1414,16 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     反过来"条分发无报错"恰是拦截生效的证据；②程序化 el.click() 不会关
     「+」弹出的类型菜单——后续点击被菜单吞掉，曾误判"拆轨失效"（复现
     失败 + 无菜单路径干净即证）。
+  - **竖轨形态 logo 补位**（用户："标签竖型时没有横向标签栏，logo 不见
+    了"）：logo 原本住在会话分栏横向条 leading（onRenderTabSet 注入），
+    竖轨形态 sync 把横向条 enableTabStrip:false 隐藏 → logo 随条消失。
+    修：RailLogoLeading 提成模块组件，工厂检测"父分栏 enableTabStrip
+    =false 且含 sessions 页签"时在**内容顶部**渲染同一条带
+    （.rail-pane-railform：leading 70 高 + body flex:1 吃剩余）——横向
+    形态条内 leading 仍在、不会双 logo；logo 跟随 sessions 所在分栏
+    （§6 语义），被拖进别的大栏再切竖轨也成立。实测（CDP）：切竖轨出带
+    （70/带内 img+MIRACH、body 908）、切回恢复条内 leading 无带、截图
+    目检带与竖轨并排无重叠。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 

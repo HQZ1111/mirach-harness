@@ -306,6 +306,23 @@
 }
 .zone-rail-add { flex: none; padding-bottom: 2px; }
 
+/* ── 竖轨形态的会话分栏 logo 带：横向条被 sync 隐藏后，工厂在内容顶部
+   补 RailLogoLeading（同一条带，§6 logo 随 sessions）；body 吃剩余高度，
+   窗格内容在其中保持 100% 高。 ── */
+.rail-pane-railform {
+  align-items: stretch;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.rail-pane-railform > .rail-logo-leading {
+  flex: none;
+}
+.rail-pane-railform-body {
+  flex: 1;
+  min-height: 0;
+}
+
 /* ── 「+」弹出菜单（PaneAddButton：多可开类型时选择） ── */
 .zone-add-menu {
   background: var(--surface);
