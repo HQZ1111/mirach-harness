@@ -281,6 +281,9 @@ src-tauri/            L3 Rust 应用层（+未来 L4 pi-adapter）
 | vite | 8.2.0 + @rolldown/plugin-babel + babel-plugin-react-compiler | React Compiler 的 babel pass **必须保留**（vite.config.ts），砍掉会导致测试里 tap 循环复发 |
 | vitest / jsdom | 4.1.10 / 29.1.1 | hermes 钉版；jsdom 30 会让 Radix pointerDown 菜单打不开 |
 | @tauri-apps/api 等 | 2.11.x | 上一轮验证过的 Tauri 基线（见 package.json） |
+| vitest | 4.1.10 | harness 单测（2026-09-27 引入；与主工程钉版一致）；无 jsdom，node 环境 + localStorage 替身 |
+
+**harness 测试**：`npm test`（vitest run）/ `npm run test:watch`；配置 = vitest.config.ts（node 环境、@ 别名）+ vitest.setup.ts（localStorage 替身）。已覆盖 constraints/rebalance 依赖的聚合与钳制纯函数、rowfix 修正语义、pane-registry 不变量。
 
 package-lock.json 已生成（2026-09-20，含上面全部钉版）；重装依赖后先跑
 tsc + vitest 再动别的。改依赖版本先看上表——每个钉版都有一次翻车在背后。
