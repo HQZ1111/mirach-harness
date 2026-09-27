@@ -48,7 +48,10 @@ function useTabsetRect(model: Model, tabIds: string[]) {
   return rect
 }
 
-/** 主区调色叠层：E9EEEF @ 40% */
+/** 主区调色层：颜色/圆角走令牌 --main-tint-*；顶部避开 100 页签带
+ *  （calc + --logo-strip-h，横向形态避条、竖轨形态避标题栏/logo 带——
+ *  用户 2026-09-27 定稿两形态都避）；z -1 垫到文字组件下面（overlays.css）。
+ *  偏移不用 100px 字面量而挂令牌：改条高一处即全跟。 */
 export function MainTint({ model }: { model: Model }) {
   const rect = useTabsetRect(model, ['workspace'])
   if (!rect) return null
@@ -56,7 +59,12 @@ export function MainTint({ model }: { model: Model }) {
     <div
       aria-hidden
       className="main-tint"
-      style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
+      style={{
+        left: rect.left,
+        top: `calc(${rect.top}px + var(--logo-strip-h))`,
+        width: rect.width,
+        height: `calc(${rect.height}px - var(--logo-strip-h))`,
+      }}
     />
   )
 }

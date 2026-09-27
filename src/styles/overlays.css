@@ -4,14 +4,19 @@
  * ============================================================ */
 
 /* ── 装饰叠片 ──
-   主区调色层：E9EEEF @ 40%，pointer-events none 点击穿透。
+   主区调色层：颜色/圆角走令牌（--main-tint-*），顶部避 100 页签带的
+   偏移在 chrome-overlays.tsx 里用 calc + --logo-strip-h（横/竖轨都避）。
+   **z -1 = 垫到窗格文字组件下面**（用户：现在盖主文字了）——flexlayout
+   背景全透明，颜色层从内容后面透出来；宿主 isolation: isolate 保证 -1
+   不掉到 app 白底之下。
    （左栏 logo 已迁入会话页签条 leading——onRenderTabSet 注入，样式见
    flexlayout.css 的 .rail-logo-leading；宿主层浮层方案退役。） */
 .main-tint {
-  background: rgba(233, 238, 239, 0.4);
+  background: var(--main-tint-color);
+  border-radius: var(--main-tint-radius);
   pointer-events: none;
   position: absolute;
-  z-index: 20;
+  z-index: -1;
 }
 
 /* ── 布局编辑画布面（hermes edit veil）——浅色 scrim ── */

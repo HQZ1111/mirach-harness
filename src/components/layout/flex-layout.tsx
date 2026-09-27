@@ -210,6 +210,22 @@ const widthBounds = (n: Node, vert: boolean): { min: number; max: number } => {
   return { min: 0, max: 99999 }
 }
 
+/** 分栏是否在窗口顶带（条 100 高的双重身份=标题栏拖拽区/窗口按钮让位，
+ *  只属于窗口顶带）：沿父链上行——VERT 行只有第一个孩子在顶带（其余被
+ *  堆在下方）；HORZ 行孩子并排同高、全体都算。到达根行 = 顶带。
+ *  上下分栏的非顶部分栏（如终端）条降到 --strip-low-height（用户
+ *  2026-09-27："分栏如果是上下分栏，100 就太高了"）。 */
+const isTopBand = (rootRow: RowNode | undefined, n: Node): boolean => {
+  let cur: Node = n
+  for (;;) {
+    const p = cur.getParent()
+    if (!(p instanceof RowNode)) return false
+    if (p.getOrientation() === Orientation.VERT && p.getChildren()[0] !== cur) return false
+    if (p === rootRow) return true
+    cur = p
+  }
+}
+
 const applyRootWeights = (m: Model) => {
   const root = m.getRootRow()
   const kids = root?.getChildren() ?? []
@@ -620,6 +636,13 @@ const syncTabsetConstraints = (m: Model) => {
     }
     const wantStrip = !rail
     if (node.isEnableTabStrip() !== wantStrip) patch.enableTabStrip = wantStrip
+    // 低条（上下分栏的非顶部分栏，isTopBand 判定）：classNameTabStrip 落在
+    // tabbar_outer 上，CSS 把条降到 --strip-low-height、文字居中。
+    // 轨跳过（无条）；竖轨形态条本就隐藏，类挂着无副作用。
+    if (!isTrack) {
+      const wantCls = isTopBand(rootRow, node) ? undefined : 'fl-strip-low'
+      if (node.getClassNameTabStrip() !== wantCls) patch.classNameTabStrip = wantCls
+    }
     // 高度：垂直堆叠语境不设限（min 由标题条天然保证，max 无——"最大高度
     // 没限制"）；历史遗留的 min/max 清回默认（白带类 bug 的根源随之消失）
     if (parentRow && parentRow.getOrientation() === Orientation.VERT) {

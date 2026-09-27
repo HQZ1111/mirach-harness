@@ -16,18 +16,41 @@
   min-width: 0;
   overflow: hidden;
   position: relative;
+  /* 建立层叠上下文：z -1 的调色层垫在布局内容之下、又不会掉到 app 白底之下 */
+  isolation: isolate;
 }
 
 .flexlayout-host .flexlayout__tabset_tabbar_outer {
-  height: 100px;
-  min-height: 100px;
+  height: var(--logo-strip-h);
+  min-height: var(--logo-strip-h);
   align-items: flex-end; /* 页签行沉到条底，上部留给 logo/文字（用户定稿） */
 }
 
 .flexlayout-host .flexlayout__tabset_tabbar_inner,
 .flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
-  height: 100px;
+  height: var(--logo-strip-h);
   align-items: flex-end;
+}
+
+/* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
+   （标题栏拖拽区/窗口按钮让位）只属于窗口顶带——下面分栏的条降到
+   --strip-low-height，文字居中（没有 logo 位要留）。 ── */
+.flexlayout-host .flexlayout__tabset_tabbar_outer.fl-strip-low {
+  height: var(--strip-low-height);
+  min-height: var(--strip-low-height);
+  align-items: center;
+}
+.flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_inner,
+.flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_inner_tab_container {
+  height: var(--strip-low-height);
+  align-items: center;
+}
+.flexlayout-host .fl-strip-low .flexlayout__tab_button_stretch {
+  align-items: center; /* 低条没有 logo 位，文字不沉底 */
+  padding-bottom: 0;
+}
+.flexlayout-host .fl-strip-low .rail-logo-leading {
+  display: none; /* 低条不存在 logo 位（sessions 被拖到下方时的退化保护） */
 }
 
 /* ── 横向页签（hermes PaneTab，token 见 tokens.css） ──

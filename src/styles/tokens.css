@@ -63,7 +63,14 @@
   --logo-text-weight: 900;                    /* black */
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */
-  --logo-strip-h: 100px;                      /* 页签条总高 */
+  --logo-strip-h: 100px;                      /* 页签条总高（顶带分栏） */
+  --strip-low-height: 36px;                   /* 上下分栏的非顶部分栏条高
+    （100 高的双重身份=标题栏区只属于窗口顶带；普通条高 36，用户 2026-09-27） */
+
+  /* ── 主对话栏调色层（MainTint，用户 2026-09-27 写进令牌） ──
+     垫在窗格文字组件下面（z -1）、顶部避开 100 页签带、40 圆角 */
+  --main-tint-color: rgba(233, 238, 239, 0.4);
+  --main-tint-radius: 40px;
 
   /* ── 页签系统（用户定稿：14/regular，非选中 #242424，选中 #006fff） ──
      横向页签 / 拉伸头栏 / 左右轨道 / 主栏竖轨共用这一套——

@@ -1424,6 +1424,25 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     （§6 语义），被拖进别的大栏再切竖轨也成立。实测（CDP）：切竖轨出带
     （70/带内 img+MIRACH、body 908）、切回恢复条内 leading 无带、截图
     目检带与竖轨并排无重叠。
+  - **调色层三改 + 低条**（用户：颜色层写进令牌 / 垫到文字下 / 避 100 /
+    40 圆角 / 上下分栏 100 条太高）：
+    ①**调色层进令牌**：--main-tint-color（E9EEEF@40%）/ --main-tint-radius
+    （40px）；条高令牌化补齐——flexlayout.css 的 tabbar 100px 字面量改接
+    既有 --logo-strip-h，新增 --strip-low-height: 36px。
+    ②**垫到文字下**：.main-tint z 20→**-1** + .flexlayout-host
+    **isolation: isolate**（建层叠上下文，-1 掉不进 app 白底、又压不到
+    布局内容）——flexlayout 背景全透明（light.css），颜色层从内容后面
+    透出，文字正常画在上面。
+    ③**顶部避 100**：MainTint 的 top/height 改 calc(± var(--logo-strip-h))
+    ——横向避条、竖轨避标题栏/logo 带（条高改令牌一处全跟）。
+    ④**低条（isTopBand + fl-strip-low）**：条 100 高的双重身份（标题栏区）
+    只属于窗口顶带——沿父链上行，VERT 行只有第一个孩子在顶带、HORZ 行
+    全体孩子都算、到根行=顶带；非顶带分栏（如终端）sync 打
+    classNameTabStrip 'fl-strip-low'（flexlayout 0.11 该 attr 落在
+    tabbar_outer 上，**没有 classNameTabSet attr**——bundle 实证），CSS
+    把条降到 36、文字居中、rail-logo-leading 强制隐藏（退化保护）。
+    实测（CDP）：tint bg/radius 40/z -1/topGap 精确 100（横+竖轨）、终端
+    条 36+低标而顶带三条 100、截图目检文字在层上圆角可见。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 
