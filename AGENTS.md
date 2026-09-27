@@ -1528,6 +1528,14 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
       workspace/session→AssistantThreadPane(Thread)；右栏 files 无
       assistant-ui 组件（生态没有文件树），保持占位，后续基于 src-tauri
       的 fs_list 命令自建。
+  - **文件树窗格实装**（2026-09-27 二轮补完，替代"保持占位"）：fs.rs 从
+    主工程（G:/MIRACH/src-tauri/src/fs.rs）逐字移植（fs_list/fs_git_root/
+    fs_read_data_url；Cargo 加 serde+base64；main.rs 注册 mod fs +
+    invoke_handler）。前端：`src/lib/fs.ts`（invoke 封装）+
+    `panes/file-tree-pane.tsx`（懒加载目录树：根路径可输入、目录点击
+    展开/收起按需 fsList、文件叶子选中高亮；样式走令牌）；COMPONENTS
+    files→FileTreePane。实测：根目录 16 项、目录排前、懒展开正常。
+    文件点击预览（fs_read_data_url）待接。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入

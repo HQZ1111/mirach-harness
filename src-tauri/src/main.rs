@@ -5,6 +5,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// 本地文件系统桥（自 G:/MIRACH 主工程逐字移植）：fs_list / fs_git_root /
+// fs_read_data_url——文件树窗格的数据源
+mod fs;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -151,6 +155,11 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            fs::fs_list,
+            fs::fs_git_root,
+            fs::fs_read_data_url
+        ])
         .run(tauri::generate_context!())
         .expect("error while running mirach-harness");
 }

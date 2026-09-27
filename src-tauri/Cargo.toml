@@ -10,3 +10,5 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # features 与主工程一致（unstable），最大化复用 cargo 缓存
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"

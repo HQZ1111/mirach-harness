@@ -30,6 +30,7 @@ import { ZoneEditor } from './zone-editor'
 
 import { BotsPane } from '@/components/panes/bots-pane'
 import { FilesPane } from '@/components/panes/files-pane'
+import { FileTreePane } from '@/components/panes/file-tree-pane'
 import { ReviewPane } from '@/components/panes/review-pane'
 import { SessionsPane } from '@/components/panes/sessions-pane'
 import { TerminalPane } from '@/components/panes/terminal-pane'
@@ -45,7 +46,7 @@ const COMPONENTS: Record<string, React.ComponentType<{ tabName?: string }>> = {
   bots: BotsPane,
   workspace: AssistantThreadPane, // 主对话栏 = assistant-ui Thread
   session: AssistantThreadPane, // 多开会话同用 Thread
-  files: FilesPane,
+  files: FileTreePane,
   review: ReviewPane,
   terminal: TerminalPane,
 }
