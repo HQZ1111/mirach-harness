@@ -129,6 +129,10 @@ min 按比例缩让**（底线 40px），宽度恢复后自动回 395。左右�
 - **页签 = 纯文字**（2026-09-27 用户定稿：文字就是按钮，点击效果=文字
   颜色，不要按钮形式）：无表面、无下划线、无页签间分隔线、无条底灰线；
   常规 #242424 / hover 品牌色 / 选中 #006fff；多选仍用 accent 14% 洗。
+- **页签分隔圆点**（2026-09-27）：横向**多页签条**的相邻页签之间渲染
+  5px #BFC3CC 圆点（--tab-dot-size/--tab-dot-color，onRenderTab 对非
+  首签注入 leading、CSS 绝对定位骑交界对文字中线）；单页签 zone 与
+  折叠轨道无。
 - **条内左对齐**：logo 带（.flexlayout__tabset_leading 包裹层）绝对定位
   在条顶（满宽、pointer-events none），页签行不再被它顶右——容器
   padding-left 10 + 页签 padding 10，文字与 logo 同一左线（20）。

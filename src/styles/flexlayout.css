@@ -71,8 +71,22 @@
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
   padding: 0 var(--tab-pad-x);
+  position: relative; /* 分隔圆点（fl-tab-sep）绝对定位的参照 */
   text-transform: uppercase;
   transition: color 100ms;
+}
+
+/* 横向多页签之间的分隔圆点（onRenderTab 对非首签注入 leading）：
+   骑在两签交界（前签右 padding 与本签左 padding 的中点），垂直对文字中线 */
+.flexlayout-host .fl-tab-sep {
+  background: var(--tab-dot-color);
+  border-radius: 50%;
+  height: var(--tab-dot-size);
+  left: -2.5px;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--tab-dot-size);
 }
 
 /* 左对齐：首个页签与拉伸头栏的文字与 logo 同一左线（由容器的

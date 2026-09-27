@@ -1531,6 +1531,12 @@ export function FlexLayoutShell() {
     (node: TabNode, renderValues: import('flexlayout-react').ITabRenderValues) => {
       const set = node.getParent()
       if (!(set instanceof TabSetNode)) return
+      // 横向多页签条：非首个页签的前缘加 5px 圆点分隔（用户 2026-09-27，
+      // 骑在两签交界、垂直对文字中线）；折叠轨道（BorderNode）不在此列
+      const tabs = set.getChildren().filter((c): c is TabNode => c instanceof TabNode)
+      if (tabs.length > 1 && tabs.indexOf(node) > 0) {
+        renderValues.leading = <span aria-hidden className="fl-tab-sep" />
+      }
       // 拉伸头栏（单页签分栏）**不渲染原生 trailing 关闭钮**（flexlayout 缺
       // 口，实测 hasTrailing=false）——可关页签在这里注入 ✕（真关闭）；
       // 多页签条走原生 trailing（hover 显示，离家一级由 fl-tab-away 常显）

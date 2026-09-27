@@ -1478,6 +1478,13 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     absolute 要打在包裹层不是 .rail-logo-leading 本身。实测：sessLeft
     219→12（文字 22=logo 左线）、全部 bg/shadow/border 清零、条底 0px、
     选中蓝 hover 蓝、截图目检干净。
+  - **页签分隔圆点**（用户 2026-09-27：横栏标签中间加 5px #BFC3CC 圆点）：
+    onRenderTab 对**多页签条的非首签**注入 renderValues.leading =
+    .fl-tab-sep（CSS 绝对定位 left -2.5px 骑在两签交界、top 50% 对文字
+    中线；按钮加 position:relative 作参照）；单页签 zone（无前签）与
+    折叠轨道（BorderNode 早退）天然无点。令牌 --tab-dot-size:5px /
+    --tab-dot-color:#bfc3cc。实测：左栏两签 1 点、交界居中、单签区与
+    轨道 0 点、截图目检 ✓。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 

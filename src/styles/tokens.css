@@ -87,6 +87,8 @@
   --tab-accent-wash: rgba(0, 111, 255, 0.14); /* hermes TAB_SELECTED 14% */
   --tab-hover-bg: rgba(0, 0, 0, 0.06);        /* hermes hover darken */
   --tab-separator: rgba(0, 0, 0, 0.07);       /* hermes --ui-stroke-quaternary 系 */
+  --tab-dot-size: 5px;                        /* 横向多页签之间的分隔圆点（用户 2026-09-27） */
+  --tab-dot-color: #bfc3cc;                   /* 圆点色 */
 
   /* ── 折叠轨道（左右 border 轨道）+ 栏级竖轨（RegionRails） ────── */
   --rail-width: 20px;                         /* 用户定值 */
