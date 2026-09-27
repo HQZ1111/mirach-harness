@@ -14,6 +14,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@assistant-ui/react": "^0.15.22",
+    "@assistant-ui/react-markdown": "^0.14.17",
     "@tabler/icons-react": "^3.47.0",
     "@tanstack/react-query": "^5.103.1",
     "@tauri-apps/api": "^2.11.1",
@@ -21,19 +23,24 @@
     "@types/react-dom": "^19.3.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cn": "^0.4.0",
     "flexlayout-react": "^0.11.1",
     "harmonyos-sans-sc-webfont-splitted": "^1.1.0",
     "lucide-react": "^1.47.0",
     "radix-ui": "^1.6.7",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.7.0",
+    "tw-shimmer": "^0.4.13",
     "web-haptics": "^0.0.6",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.5",
     "@vitejs/plugin-react": "^5.1.1",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
     "vitest": "^4.1.10"

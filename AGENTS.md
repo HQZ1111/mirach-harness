@@ -1504,6 +1504,30 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     折叠轨道（BorderNode 早退）天然无点。令牌 --tab-dot-size:5px /
     --tab-dot-color:#bfc3cc。实测：左栏两签 1 点、交界居中、单签区与
     轨道 0 点、截图目检 ✓。
+  - **【UI 阶段启动】assistant-ui 接入（2026-09-27，用户指令）**：
+    - 版本：@assistant-ui/react **0.15.22**（含 @assistant-ui/core）；
+      ~~@assistant-ui/react-ui 0.2.1~~ **已放弃**（其构建面向 react 0.14，
+      import useThread/useAssistantRuntime 等 0.15 已移除的导出，vite
+      预构建直接报 No matching export）；改走 **assistant-ui CLI**
+      （= shadcn CLI + registry：`npx shadcn@latest add
+      https://r.assistant-ui.com/thread https://r.assistant-ui.com/thread-list`）。
+    - CLI 带来 Tailwind v4（tailwindcss 4.3.3 + @tailwindcss/vite，vite
+      插件已接）+ shadcn 基座（src/components/ui/*：button/textarea/
+      tooltip/dialog/avatar/collapsible/input/skeleton）+ src/lib/utils
+      .ts（cn）+ src/hooks/*；registry 组件落位：thread.aui.tsx（对话，
+      833 行）、thread-list.aui.tsx（会话侧栏）、markdown-text.tsx、
+      reasoning/tool-group/tool-fallback/follow-up-suggestions/
+      attachment（elements 归 src/components/assistant-ui/elements/——
+      CLI 写到 components 根目录但导入路径指向 elements/，需手工归位）、
+      file.tsx/image.tsx；主题令牌在 src/styles/tailwind.css（Tailwind
+      v4 CSS-first：@theme inline + shadcn :root 变量），main.tsx 最后导入。
+    - 挂载：`src/components/assistant-ui/runtime.tsx` = AssistantRuntime
+      （useLocalRuntime + mockModelAdapter：回显式流式，pi 接入后仅换
+      adapter）；FlexLayoutShell 整树包 AssistantRuntimeProvider；
+      COMPONENTS：sessions→AssistantSessionsPane(ThreadList)、
+      workspace/session→AssistantThreadPane(Thread)；右栏 files 无
+      assistant-ui 组件（生态没有文件树），保持占位，后续基于 src-tauri
+      的 fs_list 命令自建。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入

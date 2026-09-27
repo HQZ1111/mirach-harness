@@ -1,4 +1,5 @@
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 
@@ -6,7 +7,7 @@ import { defineConfig } from 'vite'
 // 端口用 1430，避免和主工程 MIRACH 的 1420 dev server 撞车。
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   clearScreen: false,
   resolve: {
     alias: {

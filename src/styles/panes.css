@@ -30,3 +30,10 @@
   font-size: 12.5px;
   margin-top: auto;
 }
+
+/* ── assistant-ui 窗格（Thread/ThreadList）撑满所在分栏 ── */
+.assistant-thread-pane,
+.assistant-sessions-pane {
+  height: 100%;
+  overflow: hidden;
+}

@@ -34,14 +34,17 @@ import { ReviewPane } from '@/components/panes/review-pane'
 import { SessionsPane } from '@/components/panes/sessions-pane'
 import { TerminalPane } from '@/components/panes/terminal-pane'
 import { WorkspacePane } from '@/components/panes/workspace-pane'
+import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
+import { AssistantSessionsPane } from '@/components/panes/assistant-sessions-pane'
+import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 
 // ── 窗格组件注册表（按**类型**分发；多实例共用同一组件） ─────────────────────
 
 const COMPONENTS: Record<string, React.ComponentType<{ tabName?: string }>> = {
-  sessions: SessionsPane,
+  sessions: AssistantSessionsPane, // 左栏会话列表 = assistant-ui ThreadList
   bots: BotsPane,
-  workspace: WorkspacePane,
-  session: WorkspacePane, // 多开会话暂用同一占位，接 pi 后换 ChatView
+  workspace: AssistantThreadPane, // 主对话栏 = assistant-ui Thread
+  session: AssistantThreadPane, // 多开会话同用 Thread
   files: FilesPane,
   review: ReviewPane,
   terminal: TerminalPane,
@@ -1234,8 +1237,9 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
   }, [mirror])
 
   return (
-    <div className="app-shell">
-      <ResizeHandles />
+    <AssistantRuntime>
+      <div className="app-shell">
+        <ResizeHandles />
       {/* 窗口拖拽带（0-60px，用户定稿：标题栏整带可拖）：盖在页签条上部
           空白区（logo/文字区），z 40 在标题栏按钮与页签行之下——按下即
           startDragging 交还 OS 移动窗口；双击 = 最大化切换。不用
@@ -1295,8 +1299,9 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
             onClose={closeZoneEditor}
           />
         )}
+        </div>
+        <StatusBar />
       </div>
-      <StatusBar />
-    </div>
+    </AssistantRuntime>
   )
 }

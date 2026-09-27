@@ -14,6 +14,9 @@ import './styles/flexlayout.css'
 import './styles/panes.css'
 import './styles/editor.css'
 import './styles/overlays.css'
+// Tailwind v4 + assistant-ui registry 组件主题（shadcn 令牌；最后导入，
+// 组件工具类可覆盖上方体系的同面规则）
+import './styles/tailwind.css'
 
 // 纯浏览器直开（无 Tauri 透明窗体）：铺满不圆角，见 base.css 窗体段
 if (!inTauri) document.body.classList.add('in-browser')
