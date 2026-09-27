@@ -60,21 +60,3 @@ export function MainTint({ model }: { model: Model }) {
     />
   )
 }
-
-/** 左栏 logo 带：上 logo、下标签。**logo 是 sessions 窗格的附属物**
- *  （docs/layout-design.md §6）：锚定网格中承载 sessions 的 tabset——
- *  左栏拆双栏后 logo 跟随 sessions 栏，不跑到机器人栏；sessions 不在
- *  网格（折叠进左轨/被隐藏）→ logo 隐藏（左轨条上没有 logo 的位置）。 */
-export function RailLogo({ model }: { model: Model }) {
-  const rect = useTabsetRect(model, ['sessions'])
-  if (!rect) return null
-  return (
-    <div
-      className="rail-logo"
-      style={{ left: rect.left, top: rect.top, width: rect.width, height: 40 }}
-    >
-      <img alt="" className="rail-logo-mark" src="/brand/logo.png" />
-      <span className="rail-logo-word">MIRACH</span>
-    </div>
-  )
-}

@@ -72,6 +72,31 @@
    **关键：它不带基础 tab_button 类**——字号/内边距必须在这里单独接
    令牌，否则 主区/检查/文件/终端 这些单页签 zone 的标签是 16px 默认字
    （"终端的标签样式没统一"的根源）。 */
+/* ── 会话页签条 leading：logo 50 + MIRACH 30/black/#006fff/字距2
+   （用户定稿），位于条顶；页签行沉底（条 100 = leading 区 + 页签行）── */
+.flexlayout-host .rail-logo-leading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  height: 70px;
+  padding: 10px 0 0 14px;
+}
+
+.flexlayout-host .rail-logo-leading .rail-logo-mark {
+  border-radius: 50%;
+  flex: none;
+  height: var(--logo-size);
+  object-fit: cover;
+  width: var(--logo-size);
+}
+
+.flexlayout-host .rail-logo-leading .rail-logo-word {
+  color: var(--logo-text-color);
+  font-size: var(--logo-text-size);
+  font-weight: var(--logo-text-weight);
+  letter-spacing: var(--logo-text-tracking);
+}
+
 .flexlayout-host .flexlayout__tab_button_stretch {
   align-items: flex-end; /* 拉伸头栏 100 高：文字沉底，上部留白（logo/文字区） */
   font-size: var(--tab-font-size);
@@ -307,7 +332,5 @@
    定栏宽，sizer 去掉上下 padding、按钮 var(--rail-width) 即得栏宽。 */
 .flexlayout-host .flexlayout__border_sizer { padding-top: 0; padding-bottom: 0; }
 
-/* ── 左栏标签条：顶部让出 logo 带的高度（logo 带正下方就是标签） ── */
-.flexlayout-host .rail-tabstrip {
-  margin-top: 40px;
-}
+/* ── 左栏标签条：logo/文字迁入条内（onRenderTabSet leading），不再需要
+   margin 让位（宿主层浮层方案已退役，见 overlays.css 注释） ── */

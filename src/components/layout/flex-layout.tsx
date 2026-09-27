@@ -5,7 +5,7 @@ import 'flexlayout-react/style/light.css'
 import { Titlebar } from '@/app/shell/titlebar'
 import { StatusBar } from '@/app/shell/statusbar'
 import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
-import { MainTint, RailLogo } from './chrome-overlays'
+import { MainTint } from './chrome-overlays'
 import { ChevronDownIcon, ChevronUpIcon } from '@/components/ui/codicons'
 import { DropOverlay } from './drop-overlay'
 import { startPaneDrag } from './drag-session'
@@ -1197,12 +1197,24 @@ export function FlexLayoutShell() {
 
   // zone 头部按钮（onRenderTabSet）：+ 只渲染在**一级栏**（宿含本大栏的
   // 一级窗格——"分出的其他栏没有 + 号"），且本大栏有可开类型；每个 zone
-  // 都有 [切竖轨] 钮（切换整栏形态）
+  // 都有 [切竖轨] 钮（切换整栏形态）。
+  // 会话分栏额外注入 **leading（logo+MIRACH 文字）**（用户定稿：logo 50、
+  // 文字 30/black/#006fff/字距 2，位于条顶；页签行沉底）——替代宿主层
+  // RailLogo 浮层（logo 成为 flexlayout 渲染树的真实子节点）。
   const onRenderTabSet = useCallback(
     (node: TabSetNode | BorderNode, renderValues: import('flexlayout-react').ITabSetRenderValues) => {
       if (!(node instanceof TabSetNode)) return
       const cfg = zoneConfigOf(node)
       if (!cfg) return
+      // 会话分栏（左栏一级栏）：logo/文字注入 leading
+      if (node.getChildren().some((c) => c.getId() === 'sessions')) {
+        renderValues.leading = (
+          <div className="rail-logo-leading">
+            <img alt="" className="rail-logo-mark" src="/brand/logo.png" />
+            <span className="rail-logo-word">MIRACH</span>
+          </div>
+        )
+      }
       const isPrimaryZone = node.getChildren().some(
         (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
       )
@@ -1808,7 +1820,8 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         <DropOverlay />
         {/* 装饰叠片：主区调色层（E9EEEF@40%）+ 左栏 logo 带（上 logo 下标签） */}
         <MainTint model={model} />
-        <RailLogo model={model} />
+        {/* 离家一级标签 ✕ 常显/回家钮（onRenderTab）+ logo/文字由
+            onRenderTabSet 的 leading 注入会话页签条（RailLogo 浮层已退役） */}
         {/* hermes 编辑模式画布面：zone body 变拖拽把手（veil） */}
         <EditVeils
           model={model}

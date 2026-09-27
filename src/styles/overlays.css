@@ -4,41 +4,14 @@
  * ============================================================ */
 
 /* ── 装饰叠片 ──
-   主区调色层：E9EEEF @ 40%，pointer-events none 点击穿透；
-   左栏 logo 带：40px，叠在左栏 tabset 顶部——标签条经 .rail-tabstrip
-   的 margin-top 让位到 logo 带正下方（上 logo、下标签条）。z 在窗格
-   内容之上、veil/投放预览之下。 */
+   主区调色层：E9EEEF @ 40%，pointer-events none 点击穿透。
+   （左栏 logo 已迁入会话页签条 leading——onRenderTabSet 注入，样式见
+   flexlayout.css 的 .rail-logo-leading；宿主层浮层方案退役。） */
 .main-tint {
   background: rgba(233, 238, 239, 0.4);
   pointer-events: none;
   position: absolute;
   z-index: 20;
-}
-
-.rail-logo {
-  align-items: center;
-  display: flex;
-  gap: 8px;
-  padding: 0 14px;
-  pointer-events: none;
-  position: absolute;
-  z-index: 21;
-}
-
-.rail-logo-mark {
-  /* 品牌 logo 图（圆形蓝底白脸）：方图配 50% 圆角裁切，去掉色块占位的背景 */
-  border-radius: 50%;
-  flex: none;
-  height: 22px;
-  object-fit: cover;
-  width: 22px;
-}
-
-.rail-logo-word {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
 }
 
 /* ── 布局编辑画布面（hermes edit veil）——浅色 scrim ── */

@@ -12,21 +12,21 @@
 }
 
 .pane-placeholder h2 {
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 600;
+  color: var(--h1-color);
+  font-size: var(--h1-size);
+  font-weight: var(--h1-weight);
   margin: 0;
 }
 
 .pane-placeholder p {
-  color: var(--text-3);
-  font-size: 12.5px;
+  color: var(--sub-color);
+  font-size: var(--body-size);
   line-height: 1.6;
   margin: 0;
 }
 
 .pane-placeholder .hint {
   color: var(--text-4);
-  font-size: 11.5px;
+  font-size: 12.5px;
   margin-top: auto;
 }

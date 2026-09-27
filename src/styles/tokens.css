@@ -8,45 +8,76 @@
  *   panes.css       窗格内容（占位窗格）
  *   editor.css      布局编辑面板 + Zone 编辑器（.ep-* / .ze-*）
  *   overlays.css    装饰叠片 + 编辑 veil + 投放预览（宿主层绝对定位面）
- * 导入顺序（main.tsx）：tokens → base → flexlayout → panes → editor → overlays。
+ * 导入顺序（main.tsx）：webfont → tokens → base → flexlayout → panes →
+ * editor → overlays。
  * 规则文件里**禁止另写字号/颜色/间距字面值**——先来这里加令牌再引用。
  * 令牌名对齐 hermes 的语义（注释里标 hermes 对应物）。
+ * ============================================================
+ * 排版层级（用户 2026-09-26 定稿，字体 HarmonyOS Sans SC 全局）：
+ *   一级标题 25/bold/#303030 · 二级标题 20/regular/#006fff
+ *   三级标题 18/regular/#040415 · 内容 15/regular/#000000
+ *   副标题 15/regular/#5a5a5a · 页签文字 14/regular（选中 #006fff）
+ *   品牌色/主题色 #006fff · logo 50px + MIRACH 30/black/#006fff/字距2
  * ============================================================ */
 
 :root {
   color-scheme: light;
-  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
-  font-size: 14px;
+  /* ── 全局字体（HarmonyOS Sans SC webfont，main.tsx 载入） ── */
+  --font-family: 'HarmonyOS Sans SC', 'HarmonyOS Sans', 'Microsoft YaHei', system-ui, sans-serif;
+  font-family: var(--font-family);
+  font-size: 15px;
 
-  /* ── 全局色板（浅色主题） ─────────────────────────────────
-     --text: 主文字（hermes foreground）
-     --text-2: 次级（hermes --ui-text-secondary）
-     --text-3: 三级（hermes --ui-text-tertiary）
+  /* ── 全局色板（浅色主题；品牌色 #006fff 用户定稿） ─────────
+     --text: 内容文字（#000000 黑）
+     --text-2: 副标题（#5a5a5a）
+     --text-3: 三级弱化文字
      --text-4: 弱化（badge/占位提示）
-     --stroke: 常规描边；--stroke-soft: 弱分隔线（标题栏/状态栏缝） */
-  --text: #1f1f28;
-  --text-2: #5c5c66;
+     --h1-color: 一级标题（#303030）
+     --h2-color: 二级标题（品牌色）
+     --h3-color: 三级标题（#040415）
+     --stroke: 常规描边；--stroke-soft: 弱分隔线 */
+  --text: #000000;
+  --text-2: #5a5a5a;
   --text-3: #8f8f9c;
   --text-4: #a0a0ac;
+  --h1-color: #303030;
+  --h2-color: #006fff;
+  --h3-color: #040415;
   --stroke: rgba(0, 0, 0, 0.1);
   --stroke-soft: rgba(0, 0, 0, 0.06);
   --hover-wash: rgba(0, 0, 0, 0.07);
   --surface: #ffffff;
-  --accent: #4c6fff;                          /* hermes --theme-primary */
+  --brand: #006fff;                           /* 品牌色/主题色（用户定稿） */
+  --accent: var(--brand);                     /* hermes --theme-primary */
 
-  /* ── 页签系统（hermes PaneTab，pane-tab.tsx 的浅色等值） ─────────
+  /* ── 标题层级 ─────────────────────────────────────────────── */
+  --h1-size: 25px;  --h1-weight: 700;  --h1-color: #303030;
+  --h2-size: 20px;  --h2-weight: 400;  --h2-color: #006fff;
+  --h3-size: 18px;  --h3-weight: 400;  --h3-color: #040415;
+  --body-size: 15px; --body-weight: 400;
+  --sub-size: 15px;  --sub-color: #5a5a5a;
+
+  /* ── 会话页签条 logo/文字（leading 注入，用户定稿） ────────── */
+  --logo-size: 50px;                          /* logo 图 50px */
+  --logo-text-size: 30px;                     /* MIRACH 文字 30 */
+  --logo-text-weight: 900;                    /* black */
+  --logo-text-tracking: 2px;                  /* 字间距 2 */
+  --logo-text-color: #006fff;                 /* 品牌色 */
+  --logo-strip-h: 100px;                      /* 页签条总高 */
+
+  /* ── 页签系统（用户定稿：14/regular，非选中 #242424，选中 #006fff） ──
      横向页签 / 拉伸头栏 / 左右轨道 / 主栏竖轨共用这一套——
      改页签样式=只改这里。 */
-  --tab-font-size: 9px;                       /* hermes text-[9px] */
-  --tab-font-weight: 500;                     /* hermes font-medium */
-  --tab-tracking: 0.025em;                    /* hermes tracking-wide */
-  --tab-pad-x: 8px;                           /* 横向页签左右 */
+  --tab-font-size: 14px;                      /* 用户定稿 14 */
+  --tab-font-weight: 400;                     /* regular */
+  --tab-tracking: normal;
+  --tab-pad-x: 10px;                          /* 横向页签左右 */
   --tab-pad-y: 8px;                           /* hermes py-2（轨道页签上下） */
-  --tab-text: var(--text-3);                  /* 未激活 */
-  --tab-text-active: var(--text);             /* 激活 */
+  --tab-text: #242424;                        /* 未选中（用户定稿） */
+  --tab-text-active: #006fff;                 /* 选中 = 品牌色 */
   --tab-active-bg: var(--surface);            /* hermes 编辑器表面 */
-  --tab-accent: var(--accent);
-  --tab-accent-wash: rgba(76, 111, 255, 0.14);/* hermes TAB_SELECTED 14% */
+  --tab-accent: var(--brand);
+  --tab-accent-wash: rgba(0, 111, 255, 0.14); /* hermes TAB_SELECTED 14% */
   --tab-hover-bg: rgba(0, 0, 0, 0.06);        /* hermes hover darken */
   --tab-separator: rgba(0, 0, 0, 0.07);       /* hermes --ui-stroke-quaternary 系 */
 

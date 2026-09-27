@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client'
 
 import { App } from './app'
 import { inTauri } from './lib/tauri-window'
+// HarmonyOS Sans SC webfont（用户定稿：全局字体）——切片 woff2 + CSS
+// （包 exports 只开放 default=dist/index.css，子路径导入会被 vite 拦）
+import 'harmonyos-sans-sc-webfont-splitted'
 // 样式分层（见 src/styles/tokens.css 头注释）：令牌 → 壳 → flexlayout
 // → 窗格 → 编辑器 → 叠片。规则文件里禁止写字面值，取值一律进 tokens.css。
 import './styles/tokens.css'
