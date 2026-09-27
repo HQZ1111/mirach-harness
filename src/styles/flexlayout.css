@@ -24,12 +24,19 @@
   height: var(--logo-strip-h);
   min-height: var(--logo-strip-h);
   align-items: flex-end; /* 页签行沉到条底，上部留给 logo/文字（用户定稿） */
+  border-bottom: none;   /* 条底 1px 灰线（flexlayout 默认）去掉——页签纯文字化 */
 }
 
 .flexlayout-host .flexlayout__tabset_tabbar_inner,
 .flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
   height: var(--logo-strip-h);
   align-items: flex-end;
+}
+.flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
+  position: relative; /* leading 绝对定位（条顶满宽带）的参照 */
+  /* 页签文字与 logo 同一左线 20：容器 10 + 页签自身 padding 10
+     （stretch 头栏同理；0 宽 spacer 不影响） */
+  padding-left: 10px;
 }
 
 /* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
@@ -53,33 +60,35 @@
   display: none; /* 低条不存在 logo 位（sessions 被拖到下方时的退化保护） */
 }
 
-/* ── 横向页签（hermes PaneTab，token 见 tokens.css） ──
-   9px 大写宽字距、激活=白表面+2px 主题色下划线（唯一缝）、
-   未激活 hover 加深、✕ 悬停淡入、多选=accent 14% 渐变洗。 */
+/* ── 横向页签 = **纯文字**（用户 2026-09-27：文字就是按钮，给文字加
+   点击效果就行，不要按钮形式）——无表面、无下划线、无页签间分隔线；
+   状态全靠文字颜色：常规 #242424 / hover 变品牌色 / 选中 #006fff。 ── */
 .flexlayout-host .flexlayout__tab_button {
-  border-left: 1px solid var(--tab-separator);
+  background: transparent;
+  border: none;
   border-radius: 0;
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
   padding: 0 var(--tab-pad-x);
   text-transform: uppercase;
-  transition: background-color 100ms, color 100ms;
+  transition: color 100ms;
 }
 
-.flexlayout-host .flexlayout__tab_button:first-child,
-.flexlayout-host .flexlayout__tab_button_stretch { border-left: none; }
+/* 左对齐：首个页签与拉伸头栏的文字与 logo 同一左线（由容器的
+   padding-left 10 + 页签自身 padding 10 合成，见上方 tabbar 规则） */
 
-/* 激活：白色表面 + 主题色下划线（hermes TAB_ACTIVE_UNDERLINE，唯一缝） */
+/* 选中 = 品牌色文字（无白色表面、无 2px 下划线——"标签下面那根线"） */
 .flexlayout-host .flexlayout__tab_button--selected,
 .flexlayout-host .flexlayout__tab_button_stretch {
-  background-color: var(--tab-active-bg);
-  box-shadow: inset 0 -2px 0 var(--tab-accent);
+  background: transparent;
+  box-shadow: none;
+  color: var(--tab-text-active);
 }
 
-/* 未激活 hover 加深（浅色下用黑 6%） */
+/* 未选中 hover：文字变品牌色（点击效果的静态部分） */
 .flexlayout-host .flexlayout__tab_button--unselected:hover {
-  background-color: var(--tab-hover-bg);
+  background: transparent;
   color: var(--tab-text-active);
 }
 
@@ -109,6 +118,18 @@
   height: var(--logo-strip-h);
   padding: 20px 0 0 20px;
 }
+/* 条内 = 条顶满宽带（绝对定位脱离页签行流）：页签行不再被 logo 顶到右
+   边（用户 2026-09-27：会话标签要左对齐）；pointer-events 放行点击。
+   **flexlayout 的包裹层** .flexlayout__tabset_leading 才是 tabbar_outer
+   的直接子级（绝对定位与放行都打在它上面）。竖轨形态内容顶带
+   （.rail-pane-railform 内）保持普通流布局。 */
+.flexlayout-host .flexlayout__tabset_tabbar_outer > .flexlayout__tabset_leading {
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
 .flexlayout-host .rail-logo-leading .rail-logo-word {
   line-height: var(--logo-size); /* 文字与 50px logo 互相对中 */
 }
@@ -130,6 +151,8 @@
 
 .flexlayout-host .flexlayout__tab_button_stretch {
   align-items: flex-end; /* 拉伸头栏 100 高：文字沉底，上部留白（logo/文字区） */
+  background: transparent;
+  box-shadow: none;
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);

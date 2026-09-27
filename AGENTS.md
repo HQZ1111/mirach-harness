@@ -1463,6 +1463,21 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     ~219-251 是无覆盖区）——CDP 按页签要按按钮**左段**（x = rect.left
     +15），按中心点命中的是工具钮、拖拽不发生（elementFromPoint 实证）。
     条内拥挤是已知形态代价（用户定的 logo 进条方案），未修。
+  - **页签纯文字化 + 条内左对齐**（用户 2026-09-27："标签下面为什么有根
+    线 / 文字就是按钮不要按钮形式 / 会话列表标签没左对齐"）：
+    ①"根线"两层：条容器自带 border-bottom 1px 灰线（flexlayout 默认）+
+    选中/拉伸头栏的 inset 0 -2px 主题色下划线。②**页签=纯文字**：全部去
+    掉（表面/下划线/页签间 border-left 分隔/条底灰线），状态只剩文字色
+    ——常规 #242424 / hover 品牌色 / 选中 #006fff；多选 accent 14% 洗
+    保留（多选唯一视觉）。③**左对齐**：logo 不在 inner_tab_container
+    里——它的包裹层 **.flexlayout__tabset_leading** 才是 tabbar_outer
+    的直接子级（flex 行内把按钮顶到 x=219）。修：包裹层 absolute 条顶
+    满宽 + pointer-events none（点击穿透到下面的页签行）；容器
+    padding-left 10 + 页签 padding 10 → 文字与 logo 同一左线 20。
+    **坑**：拉伸头栏前有 0/4px 的 tab_spacer，`:first-child` 打不到它；
+    absolute 要打在包裹层不是 .rail-logo-leading 本身。实测：sessLeft
+    219→12（文字 22=logo 左线）、全部 bg/shadow/border 清零、条底 0px、
+    选中蓝 hover 蓝、截图目检干净。
 
 ## 有意不做的 / 有意的偏差（全部有注释在代码里）
 
