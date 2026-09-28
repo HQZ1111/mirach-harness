@@ -1552,6 +1552,15 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     Dictate；`unstable_useComposerInput`（headless 输入接管）0.15 存在、
     备用。**颜色层回归修复**：registry Thread 根 `bg-background` 白底盖
     住 MainTint——改 `bg-transparent`（Tint 从内容后面透出恢复）。
+  - **asChild 落容器**（用户 2026-09-27 二次指令，"已有 FlexLayout 容器"
+    官方场景）：ThreadRoot 的 **ThreadPrimitive.Root asChild** + **Viewport
+    asChild**（turnAnchor prop 留在**原语上**——asChild 只合并行为到子
+    元素，业务 prop 不能写进子 div JSX，TS2322 实证）。改后 DOM 层级：
+    tab content → aui-root 容器（我方 div）→ viewport div（我方 div，
+    overflow-y:scroll）→ maxwidth div——registry 的两层包裹 div 消失。
+    ViewportFooter 的 `bg-background` 同步改 `bg-transparent`（composer
+    带后不再挡 Tint）。实测：pane.children===1 且即 aui-root、viewport
+    为 root 直接子级、滚动容器有效。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入

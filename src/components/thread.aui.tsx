@@ -191,21 +191,24 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
 
   return (
-    <ThreadPrimitive.Root
-      className="aui-root aui-thread-root bg-transparent @container flex h-full flex-col"
-      style={{
-        ["--thread-max-width" as string]: "44rem",
-        ["--composer-bg" as string]:
-          "color-mix(in oklab, var(--color-muted) 30%, transparent)",
-        ["--composer-radius" as string]: "1rem",
-        ["--composer-padding" as string]: "8px",
-      }}
-    >
-      <ThreadPrimitive.Viewport
-        turnAnchor="top"
-        data-slot="aui_thread-viewport"
-        className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+    // asChild：Thread 不渲染自己的 div，行为合并到我们传入的容器上
+    // （FlexLayout tab content 就是滚动/布局容器——官方"已有容器"场景）
+    <ThreadPrimitive.Root asChild>
+      <div
+        className="aui-root aui-thread-root bg-transparent @container flex h-full flex-col"
+        style={{
+          ["--thread-max-width" as string]: "44rem",
+          ["--composer-bg" as string]:
+            "color-mix(in oklab, var(--color-muted) 30%, transparent)",
+          ["--composer-radius" as string]: "1rem",
+          ["--composer-padding" as string]: "8px",
+        }}
       >
+        <ThreadPrimitive.Viewport asChild turnAnchor="top">
+          <div
+            data-slot="aui_thread-viewport"
+            className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+          >
         <div
           className={cn(
             "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4",
@@ -230,7 +233,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              "aui-thread-viewport-footer bg-background flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
+              "aui-thread-viewport-footer bg-transparent flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
@@ -243,7 +246,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             </AuiIf>
           </ThreadPrimitive.ViewportFooter>
         </div>
-      </ThreadPrimitive.Viewport>
+          </div>
+        </ThreadPrimitive.Viewport>
+      </div>
     </ThreadPrimitive.Root>
   );
 };
