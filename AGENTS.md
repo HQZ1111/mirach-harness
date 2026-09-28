@@ -1536,6 +1536,22 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     展开/收起按需 fsList、文件叶子选中高亮；样式走令牌）；COMPONENTS
     files→FileTreePane。实测：根目录 16 项、目录排前、懒展开正常。
     文件点击预览（fs_read_data_url）待接。
+  - **composer 控件 = 官方 elements**（用户 2026-09-27 指令："elements
+    有很多组件，不要自己做"，**自研 composer-controls/settings 已删**）：
+    shadcn CLI 拉 `https://r.assistant-ui.com/model-selector` +
+    `.../context-display`（也可用 `@assistant-ui/model-selector` 命名），
+    落 **model-selector.{tsx,aui.tsx} / context-display.{tsx,aui.tsx}**
+    （手工归位 components/assistant-ui/，导入路径同步修正）。
+    接线 = **直接改 thread.aui.tsx 的 Composer 函数**（官方 Perplexity
+    克隆模式）：ComposerPrimitive.Root 内加 ModelSelector（models 传
+    ModelOption[]，efforts:true 带 低/中/高 Thinking 行；选择经
+    ModelContext 注册进 runtime——api.modelContext.register）+
+    ContextDisplay.Bar（aui 版自动 useThreadTokenUsage 读用量元数据；
+    **无用量时不渲染是官方语义**，mock 运行器无元数据故暂不显示，pi 接
+    入后 finish 步带 usage 即亮）。官方原语保留：Root/Input/Send/附件/
+    Dictate；`unstable_useComposerInput`（headless 输入接管）0.15 存在、
+    备用。**颜色层回归修复**：registry Thread 根 `bg-background` 白底盖
+    住 MainTint——改 `bg-transparent`（Tint 从内容后面透出恢复）。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入

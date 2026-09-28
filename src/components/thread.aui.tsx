@@ -23,6 +23,9 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
+import { ModelSelector } from "@/components/assistant-ui/model-selector.aui";
+import { ContextDisplay } from "@/components/assistant-ui/context-display.aui";
+import type { ModelOption } from "@/components/assistant-ui/model-selector";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -189,7 +192,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
 
   return (
     <ThreadPrimitive.Root
-      className="aui-root aui-thread-root bg-background @container flex h-full flex-col"
+      className="aui-root aui-thread-root bg-transparent @container flex h-full flex-col"
       style={{
         ["--thread-max-width" as string]: "44rem",
         ["--composer-bg" as string]:
@@ -417,6 +420,13 @@ const ThreadSuggestionItem: FC = () => {
   );
 };
 
+// mock 模型清单（官方 ModelOption 形态；efforts: true = 默认 低/中/高
+// 思考档位；pi 接入后换成真实模型表）
+const MODELS: ModelOption[] = [
+  { id: "mock-lite", name: "Mock Lite" },
+  { id: "mock-pro", name: "Mock Pro", description: "更强推理（mock）", efforts: true },
+];
+
 const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
   return (
     <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
@@ -425,6 +435,21 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
           data-slot="aui_composer-shell"
           className="border-foreground/10 focus-within:border-foreground/25 data-[dragging=true]:border-ring flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]"
         >
+          {/* 输入区控件 = 官方 elements（ModelSelector 含 Thinking/effort 行；
+              选择经 ModelContext 注册进 runtime；ContextDisplay.Bar 自动读
+              token 用量——mock 运行器暂无用量元数据，达上限前显示空是官方
+              语义："nothing renders until usage exists"） */}
+          <div className="flex items-center gap-1.5 px-2 pt-1.5">
+            <ModelSelector
+              models={MODELS}
+              size="sm"
+              searchable={false}
+              align="start"
+            />
+            <div className="ml-auto">
+              <ContextDisplay.Bar modelContextWindow={128000} />
+            </div>
+          </div>
           <ComposerAttachments />
           <ComposerPrimitive.Input
             placeholder="Send a message..."
