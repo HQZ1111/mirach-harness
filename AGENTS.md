@@ -1635,6 +1635,23 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
+  - **hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，项目，
+    能用 hermes 的 ui 样式吗？还有文件树，纯 ui 前端可以直接复制"）**：
+    依赖分类结论——hermes 的 sessions-section/session-row/project-*/
+    file-tree 全部长在 nanostores store 网+@hermes 类型+网关 RPC 上
+    （session-row 一个文件 import 10+ store），**不是纯 UI**，逐字复制
+    必然断链。做法=**复制视觉结构与类名**（chrome.tsx 的行几何体系、
+    日期分桶分隔条、项目色点概览、文件树 chevron 缩进），数据本地 mock，
+    令牌换 harness 体系（--ui-* → --text/--stroke/--hover-wash）。落位
+    src/components/panes/hermes-sidebar/：chrome.tsx（行外壳/分隔条/
+    区块头共享件）+ hermes-sessions-pane.tsx（项目概览 Home+色点项目行
+    +今天/昨天/上周分桶+状态点行+搜索）+ hermes-file-tree-pane.tsx
+    （后端=本 harness fs_list，与 hermes useProjectTree 的 ipc
+    readProjectDir 同构；懒展开+路径行+刷新）。注册表：sessions→
+    HermesSessionsPane、files→HermesFileTreePane（AssistantSessionsPane/
+    FileTreePane 保留在树未删）。CDP 截图确认全量渲染。
+    待接真数据：行点击→resume 会话、⋯菜单、项目进入、文件点击预览
+    （fs_read_data_url）、dnd-kit 排序（未搬）。
   - **页签文字统一沉条底 + stretch 文字区判定 + 虚线预览边（用户
     2026-09-29 三连）**：①拖拽落点 sheet 的深蓝边线改虚线
     （.fl-drop-sheet-active border-style:dashed，预览感不与真实边界
