@@ -79,10 +79,18 @@
    工具、a2ui-types crate、ts-rs 代码生成、前端 generative-ui 接线、
    A22/A24/A25/A26/A28 五个待确认项）；MESSAGES_SNAPSHOT 溢出回退
    （序号+环形缓冲保留——很小，且"可恢复优先"）。
-5. **提议（改已定架构，待拍板）**：XState 轮次机延后——assistant-ui
-   runtime 自带 run 生命周期（isRunning/cancel/resumable），再建一台
-   机器=第二真相源；AGENTS「待办 3」的三条铁律（纯投影/唯一消费者/
-   可恢复优先）由适配器承担。轮次复杂度真超出 runtime 表达时再引入。
+5. **XState 定稿为唯一轮次真相**（用户 2026-09-29 拍板，撤回 v2.1 的
+   "延后 XState"提议）：AG-UI SSE → **XState actor（唯一 SSE 消费者）**
+   → 归约出 phase/messages/runId/lastEventId → **ExternalStoreRuntime**
+   适配器注入 assistant-ui（纯渲染；isRunning 由机器态供给，assistant-ui
+   不再自推）。ExternalStore 是**快照式**——每次转换喂整组 messages
+   数组 + onNew/onCancel/onEdit 回调，**无需自实现增量协议**；真正的
+   成本是 AG-UI 事件→消息 part 的归约器（LocalRuntime 方案同样要写，
+   且 mock 三阶段已验证过累积 content 的构造）。收益：铁律②"SSE 只喂
+   机器"成立、XState Inspector 一条调试主线、resume/interrupt 是一等
+   转换、delegate 门铃→attach 走同一条归约路径、前端刷新由 run 边界
+   快照水合后 assistant-ui 照常渲染。API 面以已装
+   @assistant-ui/react 0.15.22 的 useExternalStoreRuntime 导出实测为准。
 6. **不建议砍**：ApprovalRegistry（审批态必须驻 Rust，跨前端刷新）；
    sync_app_context（get_app_context 的推送面，字段已最小化）；
    workspace 分阶段拆分（§3 已是保守版）。
@@ -289,10 +297,11 @@ Event **不携带领域数据**。
 
 ## 6. mock → 真引擎切换
 
-runtime.tsx 的 ChatModelAdapter 换成「AG-UI SSE → assistant-ui store」
-适配器，UI 层一行不改。切换后回归清单：思考流式/完成折叠/工具运行/
-1 tool call/thinking-indicator 三态/composer 全控件/审批卡/问题卡/
-A2UI surface/断线 resume。
+runtime.tsx 从 LocalRuntime+mockModelAdapter 换成
+**useExternalStoreRuntime 适配器**：XState actor 唯一消费 AG-UI SSE，
+归约出的 messages/isRunning 喂 assistant-ui 纯渲染（§0.2-5 定稿）。
+切换后回归清单：思考流式/完成折叠/工具运行/1 tool call/thinking-
+indicator 三态/composer 全控件/审批卡/问题卡/A2UI surface/断线 resume。
 
 ## 7. 落地顺序
 
@@ -301,7 +310,8 @@ A2UI surface/断线 resume。
    cargo check 过（recursion_limit/nightly 生效验证）。
 2. **L2 竖链**：/ag-ui 一条链 + 事件映射器（§2.2 表逐行单测，用 pi
    AgentEvent 构造样本）。
-3. **L1 切换**：runtime.tsx 真 SSE；发消息→流式回复→渲染。
+3. **L1 切换**：XState actor + ExternalStore 适配器（§0.2-5）；发消息→
+   流式回复→渲染。
 4. **控制面**：IPC 命令 + 侧栏 sessions + ModelSelector/ContextDisplay
    点亮。
 5. **审批/问题卡**：handler + oneshot + 前端卡。
