@@ -1561,6 +1561,19 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     ViewportFooter 的 `bg-background` 同步改 `bg-transparent`（composer
     带后不再挡 Tint）。实测：pane.children===1 且即 aui-root、viewport
     为 root 直接子级、滚动容器有效。
+  - **mock 全阶段运行 + thinking-indicator**（2026-09-27 三轮，"组件都
+    补齐"）：之前"简陋"的真因是 mock 只吐纯文本——官方 Reasoning（思考
+    前/中/完成折叠）与 ToolGroup（工具运行/折叠计数）**早已接线**但从未
+    被触发。mock 运行器升级为三阶段模拟：reasoning 流式 → tool-call
+    （适配器结果的 tool-call **不带 status**——运行态由有无 result 推导；
+    **argsText 必填**）→ 最终文本流式，全程 yield 累积 content 数组。
+    thinking-indicator 元素（shadcn 拉，+surfaces 依赖，归位 elements/）
+    按官方文档接线：运行中且无可见正文时渲染，label=挂起工具名或"正在
+    思考"，1s 计时器做耗时徽章，正文到达即卸载（PartState 联合类型需
+    type guard 收窄 toolName）。composer 工具栏按官方 anatomy 修正：
+    **左侧仅附件**，模型触发器/语音/上下文/发送在右侧 actions 组。
+    实测：300ms 思考行、2.2s "正在使用 mock_search"+耗时、4.7s 正文后
+    消失；Reasoning 折叠与 ToolGroup "1 tool call" 折叠渲染 ✓。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入
