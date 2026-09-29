@@ -440,21 +440,6 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
           data-slot="aui_composer-shell"
           className="border-foreground/10 focus-within:border-foreground/25 data-[dragging=true]:border-ring flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]"
         >
-          {/* 输入区控件 = 官方 elements（ModelSelector 含 Thinking/effort 行；
-              选择经 ModelContext 注册进 runtime；ContextDisplay.Bar 自动读
-              token 用量——mock 运行器暂无用量元数据，达上限前显示空是官方
-              语义："nothing renders until usage exists"） */}
-          <div className="flex items-center gap-1.5 px-2 pt-1.5">
-            <ModelSelector
-              models={MODELS}
-              size="sm"
-              searchable={false}
-              align="start"
-            />
-            <div className="ml-auto">
-              <ContextDisplay.Bar modelContextWindow={128000} />
-            </div>
-          </div>
           <ComposerAttachments />
           <ComposerPrimitive.Input
             placeholder="Send a message..."
@@ -464,101 +449,102 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
             enterKeyHint="send"
             aria-label="Message input"
           />
-          <ComposerAction />
+          {/* 官方 Composer 版式：输入框在上，工具栏在下——附件+模型选择器
+              居左（模型住在 composer rail），语音/上下文/发送居右。
+              ModelSelector（ghost 融合形态）选择经 ModelContext 注册进
+              runtime；ContextDisplay.Bar 自动读 token 用量（无用量不渲染
+              =官方语义，mock 运行器暂无元数据）。 */}
+          <div className="flex items-center gap-1.5">
+            <ComposerAddAttachment />
+            <ModelSelector
+              models={MODELS}
+              variant="ghost"
+              size="sm"
+              searchable={false}
+              align="start"
+            />
+            <div className="ml-auto flex items-center gap-1.5">
+              <AuiIf condition={(s) => s.thread.capabilities.dictation}>
+                <AuiIf condition={(s) => s.composer.dictation == null}>
+                  <ComposerPrimitive.Dictate asChild>
+                    <TooltipIconButton
+                      tooltip="Voice input"
+                      side="bottom"
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="aui-composer-dictate text-muted-foreground hover:text-foreground size-7 rounded-full"
+                      aria-label="Start voice input"
+                    >
+                      <MicIcon className="aui-composer-dictate-icon size-4" />
+                    </TooltipIconButton>
+                  </ComposerPrimitive.Dictate>
+                </AuiIf>
+                <AuiIf condition={(s) => s.composer.dictation != null}>
+                  <ComposerPrimitive.StopDictation asChild>
+                    <TooltipIconButton
+                      tooltip="Stop dictation"
+                      side="bottom"
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
+                      aria-label="Stop voice input"
+                    >
+                      <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
+                    </TooltipIconButton>
+                  </ComposerPrimitive.StopDictation>
+                </AuiIf>
+              </AuiIf>
+              <AuiIf
+                condition={(s) =>
+                  !s.composer.canCancel ||
+                  (s.thread.voice !== undefined &&
+                    s.composer.submission === undefined)
+                }
+              >
+                <ComposerPrimitive.Send asChild>
+                  <TooltipIconButton
+                    tooltip="Send message"
+                    side="bottom"
+                    type="button"
+                    variant="default"
+                    size="icon"
+                    className="aui-composer-send size-7 rounded-full"
+                    aria-label="Send message"
+                  >
+                    <ArrowUpIcon className="aui-composer-send-icon size-4" />
+                  </TooltipIconButton>
+                </ComposerPrimitive.Send>
+              </AuiIf>
+              <AuiIf
+                condition={(s) =>
+                  s.composer.canCancel &&
+                  (s.thread.voice === undefined ||
+                    s.composer.submission !== undefined)
+                }
+              >
+                <ComposerPrimitive.Cancel asChild>
+                  <Button
+                    type="button"
+                    variant="default"
+                    size="icon"
+                    className="aui-composer-cancel size-7 rounded-full"
+                    aria-label="Stop generating"
+                  >
+                    <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
+                  </Button>
+                </ComposerPrimitive.Cancel>
+              </AuiIf>
+              <ContextDisplay.Bar modelContextWindow={128000} />
+            </div>
+          </div>
         </div>
       </ComposerPrimitive.AttachmentDropzone>
     </ComposerPrimitive.Root>
   );
 };
 
-const ComposerAction: FC = () => {
-  // The stop control only cancels the send while no run it could stop is going.
-  const isSending = useAuiState(
-    (s) =>
-      s.composer.submission !== undefined &&
-      !(s.thread.isRunning && s.thread.capabilities.cancel),
-  );
-
-  return (
-    <div className="aui-composer-action-wrapper relative flex items-center justify-between">
-      <ComposerAddAttachment />
-      <div className="flex items-center gap-1.5">
-        <AuiIf condition={(s) => s.thread.capabilities.dictation}>
-          <AuiIf condition={(s) => s.composer.dictation == null}>
-            <ComposerPrimitive.Dictate asChild>
-              <TooltipIconButton
-                tooltip="Voice input"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-dictate text-muted-foreground hover:text-foreground size-7 rounded-full"
-                aria-label="Start voice input"
-              >
-                <MicIcon className="aui-composer-dictate-icon size-4" />
-              </TooltipIconButton>
-            </ComposerPrimitive.Dictate>
-          </AuiIf>
-          <AuiIf condition={(s) => s.composer.dictation != null}>
-            <ComposerPrimitive.StopDictation asChild>
-              <TooltipIconButton
-                tooltip="Stop dictation"
-                side="bottom"
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                aria-label="Stop voice input"
-              >
-                <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
-              </TooltipIconButton>
-            </ComposerPrimitive.StopDictation>
-          </AuiIf>
-        </AuiIf>
-        <AuiIf
-          condition={(s) =>
-            !s.composer.canCancel ||
-            (s.thread.voice !== undefined &&
-              s.composer.submission === undefined)
-          }
-        >
-          <ComposerPrimitive.Send asChild>
-            <TooltipIconButton
-              tooltip="Send message"
-              side="bottom"
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-send size-7 rounded-full"
-              aria-label="Send message"
-            >
-              <ArrowUpIcon className="aui-composer-send-icon size-4" />
-            </TooltipIconButton>
-          </ComposerPrimitive.Send>
-        </AuiIf>
-        <AuiIf
-          condition={(s) =>
-            s.composer.canCancel &&
-            (s.thread.voice === undefined ||
-              s.composer.submission !== undefined)
-          }
-        >
-          <ComposerPrimitive.Cancel asChild>
-            <Button
-              type="button"
-              variant="default"
-              size="icon"
-              className="aui-composer-cancel size-7 rounded-full"
-              aria-label={isSending ? "Cancel sending" : "Stop generating"}
-            >
-              <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-            </Button>
-          </ComposerPrimitive.Cancel>
-        </AuiIf>
-      </div>
-    </div>
-  );
-};
 
 const MessageError: FC = () => {
   return (
