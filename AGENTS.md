@@ -1597,6 +1597,25 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     （thread/composer/reasoning/tool-group/thinking-indicator 等）以根级
     定制版为准，registry 同名源码并存不覆盖。tsc 0；vitest 21/21；
     推送 5036d45。
+  - **pi SDK 集成方案落纸**（用户 2026-09-29 指令：读 G 盘
+    pi_agent_rust-main 文档，按 SDK 库集成方式做出落位文档）：新增
+    docs/pi-integration.md 为接入规范——集成形态=**库依赖 in-process**
+    （pi = { package = "pi_agent_rust" } 进 src-tauri Cargo.toml，
+    default-features=false 去 TUI 栈；非 tokio，上游用 asupersync runtime；
+    消费 crate 必须 recursion_limit=256）；L3 新模块 pi_session.rs 包
+    create_agent_session/prompt_with_abort/set_model 等；事件映射表
+    AgentEvent→AG-UI（MessageUpdate.TextDelta→TEXT_MESSAGE_CONTENT、
+    TurnEnd.usage→STEP_FINISHED 等）；控制面走 Tauri IPC 十二命令
+    （session_*、set_model、get_state、compact、fork…不进 AG-UI）；
+    UI 落位=对话区（停止钮/ModelSelector/ContextDisplay/thinking 等级）、
+    侧栏（sessions 列表读 pi 会话 header 镜像、tab↔sessionId 绑定、
+    logs 吃 on_tool_* 钩子）、设置页（提供方/模型/compaction/工具/技能
+    包管理/审批镜像）；数据真相=pi 持对话真相（V1 JSONL→V2 store，分支
+    树/compaction 下沉），mirach SQLx 只存 run 边界快照服务 resume；
+    extension_ui_handler 必须实现（fail closed）+persist:false、
+    workspace_trusted 默认 false 要信任确认框；steer/follow_up
+    in-process 缺位→MVP 降级 abort+prompt；七步落地顺序与风险清单见
+    文档 §6/§7。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入
