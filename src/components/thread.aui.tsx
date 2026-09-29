@@ -17,6 +17,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/elements/reasoning.aui";
 import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
+import { ThreadThinkingIndicator } from "@/components/assistant-ui/elements/thinking-indicator.aui";
 import {
   ToolGroupContent,
   ToolGroupRoot,
@@ -221,6 +222,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
+
+          {/* 运行状态行（官方 thinking-indicator 元素）：正文未到时显示
+              "正在思考/正在使用 <tool>" + 耗时，正文流出即消失 */}
+          <ThreadThinkingIndicator />
 
           <div
             data-slot="aui_message-group"
@@ -449,21 +454,21 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
             enterKeyHint="send"
             aria-label="Message input"
           />
-          {/* 官方 Composer 版式：输入框在上，工具栏在下——附件+模型选择器
-              居左（模型住在 composer rail），语音/上下文/发送居右。
-              ModelSelector（ghost 融合形态）选择经 ModelContext 注册进
-              runtime；ContextDisplay.Bar 自动读 token 用量（无用量不渲染
-              =官方语义，mock 运行器暂无元数据）。 */}
-          <div className="flex items-center gap-1.5">
+          {/* 官方 Composer anatomy（elements/composer 原文）：输入框在上，
+              工具栏在下——**左侧仅附件按钮**；右侧 actions 组 = 模型触发器、
+              语音、上下文环 + 发送钮。ModelSelector 选择经 ModelContext
+              注册进 runtime；ContextDisplay.Bar 自动读 token 用量（无用量
+              不渲染=官方语义）。 */}
+          <div className="flex items-center justify-between">
             <ComposerAddAttachment />
-            <ModelSelector
-              models={MODELS}
-              variant="ghost"
-              size="sm"
-              searchable={false}
-              align="start"
-            />
-            <div className="ml-auto flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5">
+              <ModelSelector
+                models={MODELS}
+                variant="ghost"
+                size="sm"
+                searchable={false}
+                align="end"
+              />
               <AuiIf condition={(s) => s.thread.capabilities.dictation}>
                 <AuiIf condition={(s) => s.composer.dictation == null}>
                   <ComposerPrimitive.Dictate asChild>
@@ -496,6 +501,7 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
                   </ComposerPrimitive.StopDictation>
                 </AuiIf>
               </AuiIf>
+              <ContextDisplay.Bar modelContextWindow={128000} />
               <AuiIf
                 condition={(s) =>
                   !s.composer.canCancel ||
@@ -536,7 +542,6 @@ const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
                   </Button>
                 </ComposerPrimitive.Cancel>
               </AuiIf>
-              <ContextDisplay.Bar modelContextWindow={128000} />
             </div>
           </div>
         </div>
