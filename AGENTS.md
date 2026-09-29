@@ -1635,6 +1635,27 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
+  - **【bug】--accent 令牌冲突=落点预览隐形的真凶（用户 2026-09-29
+    二次报告"还是不行，是不是 assistant-ui 容器叠加"）**：CDP 实测
+    （elementFromPoint 逐点命中 + Input.dispatchMouseEvent 真实指针拖拽
+    + 拖拽中截图）洗清了两个怀疑：①页签头命中面干净——拉伸头栏 5 采样
+    点最顶层全是页签按钮本身，aui 容器无一叠加在条带上（composer 在
+    pane 内部 y721）；②拖拽机制全通——撕离/zone 模式/4 张 sheet 全渲染、
+    Esc 干净中止。**真凶**：main.tsx 里 tailwind.css（shadcn 主题）import
+    在 tokens.css 之后，其 :root --accent: oklch(0.97 0 0)（近白）覆盖了
+    tokens.css 的品牌蓝——落点 sheet/编辑 veil/分隔条 hover 的
+    color-mix(var(--accent)…) 全部静默变灰白，白上画白=看不见。
+    **修法（命名空间分家）**：布局引擎令牌换名 --accent → --fl-accent
+    （tokens.css 定义 + overlays/editor 10 处引用 + splitter hover/drag
+    2 处），shadcn 的 --accent 留给 CLI 组件（bg-accent 等工具类经
+    --color-accent 映射不受影响）；styles 层 var(--accent) 零残留。
+    修后实测：active sheet bg=浅蓝洗、border=#006fff@75%，截图确认可见。
+    **教训**：引入第二套主题令牌体系（shadcn/tailwind）时必须查与
+    tokens.css 的 :root 键名冲突——两边都定义 --accent，import 顺序决定
+    胜者，静默失败无报错。另：主会话页签在 y499，从不在旧盖层（0-60）
+    覆盖范围；"拖整个页面"报告极可能叠加了 vite 陈旧模块缓存（改码后
+    行为不变的已知坑），CDP Page.reload 后实测拖拽即正常。
+
   - **【bug】拖拽带截胡页签头（用户 2026-09-29：标签拖拽出来被挡住
     看不到落在哪 + 主对话标签拖的是整个页面）**：根因一个——
     .titlebar-drag-band（0-60px 绝对定位盖层 z40）盖住了顶带的**页签头**。

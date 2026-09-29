@@ -30,12 +30,12 @@
 .fl-edit-veil {
   align-items: center;
   /* scrim：accent 混白（浅色主题压内容用白洗） */
-  background: color-mix(in srgb, var(--accent) 8%, rgba(255, 255, 255, 0.62));
+  background: color-mix(in srgb, var(--fl-accent) 8%, rgba(255, 255, 255, 0.62));
   backdrop-filter: blur(2px);
   cursor: grab;
   display: flex;
   justify-content: center;
-  outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--fl-accent) 55%, transparent);
   outline-offset: -4px;
   pointer-events: auto;
   position: absolute;
@@ -75,10 +75,10 @@
 }
 
 .fl-drop-sheet {
-  border: 1.5px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--fl-accent) 28%, transparent);
   border-radius: 8px;
   position: absolute;
-  background: color-mix(in srgb, var(--accent) 5%, rgba(255, 255, 255, 0.55));
+  background: color-mix(in srgb, var(--fl-accent) 5%, rgba(255, 255, 255, 0.55));
   transition:
     top 150ms ease-out,
     right 150ms ease-out,
@@ -90,8 +90,8 @@
 }
 
 .fl-drop-sheet-active {
-  border-color: color-mix(in srgb, var(--accent) 75%, transparent);
-  background: color-mix(in srgb, var(--accent) 14%, rgba(255, 255, 255, 0.5));
+  border-color: color-mix(in srgb, var(--fl-accent) 75%, transparent);
+  background: color-mix(in srgb, var(--fl-accent) 14%, rgba(255, 255, 255, 0.5));
 }
 
 @keyframes fl-drop-fade {

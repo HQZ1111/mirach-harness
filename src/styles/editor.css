@@ -134,8 +134,8 @@
 
 .ep-preset-active,
 .ep-preset-active:hover {
-  background: color-mix(in srgb, var(--accent) 6%, #ffffff);
-  border-color: var(--accent);
+  background: color-mix(in srgb, var(--fl-accent) 6%, #ffffff);
+  border-color: var(--fl-accent);
 }
 
 .ep-preset-thumb {
@@ -252,7 +252,7 @@
   padding: 0 8px;
 }
 
-.ep-input:focus { border-color: var(--accent); }
+.ep-input:focus { border-color: var(--fl-accent); }
 
 .min-w-0 { min-width: 0; }
 
@@ -392,7 +392,7 @@
   padding: 3px 8px;
 }
 
-.ze-mini:hover { border-color: var(--accent); color: var(--text); }
+.ze-mini:hover { border-color: var(--fl-accent); color: var(--text); }
 
 .ze-footer {
   display: flex;
