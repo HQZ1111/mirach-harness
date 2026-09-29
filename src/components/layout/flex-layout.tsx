@@ -1309,6 +1309,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
     (filePath: string, fileName: string) => {
       let existing: string | null = null
       model.visitNodes((n) => {
+        if (!(n instanceof TabNode)) return
         const tn = n as TabNode
         if (tn.getComponent() === 'preview' && (tn.getConfig() as { filePath?: string } | undefined)?.filePath === filePath)
           existing = n.getId()
