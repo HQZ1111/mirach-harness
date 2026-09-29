@@ -1635,7 +1635,17 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
-  - **hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，项目，
+  - **  - **文件树 v2（用户 2026-09-29："文件树不能打开文件，每种文件样式
+    一样，没有颜色和图标区分"）**：hermes-file-tree-pane 重写——①**类型
+    徽章**：FILE_KINDS 表按扩展名族上色（TS 蓝/JS 黄/{} 橄榄/CSS 天蓝/
+    <> 橙/MD 蓝紫/RS 橙红/CFG 灰/IMG 紫/LCK），16px 圆角块类型色底+字，
+    无族退回灰文件图标；②**文件可打开**：点文件 fs_read_data_url
+    （≤16MB）→ [树|预览] 双栏 55/45——图片直接 img、文本 fetch(dataUrl)
+    解码 pre 展示、含 \u0000 判二进制提示；预览头部路径+关闭钮。
+    CDP 实测：徽章四色抽查 ✓、点 package.json 预览出 JSON 全文 ✓。
+    教训：点行定位用 textContent===文件名会因徽章字混入失效（v2 按钮
+    内含 "{}" 等徽章文本），测试选择器要按结构找。
+hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，项目，
     能用 hermes 的 ui 样式吗？还有文件树，纯 ui 前端可以直接复制"）**：
     依赖分类结论——hermes 的 sessions-section/session-row/project-*/
     file-tree 全部长在 nanostores store 网+@hermes 类型+网关 RPC 上
