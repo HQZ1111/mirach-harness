@@ -75,7 +75,7 @@
 }
 
 .fl-drop-sheet {
-  border: 1.5px solid color-mix(in srgb, var(--fl-accent) 28%, transparent);
+  border: 1.5px dashed color-mix(in srgb, var(--fl-accent) 28%, transparent);
   border-radius: 8px;
   position: absolute;
   background: color-mix(in srgb, var(--fl-accent) 5%, rgba(255, 255, 255, 0.55));
@@ -91,8 +91,6 @@
 
 .fl-drop-sheet-active {
   border-color: color-mix(in srgb, var(--fl-accent) 75%, transparent);
-  border-style: dashed; /* 深蓝落点边线用虚线（用户 2026-09-29：预览感，
-                           不与真实面板边界混淆） */
   background: color-mix(in srgb, var(--fl-accent) 14%, rgba(255, 255, 255, 0.5));
 }
 

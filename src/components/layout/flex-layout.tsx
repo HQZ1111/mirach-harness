@@ -1249,7 +1249,6 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
     const win = appWindow
     const onWinPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return
-      if (e.clientY > 100) return // 顶带=--logo-strip-h（100），带外与拖窗无关
       const t = e.target as Element | null
       if (!t) return
       // 交互面/专用面归原主：按钮/输入、分隔条、溢出钮、resize 手柄、
@@ -1263,7 +1262,9 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
       )
         return
       // 页签归属：多页签整钮归页签；拉伸头栏按**文字标签区**判定（±8px
-      // 手感余量）——区外空白落穿到窗口拖动。
+      // 手感余量）——区外空白：顶带=拖窗口（双击最大化），低条=吞掉
+      // （不拖页签也不拖窗；用户 2026-09-29：低条右侧空白仍拖页签=旧
+      // clientY>100 早退把低条整段放行给了宿主接管）。
       const btn = t.closest('[id^="flexlayout-tabbutton-"]')
       if (btn) {
         if (!btn.className.includes('tab_button_stretch')) return
@@ -1271,9 +1272,20 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         if (!content) return // 兜底：无文字盒照旧整钮归页签
         const cr = content.getBoundingClientRect()
         if (e.clientX >= cr.left - 8 && e.clientX <= cr.right + 8) return
-      } else if (!t.closest('.flexlayout__tabset_tabbar_outer, .app-shell')) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.clientY <= 100) {
+          if (e.detail === 2) {
+            void win.toggleMaximize().catch(() => {})
+          } else {
+            void win.startDragging().catch(() => {})
+          }
+        }
         return
       }
+      // 非按钮面：仅顶带空白拖窗口（logo 区/条带容器/壳层）
+      if (e.clientY > 100) return
+      if (!t.closest('.flexlayout__tabset_tabbar_outer, .app-shell')) return
       e.preventDefault()
       e.stopPropagation()
       if (e.detail === 2) {

@@ -15,7 +15,10 @@ import { Model, TabSetNode } from 'flexlayout-react'
 
 import { useLayoutStore } from '@/store/layout-store'
 
-function tabsetRectOf(model: Model, tabIds: string[]): { left: number; top: number; width: number; height: number } | null {
+function tabsetRectOf(
+  model: Model,
+  tabIds: string[],
+): { left: number; top: number; width: number; height: number; stripH: number } | null {
   for (const tabId of tabIds) {
     const t = model.getNodeById(tabId)
     const set = t?.getParent()
@@ -26,7 +29,12 @@ function tabsetRectOf(model: Model, tabIds: string[]): { left: number; top: numb
         // 转宿主相对坐标（叠片画在宿主层，viewport 坐标会整体偏移宿主原点）
         const hr = document.querySelector('.flexlayout-host')?.getBoundingClientRect()
         if (r.width > 0 && r.height > 0 && hr) {
-          return { left: r.left - hr.left, top: r.top - hr.top, width: r.width, height: r.height }
+          // 真实页签栏高度（顶带 100 / 低条 36 / 无条 0）——颜色层顶边自动
+          // 贴条底，不用固定数值（用户 2026-09-29：低条时固定 100 让出
+          // 64px 不铺色，标签看着像悬在错位）
+          const bar = el.querySelector('.flexlayout__tabset_tabbar_outer')
+          const stripH = bar ? bar.getBoundingClientRect().height : 0
+          return { left: r.left - hr.left, top: r.top - hr.top, width: r.width, height: r.height, stripH }
         }
       }
     }
@@ -36,7 +44,7 @@ function tabsetRectOf(model: Model, tabIds: string[]): { left: number; top: numb
 
 function useTabsetRect(model: Model, tabIds: string[]) {
   const layoutRev = useLayoutStore(s => s.layoutRev)
-  const [rect, setRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+  const [rect, setRect] = useState<{ left: number; top: number; width: number; height: number; stripH: number } | null>(null)
   useEffect(() => {
     const measure = () => setRect(tabsetRectOf(model, tabIds))
     measure()
@@ -48,10 +56,9 @@ function useTabsetRect(model: Model, tabIds: string[]) {
   return rect
 }
 
-/** 主区调色层：颜色/圆角走令牌 --main-tint-*；顶部避开 100 页签带
- *  （calc + --logo-strip-h，横向形态避条、竖轨形态避标题栏/logo 带——
- *  用户 2026-09-27 定稿两形态都避）；z -1 垫到文字组件下面（overlays.css）。
- *  偏移不用 100px 字面量而挂令牌：改条高一处即全跟。 */
+/** 主区调色层：颜色/圆角走令牌 --main-tint-*；顶部**自动贴真实页签栏
+ *  下缘**（现量 tabbar_outer 高度——顶带 100 / 低条 36 自适应，用户
+ *  2026-09-29：高度不该用固定数值）；z -1 垫到文字组件下面（overlays.css）。 */
 export function MainTint({ model }: { model: Model }) {
   const rect = useTabsetRect(model, ['workspace'])
   if (!rect) return null
@@ -61,9 +68,9 @@ export function MainTint({ model }: { model: Model }) {
       className="main-tint"
       style={{
         left: rect.left,
-        top: `calc(${rect.top}px + var(--logo-strip-h))`,
+        top: rect.top + rect.stripH,
         width: rect.width,
-        height: `calc(${rect.height}px - var(--logo-strip-h))`,
+        height: rect.height - rect.stripH,
       }}
     />
   )
