@@ -1635,6 +1635,21 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
+  - **页签文字统一沉条底 + stretch 文字区判定 + 虚线预览边（用户
+    2026-09-29 三连）**：①拖拽落点 sheet 的深蓝边线改虚线
+    （.fl-drop-sheet-active border-style:dashed，预览感不与真实边界
+    混淆）；②拉伸头栏只有**文字标签区**（content rect ±8px）归页签
+    拖拽，标签左右空白归窗口拖动（window 捕获段判定：stretch 按
+    .flexlayout__tab_button_content rect 落穿，多页签整钮照旧）——
+    实测右侧空白按下拖动 __flDragLog 全空（窗口路径）、文字区 engage
+    正常；③**页签文字统一沉条底**（用户："下面分栏的标签跑顶部去了，
+    在上面的时候明明在底部；关闭机器人后会话列表标签自己上移"）：
+    (a) stretch 头栏 padding-bottom 10px → 0——旧值把 stretch 文字抬
+    高 10px，与普通页签（沉条底 y80-101）错位，**单页签化瞬间标签上
+    跳 10px**（左栏关签后标签上移的根因）；(b) fl-strip-low 低条容器
+    align-items center → flex-end——下分栏 36px 条文字沉底（旧 center
+    悬中视觉跑顶）。终态实测全量页签 textGapBottom=0（顶带/低条、
+    stretch/普通完全同位，开关页签零跳位）。
   - **【bug】--accent 令牌冲突=落点预览隐形的真凶（用户 2026-09-29
     二次报告"还是不行，是不是 assistant-ui 容器叠加"）**：CDP 实测
     （elementFromPoint 逐点命中 + Input.dispatchMouseEvent 真实指针拖拽

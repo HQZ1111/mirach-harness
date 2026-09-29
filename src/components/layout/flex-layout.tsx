@@ -1241,8 +1241,9 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
   // 根因：盖层截胡顶带内 pointerdown——拉伸头栏（单页签 zone）整条 100px
   // 都是页签（id 同 flexlayout-tabbutton- 前缀），带上部 60px 被盖后按下
   // 变拖窗口、拖拽会话与 zone 落点预览全不启动。语义定稿：**有页签的地方
-  // 拖页签，没页签的空白拖窗口**——拉伸头栏整条归页签；多页签条上部空白
-  // （logo 区）与条带容器其余空白归窗口（保留 2026-09-27 的顶带语义）。
+  // 拖页签，没页签的空白拖窗口**——多页签条整钮归页签、上部空白（logo 区）
+  // 归窗口；拉伸头栏只有**文字标签区**归页签，标签左右空白归窗口
+  // （用户 2026-09-29：单页签时标签右边的空白不该拖页签）。
   useEffect(() => {
     if (!inTauri || !appWindow) return
     const win = appWindow
@@ -1251,18 +1252,28 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
       if (e.clientY > 100) return // 顶带=--logo-strip-h（100），带外与拖窗无关
       const t = e.target as Element | null
       if (!t) return
-      // 交互面/专用面归原主：页签（含拉伸头栏）、分隔条、resize 手柄、
+      // 交互面/专用面归原主：按钮/输入、分隔条、溢出钮、resize 手柄、
       // 头栏工具钮、编辑面板
       if (
         t.closest(
-          'button, input, textarea, select, a, [id^="flexlayout-tabbutton-"], ' +
-            '.flexlayout__splitter, .flexlayout__tab_button_overflow, .win-resize-handle, .fl-min-btn, .fl-close-btn, ' +
-            '.fl-home-btn, [class*="ep-"], [class*="ze-"]',
+          'button, input, textarea, select, a, .flexlayout__splitter, ' +
+            '.flexlayout__tab_button_overflow, .win-resize-handle, .fl-min-btn, ' +
+            '.fl-close-btn, .fl-home-btn, [class*="ep-"], [class*="ze-"]',
         )
       )
         return
-      // 带内空白才拖窗口：条带容器（logo 区/沉底页签行的上部）或壳层
-      if (!t.closest('.flexlayout__tabset_tabbar_outer, .app-shell')) return
+      // 页签归属：多页签整钮归页签；拉伸头栏按**文字标签区**判定（±8px
+      // 手感余量）——区外空白落穿到窗口拖动。
+      const btn = t.closest('[id^="flexlayout-tabbutton-"]')
+      if (btn) {
+        if (!btn.className.includes('tab_button_stretch')) return
+        const content = btn.querySelector('.flexlayout__tab_button_content')
+        if (!content) return // 兜底：无文字盒照旧整钮归页签
+        const cr = content.getBoundingClientRect()
+        if (e.clientX >= cr.left - 8 && e.clientX <= cr.right + 8) return
+      } else if (!t.closest('.flexlayout__tabset_tabbar_outer, .app-shell')) {
+        return
+      }
       e.preventDefault()
       e.stopPropagation()
       if (e.detail === 2) {

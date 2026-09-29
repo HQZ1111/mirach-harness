@@ -41,19 +41,20 @@
 
 /* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
    （标题栏拖拽区/窗口按钮让位）只属于窗口顶带——下面分栏的条降到
-   --strip-low-height，文字居中（没有 logo 位要留）。 ── */
+   --strip-low-height。文字与顶带同规：**沉条底**（用户 2026-09-29：
+   下分栏标签在条顶是错的——"在上面的时候明明在底部"，全应用统一）。 ── */
 .flexlayout-host .flexlayout__tabset_tabbar_outer.fl-strip-low {
   height: var(--strip-low-height);
   min-height: var(--strip-low-height);
-  align-items: center;
+  align-items: flex-end;
 }
 .flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_inner,
 .flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_inner_tab_container {
   height: var(--strip-low-height);
-  align-items: center;
+  align-items: flex-end;
 }
 .flexlayout-host .fl-strip-low .flexlayout__tab_button_stretch {
-  align-items: center; /* 低条没有 logo 位，文字不沉底 */
+  align-items: flex-end; /* 低条同样沉底（旧 center=标签悬条中，视觉跑顶） */
   padding-bottom: 0;
 }
 .flexlayout-host .fl-strip-low .rail-logo-leading {
@@ -170,7 +171,10 @@
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
-  padding: 0 var(--tab-pad-x) 10px;
+  /* padding-bottom 必须 0：与普通页签同沉条底——旧值 10px 把文字抬高，
+     单页签化瞬间标签上跳 10px（用户 2026-09-29："关闭机器人后会话列表
+     的标签自己往上面移"） */
+  padding: 0 var(--tab-pad-x) 0;
   text-transform: uppercase;
 }
 
