@@ -30,6 +30,7 @@ export function ResizeHandles() {
             void appWindow.startResizeDragging(h.dir).catch(() => {})
           }}
           style={{ position: 'fixed', zIndex: 300, ...h.style }}
+          className="win-resize-handle"
         />
       ))}
     </>

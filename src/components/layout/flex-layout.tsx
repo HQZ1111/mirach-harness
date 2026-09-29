@@ -1237,29 +1237,53 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
     return () => window.removeEventListener('keydown', onKey)
   }, [mirror])
 
+  // 窗口拖动：window 捕获段按命中面分派（取代旧 .titlebar-drag-band 盖层）。
+  // 根因：盖层截胡顶带内 pointerdown——拉伸头栏（单页签 zone）整条 100px
+  // 都是页签（id 同 flexlayout-tabbutton- 前缀），带上部 60px 被盖后按下
+  // 变拖窗口、拖拽会话与 zone 落点预览全不启动。语义定稿：**有页签的地方
+  // 拖页签，没页签的空白拖窗口**——拉伸头栏整条归页签；多页签条上部空白
+  // （logo 区）与条带容器其余空白归窗口（保留 2026-09-27 的顶带语义）。
+  useEffect(() => {
+    if (!inTauri || !appWindow) return
+    const win = appWindow
+    const onWinPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      if (e.clientY > 100) return // 顶带=--logo-strip-h（100），带外与拖窗无关
+      const t = e.target as Element | null
+      if (!t) return
+      // 交互面/专用面归原主：页签（含拉伸头栏）、分隔条、resize 手柄、
+      // 头栏工具钮、编辑面板
+      if (
+        t.closest(
+          'button, input, textarea, select, a, [id^="flexlayout-tabbutton-"], ' +
+            '.flexlayout__splitter, .flexlayout__tab_button_overflow, .win-resize-handle, .fl-min-btn, .fl-close-btn, ' +
+            '.fl-home-btn, [class*="ep-"], [class*="ze-"]',
+        )
+      )
+        return
+      // 带内空白才拖窗口：条带容器（logo 区/沉底页签行的上部）或壳层
+      if (!t.closest('.flexlayout__tabset_tabbar_outer, .app-shell')) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.detail === 2) {
+        void win.toggleMaximize().catch(() => {})
+        return
+      }
+      void win.startDragging().catch(() => {})
+    }
+    window.addEventListener('pointerdown', onWinPointerDown, true)
+    return () => window.removeEventListener('pointerdown', onWinPointerDown, true)
+  }, [])
+
   return (
     <AssistantRuntime>
       <div className="app-shell">
         <ResizeHandles />
-      {/* 窗口拖拽带（0-60px，用户定稿：标题栏整带可拖）：盖在页签条上部
-          空白区（logo/文字区），z 40 在标题栏按钮与页签行之下——按下即
-          startDragging 交还 OS 移动窗口；双击 = 最大化切换。不用
-          data-tauri-drag-region（页签按钮盖满条带且我方引擎会
-          preventDefault pointerdown，原生拖拽区脚本收不到 mousedown）。 */}
-      {inTauri && (
-        <div
-          className="titlebar-drag-band"
-          onPointerDown={(e) => {
-            if (e.button !== 0 || !appWindow) return
-            e.stopPropagation()
-            if (e.detail === 2) {
-              void appWindow.toggleMaximize().catch(() => {})
-              return
-            }
-            void appWindow.startDragging().catch(() => {})
-          }}
-        />
-      )}
+      {/* 窗口拖动：不再用盖层拖拽带（旧 .titlebar-drag-band 截胡顶带内
+          页签头 pointerdown——拉伸头栏整条 100px 都是页签，带上部被盖=
+          按下变拖窗口、拖拽会话与 zone 落点预览全不启动）。改为 window
+          捕获段判定（effect 见上）：有页签的地方拖页签，没页签的空白
+          拖窗口。 */}
       {/* 自绘标题栏（app/shell/titlebar.tsx）：布局处理器以 props 注入 */}
       <Titlebar
         sideCollapsed={sideCollapsed}

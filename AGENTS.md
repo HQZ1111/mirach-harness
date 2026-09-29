@@ -1635,6 +1635,24 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
+  - **【bug】拖拽带截胡页签头（用户 2026-09-29：标签拖拽出来被挡住
+    看不到落在哪 + 主对话标签拖的是整个页面）**：根因一个——
+    .titlebar-drag-band（0-60px 绝对定位盖层 z40）盖住了顶带的**页签头**。
+    顶带即页签条（tabbar_outer 高 100=--logo-strip-h，页签沉底 y≈60-95，
+    上部是 logo 空白）；多页签条的上部空白归拖拽带没问题，但**拉伸头栏
+    （SingleTabStretch 单页签 zone，如主对话）的按钮整条 100px 都是页签**
+    ——上部 60px 被盖层截胡，按下命中的是盖层、事件到不了
+    flexlayout-host（onPointerDownCapture 收不到），于是变拖窗口（拖整
+    个页面）+ 拖拽会话/ghost/zone 落点预览全不启动（看不到落在哪）。
+    左栏页签在 y64+ 不受影响，所以只在主对话发现。**修法（语义定稿：有
+    页签的地方拖页签，没页签的空白拖窗口）**：删盖层元素与 CSS；改
+    window 捕获段 pointerdown 判定——clientY≤100 且 target 命中
+    tabbar_outer/app-shell 空白（排除 button/input/[id^=flexlayout-
+    tabbutton-]/splitter/overflow-btn/.win-resize-handle/.fl-min|close|home-btn/
+    ep-*/ze-*）才 startDragging（detail===2 双击最大化）；拉伸头栏与
+    普通页签同 id 前缀（flexlayout 源码 domId 实证），归宿主接管拖页签。
+    resize 手柄补 .win-resize-handle 类。tsc 0；vitest 21/21。
+
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入
