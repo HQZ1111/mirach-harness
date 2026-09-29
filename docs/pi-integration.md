@@ -57,20 +57,20 @@
 
 ```
 ┌ AG-UI HTTP（唯一数据面，2 个端点）
-│   POST /ag-ui                        # 起 run，SSE 返回事件流
-│   GET  /ag-ui/stream?thread&lastEventId  # 重放/续流（含 delegate run）
+│   POST /ag-ui                        # 起 run，返回 {runId}（不携流）
+│   GET  /ag-ui/stream?thread&lastEventId  # 常驻事件流（唯一消费口）
 ├ Tauri IPC（唯一控制面，全部 invoke）
 │   会话 CRUD、set_model/thinking、interrupt、approve、ask 应答、
 │   tool_result、sync_app_context、delegate_to_agent、get_agui_endpoint
-└ Tauri Event（仅门铃，~20 字节）
-    delegate_run_started {runId, threadId} → 前端开 GET 流消费
+└ Tauri Event：（v2.2 归零——门铃删除）
 ```
 
 关键裁定：
-1. **delegate 执行事件不走 Tauri Event**——Rust 侧起 run 时把事件写进
-   AG-UI 环形缓冲（sequence 照发），发门铃；前端开门后 GET 流消费。
-   修掉原设计缺陷：Tauri Event 无重放，前端刷新即丢进行中的 delegate
-   输出；入缓冲流后免费获得 Last-Event-ID 续放。
+1. **常驻流消费（v2.2）**：前端对打开的 thread 常驻一条 GET 流，所有
+   run（前端发起 + delegate）的事件都在这条流上按 thread 全序到达；
+   POST 只触发 run 并返回 {runId}，不再携带事件流。**门铃删除**——
+   Tauri Event 通道归零，两通道收口。标准 AG-UI 的 POST 流式形状若
+   未来要兼容（L5/第三方客户端），从同一缓冲做扇出即可，缓冲不动。
 2. **interrupt、tool_result 从 HTTP 挪进 IPC**——abort 是控制操作不是
    数据流；HTTP 端点从 4 个收到 2 个，鉴权面同步收窄。
 3. **JWT → 不透明随机 token**——127.0.0.1:0 + token 经 IPC 下发的威胁
@@ -94,6 +94,29 @@
 6. **不建议砍**：ApprovalRegistry（审批态必须驻 Rust，跨前端刷新）；
    sync_app_context（get_app_context 的推送面，字段已最小化）；
    workspace 分阶段拆分（§3 已是保守版）。
+
+### 0.3 同 thread 多 run 共存（v2.2，回答"delegate run 与当前 run 怎么共存"）
+
+**它们不交错——互斥已把共存变成了排队。** 一个 thread = 一个 pi
+session，AgentSessionHandle 被 Mutex 保护（同一时刻只有一个 prompt）；
+delegate 队列"忙则入队"检查的就是这把锁。因此：
+
+1. **缓冲分段连续**：run A 的 RUN_FINISHED 必然先于 run B 的
+   RUN_STARTED 落缓冲，per-thread 缓冲里 runs 是首尾相接的连续段，
+   每条事件带 run_id。事件级交错在物理上不可能——机器若收到交错序列
+   （streaming 中收到另一 runId 的 RUN_STARTED）= 协议违例，**fail
+   loud**（dev 断言 + error 上报），不静默吞。
+2. **机器语义**：RUN_STARTED(runId, source) → 追加**新消息段**（append
+   不 replace，一段对话本来就是多个 run 首尾相接），context.currentRunId
+   换轨、phase→streaming；RUN_FINISHED → currentRunId=null、phase→idle。
+   `source`（user/delegate）由 run 创建时的元数据标记，UI 可据此画
+   "机器人主动执行"徽标/分组。
+3. **消费口唯一**：不区分"当前 run 的流"和"delegate 的流"——常驻
+   GET 流是唯一消费口（§0.2-1），run 归属只看事件里的 run_id/source。
+   断线重连 Last-Event-ID 天然跨 run 段连续续放。
+4. **队列纪律**：composer 在 phase≠idle 时禁用发送（或显式转
+   follow_up）；用户触发与 delegate 任务走**同一把 Mutex、同一个队**
+   （AgentDelegate 是唯一排序权威），不允许两条排队通道。
 
 ---
 
@@ -132,8 +155,9 @@ Action 是唯一业务入口；不在 Tokio 里 block_on；AI 非确定性工作
 
 ### 2.1 端点
 
-`POST /ag-ui`（起 run，SSE 返回事件流）+ `GET /ag-ui/stream?thread&lastEventId`
-（重放/续流，**重放自实现**，delegate run 同走此流）。axum 绑
+`POST /ag-ui`（起 run，**返回 {runId}，不携事件流**）+ 
+`GET /ag-ui/stream?thread&lastEventId`（**常驻事件流，唯一消费口**；
+重放自实现，Last-Event-ID 跨 run 段连续续放，§0.3）。axum 绑
 `127.0.0.1:0`，**不透明随机 token**（uuid，经 IPC 下发）+ Origin/Host
 校验；(port, token) 存 AppState，前端 `invoke("get_agui_endpoint")`
 主动拉取（避免启动竞态）。interrupt/tool-result 不设 HTTP 端点（§0.2）。
@@ -251,7 +275,8 @@ IPC：session_list/create/open/delete/rename、set_model、
      fork、export_html、get_agui_endpoint、approve_action、
      ask_response、tool_result、sync_app_context（100ms debounce）、
      delegate_to_agent
-AG-UI HTTP：POST /ag-ui（起 run+流） / GET /ag-ui/stream（重放续流）
+AG-UI HTTP：POST /ag-ui（起 run，返回 runId） / GET /ag-ui/stream
+            （常驻事件流，唯一消费口）
 ```
 
 判据：**HTTP 只管事件流，其余一切控制都走 IPC**——设置页与侧栏在无
@@ -267,10 +292,10 @@ in-process 面缺位（上游明说）。MVP：`steer` = abort+prompt（丢失�
 
 前端 IPC `delegate_to_agent` → AgentDelegate 检查 session 空闲：
 空闲立即 prompt；忙则入队（上限 10，超出 QueueFull）。执行者=src-tauri。
-**执行事件（文本流/工具调用）进 AG-UI 环形缓冲照发 sequence**，同时发
-Tauri Event 门铃 `delegate_run_started {runId, threadId}`——前端开门后
-GET 流消费，前端刷新/断线可 Last-Event-ID 续放（§0.2 裁定 1）。Tauri
-Event **不携带领域数据**。
+**执行事件（文本流/工具调用）进 AG-UI 环形缓冲照发 sequence**——前端
+常驻 GET 流上按 thread 全序自然到达，无门铃、无专用通道（§0.2-1、
+§0.3）；前端刷新/断线 Last-Event-ID 续放。run 创建时标 `source:
+delegate` 供 UI 归属。用户触发与 delegate 走同一把 Mutex、同一个队。
 
 ---
 
