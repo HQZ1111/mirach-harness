@@ -1,15 +1,12 @@
-# pi_agent_rust SDK 集成方案（2026-09-29 · 落位定稿）
+# pi_agent_rust SDK 集成方案（2026-09-29 · v2 落位定稿）
 
 > 本文档是 pi 引擎接入 mirach-harness 的**落位规范**：每个能力住在哪一层、
 > 哪个文件、UI 哪个区域。实现与文档冲突时，以文档为准改代码。
 > 上游源码：`G:\pi_agent_rust-main`（版本 0.5.1，lib 名 `pi`，crate
-> `pi_agent_rust`）。上游文档基准：`docs/sdk.md`（SDK Cook）、
-> `docs/rpc.md`（RPC 面）、`docs/session.md`（会话存储）、
-> `docs/settings.md`、`docs/models.md`、`docs/skills.md`、
-> `docs/packages.md`、`docs/capability-prompts.md`。
->
-> 对应总架构：AGENTS.md「待办 3」L1–L5 分层。本文只管「哪里放什么」；
-> L4 适配器的实现细节在代码里长出来后再回填本文 §9。
+> `pi_agent_rust`，**工具链钉 nightly-2026-08-31**）。
+> v2 吸收了 agent-native 架构文档（Cargo Workspace 拆分 / 三通道 /
+> ActionRegistry / A2UI / delegate 队列）并逐点对照上游源码核实，
+> 修正了双方文档的失实处（§1.1 差异对照）。
 
 ---
 
@@ -17,292 +14,285 @@
 
 ```
 ┌─ L1 前端（mirach-harness src/，纯投影）──────────────────────────┐
+│  FlexLayout · assistant-ui（聊天 Store + A2UI 渲染）· shadcn/ui  │
 │  对话区(主栏)      侧栏(左/右栏)        设置页(未来)               │
-│  AssistantThread   sessions 列表        provider/model/tools      │
-│  ← AG-UI SSE       thread 列表          thinking/compaction       │
-├─ L2 桥接层 ─────────────────────────────────────────────────────┤
-│  AG-UI HTTP+SSE (axum, 127.0.0.1:0)  │  Tauri IPC（会话 CRUD 等） │
-├─ L3 Rust 应用层（mirach-harness/src-tauri）──────────────────────┤
-│  axum 挂 tauri::async_runtime · AppState · SQLx 快照 · Auth       │
-│  ★ pi = { package = "pi_agent_rust" } 直接进 Cargo.toml          │
-│  ★ create_agent_session 在这里调，AgentEvent 在这里归约成 AG-UI   │
-├─ L4 pi 本体（G:\pi_agent_rust-main，上游库，不改）────────────────┤
-│  pi::sdk 稳定面：AgentSession / AgentEvent / ToolRegistry /       │
-│  SessionOptions / RpcTransportClient / ExtensionManager           │
+├─ L2 桥接层（三通道）─────────────────────────────────────────────┤
+│  AG-UI SSE（Agent→前端）· Tauri IPC（前端→Rust）                  │
+│  · Tauri Event（Rust→前端，内部任务事件：delegate 队列进度等）     │
+├─ L3 Rust 应用层（src-tauri + workspace crates，stable）──────────┤
+│  ActionRegistry · AppState · SQLx · axum · agui-bridge · Auth    │
+│  AgentDelegate 实现 · SnapshotProvider 实现                       │
+├─ L4 pi-adapter（nightly，唯一碰 pi 的地方）───────────────────────┤
+│  create_agent_session · AgentEvent 归约 · ToolRegistry 注入       │
+│  render_a2ui 拦截 · A2UI 验证                                     │
+├─ L5 Tauri v2 Mobile ────────────────────────────────────────────┤
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**集成形态选型（已定）**：**库依赖（in-process SDK）**，不是子进程 RPC。
-理由：
-1. AGENTS「待办 3」原文即 "L4 pi-adapter（create_agent_session ·
-   AgentEvent · ToolRegistry · 生命周期）"——SDK 面就是为嵌入者准备的；
-2. 事件零序列化损耗，`AgentEvent::MessageUpdate` 直接翻 AG-UI SSE；
-3. `SessionTransport` 统一适配器（`SessionTransport::in_process`）留了
-   后路：未来移动端（L5）或沙箱隔离需要时，一行换
-   `SessionTransport::rpc_subprocess(...)` 走 `pi --mode rpc`，AG-UI 层
-   不用动（RPC 面 prompt/abort/steer/follow_up/set_model/
-   set_thinking_level/compact/get_state/get_messages 全覆盖，见
-   `docs/rpc.md`）。
+**集成形态（已定）**：**库依赖（in-process SDK）**，不用 RPC 子进程、
+不用 DSH。pi 拥有 Agent 循环，Rust 是应用层，前端是渲染层——三层谁也
+不越界。`SessionTransport` 统一适配器留后路：L5 移动端若需沙箱隔离，
+一行换 `SessionTransport::rpc_subprocess`（`pi --mode rpc`），映射层不动。
 
-**上游注意（来自 `docs/sdk.md` + `examples/basic_sdk.rs`）**：
-- pi 不用 tokio，用 **asupersync** 运行时。L3 侧在 tauri::async_runtime
-  之外为 pi 会话单独起 asupersync runtime（current_thread + reactor），
-  或者经 `SessionOptions` 的 runtime 注入（`pub runtime` 字段，"Runtime
-  this session dispatches background work on"）——落地时以 sdk.rs 实测
-  为准，**禁止**把 pi 的 future 塞进 tokio。
-- 消费方 crate 必须自带 `#![recursion_limit = "256"]`（pi 内部提了不
-  继承；没有它 `Send` 证明会溢出，报错还不指真因）。
-- `--no-default-features` 编译可去掉 TUI 全栈（crossterm/bubbletea…），
-  库消费方应加 features 集控制体积；`sqlite-sessions` 等按需保留。
+### 0.1 前置事实（读源码实锤，非转述）
 
----
-
-## 1. L3 src-tauri：pi 进什么、怎么进
-
-### 1.1 依赖
-
-`src-tauri/Cargo.toml`：
-
-```toml
-[dependencies]
-pi = { package = "pi_agent_rust", path = "G:/pi_agent_rust-main",
-       default-features = false, features = ["sqlite-sessions"] }
-# 走 git 时：
-# pi = { package = "pi_agent_rust", git = "https://github.com/Dicklesworthstone/pi_agent_rust", ... }
-```
-
-编译约束：消费 crate（src-tauri 的 lib）加
-`#![recursion_limit = "256"]`；Windows 上确认 rust-toolchain ≥ 1.95
-（上游 rust-version 2024 edition）。
-
-### 1.2 新模块 `src-tauri/src/pi_session.rs`
-
-pi SDK 只在 Rust 侧出现，前端永不 import pi。模块职责：
-
-```
-pi_session.rs
-├─ PiEngine（AppState 成员，Mutex<HashMap<sessionId, PiSessionRuntime>>）
-│   ├─ create(provider?, model?) -> SessionId      # 包 create_agent_session
-│   ├─ prompt(sessionId, text, images?)            # 包 prompt_with_abort
-│   ├─ abort(sessionId)                            # 包 new_abort_handle
-│   ├─ steer / follow_up(sessionId, text)          # 传输层行为（见 §3.4）
-│   ├─ set_model / set_thinking(sessionId, ...)    # 包 set_model / set_thinking_level
-│   ├─ state(sessionId) -> AgentSessionState       # provider/model/usage/message_count
-│   └─ shutdown(sessionId)                         # 包 transport.shutdown
-├─ AgentEvent → AG-UI 事件翻译器（§2.2 映射表）
-└─ 会话快照桥（SQLx，run 边界 + AgentEnd/TurnEnd 落库）
-```
-
-`SessionOptions` 填法（对应 UI 语义）：
-
-| SessionOptions 字段 | 来源 | 备注 |
+| 事实 | 出处 | 对集成的约束 |
 |---|---|---|
-| `provider` / `model` / `thinking` | 设置页 + 对话区触发器 | 默认值读 `~/.pi/agent/settings.json`（pi 自读）|
-| `system_prompt` / `append_system_prompt` | 机器人配置（未来 bots） | per-session |
-| `enabled_tools` | 设置页「工具与密钥」 | `None`=全部内建（read/bash/edit/write/grep/find/ls/hashline_edit，见 `BUILTIN_TOOL_NAMES`）|
-| `working_directory` | 当前项目 cwd | 文件树/终端同源 |
-| `workspace_trusted` | 打开项目时用户确认 | **默认 false**（程序化调用 fail-closed，上游注释明说）|
-| `no_session: false` + `session_dir` | mirach 会话目录 | pi 的 JSONL/V2 会话存储与 mirach SQLx 快照**双写不互替**：pi 管对话真相（§4.1）|
-| `extension_paths` / `extension_policy` | 设置页「技能与扩展」 | `safe` 起步 |
-| `extension_ui_handler` | **L3 必须实现** | 能力审批弹窗走这里（§3.5）；不实现 = 全部 deny（fail closed）|
-| `persist_extension_permissions: false` | mirach 桌面场景 | 审批决定存 mirach 自己的库，不写 `~/.pi/extension-permissions.json` |
-| `mcp: Some(McpSessionOptions)` | 设置页「MCP」 | `config_paths` 指向 mirach 管理的 mcp.json |
-| `compaction_settings` | 设置页「记忆与上下文」 | `Some(ResolvedCompactionSettings)` 直传；`None` 用 pi 默认 |
-| `on_tool_start/end/on_stream_event` | 日志窗格埋点 | logs pane 的数据源之一 |
-
-### 1.3 运行时纪律
-
-- 每个 `create_agent_session` 在 **tauri::async_runtime::spawn_blocking
-  外**的专用 asupersync runtime 上驱动；mirach 不 merge 两套 runtime。
-- `AgentSessionHandle` 是 `&mut self` 语义——PiSessionRuntime 内用
-  `Mutex<AgentSessionHandle>` 串行化 prompt/控制调用。
-- 取消：`AgentSessionHandle::new_abort_handle()` 对一次 prompt 一个，
-  abort 后 handle 丢弃重建。
+| pi 钉 `nightly-2026-08-31`（rustfmt+clippy） | 上游 rust-toolchain.toml | **A19 清账：确实要 nightly**。pi-adapter 子 crate 放独立 rust-toolchain.toml 钉同版本；locked 依赖图要 Rust ≥1.95 |
+| pi 用 **asupersync** 运行时，不是 tokio | examples/basic_sdk.rs | pi 的 future 禁止进 tauri::async_runtime/tokio；pi-adapter 内自管 asupersync runtime |
+| 消费 crate 必须 `#![recursion_limit="256"]` | docs/sdk.md | src-tauri / pi-adapter crate 顶部加上，否则 Send 证明溢出且报错不指真因 |
+| 稳定面 = `pi::Error`/`pi::PiResult`/`pi::sdk::*` | src/lib.rs | 其余模块 `#[doc(hidden)]` 无 SemVer 保证；**只准 import `pi::sdk` 与 `pi::model` 的事件类型** |
+| `AgentSessionHandle::prompt` 是 `async`、`&mut self`、回调 `Fn`（Arc 包装） | docs/sdk.md Recipe 1/2、basic_sdk.rs | A3/A4/A7 清账；Mutex 串行化 + 回调不得捕获可变状态 |
+| `AgentEnd` 之后还有事件（AutoCompaction*、extension_error） | src/agent.rs 枚举 | **A10 清账**：以 channel 关闭为退出条件（写法 A），AgentEnd 只做 UI 收尾，不做流退出 |
+| **SDK 没有 `session.approve()/deny()`** | src/sdk.rs 全文无此符号 | **A16 清账**：审批回灌必须走 `ExtensionUiHandler`（§4.4） |
+| `ExtensionUiRequest` 自带 `id` | docs/sdk.md Recipe 5b（`id: request.id`） | A15 清账：不需我方生成 UUID（除非上游某变体缺） |
+| `SessionOptions` 有 `Default`、无 builder | Recipe 全部 `..SessionOptions::default()` | A1/A2 清账 |
+| `steer/follow_up` 仅在 `RpcTransportClient`，in-process 无 | docs/sdk.md Compatibility Notes | MVP 降级（§4.6） |
 
 ---
 
-## 2. L2 桥接：AgentEvent → AG-UI SSE
+## 1. 与 agent-native 架构文档的差异对照（逐点核实后的裁定）
 
-### 2.1 端点（AGENTS「待办 3」不变）
+> 架构文档 = 用户提供的 pi 集成架构（workspace 拆分/三通道/A2UI/
+> delegate/附录 A）。下表按「架构文档原文 → 上游源码事实 → 裁定」给出，
+> 是两份文档的合并基准。
 
-`POST /ag-ui`（发消息+收流）、`/ag-ui/interrupt`、`/ag-ui/resume`
-（断线带 lastEventId 续流）、`/ag-ui/tool-result`（前端工具回调/审批）。
-axum 绑 `127.0.0.1:0`，Origin/Host 校验 + Bearer（token 经 IPC 下发）。
+| # | 架构文档说法 | 源码事实 | 裁定 |
+|---|---|---|---|
+| 1 | §6.1 审批：Rust 调 `session.approve()` / `session.deny()` | sdk.rs 无此 API；唯一回灌面是 `SessionOptions.extension_ui_handler`（async_trait `request_ui -> ExtensionUiResponse`） | **修正**：pi-adapter 实现 handler 时挂 oneshot——请求到达→转 Tauri Event 发前端→前端 IPC `approve_action` 回来→resolve oneshot→handler 返回 `ExtensionUiResponse`。**fail closed**：handler 缺位=deny（上游明说） |
+| 2 | §4.3 "pi-adapter 不依赖 agent-core" vs §三/§4.4 "pi-adapter → agent-core（ActionRegistry→ToolRegistry）" | 依赖图两边自相矛盾 | **以依赖图为准**：pi-adapter 依赖 agent-core。不碰 ActionRegistry 就没法定义 Pi 工具 |
+| 3 | §二 "nightly 隔离在 pi-adapter"（A19 待确认） | 上游钉 nightly-2026-08-31 | **成立**（见 §0.1）；pi-adapter 独立 rust-toolchain.toml |
+| 4 | §4.4 事件映射表缺 TurnStart/MessageStart/MessageEnd/AutoCompaction；usage/token 无落点 | agent.rs 枚举有这些变体；Usage 在 AssistantMessage 上 | **合并**：以本文 §2.2 表为准（含 STEP_FINISHED 带 usage——ContextDisplay 的唯一数据源） |
+| 5 | A2UI ACTIVITY_SNAPSHOT 是否 AG-UI 标准事件（A24） | 未核实（ag-ui crate 待查） | **待确认保留**；若非标准则走 AG-UI `CUSTOM` 事件包 A2UI payload，映射函数不动 |
+| 6 | "delegate_to_agent 队列" | **pi 无此概念**——这是应用层自建设计，非 pi 能力 | 保留为 mirach 设计（§4.7），标注来源；互斥语义成立：AgentSessionHandle 被 Mutex 保护，同一时刻只有一个 prompt |
+| 7 | A2UI 渲染 "@assistant-ui/react-generative-ui 原生接管" | npm 包真实存在（elements 轮已装进工程依赖）；`useAgUiRuntime`/`useAgUiSendA2uiAction` API 未核实（A25/A26） | **待确认保留**；落地时先查包导出面 |
+| 8 | §二 "审批响应走 Tauri IPC，不走 AG-UI" | 与 AGENTS「待办 3」的 `/ag-ui/tool-result` 端点有口径差 | **分工定稿**：**审批**（ExtensionUiRequest）走 IPC；**前端工具回调**（AG-UI frontend tools，human-in-the-loop 工具）走 `/ag-ui/tool-result`——两个机制，别混 |
+| 9 | §九 "UI 输入的 key 不落盘；配置文件 key 用 OS keyring" | pi 自身读 env vars / models.json（支持 `!command` shell lookup） | keyring 是 mirach 增强项（非 pi 能力）；MVP 先 env + pi 原生配置文件，keyring 后置 |
+| 10 | workspace 五 crate 拆分 | 拆分动机：nightly 隔离（成立）+ semver 卫生 + 编译隔离 | **分阶段**：见 §3（先单 crate 模块划分，接通后拆 pi-adapter） |
 
-### 2.2 事件映射表（pi::AgentEvent → AG-UI）
+**Agent-Native 理念对齐**（架构文档 §十一对照表，逐条核过）：
+Shared Actions（ActionDef+Registry+useAction 同 handler）✓；Shared Data
+（SQLite+TanStack invalidateQueries，data_changed 走 AG-UI CUSTOM 不走
+STATE_DELTA）✓；Shared Application State（get_app_context 按需拉取 +
+sync_app_context 100ms debounce 推送，**不含 draft_content**——草稿是
+纯 UI 态，Pi 不该知道）✓；UI 即 Agent 操作面板（delegate+agent_tool
+标注+Tauri Event 回传）✓；动态 UI（A2UI render_a2ui）✓。
+**核心原则**：Pi 拥有 Agent 循环、Rust 不碰；前端只管"怎么显示"；
+Action 是唯一业务入口；不在 Tokio 里 block_on；AI 非确定性工作走对话流。
 
-| pi 侧（src/agent.rs / model.rs） | AG-UI 侧 | 前端消费者 |
+---
+
+## 2. L2 桥接：AgentEvent → AG-UI（合并后的事件映射表）
+
+### 2.1 端点
+
+`POST /ag-ui`（run 由前端 HTTP 触发）、`/ag-ui/interrupt`、
+`/ag-ui/resume`（Last-Event-ID 续流，**重放自实现**）、
+`/ag-ui/tool-result`（AG-UI frontend tools 回传）。axum 绑
+`127.0.0.1:0`，JWT 中间件，(port, token) 存 AppState，前端
+`invoke("get_agui_endpoint")` 主动拉取（避免启动竞态）。
+
+### 2.2 事件映射（pi::AgentEvent → AG-UI EventType）
+
+| pi 侧（src/agent.rs、model.rs） | AG-UI 事件 | 消费者 |
 |---|---|---|
-| `AgentStart` | `RUN_STARTED` | XState 轮次机 streaming |
-| `TurnStart` | （内部计数，不外发）| — |
-| `MessageStart` | `RUN_STARTED`（首 turn）/ `TEXT_MESSAGE_STARTED` | 轮次机 |
-| `MessageUpdate { TextDelta }` | `TEXT_MESSAGE_CONTENT { delta }` | MarkdownText 流式 |
-| `MessageUpdate { ThinkingDelta }` | `THINKING_STARTED/…`（思考流） | Reasoning 元素 streaming 态 |
-| `MessageUpdate { ToolCallStart/Delta/End }` | `TOOL_CALL_STARTED/…` | ToolGroup / tool-call 元素 |
-| `ToolExecutionStart` | `TOOL_CALL_STARTED`（执行段） | thinking-indicator「正在使用 X」 |
-| `ToolExecutionUpdate { partial_result }` | `TOOL_CALL_ARGS/RESULT` 流式 | 终端块/网页预览等工具 UI |
-| `ToolExecutionEnd { is_error }` | `TOOL_CALL_END`（error 标记） | tool-error 元素 |
-| `TurnEnd` | `TEXT_MESSAGE_END` + `STEP_FINISHED`（带 usage） | ContextDisplay.Bar（token 用量的唯一来源）|
-| `AgentEnd { messages, error }` | `RUN_FINISHED` / `RUN_ERROR` | 轮次机 done/error；**usage 快照在此落 SQLx** |
-| `AutoCompactionStart/End` | 自定义 `COMPACTION` 提示事件 | 会话头横幅 |
-| `extension_ui_request`（能力审批） | 不进 AG-UI → 走 Tauri IPC 事件 | 审批弹窗（§3.5）|
-| `ask_request`（ask 工具问题卡） | 不进 AG-UI → 走 Tauri IPC 事件 | 问题卡 UI（§3.5）|
+| `AgentStart` | `RUN_STARTED` | XState 轮次机 |
+| `TurnStart` | （内部计数，不外发） | — |
+| `MessageStart` | `TEXT_MESSAGE_START` / `THINKING_TEXT_MESSAGE_START`（按首个块类型） | — |
+| `MessageUpdate { TextDelta }` | `TEXT_MESSAGE_CONTENT` | MarkdownText 流式 |
+| `MessageUpdate { ThinkingDelta }` | `THINKING_TEXT_MESSAGE_CONTENT`（AG-UI thinking 事件名以 ag-ui crate 版本为准） | Reasoning streaming |
+| `MessageUpdate { ToolCallStart/Delta/End }` | `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END` | ToolGroup / tool-call |
+| `ToolExecutionStart` | `TOOL_CALL_START`（执行段，配 CUSTOM 进度） | thinking-indicator「正在使用 X」 |
+| `ToolExecutionUpdate { partial_result }` | `TOOL_CALL_ARGS` 流式 / `CUSTOM` | 终端块、web-preview 等工具 UI |
+| `ToolExecutionEnd { result, is_error }` | `TOOL_CALL_END`（error 标记） | tool-error 元素 |
+| `TurnEnd` | `STEP_FINISHED`（**带 usage**——ContextDisplay/token 计量的唯一来源） | ContextDisplay.Bar |
+| `MessageEnd` | `TEXT_MESSAGE_END` | 轮次机 |
+| `AgentEnd { messages, error }` | `RUN_FINISHED` / `RUN_ERROR`；usage 快照落 SQLx | 轮次机 done/error |
+| `AutoCompactionStart/End` | `CUSTOM`（compaction 提示） | 会话横幅 |
+| `ExtensionUiRequest` | `CUSTOM`（审批载荷带 requestId）→ 前端弹卡 → **IPC 回灌** | 审批卡（§4.4） |
+| ask 工具问题卡 | `CUSTOM`（questions+timeoutMs） | 问题卡 UI（option-list 元素可套用） |
+| A2UI（render_a2ui 拦截产物） | `CUSTOM` 或 ACTIVITY_SNAPSHOT（#5 待确认） | assistant-ui generative-ui 渲染 |
+| 业务数据变更 | `CUSTOM`（data_changed → invalidateQueries） | TanStack Query |
 
-**A2UI $action 分流**照旧：`target:agent` 走 AG-UI，`target:client`
-本地消化或 IPC。
-
-### 2.3 resume/interrupt 的真相
-
-- `interrupt` → `abort`（`new_abort_handle` + abort）。
-- 断线续流：L3 在 `AgentEnd`/`TurnEnd` 落 SQLx 快照（按 run 边界）；
-  `/ag-ui/resume` 从快照重放，**不用** pi 的 RPC lastEventId（那是
-  RPC 传输层的机制，in-process 下由我们自己保证）。
-- `steer` / `follow_up`：in-process `AgentSessionHandle` 暂未暴露
-  （上游 Compatibility Notes 明说 steer/follow_up 在 RpcTransportClient
-  上）。两个选择：先映射为「abort + prompt」（降级），或直接用
-  `SessionTransport::rpc_subprocess` 拿全量队列控制。**定稿：MVP 用
-  降级映射，设置页注明**；等上游 in-process 面补齐再切。
+镜像类型纪律（架构文档 §5.1 采纳）：agent-protocol **不引用**
+`pi_agent_rust::AgentEvent`，自建镜像类型，pi-adapter 做转换——nightly
+污染不泄漏。SSE 序号：per-thread 单调递增，镜像到 SSE `id:` 行；环形
+缓冲（先单锁，热了再 DashMap）；**先写缓冲再写 SSE**；淘汰后回退
+`MESSAGES_SNAPSHOT` 强制重建；重放只重发已产生事件，绝不重跑 Agent 循环。
 
 ---
 
-## 3. UI 落位（前端哪里放什么）
+## 3. Cargo 布局：先模块后拆分（分阶段定稿）
 
-### 3.1 对话区（主栏，AssistantThreadPane）
+架构文档的五 crate 拆分（agent-core / agent-protocol / a2ui-types /
+pi-adapter / agui-bridge）是**终态**。对 mirach 现状（src-tauri 薄壳、
+pi 未接），**先单 crate 模块划分、第一条竖链跑通后拆出 pi-adapter**：
+
+```
+阶段 1（竖链）                阶段 2（拆分，动机出现时）
+src-tauri/src/                my-agent workspace（架构文档 §十四 结构照抄）
+  pi_session.rs  ←──────→     crates/pi-adapter/   # nightly，唯一碰 pi
+  agui.rs        ←──────→     crates/agui-bridge/  # SSE+重放缓冲
+  actions.rs     ←──────→     crates/agent-core/   # ActionRegistry/AppState/DB
+  （镜像类型内联）              crates/agent-protocol/# 镜像类型+映射（无 IO）
+                              crates/a2ui-types/   # catalog 单一事实源
+```
+
+拆分触发条件（满足其一）：① pi 的 nightly 依赖把 src-tauri 整体拖进
+nightly；② pi 编译时间拖累增量开发；③ A2UI catalog 需要独立 semver。
+模块内文件划分照架构文档 §十四（pi-adapter 的 session/events/tools/
+a2ui_bridge/lifecycle 五文件职责原样保留）。
+
+---
+
+## 4. 落位清单（哪里放什么）
+
+### 4.1 L3/L4 Rust 侧
+
+| 模块 | 职责 | 关键约束 |
+|---|---|---|
+| `pi-adapter::session` | 包 `create_agent_session(SessionOptions)` | runtime=asupersync；`no_session:false`+`session_dir` 指向 mirach 会话目录 |
+| `pi-adapter::events` | pi::AgentEvent → agent_protocol 镜像 → AG-UI | 纯转换，无 IO（可单测） |
+| `pi-adapter::tools` | `Vec<ActionDef>` 过滤 `agent_tool:true` → Pi `ToolRegistry` | **agent-visible 超 15-20 个后工具选择质量下降**——分组/渐进暴露预案 |
+| `pi-adapter::a2ui_bridge` | 注册 `render_a2ui` 自定义工具；拦截→`validate_a2ui`→映射 ACTIVITY_SNAPSHOT | **验证失败降级为文本展示**（原文附上+"UI 生成失败"），不静默丢弃 |
+| `pi-adapter::lifecycle` | `Mutex<AgentSessionHandle>` 串行；**abort handle 在锁外获取**；channel 关闭退出 | prompt 持锁跨整个执行期（同一时刻只有一个 prompt） |
+| `src-tauri::approval` | ApprovalRegistry（HashMap<session_id, Vec<PendingApproval>>） | 超时默认**自动拒绝**；会话关闭时遍历 pending 按策略处理；崩溃恢复 `list_pending_approvals` 带 remaining_seconds |
+| `src-tauri::delegate` | AgentDelegate 队列（上限 10，满返 QueueFull） | 执行事件走 **Tauri Event**（Rust 侧不能凭空起 AG-UI run）；prompt 完成回调触发下一项 |
+| `src-tauri::snapshot` | 实现 agui-bridge 的 SnapshotProvider trait | messages_snapshot 经 pi-adapter 从 Pi 会话态取；state_snapshot 从 AppState 读 |
+
+### 4.2 对话区（主栏，AssistantThreadPane）
 
 | UI 件 | 数据源 | 说明 |
 |---|---|---|
-| 消息流（MarkdownText / Reasoning / ToolGroup） | AG-UI SSE | 不变，mock 三阶段已验证全状态 |
-| thinking-indicator | AG-UI | 不变 |
-| **停止按钮**（Send↔Cancel 已有） | `/ag-ui/interrupt` | XState streaming 态发 |
-| **ModelSelector**（composer 右组） | `/api/models` → `RpcModelInfo` 列表 | 选择经 `set_model` IPC 下发（§3.4）；MODELS 常量废弃 |
-| **ContextDisplay.Bar** | TurnEnd 的 usage → token 用量 | mock 里永远空的面板从此点亮 |
-| **thinking 等级**（ModelOption efforts 行） | `set_thinking_level` IPC | ThinkingLevel: off/minimal/low/medium/high/xhigh/max |
-| 附件 | AG-UI 消息体 images 字段 | pi `UserContent` 原生支持 ImageContent |
-| 会话重命名/分支 | Tauri IPC → pi session | `set_session_name` / fork（§3.4）|
+| 消息流（Markdown/Reasoning/ToolGroup/thinking-indicator） | AG-UI SSE | mock 三阶段已验证全状态，切换后逐项回归 |
+| 停止按钮（Send↔Cancel 已有） | `/ag-ui/interrupt` | — |
+| ModelSelector | `/api/models`（RpcModelInfo） | MODELS 常量退役；efforts 行 → set_thinking_level |
+| ContextDisplay.Bar | TurnEnd usage | mock 里永远空的面板从此点亮 |
+| 审批卡 | CUSTOM + IPC 回灌 | 审批流 §4.4 |
+| 问题卡 | CUSTOM（ask） | 超时后模型收"用户未回答"错误，不挂死 |
+| A2UI surface | CUSTOM/ACTIVITY_SNAPSHOT | generative-ui 渲染；$action 走 IPC |
+| 附件 | AG-UI 消息体 images | pi UserContent 原生支持 ImageContent |
 
-### 3.2 侧栏（左栏 sessions / 右栏 files）
+### 4.3 侧栏
 
 | UI 件 | 数据源 | 说明 |
 |---|---|---|
-| **sessions 列表** | Tauri IPC `session_list` | L3 读 pi 会话目录（`~/.pi/agent/sessions/--encoded--/`，JSONL header）做列表；**列表元数据走 IPC 不走 pi 库**（轻、稳定）；改名/删除经 IPC 调 pi 的会话管理 |
-| 新建会话 | IPC `session_create` | L3 → `create_agent_session`（复用引擎） |
-| **thread 标签 ↔ 会话绑定** | layout store + IPC | 拖动对话标签 = 拖动那个会话（tab 与 sessionId 绑定，落 `session_pane` 映射） |
-| 右栏 files | 已有 fs.rs | 不动（pi 的 read 工具与文件树同 cwd，天然一致） |
-| logs 窗格 | `on_tool_start/end` 钩子 + ToolExecutionUpdate | pi 工具执行的流水，落到窗格 |
-| 机器人（bots） | 机器人 = system_prompt+tools+model 的预设 | 点开机器人会话 = 带 `SessionOptions.system_prompt/enabled_tools` 建会话 |
+| sessions 列表 | IPC 读 pi 会话目录 header（**只读镜像**） | 改名/删除经 IPC 下沉 pi；fork/branch/tree 全下沉 pi |
+| 新建会话 | IPC session_create | 复用引擎 |
+| thread 标签↔会话绑定 | layout store + IPC | 拖对话标签=拖那个会话 |
+| 右栏 files | 已有 fs.rs | 不动；与 pi read 工具同 cwd 天然一致 |
+| logs 窗格 | on_tool_start/end 钩子 + ToolExecutionUpdate | — |
+| bots | 机器人=system_prompt+tools+model 预设 | 点开=带 SessionOptions 建会话 |
 
-### 3.3 设置页（自己做的壳，接线清单）
+### 4.4 审批与问题卡（pi 的两个 UI 回调，全部 fail closed）
 
-| 设置 section | 数据源 | 落点 |
-|---|---|---|
-| **提供方** | `pi --list-providers` 语义 → L3 缓存 | API key 管理：写 `~/.pi/agent/settings.json` 兼容键或 env；上游支持 env vars + `!command` shell lookup（models.md）|
-| **模型** | `get_available_models` / models.json | 自定义 provider 走 `~/.pi/agent/models.json`（baseUrl/apiKey/models，ollama 等本地 provider 内建）|
-| **对话** | settings.json | `steering_mode`/`follow_up_mode`（one-at-a-time/all）、compaction 三参数 |
-| **记忆与上下文** | settings.json | `compaction.enabled/reserve_tokens/keep_recent_tokens`；SessionOptions 覆盖优先 |
-| **工具与密钥** | `BUILTIN_TOOL_NAMES` + ToolRegistry | per-机器人 `enabled_tools` 勾选 |
-| **技能与扩展** | docs/skills.md + packages.md | 技能目录 `~/.pi/agent/skills/`、`.pi/skills/`；包管理 `pi install/remove/list`（npm/git/local 三源）；`extension_policy: safe|balanced|permissive` |
-| **MCP** | McpSessionOptions | config_paths 管理 + 服务器开关 |
-| **审批**（能力提示） | extension_ui_handler 决策 | `~/.pi/extension-permissions.json` 的镜像视图（mirach 场景存自己库里）|
+1. **ExtensionUiRequest**（confirm/select/input/editor/notify）：
+   pi-adapter 实现 `extension_ui_handler`（async_trait）→ Tauri Event
+   发前端弹卡 → 前端 IPC `approve_action(sessionId, requestId,
+   approved)` → resolve oneshot → handler 返回 ExtensionUiResponse。
+   `persist_extension_permissions:false`（决定存 mirach 库，不写
+   `~/.pi/extension-permissions.json`）；弹窗第三态"仅本次"=响应里
+   `"persist": false`。
+2. **ask 工具**：questions[{question, options, multi}] + timeoutMs，
+   答案按 ask_response 语义回灌；超时=模型收到未回答错误（上游语义，
+   不挂死）。
 
-### 3.4 控制面走 Tauri IPC（不走 AG-UI）
-
-「不属于 Agent 循环」的判据（AGENTS L2 正交原则）：
+### 4.5 控制面走 Tauri IPC（不走 AG-UI）
 
 ```
-IPC：session_list / session_create / session_open / session_delete /
-     session_rename / set_model / set_thinking_level / get_state /
-     get_messages / compact / fork / export_html / get_agui_endpoint /
-     extension_ui_response / ask_response / approval (capability)
+IPC：session_list/create/open/delete/rename、set_model、
+     set_thinking_level、get_state、get_messages、compact、fork、
+     export_html、get_agui_endpoint、approve_action、ask_response、
+     sync_app_context（100ms debounce）、delegate_to_agent
 AG-UI：prompt(发消息+收流) / interrupt / resume / tool-result
 ```
 
-注意 `set_model`/`get_state` 两处都有人想往 AG-UI 塞——**不**。它们是
-会话管理面，设置页与侧栏在无轮次运行时也要用。
+判据：不属于 Agent 循环的会话管理面/系统面都走 IPC——设置页与侧栏在
+无轮次运行时也要用。
 
-### 3.5 审批与问题卡（pi 的两个 UI 回调）
+### 4.6 steer/follow_up（已定降级）
 
-pi 有两类「引擎伸手要 UI」的请求，都必须由 L3 的 handler 承接：
+in-process 面缺位（上游明说）。MVP：`steer` = abort+prompt（丢失排队
+语义，设置页注明）；`follow_up` = L3 自己排队（delegate 队列即复用）。
+上游补齐后一行切 `SessionTransport::rpc_subprocess`。
 
-1. **ExtensionUiRequest**（能力审批 confirm/select/input/editor/notify）：
-   `SessionOptions.extension_ui_handler`（in-process，async_trait）。
-   mirach 实现 → Tauri 事件发前端弹窗 → 决定回传 handler。
-   **fail closed**：handler 缺位 = deny。`persist: false`（会话内记忆）
-   由弹窗第三态「仅本次」提供。
-2. **ask 工具**（`ask_request` 事件：questions[{question, options,
-   multi}] + timeoutMs）：RPC 模式下是事件；in-process 下经
-   ToolExecutionUpdate/ask_tool 面暴露（落地时以 sdk.rs 实测为准）。
-   UI = 问题卡组件（elements/option-list 将来可套用），答案走
-   `ask_response` 语义回灌。
-   **超时语义照抄上游**：timeout 后模型收到「用户未回答」错误，不挂死。
+### 4.7 delegate 队列（mirach 自建设计，非 pi 能力）
+
+前端 IPC `delegate_to_agent` → AgentDelegate 检查 session 空闲：
+空闲立即 prompt；忙则入队（上限 10，超出 QueueFull）。执行者=src-tauri。
+执行事件（文本流/工具调用）走 **Tauri Event** 推前端追加进当前对话——
+因为 AG-UI run 只能由前端 HTTP 触发，Rust 侧不能凭空起 run。
 
 ---
 
-## 4. 数据真相边界（谁持什么）
+## 5. 数据真相边界（谁持什么）
 
-### 4.1 对话真相 = pi（L4）
-
-pi 的会话存储（V1 JSONL → V2 segmented store，含分支树/compaction/
-checkpoint/迁移账本）是**对话真相的唯一持有者**。mirach 不解析、不改写
-pi 会话文件——侧栏列表读 header 是「只读镜像」。fork/branch/tree 全部
-下沉给 pi 的能力面。
-
-### 4.2 UI 快照 = mirach SQLx（L3）
-
-run 边界快照（AgentEnd/TurnEnd）落 mirach 自己的 SQLx，**只服务**
-resume/审计/崩溃恢复，不是第二真相。删会话 = 调 pi 删 + 删 mirach 快照，
-顺序：先 pi 后快照（真相在后删的一方）。
-
-### 4.3 配置真相 = pi settings.json（兼容镜像进设置页）
-
-设置页读写 `~/.pi/agent/settings.json` 的兼容键（camelCase alias 上游
-自认），`PI_CONFIG_PATH` 不设（pi 双文件合并语义：全局+项目）。mirach
-自有的 UI 偏好（主题/语言/布局）继续走 mirach 的存储，**不混进** pi
-settings。
+- **对话真相 = pi**：V1 JSONL→V2 segmented store（分支树/compaction/
+  checkpoint/迁移账本）是唯一持有者。mirach 只读 header 做列表镜像，
+  不解析不改写。
+- **UI 快照 = mirach SQLx**（app_data_dir/agent.db，sqlx::migrate! 编译
+  期内嵌）：run 边界快照只服务 resume/审计/崩溃恢复。删会话=先 pi 后
+  快照（真相在后删的一方）。
+- **配置真相 = pi settings.json**（`~/.pi/agent/settings.json` 全局 +
+  `.pi/settings.json` 项目，camelCase alias 兼容）；nested 对象整体
+  替换不合并（上游语义，设置页 UI 要照此呈现）。mirach 的 UI 偏好
+  （主题/语言/布局）不混进 pi settings。
+- **状态归属表**（架构文档 §4.1 采纳）：纯 UI 态=Zustand；聊天线程/
+  composer/A2UI surface 内部态=assistant-ui Store（surface 是消息的
+  一部分，重渲不丢）；Action 返回值=TanStack Query；业务数据=Rust SQL；
+  Agent 会话态=Pi 进程内；UI 上下文=AppState（字段权威：route/
+  selected_record_id/active_view/selected_text 前端推送，
+  active_session_id Rust 管）。
 
 ---
 
-## 5. mock → 真引擎的切换面
+## 6. mock → 真引擎切换
 
-`src/components/assistant-ui/runtime.tsx` 的 `mockModelAdapter` 退役
-路径：AssistantRuntime 的 ChatModelAdapter 改为「把 composer 提交发到
-L2 AG-UI、把 SSE 事件喂回 assistant-ui store」的适配器。**UI 层一行不
-改**——这是当初选 assistant-ui + AG-UI 的全部理由。切换后必须回归
-mock 时代验证过的全部状态：思考流式/完成折叠/工具运行/1 tool call/
-thinking-indicator 三态/composer 全控件。
+runtime.tsx 的 ChatModelAdapter 换成「AG-UI SSE → assistant-ui store」
+适配器，UI 层一行不改。切换后回归清单：思考流式/完成折叠/工具运行/
+1 tool call/thinking-indicator 三态/composer 全控件/审批卡/问题卡/
+A2UI surface/断线 resume。
 
----
+## 7. 落地顺序
 
-## 6. 落地顺序（照 AGENTS「待办 3」，细化到文件）
+1. **L3 骨架**：Cargo.toml 加 pi（path 引 G 盘，default-features=false
+   去 TUI 栈）→ pi_session.rs 打通 create/prompt/abort/state →
+   cargo check 过（recursion_limit/nightly 生效验证）。
+2. **L2 竖链**：/ag-ui 一条链 + 事件映射器（§2.2 表逐行单测，用 pi
+   AgentEvent 构造样本）。
+3. **L1 切换**：runtime.tsx 真 SSE；发消息→流式回复→渲染。
+4. **控制面**：IPC 命令 + 侧栏 sessions + ModelSelector/ContextDisplay
+   点亮。
+5. **审批/问题卡**：handler + oneshot + 前端卡。
+6. **A2UI**：render_a2ui 工具 + catalog + 前端 generative-ui 接线
+   （先清 A22/A24/A25/A26）。
+7. **设置页接线**（提供方/模型/compaction/工具/技能包管理/审批镜像）。
 
-1. **L3 骨架**：`src-tauri/Cargo.toml` 加 pi 依赖（path 引用 G 盘）→
-   `pi_session.rs`（create/prompt/abort/state 五个函数打通，asupersync
-   runtime 起来）→ `cargo check` 过（recursion_limit 生效验证）。
-2. **L2 打通**：axum `/ag-ui` 一条竖链，AgentEvent→AG-UI 翻译器
-   （§2.2 表逐行写单测，用 pi 的 AgentEvent 构造样本）。
-3. **L1 切换**：runtime.tsx 适配器换成真 SSE；发消息→流式回复→渲染。
-4. **控制面**：IPC 十二命令（§3.4）+ 侧栏 sessions 列表 + composer
-   ModelSelector/ContextDisplay 点亮。
-5. **审批/问题卡**：extension_ui_handler + ask 卡片。
-6. **设置页接线**（§3.3 表）与技能/包管理。
+每步验收 = tsc + vitest + cargo check + §6 回归清单。
 
-每步的验收 = AGENTS 两门禁（tsc + vitest）+ `cargo check`，外加
-「§5 状态回归清单」逐项过。
+## 8. 风险与未决（含架构文档附录 A 清账结果）
 
----
+**已清（源码实锤）**：A1✓ A2✓ A3✓ A4✓ A7✓ A8✓ A9✓ A10✓（AgentEnd 后
+还有 AutoCompaction*/extension_error）A15✓（自带 id）A16✓（无
+approve/deny）A17✓（{tool_call_id, tool_name, args, result, is_error}）
+A19✓（nightly-2026-08-31 实锤）A21✓（get_app_context 注册为
+agent_tool:true 的 Action 即动态读 AppState）A27✓（稳定面有
+Tool/ToolDefinition/ToolRegistry/ToolFactory/default_tool_registry，
+自定义工具经 ToolRegistry 注入）。
 
-## 7. 风险与未决（记录在案）
+**待源码确认**：A5/A6（RunContext 相关——若走 Agent::run() 路径才需要；
+MVP 只用 session.prompt() 可绕开）A11/A12/A20（ag-ui crate 的
+Agent trait/mount_agent 签名——装依赖后查）A13（逐步落地时对签名）
+A14（环形缓冲容量/sequence 起点——实现时定，建议 sequence 从 1 起）
+A22（a2ui-rs 来源——crates.io 查证）A23（catalog 注入与
+append_system_prompt 兼容性）A24（ACTIVITY_SNAPSHOT payload）A25/A26
+（assistant-ui present 注册/useAgUiSendA2uiAction——查已装的
+@assistant-ui/react-generative-ui 导出面）A28（ts-rs/specta 类型生成）
+A29（delegate 队列触发回调——实现时定）A30（handler async_trait——
+ActionDef::handler 已是 boxed async Fn，无需）。
 
-- **asupersync ≠ tokio**：pi 的 future 不能进 tauri::async_runtime。
-  L3 需要一个 per-app 的 asupersync runtime 单例（或 SessionOptions
-  runtime 注入），shutdown 顺序在 app 退出钩子里处理。
-- **steer/follow_up 在 in-process 缺位**（上游 Compatibility Notes）：
-  MVP 降级为 abort+prompt，设置页注明；或换 rpc_subprocess 传输。
-- **workspace_trusted 默认 false**：打开项目的「信任此目录」确认框是
-  必需 UI，不是装饰。
-- **G 盘 path 依赖**：`G:/pi_agent_rust-main` 是开发期 path 引用；
-  出包前换成 git rev-pin 或 vendored 拷贝（上游发 crates.io 后用版本）。
-- **pi 版本漂移**：上游 0.5.1，`pi::sdk` 之外全是 #[doc(hidden)] 不
-  稳定面——集成只准 import `pi::sdk::*`（+ `pi::model::` 的事件类型），
-  碰别的模块即违反 SemVer 纪律。
-- **Windows**：上游 windows.md 有专门文档，编译/路径坑开工前先读；
-  rust-toolchain 1.95 与本机工具链对齐。
+**风险**：asupersync≠tokio（§0.1）；G 盘 path 引用出包前换 git
+rev-pin/vendored；nightly 工具链与本机 rustup 对齐（上游 pin
+nightly-2026-08-31，rust-toolchain.toml 自动拉取）；A2UI catalog 前后
+端同步成本（ts-rs 生成，变更频率低可控）；agent-visible Action 数量
+红线 15-20。

@@ -1616,6 +1616,25 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     workspace_trusted 默认 false 要信任确认框；steer/follow_up
     in-process 缺位→MVP 降级 abort+prompt；七步落地顺序与风险清单见
     文档 §6/§7。
+  - **pi 集成文档 v2（吸收 agent-native 架构文档 + 附录 A 清账）**
+    （2026-09-29，用户提供了一份更完整的架构文档：workspace 五 crate
+    拆分/三通道/ActionRegistry/A2UI/delegate 队列/附录 A 三十项待
+    确认，要求对照核实并优化）：docs/pi-integration.md 重写为 v2。
+    **源码实锤两处**：①A19——上游 rust-toolchain.toml 钉死
+    nightly-2026-08-31，"nightly 隔离在 pi-adapter"成立（v1 的 stable
+    说法作废）；②A16——sdk.rs 无 approve/deny，架构文档 §6.1 的
+    "session.approve()/deny()"是编造 API，审批回灌唯一正道=
+    extension_ui_handler 挂 oneshot（请求→Tauri Event 弹卡→IPC 回→
+    resolve→返回 ExtensionUiResponse），fail closed。**其余裁定**：
+    A10 清账（AgentEnd 后还有 AutoCompaction*/extension_error，流退出
+    以 channel 关闭为准）；依赖图矛盾以"pi-adapter→agent-core"为准；
+    事件映射合并为单表（补 TurnEnd→STEP_FINISHED 带 usage）；审批走
+    IPC 与 /ag-ui/tool-result（AG-UI frontend tools）是两个机制勿混；
+    delegate 队列标注为 mirach 自建设计非 pi 能力；workspace 拆分分
+    阶段（先单 crate 模块，nightly 拖累/编译时间/A2UI semver 任一
+    出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
+    附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
+    c0c8c27（v1）、本轮 v2。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入
