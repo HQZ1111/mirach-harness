@@ -16,9 +16,8 @@
 ┌─ L1 前端（mirach-harness src/，纯投影）──────────────────────────┐
 │  FlexLayout · assistant-ui（聊天 Store + A2UI 渲染）· shadcn/ui  │
 │  对话区(主栏)      侧栏(左/右栏)        设置页(未来)               │
-├─ L2 桥接层（三通道）─────────────────────────────────────────────┤
-│  AG-UI SSE（Agent→前端）· Tauri IPC（前端→Rust）                  │
-│  · Tauri Event（Rust→前端，内部任务事件：delegate 队列进度等）     │
+├─ L2 桥接层（两通道，v2.2）───────────────────────────────────────┤
+│  AG-UI HTTP（常驻事件流，Agent→前端）· Tauri IPC（前端↔Rust 控制）│
 ├─ L3 Rust 应用层（src-tauri + workspace crates，stable）──────────┤
 │  ActionRegistry · AppState · SQLx · axum · agui-bridge · Auth    │
 │  AgentDelegate 实现 · SnapshotProvider 实现                       │
@@ -88,8 +87,8 @@
    成本是 AG-UI 事件→消息 part 的归约器（LocalRuntime 方案同样要写，
    且 mock 三阶段已验证过累积 content 的构造）。收益：铁律②"SSE 只喂
    机器"成立、XState Inspector 一条调试主线、resume/interrupt 是一等
-   转换、delegate 门铃→attach 走同一条归约路径、前端刷新由 run 边界
-   快照水合后 assistant-ui 照常渲染。API 面以已装
+   转换、delegate run 与用户 run 走同一条归约路径（常驻流）、前端刷新
+   由 run 边界快照水合后 assistant-ui 照常渲染。API 面以已装
    @assistant-ui/react 0.15.22 的 useExternalStoreRuntime 导出实测为准。
 6. **不建议砍**：ApprovalRegistry（审批态必须驻 Rust，跨前端刷新）；
    sync_app_context（get_app_context 的推送面，字段已最小化）；
@@ -115,8 +114,14 @@ delegate 队列"忙则入队"检查的就是这把锁。因此：
    GET 流是唯一消费口（§0.2-1），run 归属只看事件里的 run_id/source。
    断线重连 Last-Event-ID 天然跨 run 段连续续放。
 4. **队列纪律**：composer 在 phase≠idle 时禁用发送（或显式转
-   follow_up）；用户触发与 delegate 任务走**同一把 Mutex、同一个队**
+   follow_up；steer=abort+prompt 即 phase≠idle 时的显式发送路径，
+   §4.6）；用户触发与 delegate 任务走**同一把 Mutex、同一个队**
    （AgentDelegate 是唯一排序权威），不允许两条排队通道。
+5. **run 外事件合法**：AutoCompaction*、data_changed 等不隶属任何 run
+   的 CUSTOM 事件会在 idle 态到达（AgentEnd 之后仍有事件，§0.1）——
+   fail-loud 规则**只约束 run 内交错**（streaming 中收到另一 runId 的
+   RUN_STARTED 这类），idle 态到达的 run 外 CUSTOM 事件透传给对应
+   消费者，不得误伤。
 
 ---
 
@@ -128,7 +133,7 @@ delegate 队列"忙则入队"检查的就是这把锁。因此：
 
 | # | 架构文档说法 | 源码事实 | 裁定 |
 |---|---|---|---|
-| 1 | §6.1 审批：Rust 调 `session.approve()` / `session.deny()` | sdk.rs 无此 API；唯一回灌面是 `SessionOptions.extension_ui_handler`（async_trait `request_ui -> ExtensionUiResponse`） | **修正**：pi-adapter 实现 handler 时挂 oneshot——请求到达→转 Tauri Event 发前端→前端 IPC `approve_action` 回来→resolve oneshot→handler 返回 `ExtensionUiResponse`。**fail closed**：handler 缺位=deny（上游明说） |
+| 1 | §6.1 审批：Rust 调 `session.approve()` / `session.deny()` | sdk.rs 无此 API；唯一回灌面是 `SessionOptions.extension_ui_handler`（async_trait `request_ui -> ExtensionUiResponse`） | **修正（v2.2 统一通道）**：pi-adapter 实现 handler 时挂 oneshot——请求到达→转 **AG-UI CUSTOM 事件（常驻流）**发前端→前端 IPC `approve_action` 回来→resolve oneshot→handler 返回 `ExtensionUiResponse`；oneshot 不自带超时，超时由 ApprovalRegistry 统一计时。**fail closed**：handler 缺位=deny（上游明说） |
 | 2 | §4.3 "pi-adapter 不依赖 agent-core" vs §三/§4.4 "pi-adapter → agent-core（ActionRegistry→ToolRegistry）" | 依赖图两边自相矛盾 | **以依赖图为准**：pi-adapter 依赖 agent-core。不碰 ActionRegistry 就没法定义 Pi 工具 |
 | 3 | §二 "nightly 隔离在 pi-adapter"（A19 待确认） | 上游钉 nightly-2026-08-31 | **成立**（见 §0.1）；pi-adapter 独立 rust-toolchain.toml |
 | 4 | §4.4 事件映射表缺 TurnStart/MessageStart/MessageEnd/AutoCompaction；usage/token 无落点 | agent.rs 枚举有这些变体；Usage 在 AssistantMessage 上 | **合并**：以本文 §2.2 表为准（含 STEP_FINISHED 带 usage——ContextDisplay 的唯一数据源） |
@@ -145,7 +150,7 @@ Shared Actions（ActionDef+Registry+useAction 同 handler）✓；Shared Data
 STATE_DELTA）✓；Shared Application State（get_app_context 按需拉取 +
 sync_app_context 100ms debounce 推送，**不含 draft_content**——草稿是
 纯 UI 态，Pi 不该知道）✓；UI 即 Agent 操作面板（delegate+agent_tool
-标注+Tauri Event 回传）✓；动态 UI（A2UI render_a2ui）✓。
+标注+事件经常驻流回传）✓；动态 UI（A2UI render_a2ui）✓。
 **核心原则**：Pi 拥有 Agent 循环、Rust 不碰；前端只管"怎么显示"；
 Action 是唯一业务入口；不在 Tokio 里 block_on；AI 非确定性工作走对话流。
 
@@ -161,6 +166,10 @@ Action 是唯一业务入口；不在 Tokio 里 block_on；AI 非确定性工作
 `127.0.0.1:0`，**不透明随机 token**（uuid，经 IPC 下发）+ Origin/Host
 校验；(port, token) 存 AppState，前端 `invoke("get_agui_endpoint")`
 主动拉取（避免启动竞态）。interrupt/tool-result 不设 HTTP 端点（§0.2）。
+POST body 带 `{threadId, message, images?}`（runId 由 Rust 生成）；GET
+流 token 走 query 参数（localhost 场景可接受）。**MVP 只为活跃 thread
+开一条常驻流（每 thread 一个 XState actor）**；后台 thread 的 delegate
+事件只进缓冲，切回时 Last-Event-ID 补放。
 
 ### 2.2 事件映射（pi::AgentEvent → AG-UI EventType）
 
@@ -168,27 +177,33 @@ Action 是唯一业务入口；不在 Tokio 里 block_on；AI 非确定性工作
 |---|---|---|
 | `AgentStart` | `RUN_STARTED` | XState 轮次机 |
 | `TurnStart` | （内部计数，不外发） | — |
-| `MessageStart` | `TEXT_MESSAGE_START` / `THINKING_TEXT_MESSAGE_START`（按首个块类型） | — |
+| `MessageUpdate { TextStart/ThinkingStart }` | `TEXT_MESSAGE_START` / `THINKING_TEXT_MESSAGE_START`（**每个块各发各的 START**，按 contentIndex 独立配对） | — |
 | `MessageUpdate { TextDelta }` | `TEXT_MESSAGE_CONTENT` | MarkdownText 流式 |
 | `MessageUpdate { ThinkingDelta }` | `THINKING_TEXT_MESSAGE_CONTENT`（AG-UI thinking 事件名以 ag-ui crate 版本为准） | Reasoning streaming |
 | `MessageUpdate { ToolCallStart/Delta/End }` | `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END` | ToolGroup / tool-call |
-| `ToolExecutionStart` | `TOOL_CALL_START`（执行段，配 CUSTOM 进度） | thinking-indicator「正在使用 X」 |
-| `ToolExecutionUpdate { partial_result }` | `TOOL_CALL_ARGS` 流式 / `CUSTOM` | 终端块、web-preview 等工具 UI |
-| `ToolExecutionEnd { result, is_error }` | `TOOL_CALL_END`（error 标记） | tool-error 元素 |
+| `ToolExecutionStart` | `CUSTOM`（tool_execution 载荷） | thinking-indicator「正在使用 X」 |
+| `ToolExecutionUpdate { partial_result }` | `CUSTOM`（执行进度流） | 终端块、web-preview 等工具 UI |
+| `ToolExecutionEnd { result, is_error }` | `CUSTOM`（tool_execution_end，error 标记） | tool-error 元素 |
 | `TurnEnd` | `STEP_FINISHED`（**带 usage**——ContextDisplay/token 计量的唯一来源） | ContextDisplay.Bar |
-| `MessageEnd` | `TEXT_MESSAGE_END` | 轮次机 |
+| `MessageUpdate { TextEnd/ThinkingEnd }` | `TEXT_MESSAGE_END` / `THINKING_TEXT_MESSAGE_END`（与同 contentIndex 的 START 配对） | 轮次机 |
 | `AgentEnd { messages, error }` | `RUN_FINISHED` / `RUN_ERROR`；usage 快照落 SQLx | 轮次机 done/error |
-| `AutoCompactionStart/End` | `CUSTOM`（compaction 提示） | 会话横幅 |
+| `AutoCompactionStart/End` | `CUSTOM`（compaction 提示，**idle 态也可到达**，§0.3-5） | 会话横幅 |
 | `ExtensionUiRequest` | `CUSTOM`（审批载荷带 requestId）→ 前端弹卡 → **IPC 回灌** | 审批卡（§4.4） |
 | ask 工具问题卡 | `CUSTOM`（questions+timeoutMs） | 问题卡 UI（option-list 元素可套用） |
 | A2UI（render_a2ui 拦截产物） | `CUSTOM` 或 ACTIVITY_SNAPSHOT（#5 待确认） | assistant-ui generative-ui 渲染 |
 | 业务数据变更 | `CUSTOM`（data_changed → invalidateQueries） | TanStack Query |
 
+**维度裁定（防 START/END 双重配对）**：`TOOL_CALL_START/ARGS/END` 只
+表达**模型参数流**维度（MessageUpdate{ToolCall*}）；**工具执行**维度
+（ToolExecutionStart/Update/End）走 **CUSTOM**（tool_execution 载荷）。
+两维度共用同一组事件会让一个工具调用出现两对 START/END，消费端必乱。
+
 镜像类型纪律（架构文档 §5.1 采纳）：agent-protocol **不引用**
 `pi_agent_rust::AgentEvent`，自建镜像类型，pi-adapter 做转换——nightly
 污染不泄漏。SSE 序号：per-thread 单调递增，镜像到 SSE `id:` 行；环形
-缓冲（先单锁，热了再 DashMap）；**先写缓冲再写 SSE**；淘汰后回退
-`MESSAGES_SNAPSHOT` 强制重建；重放只重发已产生事件，绝不重跑 Agent 循环。
+缓冲（先单锁，热了再 DashMap）；**先写缓冲再写 SSE**；溢出回退
+`MESSAGES_SNAPSHOT` 强制重建（**MVP 后**，§0.2-4）；重放只重发已产生
+事件，绝不重跑 Agent 循环。
 
 ---
 
@@ -227,7 +242,7 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
 | `pi-adapter::a2ui_bridge` | 注册 `render_a2ui` 自定义工具；拦截→`validate_a2ui`→映射 ACTIVITY_SNAPSHOT | **验证失败降级为文本展示**（原文附上+"UI 生成失败"），不静默丢弃 |
 | `pi-adapter::lifecycle` | `Mutex<AgentSessionHandle>` 串行；**abort handle 在锁外获取**；channel 关闭退出 | prompt 持锁跨整个执行期（同一时刻只有一个 prompt） |
 | `src-tauri::approval` | ApprovalRegistry（HashMap<session_id, Vec<PendingApproval>>） | 超时默认**自动拒绝**；会话关闭时遍历 pending 按策略处理；崩溃恢复 `list_pending_approvals` 带 remaining_seconds |
-| `src-tauri::delegate` | AgentDelegate 队列（上限 10，满返 QueueFull） | 执行事件走 **Tauri Event**（Rust 侧不能凭空起 AG-UI run）；prompt 完成回调触发下一项 |
+| `src-tauri::delegate` | AgentDelegate 队列（上限 10，满返 QueueFull） | 执行事件进 AG-UI 缓冲照发 sequence（常驻流到达，§0.2-1）；interrupt/abort 同样算 prompt 返回、触发队列推进 |
 | `src-tauri::snapshot` | 实现 agui-bridge 的 SnapshotProvider trait | messages_snapshot 经 pi-adapter 从 Pi 会话态取；state_snapshot 从 AppState 读 |
 
 ### 4.2 对话区（主栏，AssistantThreadPane）
@@ -235,8 +250,8 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
 | UI 件 | 数据源 | 说明 |
 |---|---|---|
 | 消息流（Markdown/Reasoning/ToolGroup/thinking-indicator） | AG-UI SSE | mock 三阶段已验证全状态，切换后逐项回归 |
-| 停止按钮（Send↔Cancel 已有） | `/ag-ui/interrupt` | — |
-| ModelSelector | `/api/models`（RpcModelInfo） | MODELS 常量退役；efforts 行 → set_thinking_level |
+| 停止按钮（Send↔Cancel 已有） | IPC `interrupt(threadId)` | Mutex 下最多一个活动 run，thread 维度即可定位 |
+| ModelSelector | IPC `get_available_models`（RpcModelInfo） | MODELS 常量退役；efforts 行 → set_thinking_level |
 | ContextDisplay.Bar | TurnEnd usage | mock 里永远空的面板从此点亮 |
 | 审批卡 | CUSTOM + IPC 回灌 | 审批流 §4.4 |
 | 问题卡 | CUSTOM（ask） | 超时后模型收"用户未回答"错误，不挂死 |
@@ -249,7 +264,7 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
 |---|---|---|
 | sessions 列表 | IPC 读 pi 会话目录 header（**只读镜像**） | 改名/删除经 IPC 下沉 pi；fork/branch/tree 全下沉 pi |
 | 新建会话 | IPC session_create | 复用引擎 |
-| thread 标签↔会话绑定 | layout store + IPC | 拖对话标签=拖那个会话 |
+| thread 标签↔会话绑定 | layout store + IPC | 拖对话标签=拖那个会话；**threadId↔sessionId 权威映射存 AppState**（Rust），前端只持镜像 |
 | 右栏 files | 已有 fs.rs | 不动；与 pi read 工具同 cwd 天然一致 |
 | logs 窗格 | on_tool_start/end 钩子 + ToolExecutionUpdate | — |
 | bots | 机器人=system_prompt+tools+model 预设 | 点开=带 SessionOptions 建会话 |
@@ -257,9 +272,12 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
 ### 4.4 审批与问题卡（pi 的两个 UI 回调，全部 fail closed）
 
 1. **ExtensionUiRequest**（confirm/select/input/editor/notify）：
-   pi-adapter 实现 `extension_ui_handler`（async_trait）→ Tauri Event
-   发前端弹卡 → 前端 IPC `approve_action(sessionId, requestId,
-   approved)` → resolve oneshot → handler 返回 ExtensionUiResponse。
+   pi-adapter 实现 `extension_ui_handler`（async_trait）→ **AG-UI
+   CUSTOM 事件（常驻流）**发前端弹卡 → 前端 IPC `approve_action(
+   sessionId, requestId, approved)` → resolve oneshot → handler 返回
+   ExtensionUiResponse（oneshot 超时归 ApprovalRegistry 计时，§4.1）。
+   **后台 thread 的审批**（delegate run 触发、无常驻流可达）靠
+   `list_pending_approvals` 拉取兜底——前端挂载与切回 thread 时调用。
    `persist_extension_permissions:false`（决定存 mirach 库，不写
    `~/.pi/extension-permissions.json`）；弹窗第三态"仅本次"=响应里
    `"persist": false`。
@@ -326,15 +344,16 @@ runtime.tsx 从 LocalRuntime+mockModelAdapter 换成
 **useExternalStoreRuntime 适配器**：XState actor 唯一消费 AG-UI SSE，
 归约出的 messages/isRunning 喂 assistant-ui 纯渲染（§0.2-5 定稿）。
 切换后回归清单：思考流式/完成折叠/工具运行/1 tool call/thinking-
-indicator 三态/composer 全控件/审批卡/问题卡/A2UI surface/断线 resume。
+indicator 三态/composer 全控件/审批卡/问题卡/断线 resume（A2UI surface
+回归随 MVP 后接线补）。
 
 ## 7. 落地顺序
 
 1. **L3 骨架**：Cargo.toml 加 pi（path 引 G 盘，default-features=false
    去 TUI 栈）→ pi_session.rs 打通 create/prompt/abort/state →
    cargo check 过（recursion_limit/nightly 生效验证）。
-2. **L2 竖链**：/ag-ui 一条链 + 事件映射器（§2.2 表逐行单测，用 pi
-   AgentEvent 构造样本）。
+2. **L2 竖链**：POST 触发 + GET 常驻流 + 重放缓冲 + 事件映射器
+   （§2.2 表逐行单测，用 pi AgentEvent 构造样本）。
 3. **L1 切换**：XState actor + ExternalStore 适配器（§0.2-5）；发消息→
    流式回复→渲染。
 4. **控制面**：IPC 命令 + 侧栏 sessions + ModelSelector/ContextDisplay
