@@ -155,6 +155,7 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             fs::fs_list,
             fs::fs_git_root,

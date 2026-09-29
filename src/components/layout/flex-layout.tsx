@@ -39,6 +39,8 @@ import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
 import { AssistantSessionsPane } from '@/components/panes/assistant-sessions-pane'
 import { HermesSessionsPane } from '@/components/panes/hermes-sidebar/hermes-sessions-pane'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
+import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
+import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 
 // ── 窗格组件注册表（按**类型**分发；多实例共用同一组件） ─────────────────────
@@ -1042,6 +1044,9 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
       const Comp = COMPONENTS[componentName]
       let content: React.ReactNode
       if (Comp) content = <Comp tabName={node.getName()} />
+      else if (componentName === 'preview') {
+        content = <HermesPreviewPane node={node} />
+      }
       else if (componentName === 'external') {
         const cfg = node.getConfig() as { fileName?: string } | undefined
         content = (
@@ -1299,6 +1304,31 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
     window.addEventListener('pointerdown', onWinPointerDown, true)
     return () => window.removeEventListener('pointerdown', onWinPointerDown, true)
   }, [])
+
+  const openPreviewTab = useCallback(
+    (filePath: string, fileName: string) => {
+      let existing: string | null = null
+      model.visitNodes((n) => {
+        const tn = n as TabNode
+        if (tn.getComponent() === 'preview' && (tn.getConfig() as { filePath?: string } | undefined)?.filePath === filePath)
+          existing = n.getId()
+      })
+      if (existing) {
+        model.doAction(Actions.selectTab(existing))
+        return
+      }
+      const filesNode = model.getNodeById('files')
+      const tabset = filesNode?.getParent()
+      if (!(tabset instanceof TabSetNode)) return
+      const id = 'preview-' + Date.now()
+      model.doAction(Actions.addNode({ id, component: 'preview', name: fileName, config: { filePath } }, tabset.getId(), DockLocation.CENTER, tabset.getChildren().length, true))
+      model.doAction(Actions.selectTab(id))
+    },
+    [model],
+  )
+  useEffect(() => {
+    setPreviewOpener((filePath, fileName) => openPreviewTab(filePath, fileName))
+  }, [openPreviewTab])
 
   return (
     <AssistantRuntime>

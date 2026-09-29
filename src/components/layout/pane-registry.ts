@@ -10,7 +10,7 @@
 
 import { Actions, DockLocation, BorderNode, RowNode, TabNode, TabSetNode, type Model, type Node as FLNode } from 'flexlayout-react'
 
-export type PaneType = 'sessions' | 'bots' | 'workspace' | 'session' | 'files' | 'review' | 'terminal'
+export type PaneType = 'sessions' | 'bots' | 'workspace' | 'session' | 'files' | 'review' | 'terminal' | 'preview'
 export type Region = 'left' | 'main' | 'right'
 
 export interface PaneTypeDef {
@@ -34,6 +34,7 @@ export const PANE_TYPES: Record<PaneType, PaneTypeDef> = {
   files: { type: 'files', name: '文件树', region: 'right', multi: false, primary: true, reopenable: false },
   review: { type: 'review', name: '检查', region: 'right', multi: false, primary: false, reopenable: true },
   terminal: { type: 'terminal', name: '终端', region: 'right', multi: true, primary: false, reopenable: true },
+  preview: { type: 'preview', name: '预览', region: 'right', multi: true, primary: false, reopenable: true },
 }
 
 export const paneDef = (type: string): PaneTypeDef | undefined =>

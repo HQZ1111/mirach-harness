@@ -1635,7 +1635,22 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
-  - **  - **文件树 v2（用户 2026-09-29："文件树不能打开文件，每种文件样式
+  - **  - **  - **文件树 v3（用户 2026-09-29 四连：预览别切树开右侧栏标签/各类文件
+    都能开/地址纯显示+左文件夹钮选位置/刷新旁折叠全部）**：①预览改
+    **flexlayout 页签**——点文件经 preview-opener（模块单例解耦）调
+    flex-layout 的 openPreviewTab：同 filePath 已开则 selectTab，否则
+    Actions.addNode 到 files 同区（**注意 0.11 签名 5 参**：json+tabsetId
+    +DockLocation.CENTER+index+select；visitNodes 回调 n 是 Node 需
+    as TabNode 收窄才有 getComponent/getConfig）+selectTab；pane-registry
+    PaneType 并集加 preview。工厂特例渲染 HermesPreviewPane（config.
+    filePath 现读）：图片 img/html **沙箱 iframe sandbox=""**/文本 pre/
+    二进制提示。②地址行改版：纯显示（去输入框）+左 FolderPlus 钮
+    （tauri-plugin-dialog open({directory:true})——**插件四处**：Cargo
+    [dependencies]（**别放 build-deps**，tauri-build 行后面=错误段，能力
+    校验报 Permission dialog:default not found）/main.rs .plugin()/caps
+    dialog:default/npm 包）+刷新旁折叠全部钮（setOpenDirs({})）。cargo
+    check 过；需重启应用（新 exe 才有 dialog 能力）。
+文件树 v2（用户 2026-09-29："文件树不能打开文件，每种文件样式
     一样，没有颜色和图标区分"）**：hermes-file-tree-pane 重写——①**类型
     徽章**：FILE_KINDS 表按扩展名族上色（TS 蓝/JS 黄/{} 橄榄/CSS 天蓝/
     <> 橙/MD 蓝紫/RS 橙红/CFG 灰/IMG 紫/LCK），16px 圆角块类型色底+字，
