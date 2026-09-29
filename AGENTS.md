@@ -1574,6 +1574,29 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     **左侧仅附件**，模型触发器/语音/上下文/发送在右侧 actions 组。
     实测：300ms 思考行、2.2s "正在使用 mock_search"+耗时、4.7s 正文后
     消失；Reasoning 折叠与 ToolGroup "1 tool call" 折叠渲染 ✓。
+  - **elements 全量落盘**（用户 2026-09-29 指令："按网站 elements 目录
+    补齐，所有的组件"）：官网 /elements 目录共 **119 个**，除此前已装的
+    15 个外，**113 个全部从官方 registry 批量拉取落盘**
+    src/components/assistant-ui/elements/（方法：registry JSON 的
+    files[].content 自带源码，BFS registryDependencies 闭包并发抓取 +
+    按 path 落盘，无需逐个跑 CLI）。**命名陷阱**：不少元素 registry 名
+    ≠ 官网 slug（composer-attachments→elements-composer、
+    composer-model-picker→elements-model-picker、composer-voice→voice、
+    thread-list-sidebar→threadlist-sidebar），404 的先从官网文档页抓
+    @assistant-ui/elements-* 真名再拉。**缺货定论**：geo-map /
+    image-gallery / link-preview / media-player / option-list /
+    question-flow / orb 七个 registry 全 404（CLI 新旧版同样 404、
+    registry.json 156 条目无对应、官网页面也无源码块）——**文档已发布
+    但 registry 未发布**，等上游。连带落盘：shadcn ui 原语
+    badge/label/separator/resizable/sheet/sidebar、icons/github.tsx、
+    use-mobile hook、utils/range.ts；tailwind.css 补 sidebar 令牌组。
+    新依赖：@assistant-ui/react-generative-ui / react-mcp /
+    react-syntax-highlighter / store、@base-ui/react、beautiful-mermaid、
+    heat-graph、react-shiki、@types/react-syntax-highlighter、@types/node。
+    组件只落盘未接线（接线按需来——多数需要具体数据面）；已接线元素
+    （thread/composer/reasoning/tool-group/thinking-indicator 等）以根级
+    定制版为准，registry 同名源码并存不覆盖。tsc 0；vitest 21/21；
+    推送 5036d45。
   - **关闭钮统一**（用户 2026-09-27：图标统一/样式走令牌/仅悬停显形，
     撤销 2026-09-26"离家 ✕ 常显"）：①codicons 新增 CloseIcon（codicon
     close path）；②原生 trailing 经 **Layout 的 icons={{close}}** 注入
