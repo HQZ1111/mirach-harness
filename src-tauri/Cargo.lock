@@ -4685,6 +4685,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tokio",
  "tokio-stream",
+ "tower-http",
 ]
 
 [[package]]

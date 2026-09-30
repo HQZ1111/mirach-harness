@@ -20,6 +20,7 @@ use axum::{
 };
 use pi::sdk::AgentEvent;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::cors::CorsLayer;
 
 const BUFFER_CAP: usize = 2000;
 const AGUI_VERSION: &str = "v0.4";
@@ -182,6 +183,13 @@ async fn agui_run(
     if message.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "empty message"}))).into_response();
     }
+    // 会话按需创建（§7-3 冒烟路径；无 API key 时错误以 RUN_ERROR 进缓冲可观测）
+    if let Err(e) = st.engine.create_session(None, None) {
+        st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread }));
+        st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
+        return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
+    }
+
     let run_id = format!(
         "run-{}",
         std::time::SystemTime::now()
@@ -250,5 +258,6 @@ pub fn router(state: Arc<AguiState>) -> Router {
         .route("/ag-ui", post(agui_run))
         .route("/ag-ui/stream", get(agui_stream))
         .route("/healthz", get(healthz))
+        .layer(CorsLayer::very_permissive())
         .with_state(state)
 }

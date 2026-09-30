@@ -19,6 +19,7 @@ base64 = "0.22"
 pi = { package = "pi_agent_rust", path = "G:/pi_agent_rust-main", default-features = false, features = ["sqlite-sessions"] }
 asupersync = "0.5"
 axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["sync", "time", "net", "macros"] }
 serde_json = "1"
 tokio-stream = "0.1"
