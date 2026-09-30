@@ -111,7 +111,9 @@ fn pi_get_messages(
     state.engine.messages()
 }
 
-#[tauri::command]
+// 参数命名显式 camelCase（Tauri v2 默认即此，写明防签名漂移——前端
+// invoke 以 modelId 调用，静默错名会变成"参数缺失"错误）
+#[tauri::command(rename_all = "camelCase")]
 fn pi_set_model(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     provider: String,

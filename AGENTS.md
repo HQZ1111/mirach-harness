@@ -411,6 +411,22 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     时静默 return（→throw）、composer set_model 乐观更新（→成功才写）、
     Mutex 中毒静默恢复（→传播；唯一例外 Drop 清场无法传播，注释说明）。
     新代码过审查时按此条执行。
+  - **ComposerWired 审查核实轮（2026-10-01，14 条修 5 驳 9）**：真 bug
+    ①onModelChange split('/') 截断含 / 的 model id（HF 风格）→
+    indexOf 第一斜杠切分（provider 不含 /，唯一边界）；②useDictation
+    过期闭包——识别实例启动后不重绑回调，第二段识别按启动时旧 value
+    追加 = 覆盖第一段 → onFinalRef 每渲染更新（start 依赖数组随之去掉
+    onFinal）；③onend 无身份校验——用户重新 start 后旧实例 onend 会停
+    掉新识别 → recRef.current === rec 才清场；④ReactNode re-export 无
+    消费方 → 删。加固⑤main.rs pi_set_model 显式 rename_all="camelCase"
+    （Tauri 默认即此，写明防签名漂移）。**驳回（有据）**：#8 slash 覆盖
+    丢前缀——useSlashMatches 是 value.startsWith('/') 语义（kit 源码），
+    "hello /im" 时菜单根本不出现，无可丢前缀；#4 isRunning 拉 state 时序
+    ——E2E 实测点亮即此机制在工作，挂载双 IPC 无依赖非竞争；#6 catch
+    静默——上轮已修（console.error 在），审查看的是旧代码；#14 provider
+    null——Rust 侧 String 非空；#12/#13 审查者自答/桌面无 SSR。
+    **记录待办（功能缺口非 bug）**：slash/mention 菜单键盘导航
+    （activeIndex+方向键）、附件 chip 删除钮（AttachmentRemove）。
 
 ## 工具（`scripts/`）
 

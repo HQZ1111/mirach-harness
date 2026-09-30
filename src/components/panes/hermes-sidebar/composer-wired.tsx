@@ -3,7 +3,7 @@
  * 语音=Web Speech；斜杠/@=kit 匹配器；附件=运行时适配器（图片/文本）；
  * 模型选择=pi 控制面（§4.5 IPC：pi_list_models/pi_get_state/pi_set_model）。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
@@ -68,6 +68,11 @@ function MicGlyph() {
 function useDictation(onFinal: (text: string) => void) {
   const [recording, setRecording] = useState(false)
   const recRef = useRef<{ stop: () => void } | null>(null)
+  // 识别实例启动后不会重绑回调——必须经 ref 读最新 onFinal。否则闭包
+  // 捕获启动那一刻的 value：第一段识别写入后 value 变了，第二段识别
+  // 仍按旧 value 追加 = 覆盖第一段（审查 #2 实锤）。
+  const onFinalRef = useRef(onFinal)
+  onFinalRef.current = onFinal
   const stop = useCallback(() => {
     recRef.current?.stop()
     recRef.current = null
@@ -93,14 +98,21 @@ function useDictation(onFinal: (text: string) => void) {
     rec.interimResults = false
     rec.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) onFinal(e.results[i][0].transcript)
+        if (e.results[i].isFinal) onFinalRef.current(e.results[i][0].transcript)
       }
     }
-    rec.onend = () => stop()
+    // 身份校验：onend 触发时用户可能已重新 start（recRef 指向新实例）——
+    // 旧实例的收尾只清自己的状态，不得停掉新识别（审查 #3 实锤）。
+    rec.onend = () => {
+      if (recRef.current === rec) {
+        recRef.current = null
+        setRecording(false)
+      }
+    }
     rec.start()
     recRef.current = rec
     setRecording(true)
-  }, [onFinal, stop])
+  }, [stop])
   const supported =
     typeof window !== 'undefined' &&
     !!((window as unknown as Record<string, unknown>).SpeechRecognition ?? (window as unknown as Record<string, unknown>).webkitSpeechRecognition)
@@ -172,7 +184,12 @@ export function ComposerWired() {
     }
   }, [isRunning])
   const onModelChange = useCallback((id: string) => {
-    const [provider, modelId] = id.split('/')
+    // provider 不含 '/'，model id 可能含（HF 风格 meta-llama/Llama-3）——
+    // 必须按第一个 '/' 切分；split('/') 会截断 modelId（审查 #1 实锤）。
+    const idx = id.indexOf('/')
+    if (idx <= 0) return
+    const provider = id.slice(0, idx)
+    const modelId = id.slice(idx + 1)
     // 错误即错误：set_model 成功才更新选中态，失败保持原值且错误可见
     // ——不乐观更新（UI 假装切换成功 = 兜底）。
     void invoke('pi_set_model', { provider, modelId })
@@ -270,5 +287,3 @@ export function ComposerWired() {
     </ComposerPrimitive.Root>
   )
 }
-
-export type { ReactNode }
