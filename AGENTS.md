@@ -1635,6 +1635,48 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
+
+  - **pi 接线 §7-1/2/3 实施 + E2E 冒烟三修（2026-09-30，提交
+    54956cc/380d18a/2be0c62/69e5af2）**：
+    - **§7-1**：pi_agent_rust 0.5.1 进 src-tauri（path 依赖
+      G:/pi_agent_rust-main，features=["sqlite-sessions"——memory.rs 无条件
+      import session_sqlite，不带就 E0432]）+ rust-toolchain.toml 钉
+      nightly-2026-08-31 + recursion_limit=256；pi_session.rs：PiRuntime
+      （asupersync reactor+RuntimeBuilder::current_thread，Box::leak 成
+      &'static）+ PiEngine（Mutex<Option<AgentSessionHandle>> 串行）。
+      **SDK 事实**：prompt 是二参 (text, on_event) 直通，无 subscribe 式
+      一参 API（wrapper 照签名写，别造）。
+    - **§7-2**：agui.rs——axum 双端点（POST /ag-ui 起 run 返回 runId；
+      GET /ag-ui/stream 常驻 SSE 唯一消费口，150ms 轮询缓冲放出）+
+      per-thread 环形缓冲（seq 单调，cap 2000）+ AgentEvent→AG-UI 映射器
+      （ToolExecution*→CUSTOM，AgentStart 不发 RUN_STARTED——POST 处理器
+      手动发一次，双发会触发前端交错守卫）。
+    - **§7-3**：runtime.tsx（ExternalStore 纯渲染 + EventSource 常驻流，
+      断线自动带 Last-Event-ID 重连=免费续放）+ turn-actor.ts（XState v5
+      轮次机，reduceAguiEvent 纯函数可单测）。
+    - **【E2E 三修，全部实测根因】**：
+      ①**pi 深递归爆栈杀进程**（exe "无声死亡"真凶）——create_session/
+      prompt 的 future 在 tokio worker（axum）/2MiB 默认栈上 block_on，
+      debug 构建下 pi session future 深递归 >2MiB 直接
+      "thread has overflowed its stack" 带走整个进程。修法：专用
+      Builder::new().stack_size(16MiB) 线程承载（对齐 pi .cargo/config.toml
+      的 RUST_MIN_STACK=16777216 教训：MutexGuard 跨 await 非 Send，
+      不能挪 reserved thread，只能加大调用线程自己的栈）。
+      ②**RUN_STARTED 双发**——POST 手动 push 一次 + AgentStart 映射又
+      一次；删映射器分支。
+      ③**XState fail-loud 守卫白屏**——streaming 中收到另一 runId 的
+      RUN_STARTED 就 throw，但 HTTP 流无连接亲和性：断线重连重放/多 run
+      同缓冲是常态（§0.3 交错语义本来接受），throw 杀死整个 React 树
+      （实测 reload 后重放缓冲即白屏）。改 console.warn+按新 run 段接受；
+      runtime.tsx 加 RuntimeBoundary error boundary 兜底。
+    - 冒烟终态（Tauri 窗口 CDP）：POST 200+runId → SSE
+      RUN_STARTED→TEXT_MESSAGE_END×2→STEP_FINISHED（无 key 时 RUN_ERROR
+      透传 pi 鉴权错误，符合"错误可观测"设计）；UI composer 发送→用户
+      消息渲染 ✓；进程存活 ✓；tsc 0。
+      **验证方法坑**：会话内后台 spawn 的 exe 会被宿主回收——用
+      Start-Process 分离启动；冒烟脚本一律文件日志（appendFileSync）+
+      看门狗，CDP Runtime.evaluate 长 awaitPromise 会无声死（改页面内
+      fire-and-forget + node 短轮询 window.__probe）。
   - **  - **  - **  - **  - **代码模式撤回 + 左侧栏回归官方 ThreadList 原语（用户 2026-09-29：
     "代码模式不对，撤回。左侧栏要用它本身原语的方式加，参考 hermes
     样式，但得用 assistant-ui 的组件"）**：①v3.1 的行号代码模式撤回，
