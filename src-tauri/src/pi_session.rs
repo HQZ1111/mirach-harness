@@ -6,7 +6,7 @@
 //! - AgentSessionHandle 被 Mutex 串行——同一时刻只有一个 prompt；
 //! - 消费面只准 import pi::sdk / pi::model（SemVer 稳定面）。
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use pi::sdk::{AgentEvent, AgentSessionHandle, SessionOptions, create_agent_session};
 
@@ -68,32 +68,21 @@ impl PiEngine {
         Ok(format!("{provider}/{model_id}"))
     }
 
-    /// 发送一条 prompt（Mutex 串行），收集 AgentEvent 轨迹 + 最终消息。
-    /// 事件→AG-UI 的流式映射在 §7-2 拆出；此处先返回归并轨迹供冒烟。
-    pub fn prompt(&self, text: &str) -> Result<Vec<String>, String> {
+    /// 发送一条 prompt（SDK 二参签名：text + on_event；Mutex 串行）。
+    pub fn prompt(
+        &self,
+        text: &str,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<(), String> {
         let mut guard = self.handle.lock().expect("pi engine poisoned");
         let handle = match guard.as_mut() {
             Some(h) => h,
             None => return Err("no active session".into()),
         };
-        let events: Arc<Mutex<Vec<String>>> = Default::default();
-        let sink = events.clone();
-        let assistant = self
-            .runtime
-            .block_on(handle.prompt(text, move |event: AgentEvent| {
-                let line = match &event {
-                    AgentEvent::MessageUpdate {
-                        assistant_message_event,
-                        ..
-                    } => format!("update: {assistant_message_event:?}"),
-                    other => format!("{other:?}"),
-                };
-                sink.lock().expect("event sink poisoned").push(line);
-            }))
+        self.runtime
+            .block_on(handle.prompt(text, move |event: AgentEvent| on_event(event)))
             .map_err(|e| e.to_string())?;
-        let mut all = events.lock().expect("event sink poisoned").clone();
-        all.push(format!("final: {assistant:#?}"));
-        Ok(all)
+        Ok(())
     }
 
     /// 会话状态快照（provider/model/message_count）。

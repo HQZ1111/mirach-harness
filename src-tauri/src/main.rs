@@ -11,6 +11,7 @@ mod fs;
 
 // pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
 mod pi_session;
+mod agui;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -82,6 +83,14 @@ fn fit_to_monitor(window: &tauri::WebviewWindow) {
     if cur_w > work_w || cur_h > work_h {
         let _ = window.set_size(tauri::LogicalSize::new(cur_w.min(work_w), cur_h.min(work_h)));
     }
+}
+
+/// AG-UI 端点发现（端口+token；前端主动拉取，§2.1）
+#[tauri::command]
+fn get_agui_endpoint(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> serde_json::Value {
+    state.endpoint()
 }
 
 fn main() {
@@ -156,10 +165,29 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            // L2 AG-UI 桥（docs/pi-integration.md §7-2）：127.0.0.1:0 + token，
+            // 端点经 get_agui_endpoint 主动拉取（避免启动竞态）。
+            let agui_state = std::sync::Arc::new(agui::AguiState::new());
+            let agui_router = agui::router(agui_state.clone());
+            let agui_for_server = agui_state.clone();
+            tauri::async_runtime::spawn(async move {
+                match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                    Ok(listener) => {
+                        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                        agui_for_server.set_port(port);
+                        eprintln!("[agui] listening on 127.0.0.1:{port}");
+                        let _ = axum::serve(listener, agui_router).await;
+                    }
+                    Err(e) => eprintln!("[agui] bind ERR: {e}"),
+                }
+            });
+            app.manage(agui_state);
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            get_agui_endpoint,
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url

@@ -1,0 +1,254 @@
+//! L2 AG-UI 桥（docs/pi-integration.md §2/§7-2）：axum 双端点 +
+//! per-thread 事件缓冲（sequence 单调）+ AgentEvent→AG-UI 映射器。
+//!
+//! 端点（v2.2 定稿，两通道收口）：
+//! - POST /ag-ui?token=…           起 run：{threadId, message} → {runId}
+//! - GET  /ag-ui/stream?thread&lastEventId&token=…   常驻 SSE（唯一消费口）
+//!
+//! 映射：pi::AgentEvent → AG-UI 事件（§2.2 表）；ToolExecution* 走 CUSTOM
+//! （执行维度与参数流维度分离）；AgentEnd → RUN_FINISHED/RUN_ERROR。
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{ IntoResponse, Sse},
+    routing::{get, post},
+    Json, Router,
+};
+use pi::sdk::AgentEvent;
+use tokio_stream::wrappers::ReceiverStream;
+
+const BUFFER_CAP: usize = 2000;
+const AGUI_VERSION: &str = "v0.4";
+
+pub struct AguiState {
+    pub engine: crate::pi_session::PiEngine,
+    token: String,
+    port: Mutex<Option<u16>>,
+    buffers: Mutex<ThreadBuffers>,
+}
+
+#[derive(Default)]
+struct ThreadBuffers {
+    counters: HashMap<String, u64>,
+    events: HashMap<String, VecDeque<(u64, String)>>,
+}
+
+impl AguiState {
+    pub fn new() -> Self {
+        // token：本地进程随机串（§0.2-3——localhost 威胁模型不需要 JWT）
+        let token = format!(
+            "agui-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        );
+        Self {
+            engine: crate::pi_session::PiEngine::new(),
+            token,
+            port: Mutex::new(None),
+            buffers: Mutex::new(ThreadBuffers::default()),
+        }
+    }
+
+    pub fn set_port(&self, port: u16) {
+        *self.port.lock().expect("agui port poisoned") = Some(port);
+    }
+
+    pub fn endpoint(&self) -> serde_json::Value {
+        serde_json::json!({
+            "port": self.port.lock().expect("agui port poisoned").unwrap_or(0),
+            "token": self.token,
+            "version": AGUI_VERSION,
+        })
+    }
+
+    fn check_token(&self, token: Option<&String>) -> bool {
+        token.map(|t| t == &self.token).unwrap_or(false)
+    }
+
+    fn push(&self, thread: &str, json: serde_json::Value) -> u64 {
+        let mut b = self.buffers.lock().expect("agui buffers poisoned");
+        let counter = b.counters.entry(thread.to_string()).or_insert(0);
+        *counter += 1;
+        let seq = *counter;
+        let dq = b.events.entry(thread.to_string()).or_default();
+        dq.push_back((seq, json.to_string()));
+        while dq.len() > BUFFER_CAP {
+            dq.pop_front();
+        }
+        seq
+    }
+
+    fn drain(&self, thread: &str, after: u64) -> Vec<(u64, String)> {
+        let b = self.buffers.lock().expect("agui buffers poisoned");
+        b.events
+            .get(thread)
+            .map(|dq| {
+                dq.iter()
+                    .filter(|(s, _)| *s > after)
+                    .take(200)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// pi::AgentEvent → AG-UI 事件（§2.2 表；事件名以 ag-ui 协议为基准，
+/// THINKING_* 事件名等 ag-ui crate 落地时对齐）。
+fn map_agent_event(event: &AgentEvent, thread: &str) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    match event {
+        AgentEvent::AgentStart { .. } => vec![json!({
+            "type": "RUN_STARTED", "threadId": thread,
+        })],
+        AgentEvent::MessageUpdate {
+            assistant_message_event,
+            ..
+        } => match assistant_message_event {
+            pi::model::AssistantMessageEvent::TextDelta { delta, .. } => {
+                vec![json!({ "type": "TEXT_MESSAGE_CONTENT", "delta": delta })]
+            }
+            pi::model::AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                vec![json!({ "type": "THINKING_TEXT_MESSAGE_CONTENT", "delta": delta })]
+            }
+            pi::model::AssistantMessageEvent::ToolCallStart { .. } => {
+                vec![json!({ "type": "TOOL_CALL_START" })]
+            }
+            pi::model::AssistantMessageEvent::ToolCallDelta { delta, .. } => {
+                vec![json!({ "type": "TOOL_CALL_ARGS", "delta": delta })]
+            }
+            _ => vec![],
+        },
+        AgentEvent::MessageEnd { .. } => vec![json!({ "type": "TEXT_MESSAGE_END" })],
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            ..
+        } => vec![json!({
+            "type": "CUSTOM", "name": "tool_execution",
+            "value": { "phase": "start", "toolCallId": tool_call_id, "toolName": tool_name },
+        })],
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            partial_result,
+            ..
+        } => vec![json!({
+            "type": "CUSTOM", "name": "tool_execution",
+            "value": { "phase": "update", "toolCallId": tool_call_id, "partial": partial_result },
+        })],
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            is_error,
+            ..
+        } => vec![json!({
+            "type": "CUSTOM", "name": "tool_execution",
+            "value": { "phase": "end", "toolCallId": tool_call_id, "isError": is_error },
+        })],
+        AgentEvent::TurnEnd { .. } => vec![json!({ "type": "STEP_FINISHED" })],
+        AgentEvent::AgentEnd { error, .. } => match error {
+            Some(err) => vec![json!({ "type": "RUN_ERROR", "message": err })],
+            None => vec![json!({ "type": "RUN_FINISHED" })],
+        },
+        AgentEvent::AutoCompactionStart { reason } => vec![json!({
+            "type": "CUSTOM", "name": "compaction", "value": { "phase": "start", "reason": reason },
+        })],
+        AgentEvent::AutoCompactionEnd { .. } => vec![json!({
+            "type": "CUSTOM", "name": "compaction", "value": { "phase": "end" },
+        })],
+        _ => vec![],
+    }
+}
+
+async fn agui_run(
+    State(st): State<Arc<AguiState>>,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !st.check_token(q.get("token")) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "bad token"}))).into_response();
+    }
+    let thread = body["threadId"]
+        .as_str()
+        .unwrap_or("main")
+        .to_string();
+    let message = body["message"].as_str().unwrap_or("").to_string();
+    if message.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "empty message"}))).into_response();
+    }
+    let run_id = format!(
+        "run-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread, "runId": run_id }));
+
+    let st2 = st.clone();
+    let thread2 = thread.clone();
+    // pi 的 block_on 阻塞自己的线程（asupersync），std::thread 承载；
+    // 事件回调经映射器进缓冲，SSE 端轮询放出。
+    let sink = st2.clone();
+    let thread3 = thread2.clone();
+    std::thread::spawn(move || {
+        let _ = st2.engine.prompt(&message, move |event: AgentEvent| {
+            for v in map_agent_event(&event, &thread3) {
+                sink.push(&thread3, v);
+            }
+        });
+    });
+    Json(serde_json::json!({ "runId": run_id })).into_response()
+}
+
+async fn agui_stream(
+    State(st): State<Arc<AguiState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Sse<axum::response::sse::KeepAliveStream<ReceiverStream<Result<axum::response::sse::Event, std::convert::Infallible>>>> {
+    let thread = q.get("thread").cloned().unwrap_or("main".into());
+    let mut cursor: u64 = q.get("lastEventId").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::response::sse::Event, std::convert::Infallible>>(32);
+
+    // 轮询放出（MVP：150ms 步进；per-thread 单消费，drain 后丢弃已送事件）
+    tauri::async_runtime::spawn(async move {
+        loop {
+            for (seq, data) in st.drain(&thread, cursor) {
+                cursor = seq;
+                if tx
+                    .send(Ok(axum::response::sse::Event::default()
+                        .id(seq.to_string())
+                        .data(data)))
+                    .await
+                    .is_err()
+                {
+                    return; // 客户端断开
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+    });
+
+    Sse::new(ReceiverStream::new(rx)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
+async fn healthz() -> impl IntoResponse {
+    "agui ok"
+}
+
+pub fn router(state: Arc<AguiState>) -> Router {
+    Router::new()
+        .route("/ag-ui", post(agui_run))
+        .route("/ag-ui/stream", get(agui_stream))
+        .route("/healthz", get(healthz))
+        .with_state(state)
+}
