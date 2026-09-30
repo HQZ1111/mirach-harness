@@ -1635,7 +1635,23 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
-  - **  - **  - **  - **预览代码模式 + 图标更换（用户 2026-09-29："文件树看代码没有代码
+  - **  - **  - **  - **  - **代码模式撤回 + 左侧栏回归官方 ThreadList 原语（用户 2026-09-29：
+    "代码模式不对，撤回。左侧栏要用它本身原语的方式加，参考 hermes
+    样式，但得用 assistant-ui 的组件"）**：①v3.1 的行号代码模式撤回，
+    恢复 pre break-all 文本渲染；②**hermes-sessions-pane.tsx（mock）与
+    chrome.tsx 删除**——mock 方案违背"用 assistant-ui 组件"的方向；
+    注册表 sessions 回指 AssistantSessionsPane（官方 thread-list 元素
+    thread-list.aui.tsx，**原语接线零改动**：ThreadListPrimitive.New/
+    ItemByIndex、ThreadListItemPrimitive.Root/Trigger/Title/Archive/
+    Delete、ThreadListItemMorePrimitive 全保留），只换皮——顶排
+    [搜索(flex-1)|新建钮(size-7 边框)]、日期分组 caption+发丝线中文
+    （今天/昨天/更早）、行 min-h-9 + 状态点三态（isRunning 绿点脉冲/
+    其余灰点；**官方 ThreadListItemState 无 isMain 字段**，选中态靠
+    data-active 蓝洗）、行 hover ⋯、More 菜单中文（重命名/归档/删除）、
+    空态"没有匹配的会话"。运维坑：vite 死后 taskkill node.exe 会连
+    验证脚本一起杀（**只杀 1430 持有 PID**）；官方 state 字段先查类型
+    再用（isMain 编译期才暴露）。
+预览代码模式 + 图标更换（用户 2026-09-29："文件树看代码没有代码
     模式，选位/折叠图标换掉"）**：①文本预览改**代码模式**——行号列
     （sticky left-0 贴左、横向滚动时行号不动）+ whitespace-pre 不换行
     （长行横向滚动，旧 break-all 换行把代码搅碎）+ min-w-max 撑宽；

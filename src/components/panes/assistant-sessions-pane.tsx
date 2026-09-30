@@ -3,7 +3,7 @@ import { ThreadList } from '@/components/thread-list.aui'
 
 export function AssistantSessionsPane() {
   return (
-    <div className="assistant-sessions-pane">
+    <div className="assistant-sessions-pane h-full min-h-0">
       <ThreadList />
     </div>
   )

@@ -37,7 +37,6 @@ import { TerminalPane } from '@/components/panes/terminal-pane'
 import { WorkspacePane } from '@/components/panes/workspace-pane'
 import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
 import { AssistantSessionsPane } from '@/components/panes/assistant-sessions-pane'
-import { HermesSessionsPane } from '@/components/panes/hermes-sidebar/hermes-sessions-pane'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
@@ -46,7 +45,7 @@ import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 // ── 窗格组件注册表（按**类型**分发；多实例共用同一组件） ─────────────────────
 
 const COMPONENTS: Record<string, React.ComponentType<{ tabName?: string }>> = {
-  sessions: HermesSessionsPane, // 左栏会话列表 = hermes 侧栏视觉（项目概览+日期分桶 recents，本地 mock 纯 UI）
+  sessions: AssistantSessionsPane, // 左栏会话列表 = assistant-ui ThreadList 原语（hermes 皮）
   bots: BotsPane,
   workspace: AssistantThreadPane, // 主对话栏 = assistant-ui Thread
   session: AssistantThreadPane, // 多开会话同用 Thread
