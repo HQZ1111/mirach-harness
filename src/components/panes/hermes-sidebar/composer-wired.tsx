@@ -3,14 +3,15 @@
  * 语音=Web Speech；斜杠/@=kit 匹配器；附件=运行时适配器（图片/文本）；
  * 模型选择=pi 控制面（§4.5 IPC：pi_list_models/pi_get_state/pi_set_model）。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
+  useAui,
   useAuiState,
   unstable_useComposerInput,
 } from '@assistant-ui/react'
-import { ArrowUpIcon, FileText, ImageIcon, Languages, SquareIcon } from 'lucide-react'
+import { ArrowUpIcon, FileText, ImageIcon, Languages, SquareIcon, XIcon } from 'lucide-react'
 
 import {
   Composer,
@@ -121,15 +122,24 @@ function useDictation(onFinal: (text: string) => void) {
 
 function AttachmentsChips() {
   const attachments = useAuiState((s) => s.composer.attachments)
+  const aui = useAui()
   if (!attachments || attachments.length === 0) return null
   return (
     <div className="flex flex-wrap gap-2 px-1 pt-1">
       {attachments.map((a) => (
         <span
-          className="flex items-center gap-2 rounded-xl border border-(--stroke-soft) px-2 py-1 text-xs text-(--text-2)"
+          className="flex items-center gap-1.5 rounded-xl border border-(--stroke-soft) px-2 py-1 text-xs text-(--text-2)"
           key={a.id}
         >
           {a.name}
+          <button
+            aria-label={`移除附件 ${a.name}`}
+            className="text-(--text-4) hover:text-(--text)"
+            onClick={() => void aui.composer.attachment({ id: a.id }).remove()}
+            type="button"
+          >
+            <XIcon className="size-3" />
+          </button>
         </span>
       ))}
     </div>
@@ -197,6 +207,72 @@ export function ComposerWired() {
       .catch((e) => console.error(`[pi] set_model ${id} 失败（保持原选择）`, e))
   }, [])
 
+  // ── 斜杠/@ 菜单键盘导航（↑↓ 移动高亮、Enter/Tab 确认、Esc 关闭）──
+  // Input 的传入 onKeyDown 先于内部 handleKeyPress 执行（包内
+  // composeEventHandlers(onKeyDown, handleKeyPress)），preventDefault
+  // 即可拦截内部 Enter 发送 / Esc 取消运行的默认行为。
+  const [slashIdx, setSlashIdx] = useState(0)
+  const [mentionIdx, setMentionIdx] = useState(0)
+  // Esc 关闭记住当时 value——只有输入变化（匹配 token 改变）才重开
+  const dismissedRef = useRef<string | null>(null)
+  const slashOpen = dismissedRef.current !== value && slash.length > 0
+  const mentionOpen = dismissedRef.current !== value && mentions.length > 0
+
+  useEffect(() => {
+    setSlashIdx(0)
+    setMentionIdx(0)
+  }, [value])
+
+  const onInputKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashOpen) {
+      const n = slash.length
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashIdx((i) => (Math.min(i, n - 1) + 1) % n)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashIdx((i) => (Math.min(i, n - 1) - 1 + n) % n)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        const c = slash[Math.min(slashIdx, n - 1)]
+        if (c) setText('/' + c.name + ' ')
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        dismissedRef.current = value
+        return
+      }
+    }
+    if (mentionOpen) {
+      const n = mentions.length
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setMentionIdx((i) => (Math.min(i, n - 1) + 1) % n)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setMentionIdx((i) => (Math.min(i, n - 1) - 1 + n) % n)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        const p = mentions[Math.min(mentionIdx, n - 1)]
+        if (p) setText(value.replace(/@[\w]*$/, '@' + p.name + ' '))
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        dismissedRef.current = value
+      }
+    }
+  }
+
   return (
     <ComposerPrimitive.Root asChild>
       {/* max-w-none：官方 Composer kit 自带 max-w-lg（512px）第二层收窄，
@@ -206,20 +282,25 @@ export function ComposerWired() {
         <ComposerPrimitive.AttachmentDropzone asChild>
           <ComposerBar className="rounded-(--composer-radius) border border-(--stroke-soft) bg-transparent p-2.5">
             <AttachmentsChips />
-            {slash.length > 0 && (
+            {slashOpen && (
               <ComposerMenu open>
-                {slash.map((c) => (
-                  <ComposerCommandItem key={c.name} command={c} active={false} onClick={() => setText('/' + c.name + ' ')} />
+                {slash.map((c, i) => (
+                  <ComposerCommandItem
+                    key={c.name}
+                    command={c}
+                    active={i === Math.min(slashIdx, slash.length - 1)}
+                    onClick={() => setText('/' + c.name + ' ')}
+                  />
                 ))}
               </ComposerMenu>
             )}
-            {mentions.length > 0 && (
+            {mentionOpen && (
               <ComposerMenu open align="start">
-                {mentions.map((p) => (
+                {mentions.map((p, i) => (
                   <ComposerPersonItem
                     key={p.name}
                     person={p}
-                    active={false}
+                    active={i === Math.min(mentionIdx, mentions.length - 1)}
                     onClick={() => setText(value.replace(/@[\w]*$/, '@' + p.name + ' '))}
                   />
                 ))}
@@ -229,6 +310,7 @@ export function ComposerWired() {
               aria-label="消息输入"
               className="max-h-40 min-h-10 w-full resize-none bg-transparent px-2 text-[0.9375rem] leading-6 text-(--text) outline-none placeholder:text-(--text-4)"
               enterKeyHint="send"
+              onKeyDown={onInputKeyDown}
               placeholder="输入消息，/ 指令，@ 成员…"
               rows={1}
             />
