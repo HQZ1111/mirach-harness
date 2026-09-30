@@ -69,9 +69,18 @@ export function HermesPreviewPane({ node }: { node: TabNode }) {
           />
         )}
         {state.kind === 'text' && (
-          <pre className="p-3 font-mono text-[0.75rem] leading-5 whitespace-pre-wrap break-all text-(--text-2)">
-            {state.text}
-          </pre>
+          <div className="min-h-0 flex-1 overflow-auto font-mono text-[0.75rem] leading-5">
+            <div className="min-w-max py-2">
+              {state.text.split('\n').map((line, i) => (
+                <div className="flex" key={i}>
+                  <span className="sticky left-0 w-10 shrink-0 select-none bg-(--surface) pr-2 text-right text-(--text-4)">
+                    {i + 1}
+                  </span>
+                  <span className="whitespace-pre pr-6 text-(--text-2)">{line === '' ? ' ' : line}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
         {state.kind === 'binary' && (
           <div className="p-3 text-xs text-(--text-4)">二进制文件，不支持预览</div>

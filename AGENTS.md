@@ -1635,7 +1635,15 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
     出现再拆）；A2UI render_a2ui 拦截+验证失败降级文本照抄；30 项
     附录清掉 13 项（A1-4/7-10/15-17/19/21/27），余项标待确认。提交
     c0c8c27（v1）、本轮 v2。
-  - **  - **  - **文件树 v3（用户 2026-09-29 四连：预览别切树开右侧栏标签/各类文件
+  - **  - **  - **  - **预览代码模式 + 图标更换（用户 2026-09-29："文件树看代码没有代码
+    模式，选位/折叠图标换掉"）**：①文本预览改**代码模式**——行号列
+    （sticky left-0 贴左、横向滚动时行号不动）+ whitespace-pre 不换行
+    （长行横向滚动，旧 break-all 换行把代码搅碎）+ min-w-max 撑宽；
+    ②选位钮 FolderPlus（读作"新建文件夹"）→ **FolderSearch**（文件夹+
+    放大镜=选位置）；③折叠全部钮 ChevronRight → **ChevronsDownUp**
+    （双箭头相向=折叠全部的标准形）。CDP 实测：whiteSpace pre ✓、
+    ChevronsDownUp/FolderSearch SVG 换装 ✓、行号列渲染 ✓（截图）。
+文件树 v3（用户 2026-09-29 四连：预览别切树开右侧栏标签/各类文件
     都能开/地址纯显示+左文件夹钮选位置/刷新旁折叠全部）**：①预览改
     **flexlayout 页签**——点文件经 preview-opener（模块单例解耦）调
     flex-layout 的 openPreviewTab：同 filePath 已开则 selectTab，否则

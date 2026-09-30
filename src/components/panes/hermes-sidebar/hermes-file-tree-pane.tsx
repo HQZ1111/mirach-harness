@@ -3,7 +3,7 @@
  * （Tauri dialog）+刷新旁折叠全部钮；点文件=右侧栏开预览标签）。
  */
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { ChevronRight, FileText, Folder, FolderOpen, FolderPlus, RefreshCw } from 'lucide-react'
+import { ChevronsDownUp, ChevronRight, FileText, Folder, FolderOpen, FolderSearch, RefreshCw } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { fsList } from '@/lib/fs'
@@ -157,7 +157,7 @@ export function HermesFileTreePane() {
           title="选择文件夹"
           type="button"
         >
-          <FolderPlus className="size-4" />
+          <FolderSearch className="size-4" />
         </button>
         <span className="min-w-0 flex-1 truncate text-xs text-(--text-2)" title={root}>
           {root}
@@ -169,7 +169,7 @@ export function HermesFileTreePane() {
           title="折叠全部文件夹"
           type="button"
         >
-          <ChevronRight className="size-4" />
+          <ChevronsDownUp className="size-4" />
         </button>
         <button
           aria-label="刷新"
