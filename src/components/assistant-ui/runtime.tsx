@@ -12,6 +12,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useActorRef, useSelector } from '@xstate/react'
 
 import { turnMachine, type TurnContext } from './turn-actor'
+import { approvalBridge } from './approval-bridge'
 
 const THREAD = 'main'
 
@@ -63,9 +64,18 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         es = new EventSource(url)
         es.onmessage = (e) => {
           try {
+            const parsed = JSON.parse(e.data)
+            // 宿主桥门铃（§4.4）：卡片详情以 registry 为真相，经 IPC 拉取
+            // 全量挂起列表（重放流不会造成卡片重复）。事件本体照常喂机器。
+            if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
+              approvalBridge
+                .getState()
+                .refresh()
+                .catch((err) => console.error('[pi] 审批列表拉取失败', err))
+            }
             actorRef.send({
               type: 'AGUI_EVENT',
-              event: JSON.parse(e.data),
+              event: parsed as { type: string } & Record<string, unknown>,
               id: Number(e.lastEventId || 0),
             })
           } catch (err) {
@@ -75,6 +85,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         es.onerror = () => {
           // 浏览器自动重连（带 Last-Event-ID），静默
         }
+        // 挂载恢复：页面刷新后拉一次挂起列表（§4.4 pending_approvals）
+        approvalBridge
+          .getState()
+          .refresh()
+          .catch((err) => console.error('[pi] 审批列表拉取失败', err))
       } catch (e) {
         console.error('[agui] endpoint 获取失败（应用重启中？）', e)
       }

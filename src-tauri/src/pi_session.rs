@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex};
 
 use pi::sdk::{AgentEvent, AgentSessionHandle, SessionOptions, create_agent_session};
 
+use crate::agui::{ApprovalRegistry, ThreadBuffers, UiAnswer};
+
 /// block_on 的固定执行栈：16MiB（虚拟预留，惰性提交）。
 const PI_STACK_BYTES: usize = 16 * 1024 * 1024;
 
@@ -98,6 +100,65 @@ pub struct PiEngine {
     shared: Arc<EngineShared>,
 }
 
+/// 扩展 UI 请求的宿主桥柄（§4.4）：handler 收到请求时先登记再推
+/// CUSTOM 进 AG-UI 缓冲（SSE 唯一消费口照常到达），前端经 IPC 应答回灌。
+#[derive(Clone)]
+pub struct UiBridgeHandle {
+    pub buffers: Arc<Mutex<ThreadBuffers>>,
+    pub approvals: Arc<ApprovalRegistry>,
+    pub thread: String,
+}
+
+/// ExtensionUiHandler 实现：请求 → [registry 登记 → CUSTOM 进缓冲] →
+/// oneshot 等前端 IPC 应答。fail-closed 是上游默认（无 handler 时能力
+/// 提示直接 deny）——有 handler 后，宿主桥故障（registry 清空）按
+/// cancelled 回灌，让扩展得到明确"用户取消"而不是永久挂起。
+/// 上游 trait 是 #[async_trait]（dyn-compatible 反反 Sugar），impl 必须同宏。
+struct HostUiBridge {
+    handle: UiBridgeHandle,
+}
+
+#[async_trait::async_trait]
+impl pi::sdk::ExtensionUiHandler for HostUiBridge {
+    async fn request_ui(
+        &self,
+        request: pi::sdk::ExtensionUiRequest,
+    ) -> pi::sdk::Result<Option<pi::sdk::ExtensionUiResponse>> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<UiAnswer>();
+        // 先登记再推流——前端拉取/秒应答不会撞空注册表
+        self.handle.approvals.register(
+            request.id.clone(),
+            serde_json::json!({
+                "id": request.id,
+                "method": request.method,
+                "payload": request.payload,
+                "timeoutMs": request.timeout_ms,
+                "extensionId": request.extension_id,
+            }),
+            tx,
+        );
+        crate::agui::push_shared(
+            &self.handle.buffers,
+            &self.handle.thread,
+            serde_json::json!({
+                "type": "CUSTOM",
+                "name": "extension_ui_request",
+                "value": { "id": request.id },
+            }),
+        );
+        // 应答到达（或注册表被整体清理）前，pi 的扩展任务在此挂起
+        let answer = match rx.await {
+            Ok(a) => a,
+            Err(_) => UiAnswer { value: None, cancelled: true },
+        };
+        Ok(Some(pi::sdk::ExtensionUiResponse {
+            id: request.id,
+            value: answer.value,
+            cancelled: answer.cancelled,
+        }))
+    }
+}
+
 impl PiEngine {
     pub fn new() -> Self {
         Self {
@@ -110,6 +171,8 @@ impl PiEngine {
     }
 
     /// 创建进程内会话（ephemeral；provider/model 缺省读 ~/.pi settings）。
+    /// ui_bridge：扩展 UI 请求桥（§4.4 审批/问题卡）——None 时保持上游
+    /// fail-closed（能力提示直接 deny）。
     /// 返回 "provider/model" 标识（与 handle.model() 的 (String, String) 对应，
     /// 仅供日志；消费方不解析——单会话引擎下 provider/model 经 pi_get_state
     /// 结构化获取）。
@@ -117,12 +180,19 @@ impl PiEngine {
         &self,
         provider: Option<String>,
         model: Option<String>,
+        ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
         let shared = Arc::clone(&self.shared);
         let options = SessionOptions {
             provider,
             model,
             no_session: true,
+            // handler 仅在加载了扩展时被咨询；挂上桥后能力提示/扩展 UI
+            // 请求经 CUSTOM 事件到前端卡片（§4.4）
+            extension_ui_handler: ui_bridge.map(|h| {
+                Arc::new(HostUiBridge { handle: h })
+                    as Arc<dyn pi::sdk::ExtensionUiHandler>
+            }),
             ..SessionOptions::default()
         };
         let handle: AgentSessionHandle = on_big_stack(move || {

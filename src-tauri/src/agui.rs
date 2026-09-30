@@ -1,5 +1,7 @@
 //! L2 AG-UI 桥（docs/pi-integration.md §2/§7-2）：axum 双端点 +
-//! per-thread 事件缓冲（sequence 单调）+ AgentEvent→AG-UI 映射器。
+//! per-thread 事件缓冲（sequence 单调）+ AgentEvent→AG-UI 映射器 +
+//! ExtensionUiHandler 桥（§4.4 审批/问题卡：请求→缓冲 CUSTOM→前端卡→
+//! IPC 应答→oneshot 回灌）。
 //!
 //! 端点（v2.2 定稿，两通道收口）：
 //! - POST /ag-ui?token=…           起 run：{threadId, message} → {runId}
@@ -29,13 +31,88 @@ pub struct AguiState {
     pub engine: crate::pi_session::PiEngine,
     token: String,
     port: Mutex<Option<u16>>,
-    buffers: Mutex<ThreadBuffers>,
+    /// 事件缓冲（handler 桥经 Arc 共享写同一份——扩展 UI 请求也进流）
+    buffers: Arc<Mutex<ThreadBuffers>>,
+    /// 扩展 UI 请求挂起注册表（§4.4：挂载时拉取 + 应答回灌）
+    pub approvals: Arc<ApprovalRegistry>,
 }
 
 #[derive(Default)]
-struct ThreadBuffers {
+pub struct ThreadBuffers {
     counters: HashMap<String, u64>,
     events: HashMap<String, VecDeque<(u64, String)>>,
+}
+
+/// 缓冲写入（AguiState 与 handler 桥共用——单锁语义不变）
+pub(crate) fn push_shared(
+    b: &Mutex<ThreadBuffers>,
+    thread: &str,
+    json: serde_json::Value,
+) -> u64 {
+    let mut b = b.lock().expect("agui buffers poisoned");
+    let counter = b.counters.entry(thread.to_string()).or_insert(0);
+    *counter += 1;
+    let seq = *counter;
+    let dq = b.events.entry(thread.to_string()).or_default();
+    dq.push_back((seq, json.to_string()));
+    while dq.len() > BUFFER_CAP {
+        dq.pop_front();
+    }
+    seq
+}
+
+/// 前端待应答的扩展 UI 请求（§4.4）。responder 桥回 pi 的 handler await。
+pub struct PendingApproval {
+    pub request: serde_json::Value,
+    responder: tokio::sync::oneshot::Sender<UiAnswer>,
+}
+
+/// 前端对一条扩展 UI 请求的应答（ExtensionUiResponse 的传输形状）。
+#[derive(Debug)]
+pub struct UiAnswer {
+    pub value: Option<serde_json::Value>,
+    pub cancelled: bool,
+}
+
+#[derive(Default)]
+pub struct ApprovalRegistry {
+    pending: Mutex<HashMap<String, PendingApproval>>,
+}
+
+impl ApprovalRegistry {
+    pub(crate) fn register(
+        &self,
+        id: String,
+        request: serde_json::Value,
+        responder: tokio::sync::oneshot::Sender<UiAnswer>,
+    ) {
+        self.pending
+            .lock()
+            .expect("approval registry poisoned")
+            .insert(id, PendingApproval { request, responder });
+    }
+
+    /// 挂载/刷新时拉取（§4.4：pending_approvals 列表）
+    pub fn list(&self) -> Vec<serde_json::Value> {
+        self.pending
+            .lock()
+            .expect("approval registry poisoned")
+            .values()
+            .map(|p| p.request.clone())
+            .collect()
+    }
+
+    /// 应答回灌；id 不存在 = 错误（错误即错误，不静默）。
+    pub fn respond(&self, id: &str, answer: UiAnswer) -> Result<(), String> {
+        let pending = self
+            .pending
+            .lock()
+            .expect("approval registry poisoned")
+            .remove(id)
+            .ok_or_else(|| format!("no pending approval with id {id}"))?;
+        let _ = pending.responder.send(answer);
+        Ok(())
+    }
 }
 
 impl AguiState {
@@ -53,7 +130,8 @@ impl AguiState {
             engine: crate::pi_session::PiEngine::new(),
             token,
             port: Mutex::new(None),
-            buffers: Mutex::new(ThreadBuffers::default()),
+            buffers: Arc::new(Mutex::new(ThreadBuffers::default())),
+            approvals: Arc::new(ApprovalRegistry::default()),
         }
     }
 
@@ -74,16 +152,7 @@ impl AguiState {
     }
 
     fn push(&self, thread: &str, json: serde_json::Value) -> u64 {
-        let mut b = self.buffers.lock().expect("agui buffers poisoned");
-        let counter = b.counters.entry(thread.to_string()).or_insert(0);
-        *counter += 1;
-        let seq = *counter;
-        let dq = b.events.entry(thread.to_string()).or_default();
-        dq.push_back((seq, json.to_string()));
-        while dq.len() > BUFFER_CAP {
-            dq.pop_front();
-        }
-        seq
+        push_shared(&self.buffers, thread, json)
     }
 
     fn drain(&self, thread: &str, after: u64) -> Vec<(u64, String)> {
@@ -194,11 +263,23 @@ async fn agui_run(
     // create_session 的 future 同源深递归，不能在 tokio worker 栈上 block_on——
     // 挪 16MiB 大栈线程同步等结果（engine 经 Arc 共享，单会话不变量不破）。
     let st_create = st.clone();
+    let st_bridge = st.clone();
+    let thread_bridge = thread.clone();
     let create = tokio::task::spawn_blocking(move || {
         std::thread::Builder::new()
             .name("pi-create".into())
             .stack_size(16 * 1024 * 1024)
-            .spawn(move || st_create.engine.create_session(None, None))
+            .spawn(move || {
+                st_create.engine.create_session(
+                    None,
+                    None,
+                    Some(crate::pi_session::UiBridgeHandle {
+                        buffers: Arc::clone(&st_bridge.buffers),
+                        approvals: Arc::clone(&st_bridge.approvals),
+                        thread: thread_bridge,
+                    }),
+                )
+            })
             .expect("spawn pi-create thread")
             .join()
             .map_err(|_| "pi-create thread panicked".to_string())

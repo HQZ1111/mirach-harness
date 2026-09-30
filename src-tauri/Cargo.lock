@@ -4675,6 +4675,7 @@ name = "mirach-harness"
 version = "0.1.0"
 dependencies = [
  "asupersync 0.5.0",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "pi_agent_rust",

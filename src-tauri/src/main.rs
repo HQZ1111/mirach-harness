@@ -142,6 +142,28 @@ fn pi_list_models(
     state.engine.list_models()
 }
 
+// ── 扩展 UI 请求（§4.4 审批/问题卡）：请求经 SSE CUSTOM 到前端卡，
+//    应答走 IPC 回灌 oneshot。──
+
+#[tauri::command]
+fn pi_pending_approvals(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(state.approvals.list())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn pi_extension_ui_response(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    id: String,
+    value: Option<serde_json::Value>,
+    cancelled: bool,
+) -> Result<(), String> {
+    state
+        .approvals
+        .respond(&id, agui::UiAnswer { value, cancelled })
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -243,6 +265,8 @@ fn main() {
             pi_set_thinking_level,
             pi_interrupt,
             pi_list_models,
+            pi_pending_approvals,
+            pi_extension_ui_response,
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url
