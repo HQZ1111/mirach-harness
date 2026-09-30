@@ -13,3 +13,8 @@ tauri-plugin-dialog = "2"
 tauri = { version = "2", features = ["unstable", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
+
+# pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：path 引 G 盘仓库；
+# default-features=false 去 TUI 栈；nightly 钉版见 rust-toolchain.toml
+pi = { package = "pi_agent_rust", path = "G:/pi_agent_rust-main", default-features = false, features = ["sqlite-sessions"] }
+asupersync = "0.5"

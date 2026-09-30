@@ -9,6 +9,9 @@
 // fs_read_data_url——文件树窗格的数据源
 mod fs;
 
+// pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
+mod pi_session;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},

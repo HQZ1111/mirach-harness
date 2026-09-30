@@ -1,0 +1,5 @@
+# pi_agent_rust 的锁定依赖图要求 Rust ≥1.95（asupersync/sysinfo），
+# 且上游仅在 nightly-2026-08-31 上验证过——src-tauri 整体随之 nightly
+# （拆 pi-adapter 出独立 nightly 的触发条件已满足，见 docs/pi-integration.md §3）
+[toolchain]
+channel = "nightly-2026-08-31"
