@@ -170,23 +170,35 @@ impl PiEngine {
         }
     }
 
-    /// 创建进程内会话（ephemeral；provider/model 缺省读 ~/.pi settings）。
+    /// 创建/打开进程内会话（provider/model 缺省读 ~/.pi settings；
+    /// no_session:false = 会话持久化到 ~/.pi/agent/sessions 并自动进索引，
+    /// 对话真相在 pi（§5）；session_path 打开历史会话时上游自动装填）。
     /// ui_bridge：扩展 UI 请求桥（§4.4 审批/问题卡）——None 时保持上游
     /// fail-closed（能力提示直接 deny）。
-    /// 返回 "provider/model" 标识（与 handle.model() 的 (String, String) 对应，
-    /// 仅供日志；消费方不解析——单会话引擎下 provider/model 经 pi_get_state
-    /// 结构化获取）。
-    pub fn create_session(
+    /// 返回 "provider/model" 标识（仅供日志；消费方经 pi_get_state 结构化获取）。
+    fn create_session_opts(
         &self,
         provider: Option<String>,
         model: Option<String>,
         ui_bridge: Option<UiBridgeHandle>,
+        session_path: Option<std::path::PathBuf>,
     ) -> Result<String, String> {
+        // 先 flush 旧会话（失败即中止——handle 未换、消息不丢，用户可重试；
+        // 也避免 flush 失败后重试堆积空会话文件）
+        self.flush_active_session()?;
         let shared = Arc::clone(&self.shared);
         let options = SessionOptions {
             provider,
             model,
+            // 【上游缺陷回退，2026-10-01】no_session:false 实测（Windows /
+            // pi v0.5.1）：会话存活期间 save_and_index / flush_autosave
+            // 永远失败（os error 5；SessionPersistenceLockGuard 持锁 +
+            // lock_session_persistence 再锁的同进程锁冲突嫌疑），jsonl
+            // 永不落盘、SDK 路径无 Periodic 驱动——持久化形同虚设，且
+            // 每次创建泄漏 .jsonl.lock 文件。恢复 ephemeral；上游修复后
+            // 改回 false、session_path 改回参数即恢复全部会话功能。
             no_session: true,
+            session_path: None, // ← 上游修复后改回 session_path
             // handler 仅在加载了扩展时被咨询；挂上桥后能力提示/扩展 UI
             // 请求经 CUSTOM 事件到前端卡片（§4.4）
             extension_ui_handler: ui_bridge.map(|h| {
@@ -198,6 +210,8 @@ impl PiEngine {
             persist_extension_permissions: false,
             ..SessionOptions::default()
         };
+        // 上游修复回退期：session_path 参数保留但不生效（no_session:true）
+        let _ = session_path;
         let handle: AgentSessionHandle = on_big_stack(move || {
             shared.runtime.block_on(async { create_agent_session(options).await })
         })?
@@ -209,6 +223,127 @@ impl PiEngine {
             .lock()
             .map_err(|_| "pi handle mutex poisoned".to_string())? = Some(handle);
         Ok(format!("{provider}/{model_id}"))
+    }
+
+    /// 新建（空）会话——替换 handle，后续消息历史/状态都指向新会话。
+    pub fn create_session(
+        &self,
+        provider: Option<String>,
+        model: Option<String>,
+        ui_bridge: Option<UiBridgeHandle>,
+    ) -> Result<String, String> {
+        self.create_session_opts(provider, model, ui_bridge, None)
+    }
+
+    /// 打开历史会话（session_path 指向 pi 会话文件）。
+    pub fn open_session(
+        &self,
+        path: &str,
+        ui_bridge: Option<UiBridgeHandle>,
+    ) -> Result<String, String> {
+        self.create_session_opts(None, None, ui_bridge, Some(std::path::PathBuf::from(path)))
+    }
+
+    /// 替换 handle 前对旧会话显式 flush（save_and_index = 官方 pub 通道：
+    /// flush_autosave(Periodic) + 进索引）。pi 的 SDK 路径没有 Periodic
+    /// 驱动、Session 无 Drop flush——不显式 flush，切换/新建时未落盘的
+    /// mutations 全部丢失（实测：会话文件只有 .lock，jsonl 空）。
+    fn flush_active_session(&self) -> Result<(), String> {
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = match guard.as_mut() {
+                Some(h) => h,
+                None => return Ok(()), // 无会话即无事可刷（非兜底）
+            };
+            shared
+                .runtime
+                .block_on(async { handle.session_mut().save_and_index().await })
+                .map_err(|e| format!("会话 flush 失败: {e}"))
+        })?
+    }
+
+    /// 列出会话（pi SessionIndex sqlite 索引，`~/.pi/agent/sessions/`）。
+    /// 读前先 flush 当前会话——列表即新鲜真相（flush 是写副作用，注释
+    /// 说明；pi autosave 无 Periodic 驱动，不 flush 则当前会话永远不在列）。
+    /// 注：SessionIndex 是 pi 原生模块非 sdk re-export（同 auth/config
+    /// 先例的最小例外）；SDK 无列举 API。SessionMeta 无 Serialize（上游
+    /// 未派生）——手动映射，字段名对齐上游 snake_case。
+    pub fn list_sessions(&self) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        on_big_stack(move || {
+            let index = pi::session_index::SessionIndex::new();
+            let metas = index
+                .list_sessions(None)
+                .map_err(|e| format!("会话索引读取失败: {e}"))?;
+            let rows: Vec<serde_json::Value> = metas
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "path": m.path,
+                        "id": m.id,
+                        "cwd": m.cwd,
+                        "timestamp": m.timestamp,
+                        "messageCount": m.message_count,
+                        "lastModifiedMs": m.last_modified_ms,
+                        "sizeBytes": m.size_bytes,
+                        "name": m.name,
+                    })
+                })
+                .collect();
+            Ok(serde_json::Value::Array(rows))
+        })?
+    }
+
+    /// 重命名当前活跃会话（SDK 语义：set_session_name 只作用于当前会话；
+    /// 非活跃会话重命名不被支持——错误即错误）。
+    pub fn rename_session(&self, name: &str) -> Result<(), String> {
+        let shared = Arc::clone(&self.shared);
+        let name = name.to_string();
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared
+                .runtime
+                .block_on(handle.set_session_name(name))
+                .map_err(|e| e.to_string())
+        })?
+    }
+
+    /// 删除会话（pi 索引行 + 文件本体）。活跃会话拒绝删除——错误即错误。
+    pub fn delete_session(&self, path: &str) -> Result<(), String> {
+        // 活跃性判定：SessionMeta.id 与当前 state.sessionId 同源（上游索引），
+        // 比对命中即活跃会话。
+        let active_id = self.state()?["sessionId"]
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let metas = self.list_sessions()?;
+        let meta = metas
+            .as_array()
+            .and_then(|arr| arr.iter().find(|m| m["path"] == serde_json::json!(path)))
+            .ok_or_else(|| format!("no session at {path}"))?;
+        if !active_id.is_empty() && meta["id"] == serde_json::json!(active_id) {
+            return Err("cannot delete the active session".into());
+        }
+        let path = path.to_string();
+        on_big_stack(move || {
+            let index = pi::session_index::SessionIndex::new();
+            index
+                .delete_session_path(std::path::Path::new(&path))
+                .map_err(|e| format!("会话删除失败: {e}"))?;
+            let file = std::path::Path::new(&path);
+            if file.exists() {
+                std::fs::remove_file(file).map_err(|e| format!("会话文件删除失败: {e}"))?;
+            }
+            Ok(())
+        })?
     }
 
     /// 发送一条 prompt（SDK 二参签名：text + on_event；Mutex 串行）。

@@ -164,7 +164,58 @@ fn pi_extension_ui_response(
         .respond(&id, agui::UiAnswer { value, cancelled })
 }
 
+// ── 会话持久化（§7-4 侧栏 sessions：对话真相在 pi，前端只持镜像）──
+
+#[tauri::command]
+fn pi_list_sessions(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.list_sessions()
+}
+
+#[tauri::command]
+fn pi_new_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<(), String> {
+    state
+        .engine
+        .create_session(None, None, Some(state.ui_bridge("main")))?;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn pi_open_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    path: String,
+) -> Result<(), String> {
+    state
+        .engine
+        .open_session(&path, Some(state.ui_bridge("main")))?;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn pi_rename_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    name: String,
+) -> Result<(), String> {
+    state.engine.rename_session(&name)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn pi_delete_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    path: String,
+) -> Result<(), String> {
+    state.engine.delete_session(&path)
+}
+
 fn main() {
+    // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
+    // 删除立即可见；默认 balanced 是定时 autosave，列表会延迟出现且
+    // rename 可能撞未落盘文件的锁）。桌面壳本地 JSONL append 开销可忽略。
+    std::env::set_var("PI_SESSION_DURABILITY_MODE", "strict");
+
     tauri::Builder::default()
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
@@ -267,6 +318,11 @@ fn main() {
             pi_list_models,
             pi_pending_approvals,
             pi_extension_ui_response,
+            pi_list_sessions,
+            pi_new_session,
+            pi_open_session,
+            pi_rename_session,
+            pi_delete_session,
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url

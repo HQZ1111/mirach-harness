@@ -139,6 +139,15 @@ impl AguiState {
         *self.port.lock().expect("agui port poisoned") = Some(port);
     }
 
+    /// 会话 UI 桥柄（POST 按需建会话与 pi_open_session/pi_new_session 复用）
+    pub fn ui_bridge(&self, thread: &str) -> crate::pi_session::UiBridgeHandle {
+        crate::pi_session::UiBridgeHandle {
+            buffers: Arc::clone(&self.buffers),
+            approvals: Arc::clone(&self.approvals),
+            thread: thread.to_string(),
+        }
+    }
+
     pub fn endpoint(&self) -> serde_json::Value {
         serde_json::json!({
             "port": self.port.lock().expect("agui port poisoned").unwrap_or(0),
@@ -263,7 +272,6 @@ async fn agui_run(
     // create_session 的 future 同源深递归，不能在 tokio worker 栈上 block_on——
     // 挪 16MiB 大栈线程同步等结果（engine 经 Arc 共享，单会话不变量不破）。
     let st_create = st.clone();
-    let st_bridge = st.clone();
     let thread_bridge = thread.clone();
     let create = tokio::task::spawn_blocking(move || {
         std::thread::Builder::new()
@@ -273,11 +281,7 @@ async fn agui_run(
                 st_create.engine.create_session(
                     None,
                     None,
-                    Some(crate::pi_session::UiBridgeHandle {
-                        buffers: Arc::clone(&st_bridge.buffers),
-                        approvals: Arc::clone(&st_bridge.approvals),
-                        thread: thread_bridge,
-                    }),
+                    Some(st_create.ui_bridge(&thread_bridge)),
                 )
             })
             .expect("spawn pi-create thread")

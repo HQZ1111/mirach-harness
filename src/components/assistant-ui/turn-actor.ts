@@ -27,6 +27,10 @@ export type AguiEvent = { type: string } & Record<string, unknown>
 export type TurnEvent =
   | { type: 'AGUI_EVENT'; event: AguiEvent; id: number }
   | { type: 'USER_SUBMIT'; text: string; messageId: string }
+  /** 新会话（New Chat）：清空全部轮次态（§7-4 会话切换） */
+  | { type: 'RESET' }
+  /** 打开历史会话：注入 pi 会话历史（真相在 pi，机器只收投影快照） */
+  | { type: 'HYDRATE'; messages: TurnMessage[] }
 
 /** 归约单条 AG-UI 事件 → 上下文（纯函数，可单测）。 */
 export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): TurnContext {
@@ -102,6 +106,16 @@ export const turnMachine = setup({
         return { ...next, error: String(event.event.message ?? 'run error') }
       return next
     }),
+    reset: assign(() => ({
+      messages: [],
+      currentRunId: null,
+      lastEventId: 0,
+      error: null,
+    })),
+    hydrate: assign(({ event }) => {
+      if (event.type !== 'HYDRATE') return {}
+      return { messages: event.messages, currentRunId: null, error: null }
+    }),
   },
   guards: {
     isRunStart: ({ event }) =>
@@ -123,6 +137,8 @@ export const turnMachine = setup({
     idle: {
       on: {
         USER_SUBMIT: { actions: 'appendUser' },
+        RESET: { actions: 'reset' },
+        HYDRATE: { actions: 'hydrate' },
         AGUI_EVENT: [
           { guard: 'isRunStart', target: 'streaming', actions: 'reduce' },
           { actions: 'reduce' }, // idle 态 run 外事件透传（§0.3-5）
@@ -131,6 +147,9 @@ export const turnMachine = setup({
     },
     streaming: {
       on: {
+        USER_SUBMIT: { actions: 'appendUser' },
+        RESET: { actions: 'reset' },
+        HYDRATE: { actions: 'hydrate' },
         AGUI_EVENT: [
           // streaming 中另一 runId 的 RUN_STARTED：HTTP 流无连接亲和性，
           // 断线重连重放/多 run 同缓冲都是常态（§0.3 交错语义）——接受为

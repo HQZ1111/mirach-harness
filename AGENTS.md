@@ -427,6 +427,38 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     null——Rust 侧 String 非空；#12/#13 审查者自答/桌面无 SSR。
     **记录待办（功能缺口非 bug）**：slash/mention 菜单键盘导航
     （activeIndex+方向键）、附件 chip 删除钮（AttachmentRemove）。
+  - **§7-5 审批/问题卡（2026-10-01，提交 9e87e71/75ec01e）**：SDK 实证
+    ExtensionUiRequest 不走 AgentEvent 流——走 create 时安装的
+    extension_ui_handler（#[async_trait]，impl 侧同宏否则 E0195）；无
+    handler 时 fail-closed。审批信号 piggyback 唯一 GET 流（CUSTOM
+    name=extension_ui_request 只带 {id}）→ 前端拉 pi_pending_approvals
+    （Rust ApprovalRegistry 为真相，重放流不复活已应答卡）→ IPC
+    pi_extension_ui_response(id, value, cancelled)（对齐 SDK
+    ExtensionUiResponse；无 requestGeneration——那是 RPC 协议层）经
+    tokio oneshot 回灌（Receiver 普通 Future，asupersync 可 poll）。
+    **术语澄清（用户质疑后核实）**：这不是 v2.1 被删的 Tauri Event
+    门铃复辟——门铃删的是第三通知通道；审批进流是 §4.4 prescribed，
+    通道归零仍成立。persist_extension_permissions:false 已落实（决定
+    全会话级，"仅本次"按钮无意义）。待办：oneshot 超时、ask_response、
+    select/input 卡片真实形状（等扩展生态）。
+  - **composer 小 UI 补全（6ca647e）**：斜杠/@ 菜单键盘导航（↑↓/
+    Enter/Tab/Esc；Input 传入 onKeyDown 先于内部 handleKeyPress——
+    composeEventHandlers，preventDefault 拦内部发送）；附件删除
+    aui.composer.attachment({id}).remove()。
+  - **【上游缺陷】pi Windows 会话持久化不可用（实锤实验，§7-4 会话
+    持久化回退 ephemeral）**：no_session:false 下 Session 存活期间
+    save_and_index/flush_autosave 永远失败（os error 5 拒绝访问；
+    延时 2s/8s/15s 三次全败，干净目录复现）；jsonl 只建 .lock 不落盘
+    （flush 仅 Shutdown 触发、SDK 路径无 Periodic 驱动、Session 无
+    Drop flush）；save_and_index（官方 pub，flush+进索引）同败——
+    SessionPersistenceLockGuard 持锁 + lock_session_persistence 再锁
+    的同进程冲突嫌疑。**已回退 no_session:true**（flush_active_session
+    保留：无会话 no-op；flush 失败中止切换不丢消息）；PI_SESSION_
+    DURABILITY_MODE=strict 留存（上游修复即生效）。**恢复条件**：上游
+    修锁冲突后 create_session_opts 改 no_session:false + session_path
+    改回参数；threadListAdapter（runtime.tsx，threads/switch/hydrate/
+    rename/delete 全接好）与 pi_list/new/open/rename/delete_session
+    五命令原样可用。tsc 0；cargo check 零警告。
 
 ## 工具（`scripts/`）
 
