@@ -15,6 +15,7 @@ import { useActorRef, useSelector } from '@xstate/react'
 
 import { turnMachine, type TurnContext, type TurnMessage } from './turn-actor'
 import { approvalBridge } from './approval-bridge'
+import { usageBridge, type UsageState } from './usage-bridge'
 
 const THREAD = 'main'
 
@@ -66,6 +67,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   })
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
+  const usage = useSelector(actorRef, (s) => s.context.usage)
+  useEffect(() => {
+    usageBridge.getState().setUsage(usage as UsageState | null)
+  }, [usage])
 
   const [endpoint, setEndpoint] = useState<{ port: number; token: string } | null>(null)
   const endpointRef = useRef(endpoint)

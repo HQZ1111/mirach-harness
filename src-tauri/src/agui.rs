@@ -244,9 +244,25 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
             "value": { "phase": "end", "toolCallId": tool_call_id, "isError": is_error },
         })],
         AgentEvent::TurnEnd { .. } => vec![json!({ "type": "STEP_FINISHED" })],
-        AgentEvent::AgentEnd { error, .. } => match error {
+        AgentEvent::AgentEnd { messages, error, .. } => match error {
             Some(err) => vec![json!({ "type": "RUN_ERROR", "message": err })],
-            None => vec![json!({ "type": "RUN_FINISHED" })],
+            None => {
+                // 用量快照（ContextDisplay 数据面）：取最后一条 assistant
+                // 消息的 usage（= 最终 turn 的上下文规模，input 已含历史）
+                let usage = messages.iter().rev().find_map(|m| match m {
+                    pi::sdk::Message::Assistant(a) => Some(json!({
+                        "inputTokens": a.usage.input,
+                        "outputTokens": a.usage.output,
+                        "cachedInputTokens": a.usage.cache_read,
+                        "totalTokens": a.usage.total_tokens,
+                    })),
+                    _ => None,
+                });
+                vec![json!({
+                    "type": "RUN_FINISHED",
+                    "usage": usage,
+                })]
+            }
         },
         AgentEvent::AutoCompactionStart { reason } => vec![json!({
             "type": "CUSTOM", "name": "compaction", "value": { "phase": "start", "reason": reason },

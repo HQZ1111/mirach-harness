@@ -24,7 +24,9 @@ import {
   useMentionMatches,
   useSlashMatches,
 } from '@/components/assistant-ui/elements/composer'
+import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
+import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
 import { cn } from '@/lib/utils'
 
 /** pi 模型目录条目（pi_list_models 返回形状）。 */
@@ -33,6 +35,7 @@ interface PiModelEntry {
   id: string
   name: string
   reasoning: boolean
+  contextWindow: number
 }
 
 /** pi 模型目录 → ModelSelector 选项；reasoning 模型带默认三档。 */
@@ -164,13 +167,19 @@ export function ComposerWired() {
   // 错误态）；首条消息前 pi_get_state 报 no active session 是预期域状态
   // （会话按需创建），不是被吞的错误。
   const [models, setModels] = useState<ModelOption[]>([])
+  // 原始目录（取当前模型的 contextWindow 给用量环）
+  const modelEntriesRef = useRef<PiModelEntry[]>([])
   const [currentModel, setCurrentModel] = useState<string | null>(null)
+  const usage = useUsageBridge((s) => s.usage)
   useEffect(() => {
     let cancelled = false
     void (async () => {
       try {
         const res = await invoke<{ models: PiModelEntry[] }>('pi_list_models')
-        if (!cancelled) setModels(toModelOptions(res.models ?? []))
+        if (!cancelled) {
+          modelEntriesRef.current = res.models ?? []
+          setModels(toModelOptions(res.models ?? []))
+        }
       } catch (e) {
         console.error('[pi] 模型目录获取失败', e)
       }
@@ -319,6 +328,22 @@ export function ComposerWired() {
                 <ComposerAttachButton className="text-(--text-3) hover:text-(--text)" />
               </ComposerPrimitive.AddAttachment>
               <div className="ml-auto flex items-center gap-1.5">
+                {/* 用量环（官方 ContextDisplay）：usage 与模型上下文窗口
+                    任一缺失即不渲染 = 官方语义"无数据不显示" */}
+                {usage && currentModel && (
+                  <ContextDisplay.Bar
+                    modelContextWindow={
+                      modelEntriesRef.current.find((e) => `${e.provider}/${e.id}` === currentModel)
+                        ?.contextWindow ?? 0
+                    }
+                    usage={{
+                      inputTokens: usage.inputTokens,
+                      outputTokens: usage.outputTokens,
+                      cachedInputTokens: usage.cachedInputTokens,
+                      totalTokens: usage.totalTokens,
+                    }}
+                  />
+                )}
                 <ModelSelector
                   align="end"
                   models={models}

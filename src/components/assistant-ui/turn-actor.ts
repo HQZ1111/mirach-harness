@@ -15,11 +15,21 @@ export interface TurnMessage {
   content: string
 }
 
+/** 会话用量快照（ContextDisplay 数据面；RUN_FINISHED.usage 原样投影） */
+export interface TurnUsage {
+  inputTokens?: number
+  outputTokens?: number
+  cachedInputTokens?: number
+  totalTokens?: number
+}
+
 export interface TurnContext {
   messages: TurnMessage[]
   currentRunId: string | null
   lastEventId: number
   error: string | null
+  /** 最新 run 结束时的用量（= 当前上下文规模近似，替换不累计） */
+  usage: TurnUsage | null
 }
 
 export type AguiEvent = { type: string } & Record<string, unknown>
@@ -74,8 +84,23 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
       }
       return next
     }
-    case 'RUN_FINISHED':
-      return { ...next, currentRunId: null }
+    case 'RUN_FINISHED': {
+      // 用量快照（替换语义：最新 run 结束时的上下文规模）
+      const usage = ev.usage as Partial<TurnUsage> | null | undefined
+      return {
+        ...next,
+        currentRunId: null,
+        usage: usage
+          ? {
+              inputTokens: typeof usage.inputTokens === 'number' ? usage.inputTokens : undefined,
+              outputTokens: typeof usage.outputTokens === 'number' ? usage.outputTokens : undefined,
+              cachedInputTokens:
+                typeof usage.cachedInputTokens === 'number' ? usage.cachedInputTokens : undefined,
+              totalTokens: typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined,
+            }
+          : next.usage,
+      }
+    }
     case 'RUN_ERROR':
       return { ...next, currentRunId: null, error: String(ev.message ?? 'run error') }
     default:
@@ -111,10 +136,12 @@ export const turnMachine = setup({
       currentRunId: null,
       lastEventId: 0,
       error: null,
+      usage: null,
     })),
     hydrate: assign(({ event }) => {
       if (event.type !== 'HYDRATE') return {}
-      return { messages: event.messages, currentRunId: null, error: null }
+      // 历史会话的用量未知——pi_get_messages 的消息 usage 后续可聚合
+      return { messages: event.messages, currentRunId: null, error: null, usage: null }
     }),
   },
   guards: {
