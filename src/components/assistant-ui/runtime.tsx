@@ -6,7 +6,9 @@
  * UI 不动。模型/思考等级经 ModelSelector 注册进 ModelContext（官方
  * ModelContext 系统），运行器从这里读——mock 只回显。
  */
-import {
+import { CompositeAttachmentAdapter, SimpleImageAttachmentAdapter, SimpleTextAttachmentAdapter,
+  } from '@assistant-ui/react'
+  import {
   AssistantRuntimeProvider,
   useLocalRuntime,
   type ChatModelAdapter,
@@ -95,6 +97,13 @@ const mockModelAdapter: ChatModelAdapter = {
 }
 
 export function AssistantRuntime({ children }: { children: React.ReactNode }) {
-  const runtime = useLocalRuntime(mockModelAdapter)
+  const runtime = useLocalRuntime(mockModelAdapter, {
+        adapters: {
+          attachments: new CompositeAttachmentAdapter([
+            new SimpleImageAttachmentAdapter(),
+            new SimpleTextAttachmentAdapter(),
+          ]),
+        },
+      })
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired'
 import {
   ComposerAddAttachment,
   ComposerAttachments,
@@ -245,7 +246,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            <Composer autoFocus={autoFocus} />
+            <ComposerWired />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
