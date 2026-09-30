@@ -476,6 +476,27 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     sessionId 同源。冒烟全绿；tsc 0；cargo check 零警告。
     **注意**：下次同步上游 pi 代码时此补丁会被同化（内容与官方一致，
     无冲突）。
+  - **多会话接线完成（2026-10-01 深夜）**：
+    1. **多轮对话 bug 修复**：agui_run 原来每次 POST 无条件
+       create_session（每条消息换新会话、上下文全丢）→ PiEngine
+       ensure_session（有会话复用，无才建）。
+    2. **New Chat 语义**：pi_discard_session（flush 旧会话落盘 + 清
+       handle），下一次 POST 按需建新——避免弃用空会话文件堆积。
+    3. **挂载水合**：pi_stream_cursor（缓冲最新 seq）作 EventSource
+       lastEventId 起点（跳过重放，多会话旧事件不混入）+ pi_get_messages
+       水合当前会话历史（真相在 pi，流只管增量）。hydrate 消息 id 用
+       序号（pi AssistantMessage 无 id/timestamp）。
+    4. **【坑】threadListAdapter 键位**：useExternalStoreRuntime 的
+       threadListAdapter 必须放 `adapters: { threadList: ... }`——core
+       的 getThreadListAdapter 只读 store.adapters?.threadList；顶层
+       平铺静默无效（threads 永空、侧栏只渲染自动补的当前行）。
+    5. **【坑】TDZ 白屏**：挂载 effect 引用 refreshThreads/
+       piMessageToTurn 但声明在 effect 之后——依赖数组 render 期求值
+       抛 "Cannot access before initialization" 白屏（RuntimeBoundary
+       包不住自身组件的 effect）。声明必须前移。
+    6. **UI 全链实测**（CDP）：侧栏 5 行渲染（命名行显示真名）、点击
+       "历史会话A" → 主区水合该会话两条历史消息 + 行 active 高亮、
+       multi-sess 七步（建/多轮/列表/重命名/discard/新会话/切回）全绿。
 
 ## 工具（`scripts/`）
 

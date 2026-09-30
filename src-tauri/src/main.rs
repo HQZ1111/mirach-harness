@@ -173,14 +173,22 @@ fn pi_list_sessions(
     state.engine.list_sessions()
 }
 
+/// New Chat 语义：flush 旧会话落盘 + 清空 handle；下一次 POST 按需建新会话
+/// （不立即创建，避免弃用的空会话文件堆积）。
 #[tauri::command]
-fn pi_new_session(
+fn pi_discard_session(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<(), String> {
-    state
-        .engine
-        .create_session(None, None, Some(state.ui_bridge("main")))?;
-    Ok(())
+    state.engine.discard_session()
+}
+
+/// 前端挂载时取缓冲最新 seq 作为 EventSource 的 lastEventId 起点
+/// （跳过历史重放——会话历史经 pi_get_messages 水合）。
+#[tauri::command]
+fn pi_stream_cursor(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<u64, String> {
+    Ok(state.latest_seq("main"))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -319,7 +327,8 @@ fn main() {
             pi_pending_approvals,
             pi_extension_ui_response,
             pi_list_sessions,
-            pi_new_session,
+            pi_discard_session,
+            pi_stream_cursor,
             pi_open_session,
             pi_rename_session,
             pi_delete_session,

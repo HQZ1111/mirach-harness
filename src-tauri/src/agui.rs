@@ -177,6 +177,19 @@ impl AguiState {
             })
             .unwrap_or_default()
     }
+
+    /// 当前缓冲最新 sequence（前端挂载时作为 EventSource 的
+    /// lastEventId 起点——跳过历史重放，会话历史经 pi_get_messages 水合，
+    /// 避免"重放混入其它会话的旧事件"）。
+    pub fn latest_seq(&self, thread: &str) -> u64 {
+        self.buffers
+            .lock()
+            .expect("agui buffers poisoned")
+            .counters
+            .get(thread)
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// pi::AgentEvent → AG-UI 事件（§2.2 表；事件名以 ag-ui 协议为基准，
@@ -268,9 +281,10 @@ async fn agui_run(
     if message.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "empty message"}))).into_response();
     }
-    // 会话按需创建（§7-3 冒烟路径；无 API key 时错误以 RUN_ERROR 进缓冲可观测）。
-    // create_session 的 future 同源深递归，不能在 tokio worker 栈上 block_on——
-    // 挪 16MiB 大栈线程同步等结果（engine 经 Arc 共享，单会话不变量不破）。
+    // 会话按需创建（§7-3）：已有活跃会话时原样复用（多轮上下文保持），
+    // 无才创建——【关键】不能每次 POST 都 create（否则每条消息换新会话，
+    // 上下文全丢）。flush/create 的深递归 future 不能在 tokio worker 栈上
+    // block_on——16MiB 大栈线程承载（engine 经 Arc 共享，单会话不变量不破）。
     let st_create = st.clone();
     let thread_bridge = thread.clone();
     let create = tokio::task::spawn_blocking(move || {
@@ -278,11 +292,9 @@ async fn agui_run(
             .name("pi-create".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                st_create.engine.create_session(
-                    None,
-                    None,
-                    Some(st_create.ui_bridge(&thread_bridge)),
-                )
+                st_create
+                    .engine
+                    .ensure_session(Some(st_create.ui_bridge(&thread_bridge)))
             })
             .expect("spawn pi-create thread")
             .join()

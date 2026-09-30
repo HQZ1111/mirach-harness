@@ -234,6 +234,35 @@ impl PiEngine {
         self.create_session_opts(provider, model, ui_bridge, None)
     }
 
+    /// 确保有活跃会话：已有则原样复用（多轮对话上下文保持），
+    /// 没有才创建——POST 路径按需创建的唯一入口。
+    pub fn ensure_session(&self, ui_bridge: Option<UiBridgeHandle>) -> Result<(), String> {
+        {
+            let guard = self
+                .shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            if guard.is_some() {
+                return Ok(());
+            }
+        }
+        self.create_session(None, None, ui_bridge)?;
+        Ok(())
+    }
+
+    /// 丢弃当前会话（New Chat 语义）：先 flush 落盘（消息进索引可再打开），
+    /// 再清空 handle——下一次 POST 按需创建全新会话。
+    pub fn discard_session(&self) -> Result<(), String> {
+        self.flush_active_session()?;
+        *self
+            .shared
+            .handle
+            .lock()
+            .map_err(|_| "pi handle mutex poisoned".to_string())? = None;
+        Ok(())
+    }
+
     /// 打开历史会话（session_path 指向 pi 会话文件）。
     pub fn open_session(
         &self,
