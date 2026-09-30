@@ -107,7 +107,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       postRun(text)
     },
     onCancel: async () => {
-      // interrupt 端点待 §7-4（abort handle 已在 PiEngine 预留）
+      // §4.5：abort 是控制操作走 IPC；阻塞中的 prompt 观察 abort 信号收尾
+      try {
+        await invoke('pi_interrupt')
+      } catch (e) {
+        console.error('[agui] interrupt 失败', e)
+      }
     },
   })
 

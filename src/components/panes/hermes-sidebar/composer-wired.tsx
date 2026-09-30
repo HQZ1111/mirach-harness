@@ -1,8 +1,10 @@
 /**
  * 接线版 composer：官方 elements/composer kit + @assistant-ui/react 原语。
- * 语音=Web Speech；斜杠/@=kit 匹配器；附件=运行时适配器（图片/文本）。
+ * 语音=Web Speech；斜杠/@=kit 匹配器；附件=运行时适配器（图片/文本）；
+ * 模型选择=pi 控制面（§4.5 IPC：pi_list_models/pi_get_state/pi_set_model）。
  */
-import { useCallback, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
   useAuiState,
@@ -21,8 +23,26 @@ import {
   useMentionMatches,
   useSlashMatches,
 } from '@/components/assistant-ui/elements/composer'
-import { ModelSelector } from '@/components/assistant-ui/model-selector.aui'
+import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
 import { cn } from '@/lib/utils'
+
+/** pi 模型目录条目（pi_list_models 返回形状）。 */
+interface PiModelEntry {
+  provider: string
+  id: string
+  name: string
+  reasoning: boolean
+}
+
+/** pi 模型目录 → ModelSelector 选项；reasoning 模型带默认三档。 */
+function toModelOptions(entries: PiModelEntry[]): ModelOption[] {
+  return entries.map((e) => ({
+    id: `${e.provider}/${e.id}`,
+    name: e.name || e.id,
+    description: e.provider,
+    ...(e.reasoning ? { efforts: true as const } : {}),
+  }))
+}
 
 const COMMANDS = [
   { name: 'image', description: '生成一张图片', icon: ImageIcon },
@@ -116,6 +136,45 @@ export function ComposerWired() {
     setText(cur ? cur + ' ' + text : text)
   })
 
+  // pi 控制面：模型目录 + 当前选中。挂载时拉目录；state 随 isRunning
+  // 变化重拉（会话按需创建后 trigger 自动从 "Select model" 点亮为真名）。
+  const [models, setModels] = useState<ModelOption[]>([])
+  const [currentModel, setCurrentModel] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await invoke<{ models: PiModelEntry[] }>('pi_list_models')
+        if (!cancelled) setModels(toModelOptions(res.models ?? []))
+      } catch {
+        // 无会话/桥未起：留空态
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    let cancelled = false
+    void invoke<{ provider: string; modelId: string }>('pi_get_state')
+      .then((st) => {
+        if (!cancelled) setCurrentModel(`${st.provider}/${st.modelId}`)
+      })
+      .catch(() => {
+        // 无会话：保留占位
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isRunning])
+  const onModelChange = useCallback((id: string) => {
+    const [provider, modelId] = id.split('/')
+    setCurrentModel(id)
+    void invoke('pi_set_model', { provider, modelId }).catch((e) =>
+      console.error('[pi] set_model 失败', e),
+    )
+  }, [])
+
   return (
     <ComposerPrimitive.Root asChild>
       <Composer className="w-full">
@@ -155,10 +214,9 @@ export function ComposerWired() {
               <div className="ml-auto flex items-center gap-1.5">
                 <ModelSelector
                   align="end"
-                  models={[
-                    { id: 'mock-lite', name: 'Mock Lite' },
-                    { id: 'mock-pro', name: 'Mock Pro', description: '更强推理（mock）', efforts: true },
-                  ]}
+                  models={models}
+                  value={currentModel ?? undefined}
+                  onValueChange={onModelChange}
                   size="sm"
                   variant="ghost"
                 />

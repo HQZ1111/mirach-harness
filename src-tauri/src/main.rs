@@ -93,6 +93,53 @@ fn get_agui_endpoint(
     state.endpoint()
 }
 
+// ── pi 控制面 IPC（docs/pi-integration.md §4.5：HTTP 只管事件流，
+//    其余一切控制走 IPC）——命令都阻塞到大栈线程返回（引擎内部
+//    已按 16MiB 栈纪律处理；Tauri command 在 async 上下文外安全）。──
+
+#[tauri::command]
+fn pi_get_state(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.state()
+}
+
+#[tauri::command]
+fn pi_get_messages(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.messages()
+}
+
+#[tauri::command]
+fn pi_set_model(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    provider: String,
+    model_id: String,
+) -> Result<(), String> {
+    state.engine.set_model(&provider, &model_id)
+}
+
+#[tauri::command]
+fn pi_set_thinking_level(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    level: String,
+) -> Result<(), String> {
+    state.engine.set_thinking_level(&level)
+}
+
+#[tauri::command]
+fn pi_interrupt(state: tauri::State<std::sync::Arc<agui::AguiState>>) -> Result<(), String> {
+    state.engine.interrupt()
+}
+
+#[tauri::command]
+fn pi_list_models(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.list_models()
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -188,6 +235,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_agui_endpoint,
+            pi_get_state,
+            pi_get_messages,
+            pi_set_model,
+            pi_set_thinking_level,
+            pi_interrupt,
+            pi_list_models,
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url
