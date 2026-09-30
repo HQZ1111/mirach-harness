@@ -4,7 +4,8 @@
  * 经 ExternalStore 纯渲染）。
  *
  * 铁律：纯投影（不持会话真相，真相在 pi）；lastEventId 是续放句柄；
- * run 内交错 = 协议违例 fail loud（§0.3）；idle 态 run 外事件透传。
+ * run 内交错 = 按新 run 段接受（HTTP 流无连接亲和性，重放/多 run 共存
+ * 是常态，§0.3）；idle 态 run 外事件透传。
  */
 import { assign, setup } from 'xstate'
 
@@ -131,13 +132,15 @@ export const turnMachine = setup({
     streaming: {
       on: {
         AGUI_EVENT: [
-          // run 内交错（streaming 中另一 runId 的 RUN_STARTED）= fail loud
+          // streaming 中另一 runId 的 RUN_STARTED：HTTP 流无连接亲和性，
+          // 断线重连重放/多 run 同缓冲都是常态（§0.3 交错语义）——接受为
+          // 新 run 段（reduce 追加新 assistant 消息），只告警不炸树。
           {
             guard: 'isRunStartViolation',
             actions: ({ context, event }) => {
               if (event.type !== 'AGUI_EVENT') return
-              throw new Error(
-                `[turn] 协议违例：streaming 中收到新 RUN_STARTED（run=${String(event.event.runId ?? '')}，当前=${context.currentRunId}）`,
+              console.warn(
+                `[turn] streaming 中收到新 RUN_STARTED（run=${String(event.event.runId ?? '')}，当前=${context.currentRunId}）——按交错接受`,
               )
             },
           },

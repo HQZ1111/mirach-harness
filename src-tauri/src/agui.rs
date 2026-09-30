@@ -103,12 +103,12 @@ impl AguiState {
 
 /// pi::AgentEvent → AG-UI 事件（§2.2 表；事件名以 ag-ui 协议为基准，
 /// THINKING_* 事件名等 ag-ui crate 落地时对齐）。
-fn map_agent_event(event: &AgentEvent, thread: &str) -> Vec<serde_json::Value> {
+fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
     use serde_json::json;
     match event {
-        AgentEvent::AgentStart { .. } => vec![json!({
-            "type": "RUN_STARTED", "threadId": thread,
-        })],
+        // RUN_STARTED 由 POST 处理器在起 run 时手动 push（runId 在那里才
+        // 生成），AgentStart 不再重复发。
+        AgentEvent::AgentStart { .. } => vec![],
         AgentEvent::MessageUpdate {
             assistant_message_event,
             ..
@@ -183,8 +183,31 @@ async fn agui_run(
     if message.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "empty message"}))).into_response();
     }
-    // 会话按需创建（§7-3 冒烟路径；无 API key 时错误以 RUN_ERROR 进缓冲可观测）
-    if let Err(e) = st.engine.create_session(None, None) {
+    // 会话按需创建（§7-3 冒烟路径；无 API key 时错误以 RUN_ERROR 进缓冲可观测）。
+    // create_session 的 future 同源深递归，不能在 tokio worker 栈上 block_on——
+    // 挪 16MiB 大栈线程同步等结果（engine 经 Arc 共享，单会话不变量不破）。
+    let st_create = st.clone();
+    let create = tokio::task::spawn_blocking(move || {
+        std::thread::Builder::new()
+            .name("pi-create".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || st_create.engine.create_session(None, None))
+            .expect("spawn pi-create thread")
+            .join()
+            .map_err(|_| "pi-create thread panicked".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    let created = match create {
+        Ok(res) => res,
+        Err(e) => {
+            st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread }));
+            st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
+            return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
+        }
+    };
+    if let Err(e) = created {
         st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread }));
         st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
         return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
@@ -201,17 +224,22 @@ async fn agui_run(
 
     let st2 = st.clone();
     let thread2 = thread.clone();
-    // pi 的 block_on 阻塞自己的线程（asupersync），std::thread 承载；
-    // 事件回调经映射器进缓冲，SSE 端轮询放出。
+    // pi 的 block_on 阻塞自己的线程（asupersync），专用大栈线程承载——
+    // pi debug 构建的 session future 深递归 >2MiB 默认栈（pi .cargo/config.toml
+    // 的 RUST_MIN_STACK=16MiB 同源教训：MutexGuard 跨 await 非 Send，
+    // 只能靠调用线程自己的栈）；事件回调经映射器进缓冲，SSE 端轮询放出。
     let sink = st2.clone();
-    let thread3 = thread2.clone();
-    std::thread::spawn(move || {
-        let _ = st2.engine.prompt(&message, move |event: AgentEvent| {
-            for v in map_agent_event(&event, &thread3) {
-                sink.push(&thread3, v);
-            }
-        });
-    });
+    std::thread::Builder::new()
+        .name("pi-prompt".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let _ = st2.engine.prompt(&message, move |event: AgentEvent| {
+                for v in map_agent_event(&event) {
+                    sink.push(&thread2, v);
+                }
+            });
+        })
+        .expect("spawn pi-prompt thread");
     Json(serde_json::json!({ "runId": run_id })).into_response()
 }
 

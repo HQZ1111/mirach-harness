@@ -6,7 +6,7 @@
  * 重连）→ AGUI_EVENT → 轮次机归约 → messages/isRunning 喂 ExternalStore；
  * 发送：POST /ag-ui 起 run（RUN_STARTED 经 SSE 到达后进 streaming 态）。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AssistantRuntimeProvider, useExternalStoreRuntime } from '@assistant-ui/react'
 import { invoke } from '@tauri-apps/api/core'
 import { useActorRef, useSelector } from '@xstate/react'
@@ -14,6 +14,24 @@ import { useActorRef, useSelector } from '@xstate/react'
 import { turnMachine, type TurnContext } from './turn-actor'
 
 const THREAD = 'main'
+
+/** 渲染错误兜底：归约链路的任何意外不得白屏整个应用（只隔离聊天树）。 */
+class RuntimeBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-4 text-sm text-(--text-3)">
+          聊天渲染出错：{String(this.state.error.message ?? this.state.error)}
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 export function AssistantRuntime({ children }: { children: ReactNode }) {
   const actorRef = useActorRef(turnMachine, {
@@ -93,5 +111,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     },
   })
 
-  return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
+  return (
+    <RuntimeBoundary>
+      <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>
+    </RuntimeBoundary>
+  )
 }
