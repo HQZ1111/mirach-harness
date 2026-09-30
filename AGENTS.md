@@ -402,6 +402,15 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     jsdom 真实 Storage 上 `vi.spyOn` 静默失效（Node 24.18 实测），别改回条件安装；
     部分 hermes 测试隐含英文 OS（Intl 相对时间跟随系统语言），在本机
     （中文 Windows）会有措辞差异，遇到先怀疑这个再怀疑代码。
+12. **禁止兜底（2026-10-01 用户定稿：错误就是错误）**：任何实现不得写
+    fail-open / 静默降级 / 默认值替代 / 乐观假装成功——失败必须传播
+    （Err / throw）或可见（RUN_ERROR 进缓冲、console.error），调用方
+    自己决定怎么处理。已清的兜底：list_models 的 auth 读取失败降级空
+    目录（→传播）、POST/GET 缺 threadId/thread 静默默认 "main"（→400）、
+    prompt 自身 Err 被吞（→RUN_ERROR 进缓冲）、onNew 在 endpoint 未就绪
+    时静默 return（→throw）、composer set_model 乐观更新（→成功才写）、
+    Mutex 中毒静默恢复（→传播；唯一例外 Drop 清场无法传播，注释说明）。
+    新代码过审查时按此条执行。
 
 ## 工具（`scripts/`）
 

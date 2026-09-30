@@ -5,6 +5,8 @@
 //!   运行时由 PiRuntime 持有（'static 泄漏一次，进程生命周期内复用）；
 //! - AgentSessionHandle 被 Mutex 串行——同一时刻只有一个 prompt；
 //! - 消费面只准 import pi::sdk / pi::model（SemVer 稳定面）；
+//! - **禁止兜底（2026-10-01 用户定稿）**：错误就是错误——失败一律传播
+//!   （Err），不降级、不用默认值替代、不假装成功；
 //! - **一切 block_on 都在 16MiB 大栈线程上**（E2E 实测：pi debug 构建的
 //!   session future 深递归 >2MiB 默认栈，tokio worker / 裸 spawn 必爆栈；
 //!   MutexGuard 跨 await 非 Send，不能挪 reserved thread——pi
@@ -18,7 +20,7 @@
 //!   caller-polled 路径，不 panic 不 UB（loan 协议，WorkerSlot::Loaned）。
 //!   签名 block_on<F: Future> 无 'static 约束，故 messages() 可借 &handle。
 
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use pi::sdk::{AgentEvent, AgentSessionHandle, SessionOptions, create_agent_session};
 
@@ -44,11 +46,6 @@ pub(crate) fn on_big_stack<T: Send + 'static>(
                 .unwrap_or_else(|| "unknown panic payload".into());
             format!("pi-block-on: thread panicked: {msg}")
         })
-}
-
-/// 中毒恢复的锁获取（PoisonError 里拿内层 guard——清场路径不能因中毒失败）。
-fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// asupersync 运行时宿主（'static，驱动 pi 的全部 future）。
@@ -81,13 +78,17 @@ struct EngineShared {
     abort: Mutex<Option<pi::sdk::AbortHandle>>,
 }
 
-/// prompt 期间的清场守卫（Drop 异常安全：panic/Err 都清 abort 槽位）。
+/// prompt 期间的清场守卫。Drop 无法传播错误——这里的锁失败只能忽略：
+/// abort 槽位残留的最坏后果是 interrupt() 对已结束 run 置位（无害），
+/// 是资源清场的物理边界，不是业务兜底。
 struct PromptGuard<'a> {
     abort: &'a Mutex<Option<pi::sdk::AbortHandle>>,
 }
 impl Drop for PromptGuard<'_> {
     fn drop(&mut self) {
-        *lock_recover(self.abort) = None;
+        if let Ok(mut slot) = self.abort.lock() {
+            *slot = None;
+        }
     }
 }
 
@@ -129,29 +130,37 @@ impl PiEngine {
         })?
         .map_err(|e| e.to_string())?;
         let (provider, model_id) = handle.model();
-        *lock_recover(&self.shared.handle) = Some(handle);
+        *self
+            .shared
+            .handle
+            .lock()
+            .map_err(|_| "pi handle mutex poisoned".to_string())? = Some(handle);
         Ok(format!("{provider}/{model_id}"))
     }
 
     /// 发送一条 prompt（SDK 二参签名：text + on_event；Mutex 串行）。
-    /// 同时登记 abort 句柄（pi_interrupt 可中断；PromptGuard 异常安全清场）。
+    /// 同时登记 abort 句柄（pi_interrupt 可中断；PromptGuard 清场）。
     pub fn prompt(
         &self,
         text: &str,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<(), String> {
-        // 重入防护（审查修复）：on_event 回调运行在 block_on 的 poll 里，
-        // asupersync 的 ScopedRuntimeHandle 是 thread-local——此刻
-        // current_handle() 必 Some；而外部线程（tokio worker/IPC）新起的
-        // prompt 拿不到。拿得到 = 正在另一个 prompt 的 poll 链上 = 再 lock
-        // handle 必死锁（std Mutex 不可重入），显式拒绝而不是挂死。
-        // （spawn_blocking 里的异步重入不走此路径——那里新线程无 handle，
-        // 但也不死锁：handle 锁可正常等待。）
+        // 重入防护：on_event 回调运行在 block_on 的 poll 里，asupersync 的
+        // ScopedRuntimeHandle 是 thread-local——此刻 current_handle() 必
+        // Some；而外部线程（tokio worker/IPC）新起的 prompt 拿不到。拿到 =
+        // 正在另一个 prompt 的 poll 链上 = 再 lock handle 必死锁（std Mutex
+        // 不可重入），显式报错而不是挂死。
         if asupersync::runtime::Runtime::current_handle().is_some() {
-            return Err("re-entrant prompt rejected: on_event 回调里禁止发起新 prompt（会死锁）".into());
+            return Err(
+                "re-entrant prompt rejected: on_event 回调里禁止发起新 prompt（会死锁）".into(),
+            );
         }
         let (abort_handle, abort_signal) = pi::sdk::AbortHandle::new();
-        *lock_recover(&self.shared.abort) = Some(abort_handle);
+        *self
+            .shared
+            .abort
+            .lock()
+            .map_err(|_| "pi abort mutex poisoned".to_string())? = Some(abort_handle);
         let _guard = PromptGuard {
             abort: &self.shared.abort,
         };
@@ -169,7 +178,10 @@ impl PiEngine {
         on_big_stack(move || {
             // 锁在大栈线程内拿并跨 block_on 持有——MutexGuard 不出线程，
             // 串行不变量靠 std Mutex 保证（其他 prompt 调用在此排队）。
-            let mut guard = lock_recover(&shared.handle);
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_mut().ok_or("no active session")?;
             let result = shared.runtime.block_on(async move {
                 match abort_signal {
@@ -184,7 +196,11 @@ impl PiEngine {
     /// 中断当前 run（§4.5：abort 是控制操作走 IPC）。置 abort 信号；
     /// 阻塞中的 prompt_with_abort 观察到后尽快收尾返回。
     pub fn interrupt(&self) -> Result<(), String> {
-        let guard = lock_recover(&self.shared.abort);
+        let guard = self
+            .shared
+            .abort
+            .lock()
+            .map_err(|_| "pi abort mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(h) => {
                 h.abort();
@@ -198,7 +214,10 @@ impl PiEngine {
     pub fn state(&self) -> Result<serde_json::Value, String> {
         let shared = Arc::clone(&self.shared);
         let state = on_big_stack(move || {
-            let mut guard = lock_recover(&shared.handle);
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_mut().ok_or("no active session")?;
             shared
                 .runtime
@@ -218,7 +237,10 @@ impl PiEngine {
     pub fn messages(&self) -> Result<serde_json::Value, String> {
         let shared = Arc::clone(&self.shared);
         let msgs = on_big_stack(move || {
-            let guard = lock_recover(&shared.handle);
+            let guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_ref().ok_or("no active session")?;
             // block_on<F: Future> 无 'static 约束，借 &handle 合法（future
             // 在本线程 caller-polled 或经 loan 协议驱动，见模块头注释）。
@@ -236,7 +258,10 @@ impl PiEngine {
         let provider = provider.to_string();
         let model_id = model_id.to_string();
         on_big_stack(move || {
-            let mut guard = lock_recover(&shared.handle);
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_mut().ok_or("no active session")?;
             shared
                 .runtime
@@ -252,7 +277,10 @@ impl PiEngine {
         // 字符串匹配（无深递归），主线程做安全。
         let parsed: pi::sdk::ThinkingLevel = level.parse().map_err(|e: String| e)?;
         on_big_stack(move || {
-            let mut guard = lock_recover(&shared.handle);
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_mut().ok_or("no active session")?;
             shared
                 .runtime
@@ -270,16 +298,9 @@ impl PiEngine {
     /// 记录在案；上游收口后一行切换。
     pub fn list_models(&self) -> Result<serde_json::Value, String> {
         on_big_stack(move || {
-            let auth_path = pi::config::Config::auth_path();
-            let auth = match pi::auth::AuthStorage::load(auth_path.clone()) {
-                Ok(a) => a,
-                Err(e) => {
-                    // 审查修复：auth 读取失败可见化（损坏/权限问题不应伪装成
-                    // "没有可用模型"），但列表仍 fail-open 列免凭据条目。
-                    eprintln!("[pi] auth.json 读取失败（仅列免凭据模型）: {e}");
-                    pi::auth::AuthStorage::empty_at(auth_path)
-                }
-            };
+            // 错误即错误：auth.json 读取失败直接报错，不降级为空凭据目录。
+            let auth = pi::auth::AuthStorage::load(pi::config::Config::auth_path())
+                .map_err(|e| format!("auth.json 读取失败: {e}"))?;
             let registry = pi::sdk::ModelRegistry::load_for_listing(&auth, None);
             let models: Vec<serde_json::Value> = registry
                 .get_available()

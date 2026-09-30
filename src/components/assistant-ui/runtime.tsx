@@ -103,6 +103,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       const raw = m.content
       const text = (typeof raw === 'string' ? raw : raw.map((c) => (c.type === 'text' ? c.text : '')).join('')).trim()
       if (!text) return
+      // 错误即错误：endpoint 未就绪直接抛错——消息不装作已发送
+      if (!endpointRef.current) throw new Error('[agui] endpoint 未就绪，消息未发送')
       actorRef.send({ type: 'USER_SUBMIT', text, messageId: `user-${Date.now()}` })
       postRun(text)
     },

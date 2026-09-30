@@ -138,6 +138,9 @@ export function ComposerWired() {
 
   // pi 控制面：模型目录 + 当前选中。挂载时拉目录；state 随 isRunning
   // 变化重拉（会话按需创建后 trigger 自动从 "Select model" 点亮为真名）。
+  // 错误即错误：目录/状态拉取失败 console 可见，不假装成功（目录空 =
+  // 错误态）；首条消息前 pi_get_state 报 no active session 是预期域状态
+  // （会话按需创建），不是被吞的错误。
   const [models, setModels] = useState<ModelOption[]>([])
   const [currentModel, setCurrentModel] = useState<string | null>(null)
   useEffect(() => {
@@ -146,8 +149,8 @@ export function ComposerWired() {
       try {
         const res = await invoke<{ models: PiModelEntry[] }>('pi_list_models')
         if (!cancelled) setModels(toModelOptions(res.models ?? []))
-      } catch {
-        // 无会话/桥未起：留空态
+      } catch (e) {
+        console.error('[pi] 模型目录获取失败', e)
       }
     })()
     return () => {
@@ -160,8 +163,9 @@ export function ComposerWired() {
       .then((st) => {
         if (!cancelled) setCurrentModel(`${st.provider}/${st.modelId}`)
       })
-      .catch(() => {
-        // 无会话：保留占位
+      .catch((e) => {
+        // 首条消息前必然发生（无会话=预期域状态）；其余失败照常可见
+        if (!String(e).includes('no active session')) console.error('[pi] 会话状态获取失败', e)
       })
     return () => {
       cancelled = true
@@ -169,10 +173,11 @@ export function ComposerWired() {
   }, [isRunning])
   const onModelChange = useCallback((id: string) => {
     const [provider, modelId] = id.split('/')
-    setCurrentModel(id)
-    void invoke('pi_set_model', { provider, modelId }).catch((e) =>
-      console.error('[pi] set_model 失败', e),
-    )
+    // 错误即错误：set_model 成功才更新选中态，失败保持原值且错误可见
+    // ——不乐观更新（UI 假装切换成功 = 兜底）。
+    void invoke('pi_set_model', { provider, modelId })
+      .then(() => setCurrentModel(id))
+      .catch((e) => console.error(`[pi] set_model ${id} 失败（保持原选择）`, e))
   }, [])
 
   return (

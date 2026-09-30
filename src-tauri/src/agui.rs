@@ -46,8 +46,8 @@ impl AguiState {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
+                .expect("system clock before Unix epoch")
+                .subsec_nanos()
         );
         Self {
             engine: crate::pi_session::PiEngine::new(),
@@ -175,10 +175,17 @@ async fn agui_run(
     if !st.check_token(q.get("token")) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "bad token"}))).into_response();
     }
-    let thread = body["threadId"]
-        .as_str()
-        .unwrap_or("main")
-        .to_string();
+    let thread = match body["threadId"].as_str() {
+        Some(t) if !t.is_empty() => t.to_string(),
+        // 错误即错误：缺 threadId 不静默默认（兜底禁令）
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "threadId required" })),
+            )
+                .into_response();
+        }
+    };
     let message = body["message"].as_str().unwrap_or("").to_string();
     if message.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "empty message"}))).into_response();
@@ -217,8 +224,8 @@ async fn agui_run(
         "run-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
+            .expect("system clock before Unix epoch")
+            .as_millis()
     );
     st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread, "runId": run_id }));
 
@@ -228,16 +235,23 @@ async fn agui_run(
     // pi debug 构建的 session future 深递归 >2MiB 默认栈（pi .cargo/config.toml
     // 的 RUST_MIN_STACK=16MiB 同源教训：MutexGuard 跨 await 非 Send，
     // 只能靠调用线程自己的栈）；事件回调经映射器进缓冲，SSE 端轮询放出。
+    // prompt 自身失败（会话锁中毒/重入拒绝等 pi 未走 AgentEnd(error) 的
+    // 失败）以 RUN_ERROR 进缓冲——错误可观测，不吞。
     let sink = st2.clone();
     std::thread::Builder::new()
         .name("pi-prompt".into())
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
-            let _ = st2.engine.prompt(&message, move |event: AgentEvent| {
+            let err_sink = sink.clone();
+            let err_thread = thread2.clone();
+            let result = st2.engine.prompt(&message, move |event: AgentEvent| {
                 for v in map_agent_event(&event) {
                     sink.push(&thread2, v);
                 }
             });
+            if let Err(e) = result {
+                err_sink.push(&err_thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
+            }
         })
         .expect("spawn pi-prompt thread");
     Json(serde_json::json!({ "runId": run_id })).into_response()
@@ -246,8 +260,18 @@ async fn agui_run(
 async fn agui_stream(
     State(st): State<Arc<AguiState>>,
     Query(q): Query<HashMap<String, String>>,
-) -> Sse<axum::response::sse::KeepAliveStream<ReceiverStream<Result<axum::response::sse::Event, std::convert::Infallible>>>> {
-    let thread = q.get("thread").cloned().unwrap_or("main".into());
+) -> axum::response::Response {
+    // 错误即错误：缺 thread 不静默默认（兜底禁令）
+    let thread = match q.get("thread") {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "thread required" })),
+            )
+                .into_response();
+        }
+    };
     let mut cursor: u64 = q.get("lastEventId").and_then(|s| s.parse().ok()).unwrap_or(0);
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::response::sse::Event, std::convert::Infallible>>(32);
 
@@ -274,7 +298,7 @@ async fn agui_stream(
         axum::response::sse::KeepAlive::new()
             .interval(std::time::Duration::from_secs(15))
             .text("ping"),
-    )
+    ).into_response()
 }
 
 async fn healthz() -> impl IntoResponse {
