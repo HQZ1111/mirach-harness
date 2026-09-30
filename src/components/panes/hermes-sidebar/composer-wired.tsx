@@ -177,7 +177,10 @@ export function ComposerWired() {
 
   return (
     <ComposerPrimitive.Root asChild>
-      <Composer className="w-full">
+      {/* max-w-none：官方 Composer kit 自带 max-w-lg（512px）第二层收窄，
+          与 thread 的 44rem 消息区叠层——输入框比消息区窄一截（实测 480 vs
+          660）。twMerge 下 max-w-none 覆盖 kit 默认，宽度全权归外层。 */}
+      <Composer className="w-full max-w-none">
         <ComposerPrimitive.AttachmentDropzone asChild>
           <ComposerBar className="rounded-(--composer-radius) border border-(--stroke-soft) bg-transparent p-2.5">
             <AttachmentsChips />
