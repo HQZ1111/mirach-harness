@@ -1677,6 +1677,32 @@ dockview 已从依赖移除，pane-shell 抄写终止——hermes 的 14k 行 pa
       Start-Process 分离启动；冒烟脚本一律文件日志（appendFileSync）+
       看门狗，CDP Runtime.evaluate 长 awaitPromise 会无声死（改页面内
       fire-and-forget + node 短轮询 window.__probe）。
+  - **§7-4 控制面 IPC（2026-09-30，提交 11217a5）**：
+    - pi_session.rs 重构 **Arc<EngineShared>**：共享态(handle/abort/runtime)
+      全在 Arc 里，16MiB 大栈线程 move Arc、锁在线程内拿——闭包满足
+      'static（此前版本闭包借 &self/guard 被 E0521/E0597 全拒）。串行
+      不变量不变（std Mutex 排队）。
+    - 引擎新增 state/messages/set_model/set_thinking_level/interrupt/
+      list_models；**prompt 改走 prompt_with_abort**（AbortHandle 登记，
+      pi_interrupt 置信号，prompt 返回即清）。
+    - main.rs 六 IPC 命令（§4.5 判据：HTTP 只管事件流）：pi_get_state/
+      pi_get_messages/pi_set_model/pi_set_thinking_level/pi_interrupt/
+      pi_list_models。
+    - composer-wired：ModelSelector 接 **pi_list_models**（只列凭据就绪
+      条目=上游 model_entry_is_ready 语义，本机 72 条 bedrock 实测）；
+      当前模型 **随 isRunning 变化重拉**（会话按需创建后 trigger 从
+      "Select model" 自动点亮真名——挂载时只拉一次会错过）；选模型走
+      pi_set_model；onCancel 接 pi_interrupt（composer 停止钮生效）。
+    - **稳定面例外记录**：AuthStorage/Config 未进 pi::sdk re-export，
+      但 ModelRegistry::load_for_listing（sdk 稳定面）签名要求
+      &AuthStorage——走 pub mod（pi::auth/pi::config）是上游 sdk 内部
+      同款用法（sdk.rs: AuthStorage::load_async(Config::auth_path())），
+      最小例外注释在案。
+    - 实测（CDP）：无会话 state 报 "no active session"；models=72；
+      POST 后 state 完整快照（sessionId/opus-4/thinkingLevel=high）；
+      UI 发消息后 trigger 显示 us.anthropic.claude-opus-4-…-v1:0；
+      tsc 0；cargo check 零警告。
+
   - **  - **  - **  - **  - **代码模式撤回 + 左侧栏回归官方 ThreadList 原语（用户 2026-09-29：
     "代码模式不对，撤回。左侧栏要用它本身原语的方式加，参考 hermes
     样式，但得用 assistant-ui 的组件"）**：①v3.1 的行号代码模式撤回，
