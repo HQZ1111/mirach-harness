@@ -281,6 +281,26 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
    `persist_extension_permissions:false`（决定存 mirach 库，不写
    `~/.pi/extension-permissions.json`）；弹窗第三态"仅本次"=响应里
    `"persist": false`。
+
+   **实现现状（2026-10-01，§7-5 落地，提交 9e87e71）**：
+   - 机制与本节裁定一致——handler → CUSTOM（常驻流）→ 卡片 → IPC 回灌
+     oneshot。**这不是 v2.1 被删的 Tauri Event 门铃复辟**：门铃删的是
+     第三通知通道（Tauri Event），此处审批信号 piggyback 在唯一
+     GET 流上，通道归零仍然成立（仍只有 POST + GET 流两个 HTTP 端点）。
+   - 命令实现名与形状（对齐 SDK `ExtensionUiResponse{id, value, cancelled}`；
+     草稿 `approve_action(sessionId, requestId, approved)` 的
+     approved:boolean 只覆盖 confirm，作废）：
+     `pi_pending_approvals()`（挂载/收到流信号/应答后调用）、
+     `pi_extension_ui_response(id, value, cancelled)`。sessionId 单会话
+     MVP 省略（registry 按 id 全局唯一），多会话引入时再加。
+   - CUSTOM 流事件 value 只带 `{id}`（信号）；请求详情以 Rust 端
+     ApprovalRegistry 为唯一真相经拉取——防流重放复活已应答卡片。
+   - `persist_extension_permissions:false` 已落实（全部决定会话级，
+     不写盘）→ 草稿的"仅本次"（`{"allow":bool,"persist":false}`）
+     按钮无意义，不设。
+   - oneshot 超时 MVP 未实现（卡片挂起直到用户应答）；上游
+     `deadline` 字段私有。**待办**。
+   - ask 工具问题卡（ask_response）未实现，待 ask 工具启用。
 2. **ask 工具**：questions[{question, options, multi}] + timeoutMs，
    答案按 ask_response 语义回灌；超时=模型收到未回答错误（上游语义，
    不挂死）。
@@ -290,9 +310,10 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
 ```
 IPC：session_list/create/open/delete/rename、set_model、
      set_thinking_level、interrupt、get_state、get_messages、compact、
-     fork、export_html、get_agui_endpoint、approve_action、
-     ask_response、tool_result、sync_app_context（100ms debounce）、
-     delegate_to_agent
+     fork、export_html、get_agui_endpoint、pi_pending_approvals、
+     pi_extension_ui_response（=草稿 approve_action，按 SDK
+     ExtensionUiResponse 形状定名）、ask_response（待实现）、tool_result、
+     sync_app_context（100ms debounce）、delegate_to_agent
 AG-UI HTTP：POST /ag-ui（起 run，返回 runId） / GET /ag-ui/stream
             （常驻事件流，唯一消费口）
 ```

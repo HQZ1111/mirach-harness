@@ -65,8 +65,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         es.onmessage = (e) => {
           try {
             const parsed = JSON.parse(e.data)
-            // 宿主桥门铃（§4.4）：卡片详情以 registry 为真相，经 IPC 拉取
-            // 全量挂起列表（重放流不会造成卡片重复）。事件本体照常喂机器。
+            // 审批请求进流（§4.4 prescribed：ExtensionUiRequest → CUSTOM
+            // 常驻流——不是被删的 Tauri Event 门铃，零新增通道）：卡片详情
+            // 以 Rust 端 ApprovalRegistry 为真相，经 IPC 拉取全量挂起列表
+            // （重放流不会造成卡片重复）。事件本体照常喂机器。
             if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
               approvalBridge
                 .getState()

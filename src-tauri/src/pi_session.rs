@@ -193,6 +193,9 @@ impl PiEngine {
                 Arc::new(HostUiBridge { handle: h })
                     as Arc<dyn pi::sdk::ExtensionUiHandler>
             }),
+            // §4.4 裁定：许可决定不写 ~/.pi/extension-permissions.json，
+            // 全部会话级（决定权在 mirach）——"仅本次"按钮因此无意义
+            persist_extension_permissions: false,
             ..SessionOptions::default()
         };
         let handle: AgentSessionHandle = on_big_stack(move || {
