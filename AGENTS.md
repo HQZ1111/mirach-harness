@@ -459,6 +459,23 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     改回参数；threadListAdapter（runtime.tsx，threads/switch/hydrate/
     rename/delete 全接好）与 pi_list/new/open/rename/delete_session
     五命令原样可用。tsc 0；cargo check 零警告。
+  - **【上游缺陷已修+持久化恢复（2026-10-01 晚）】用户版本疑问触发
+    复查：本地 pi_agent_rust-main 自报 0.5.1（Cargo.toml/Cargo.lock），
+    GitHub 实际最新 release=v0.6.1（24 Sep）——下载的 main zip 未含
+    修复。**根因改判（有据）**：非锁冲突猜测，是 session_index.rs
+    note_session_namespace_change 里 generation counter
+    （session-index.generation，0 字节文件）以 append-only 打开后
+    FileExt::lock——Windows LockFileEx 拒绝 append-only 句柄
+    （FILE_APPEND_DATA 无 GENERIC_WRITE）→ os error 5 → save 流程
+    中断（persist 排在 generation 打开之后）→ jsonl 永不落盘。
+    **修复=同款上游 gh #239（v0.6.0 release note 原文："opens the
+    counter read + append"）**：pi session_index.rs 加 .read(true)
+    一行补丁。恢复 no_session:false + session_path 参数。实测：POST
+    后 jsonl 落盘（731 字节）、pi_list_sessions 出完整记录
+    （id/path/messageCount）、rename 成功且列表可见、threadId 与
+    sessionId 同源。冒烟全绿；tsc 0；cargo check 零警告。
+    **注意**：下次同步上游 pi 代码时此补丁会被同化（内容与官方一致，
+    无冲突）。
 
 ## 工具（`scripts/`）
 

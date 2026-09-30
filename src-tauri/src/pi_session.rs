@@ -190,15 +190,16 @@ impl PiEngine {
         let options = SessionOptions {
             provider,
             model,
-            // 【上游缺陷回退，2026-10-01】no_session:false 实测（Windows /
-            // pi v0.5.1）：会话存活期间 save_and_index / flush_autosave
-            // 永远失败（os error 5；SessionPersistenceLockGuard 持锁 +
-            // lock_session_persistence 再锁的同进程锁冲突嫌疑），jsonl
-            // 永不落盘、SDK 路径无 Periodic 驱动——持久化形同虚设，且
-            // 每次创建泄漏 .jsonl.lock 文件。恢复 ephemeral；上游修复后
-            // 改回 false、session_path 改回参数即恢复全部会话功能。
-            no_session: true,
-            session_path: None, // ← 上游修复后改回 session_path
+            // 会话持久化（对话真相在 pi，§5）；session_path 打开历史会话时
+            // 上游自动装填该文件。
+            // 【2026-10-01 修复记录】此前 no_session:false 实测"flush 永败
+            // os error 5"非本仓库问题——是 pi 上游 v0.5.x 的 generation
+            // counter append-only 句柄 + LockFileEx 缺陷（gh #239，v0.6.0
+            // 官方修复：open read + append）。已将同款修复打到本地
+            // pi_agent_rust-main（session_index.rs note_session_namespace_
+            // change），实测恢复后见下方冒烟记录。
+            no_session: false,
+            session_path,
             // handler 仅在加载了扩展时被咨询；挂上桥后能力提示/扩展 UI
             // 请求经 CUSTOM 事件到前端卡片（§4.4）
             extension_ui_handler: ui_bridge.map(|h| {
@@ -210,8 +211,6 @@ impl PiEngine {
             persist_extension_permissions: false,
             ..SessionOptions::default()
         };
-        // 上游修复回退期：session_path 参数保留但不生效（no_session:true）
-        let _ = session_path;
         let handle: AgentSessionHandle = on_big_stack(move || {
             shared.runtime.block_on(async { create_agent_session(options).await })
         })?
