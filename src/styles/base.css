@@ -35,14 +35,15 @@ body {
 body.in-browser { background: var(--surface); }
 
 /* ── 标题栏 ── */
-/* 标题栏 = 100px 透明浮层（用户定稿：页签条加高 100 覆盖标题栏区域）：
+/* 标题栏 = 100px 透明浮层（用户定稿：页签条加高 100 覆盖标题栏区域，
+   高度同 --logo-strip-h 一处取值）：
    容器穿透（页签条可点），仅按钮与顶部拖拽带可交互；MIRACH logo 由左栏
    页签条上部承载（RailLogo），标题栏不再重复。 */
 .app-titlebar {
   align-items: flex-start;
   background: transparent;
   display: flex;
-  height: 100px;
+  height: var(--logo-strip-h);
   justify-content: flex-end;
   left: 0;
   padding: 4px 10px 0;

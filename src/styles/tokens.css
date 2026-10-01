@@ -68,6 +68,8 @@
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */
   --logo-strip-h: 100px;                      /* 页签条总高（顶带分栏） */
+  --logo-leading-gap: 12px;                   /* logo 带内 logo 与文字的间距 */
+  --logo-leading-pad: 20px;                   /* logo 带上/左内边距（文字与 logo 同一左线 20） */
   --strip-low-height: 36px;                   /* 上下分栏的非顶部分栏条高
     （100 高的双重身份=标题栏区只属于窗口顶带；普通条高 36，用户 2026-09-27） */
 
@@ -103,7 +105,15 @@
   /* ── 折叠轨道（左右 border 轨道）+ 栏级竖轨（RegionRails） ────── */
   --rail-width: 20px;                         /* 用户定值 */
   --rail-btn-size: 14px;                      /* 轨道钮 */
+  /* ── zone 头部钮（fl-min-btn：「+」/切竖轨，onRenderTabSet 注入） ── */
+  --zone-btn-size: 20px;                      /* 20×20 方盒 */
+  --zone-btn-font: 13px;                      /* 「+」字号（盒内唯一文字） */
+  --zone-btn-gap: 4px;                        /* 条内左距（margin-left） */
+  --zone-btn-radius: 4px;                     /* 圆角（zone 头部钮系） */
   --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.14);  /* 弹出菜单投影 */
+
+  /* ── 全局设置浮层（settings-overlay，§7-7；2026-10-01 写进令牌） ── */
+  --overlay-mask: rgba(0, 0, 0, 0.32);        /* 遮罩 scrim（.ze-backdrop 同系） */
 
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被

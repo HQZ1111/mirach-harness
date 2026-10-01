@@ -21,22 +21,15 @@
 export const TAB_STRIP_H = 28
 /** hermes COLLAPSED_ZONE_PX：拖到这个高度就折叠进轨道 */
 export const COLLAPSED_ZONE_PX = 28
-/** hermes app/layout-constants.ts：两根侧栏撤出网格变 overlay 的断点 */
-export const SIDEBAR_COLLAPSE_MEDIA_QUERY = '(max-width: 639.98px)'
 
 // ── 固定 px 轨道（hermes 的 zone 声明式尺寸 + 用户覆盖：默认宽 350） ────────
-// 大栏约束数值（用户 2026-09-26 定稿，docs/layout-design.md §2）：
-// 左栏 240-420 / 主栏 仅 min 395（无上限）/ 右栏 240-420。
-// 左右栏默认宽 350（区间内）。高度：堆叠分栏 min = 标题栏（28）、max 无
-// （v2.1 删除了终端 80vh 上限——"最大高度没限制"，白带类 bug 随之消失）。
+// 大栏约束数值（用户 2026-09-26 定稿，docs/layout-design.md §2）：左栏
+// 240-420 / 主栏 仅 min 395（无上限）/ 右栏 240-420；默认宽 350/746/700。
+// **单一来源 = pane-registry.ts 的 REGION_LIMITS / REGION_DEFAULT_W**（P2-12
+// 单源化：此前的副本无人导入，已删——勿再在此复制一份）。高度：堆叠分栏
+// min = 标题栏（28）、max 无（v2.1 删除了终端 80vh 上限——"最大高度没
+// 限制"，白带类 bug 随之消失）。
 export const SIDEBAR_DEFAULT_WIDTH = 350
-
-/** 各 region 的 zone 宽度约束（flex-layout 约束引擎按此分发） */
-export const REGION_LIMITS: Record<string, { minW: number; maxW: number | null }> = {
-  left: { minW: 240, maxW: 420 },
-  main: { minW: 395, maxW: null },
-  right: { minW: 240, maxW: 420 },
-}
 
 /** 左栏 tabset（logo 带在上、标签条紧随其下）：宽度钳制 + 标签条自定义类
  *  （styles/flexlayout.css 给 .rail-tabstrip 顶部让出 logo 带高度） */

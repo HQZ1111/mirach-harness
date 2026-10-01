@@ -49,7 +49,7 @@ import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
 
 import type { DropHint, DropPosition } from '@/store/layout-store'
 import { useLayoutStore } from '@/store/layout-store'
-import { zoneConfigOf } from './pane-registry'
+import { PANE_TYPES, paneTypeOf, zoneConfigOf, type Region } from './pane-registry'
 import { clearTabSelection } from './tab-selection'
 import { type EngineZone, HighlightedZones, primaryZone, type ZoneRect } from './zones-engine'
 
@@ -201,11 +201,14 @@ const sameHint = (a: DropHint | null, b: DropHint | null) =>
   (a?.groupIds?.length ?? 0) === (b?.groupIds?.length ?? 0) &&
   (a?.groupIds ?? []).every((id, i) => b?.groupIds?.[i] === id)
 
-// 临时调试钩子（CDP 冒烟用，模块级——startDragSession/startPaneDrag 都写）
+// 临时调试钩子（CDP 冒烟用，模块级——startDragSession/startPaneDrag 都写）。
+// 有界：cap 200，超限丢最旧（长会话探针不再无限增长，2026-10-01 审查 P2-13）。
+const DRAG_LOG_CAP = 200
 const dragLog = (what: string, data?: unknown) => {
   const w = window as any
   w.__flDragLog = w.__flDragLog ?? []
   w.__flDragLog.push({ what, data })
+  if (w.__flDragLog.length > DRAG_LOG_CAP) w.__flDragLog.splice(0, w.__flDragLog.length - DRAG_LOG_CAP)
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +770,17 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
   })
 }
 
+/** 投放块内第一个一级窗格的家乡 region（无 → undefined）——dropBlock 预戳
+ *  门控用（§2.1 ②：含一级窗格的投放不预戳，交给 sync 的 primary 锚定） */
+const movingPrimaryRegion = (moving: readonly string[]): Region | undefined => {
+  for (const id of moving) {
+    const t = paneTypeOf(id)
+    const def = t ? PANE_TYPES[t] : undefined
+    if (def?.primary) return def.region
+  }
+  return undefined
+}
+
 /** hermes movePanes 的 flexlayout 版：lead 吃几何（edge=分裂、center=进栈），
  *  其余按条带序跟队，`activeId`（按下的页签）在落点组置前。 */
 function dropBlock(
@@ -796,11 +810,17 @@ function dropBlock(
     model.doAction(Actions.moveNode(lead, targetId, dropDockLocation(pos), 0))
     const leadParent = model.getNodeById(lead)?.getParent()
     if (leadParent instanceof TabSetNode && leadParent.getId() !== targetId) {
-      // 新分栏继承**被投入分栏（目标）**的列 identity——"放到检查的左边"=
-      // 检查所在的列（跟随状态），不能用几何左邻猜（2026-09-26 用户场景）
+      // 新分栏预戳**被投入分栏（目标）**的列 identity——"放到检查的左边"=
+      // 检查所在的列（跟随状态），不能用几何左邻猜（2026-09-26 用户场景）。
+      // **门控（§2.1 ②，2026-10-01 审查 P1-2）**：仅当投放内容不含一级窗格
+      // （或其家乡 region 与目标列一致）才预戳——含一级窗格（如主会话拖到
+      // 左栏旁分裂）时留空，交给 sync 的"列子树内第一个一级窗格锚定"：
+      // config 戳防夺锚，预戳的错误 region 会抢在 primary 锚定之前生效，
+      // 把主会话钉进左栏限制。
       const targetNode = model.getNodeById(targetId)
       const targetCfg = targetNode instanceof TabSetNode ? zoneConfigOf(targetNode) : undefined
-      if (targetCfg) {
+      const movingPrimary = movingPrimaryRegion(moving)
+      if (targetCfg && (movingPrimary === undefined || movingPrimary === targetCfg.region)) {
         model.doAction(
           Actions.updateNodeAttributes(leadParent.getId(), { config: { region: targetCfg.region, rail: targetCfg.rail } }),
         )

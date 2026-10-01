@@ -21,6 +21,9 @@ export const syncTabsetConstraints = (m: Model) => {
   const railByRegion: Record<Region, boolean> = { left: false, main: false, right: false }
   m.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
+    // 浮动窗格隔离（§8/§12）：非主布局子树（浮动/弹出窗）不参与竖轨形态
+    // 判定——轨只建在主布局网格里
+    if (node.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
     const cfg = zoneConfigOf(node)
     if (cfg?.rail && cfg.track) railByRegion[cfg.region] = true
   })
@@ -58,7 +61,17 @@ export const syncTabsetConstraints = (m: Model) => {
     const stamped = regionCfgOfNode(k)?.region
     if (stamped) kidRegion.set(k.getId(), stamped)
   }
-  // 邻居传播：仍无 region 的列从最近邻（左先右后）继承，直到收敛
+  // ② 全新列（无戳）由列子树内第一个一级窗格的家乡 region 锚定——**必须
+  // 先于邻居传播**（§2.1 优先级）：否则拖出的主会话新列会被邻居（如左栏）
+  // 的 region 抢锚，宽度限制跟着错（"主会话拖到左栏旁分裂"场景，
+  // 2026-10-01 审查 P1-2）。
+  for (const k of nonTrackKids) {
+    if (kidRegion.get(k.getId())) continue
+    const r = primaryRegionOf(k)
+    if (r) kidRegion.set(k.getId(), r)
+  }
+  // ③ 邻居传播：仍无 region 的列（子树无一级窗格，如拖出的机器人分栏）
+  // 从最近邻（左先右后）继承，直到收敛
   let propagated = true
   while (propagated) {
     propagated = false
@@ -74,8 +87,9 @@ export const syncTabsetConstraints = (m: Model) => {
       }
     }
   }
+  // ④ 都不满足 → main
   for (const k of nonTrackKids) {
-    if (!kidRegion.get(k.getId())) kidRegion.set(k.getId(), primaryRegionOf(k) ?? 'main')
+    if (!kidRegion.get(k.getId())) kidRegion.set(k.getId(), 'main')
   }
   // 空区竖轨清理（用户 2026-09-27：竖轨里关闭区内最后一个窗格后，空轨
   // 不残留——原"空轨保留"设计作废）：某区的轨还在、但该区已无任何分栏
@@ -115,6 +129,10 @@ export const syncTabsetConstraints = (m: Model) => {
   const hasMainKid = [...kidRegion.values()].some((r) => r === 'main')
   m.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
+    // 浮动窗格隔离（§8/§12）：非主布局子树（浮动/弹出窗）不被 sync 污染
+    // ——浮窗内分栏不推 minWidth/不打 fl-strip-low/不改 enableClose，
+    // 限制与形态语义只属于主布局网格。
+    if (node.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
     // 空分栏跳过；空轨（20px 导航轨）必须过——它的 min/max 在这里修
     if (node.getChildren().length === 0 && !zoneConfigOf(node)?.track) return
     const isTrack = zoneConfigOf(node)?.track === true

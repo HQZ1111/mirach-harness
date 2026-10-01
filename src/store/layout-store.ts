@@ -17,7 +17,6 @@ import {
   deleteUserPreset,
   readUserPresets,
   saveUserPreset,
-  SIDEBAR_COLLAPSE_MEDIA_QUERY,
   type StoredPreset,
 } from '@/components/layout/layout-presets'
 
@@ -35,6 +34,36 @@ export interface DropHint {
 }
 
 const SIDES_KEY = 'mirach.layout.sides.v1'
+
+// 已应用预设记录（P2-9）：{presetId, appliedTreeJson}——内存 appliedTree
+// 重载即丢，此前重载后双击分隔条回退均分而非预设原始权重；记录落盘后
+// boot 水合回 appliedTree + activePresetId。
+const APPLIED_KEY = 'mirach.harness.layout.applied.v1'
+
+const readApplied = (): { presetId: string | null; json: unknown } | null => {
+  try {
+    const raw = localStorage.getItem(APPLIED_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    const r = parsed as Record<string, unknown>
+    return { presetId: typeof r.presetId === 'string' ? r.presetId : null, json: r.json ?? null }
+  } catch (e) {
+    console.error('[layout-store] read applied layout failed', e)
+    return null
+  }
+}
+
+/** 写已应用预设记录（applied.v1）：setActivePreset（预设标记变化）与
+ *  setAppliedTree（应用预设成功）两个入口都落盘——重载后双击分隔条按
+ *  预设原始权重回退、激活预设徽标恢复。失败 console.error（铁律 12）。 */
+const writeAppliedRecord = (presetId: string | null, json: unknown) => {
+  try {
+    localStorage.setItem(APPLIED_KEY, JSON.stringify({ presetId, json }))
+  } catch (e) {
+    console.error('[layout-store] persist applied layout failed', e)
+  }
+}
 
 const readSides = (): { left: boolean; right: boolean } => {
   try {
@@ -62,7 +91,10 @@ export interface LayoutStore {
   appliedTree: unknown
   /** Zone 编辑器（hermes「New grid layout」） */
   zoneEditorOpen: boolean
-  /** 窄视口（hermes $narrowViewport：两根侧栏撤出网格变 overlay 的断点） */
+  /** 窄视口（hermes $narrowViewport：两根侧栏撤出网格变 overlay 的断点）。
+   *  **唯一写者 = rebalance 的动态判据 updateNarrowViewport**（640
+   *  matchMedia 写者已删，P1-3：双写者窄窗收/展横跳）；boot 由
+   *  flex-layout 挂载 effect 先写一次初值。 */
   narrowViewport: boolean
   /** 拖拽高亮提示（overlay 订阅；壳不订阅——per-move churn 隔离契约） */
   dropHint: DropHint | null
@@ -101,14 +133,16 @@ export const closeZoneEditor = () => useLayoutStore.getState().closeZoneEditor()
 export const setSideCollapsed = (side: 'left' | 'right', collapsed: boolean) =>
   useLayoutStore.getState().setSideCollapsed(side, collapsed)
 
+const applied0 = readApplied()
+
 export const useLayoutStore = create<LayoutStore>()((set, get) => ({
   editMode: false,
-  activePresetId: null,
+  activePresetId: applied0?.presetId ?? null,
   userPresets: readUserPresets(),
   layoutRev: 0,
-  appliedTree: null,
+  appliedTree: applied0?.json ?? null,
   zoneEditorOpen: false,
-  narrowViewport: false, // 真值由下方 narrowNow() 在模块加载后同步（见守卫注释）
+  narrowViewport: false, // 真值由 updateNarrowViewport（rebalance 动态判据）驱动，唯一写者
   dropHint: null,
   treeDragging: null,
   sideCollapsed: readSides(),
@@ -116,11 +150,21 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
   openEditMode: () => set({ editMode: true }),
   closeEditMode: () => set({ editMode: false }),
   toggleEditMode: () => set({ editMode: !get().editMode }),
-  setActivePreset: (id) => set({ activePresetId: id }),
+  setActivePreset: (id) => {
+    set({ activePresetId: id })
+    // 预设标记进 applied.v1 记录（json 不动）——手动拖动清标记后重载，
+    // 徽标语义与内存一致（json 仍留作双击回退的权重来源）
+    writeAppliedRecord(id, get().appliedTree)
+  },
   storeUserPreset: (title, json) => set({ userPresets: saveUserPreset(title, json) }),
   removeUserPreset: (id) => set({ userPresets: deleteUserPreset(id) }),
   bumpLayoutRev: () => set({ layoutRev: get().layoutRev + 1 }),
-  setAppliedTree: (json) => set({ appliedTree: json }),
+  setAppliedTree: (json) => {
+    set({ appliedTree: json })
+    // 应用预设/重置成功后写记录（presetId 取当前值——applyJson 先
+    // setActivePreset 再这里，两次写收敛到同一条记录）
+    writeAppliedRecord(get().activePresetId, json)
+  },
   openZoneEditor: () => set({ zoneEditorOpen: true }),
   closeZoneEditor: () => set({ zoneEditorOpen: false }),
   setDropHint: (hint) => set({ dropHint: hint }),
@@ -130,23 +174,15 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
     set({ sideCollapsed: next })
     try {
       localStorage.setItem(SIDES_KEY, JSON.stringify(next))
-    } catch {}
+    } catch (e) {
+      console.error('[layout-store] persist sides failed', e)
+    }
   },
 }))
 
-// 窄视口断点监听（hermes $narrowViewport 的 matchMedia 驱动）。
-// **最小化守卫**：Windows 最小化时 WebView2 视口报 160×28——宽度塌过
-// 断点但高度不是真的；误判成窄屏会把两侧栏抽成 overlay 抽屉，恢复后
-// 收编重排 = 用户实测的"最小化再打开，竖栏标签位置/栏位置自己变"。
-// 视口高度 ≤240 一律视为最小化瞬态，保持现状不动。
-const narrowNow = (): boolean =>
-  typeof window !== 'undefined' &&
-  window.innerHeight > 240 &&
-  (window.matchMedia?.(SIDEBAR_COLLAPSE_MEDIA_QUERY).matches ?? false)
-
-if (typeof window !== 'undefined') {
-  useLayoutStore.setState({ narrowViewport: narrowNow() })
-  window.matchMedia?.(SIDEBAR_COLLAPSE_MEDIA_QUERY).addEventListener('change', () => {
-    useLayoutStore.setState({ narrowViewport: narrowNow() })
-  })
-}
+// 窄视口判定不再有 640 matchMedia 写者（P1-3，2026-10-01 审查）：它与
+// rebalance.updateNarrowViewport 的动态判据（"根行装不下合并后各列 min
+// → 左右栏撤成 overlay"）双写者打架，窄窗收/展横跳——动态判据为准。
+// 写者唯一后：boot 由 flex-layout 挂载 effect 调 updateNarrowViewport 写
+// 初值；resize/结构动作后由串行重排通道刷新。最小化守卫（视口高 ≤240
+// 不改判）在 updateNarrowViewport 内，语义不变。

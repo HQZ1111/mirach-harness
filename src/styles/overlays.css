@@ -1,6 +1,7 @@
 /* ============================================================
  * overlays.css — 宿主层绝对定位面：装饰叠片（chrome-overlays.tsx）+
  * 布局编辑 veil（edit-veils.tsx）+ FancyZones 投放预览（drop-overlay.tsx）
+ * + 全局设置浮层（settings-overlay.tsx，portal 到 body 的模态）
  * ============================================================ */
 
 /* ── 装饰叠片 ──
@@ -108,3 +109,258 @@
   width: 2px;
   z-index: 50;
 }
+
+/* ── 全局设置浮层（settings-overlay.tsx，§7-7）——portal 到 body，
+   遮罩 + 居中卡片（.ep-* 卡片做法；z 130 在 ze-backdrop(120) 之上，
+   设置钮常驻标题栏，浮层打开时盖住一切 transient 面）。
+   颜色/间距一律引用 tokens.css 令牌；错误色 var(--destructive)
+   （tailwind.css 既有令牌，非新字面值）。 ── */
+.set-overlay {
+  align-items: center;
+  background: var(--overlay-mask);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 130;
+}
+
+.set-card {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  box-shadow: var(--shadow-pop);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100% - 6rem);
+  max-width: calc(100% - 4rem);
+  position: fixed;
+  width: 44rem;
+}
+
+.set-header {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+  user-select: none;
+}
+
+.set-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.set-close {
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  padding: 4px;
+}
+
+.set-close:hover {
+  background: var(--hover-wash);
+  color: var(--text);
+}
+
+.set-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  padding: 0 16px 16px;
+}
+
+.set-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.set-label {
+  color: var(--text-4);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.set-hint {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 0;
+}
+
+.set-code {
+  background: var(--hover-wash);
+  border-radius: 4px;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  padding: 0 4px;
+}
+
+.set-select {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  height: 28px;
+  max-width: 100%;
+  outline: none;
+  padding: 0 8px;
+}
+
+.set-select:focus { border-color: var(--fl-accent); }
+
+/* 提供方凭据行：组上下分隔线（.zone-rail-group 同系令牌） */
+.set-rows {
+  border-bottom: 1px solid var(--stroke-soft);
+  display: flex;
+  flex-direction: column;
+}
+
+.set-row {
+  align-items: baseline;
+  border-top: 1px solid var(--stroke-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 6px 2px;
+}
+
+.set-row-provider {
+  color: var(--text);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.set-row-source {
+  color: var(--text-4);
+  font-size: 11px;
+}
+
+.set-row-ok {
+  color: var(--fl-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.set-row-miss {
+  color: var(--text-4);
+  font-size: 11px;
+}
+
+.set-row-env {
+  color: var(--text-3);
+  font-family: Consolas, monospace;
+  font-size: 11px;
+}
+
+.set-row-env-off { color: var(--text-4); }
+
+/* 错误条（错误即错误：红色调，destructive 既有令牌） */
+.set-err {
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--destructive) 45%, transparent);
+  border-radius: 6px;
+  color: var(--destructive);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 保存成功反馈（可见，非假装成功） */
+.set-saved {
+  color: var(--fl-accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* JSON 文本编辑器（等宽字体） */
+.set-textarea {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  min-height: 120px;
+  outline: none;
+  padding: 8px;
+  resize: vertical;
+  white-space: pre;
+  width: 100%;
+}
+
+.set-textarea:focus { border-color: var(--fl-accent); }
+
+.set-file-missing {
+  color: var(--text-4);
+  font-size: 12px;
+}
+
+.set-actions {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.set-btn {
+  background: transparent;
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.set-btn:hover {
+  background: var(--hover-wash);
+  border-color: color-mix(in srgb, var(--text) 24%, transparent);
+  color: var(--text);
+}
+
+.set-btn:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.set-btn-primary {
+  background: var(--fl-accent);
+  border-color: var(--fl-accent);
+  color: var(--surface);
+}
+
+.set-btn-primary:hover {
+  background: var(--fl-accent);
+  border-color: var(--fl-accent);
+  color: var(--surface);
+  opacity: 0.9;
+}
+
+.set-about-defs {
+  color: var(--text-2);
+  display: grid;
+  font-size: 12px;
+  gap: 4px 16px;
+  grid-template-columns: max-content 1fr;
+  margin: 0;
+}
+
+.set-about-defs dt { color: var(--text-4); }
+.set-about-defs dd { margin: 0; }

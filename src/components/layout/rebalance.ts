@@ -109,12 +109,17 @@ export const applyRootWeights = (m: Model) => {
     return c?.region === 'main' && !c.track
   })
   if (mainKids.length > 0) {
-    // 主栏（可能多分栏并列）按当前权重比例分吃剩余，每栏不低于 min 395
+    // 主栏（可能多分栏并列）按当前权重比例分吃剩余，每栏不低于**实际生效
+    // min**（sync 过承诺缩让后的动态值 40-395，从节点约束读——写死 395
+    // 会把缩让顶回去，再溢出再缩让来回拉锯，2026-10-01 审查 P2-7）
     const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
     const wSum = mainKids.reduce((s, k) => s + (weightOf(k) > 0 ? weightOf(k) : 100), 0)
     for (const k of mainKids) {
       const i = kids.indexOf(k)
-      px[i] = Math.max((rest * weightOf(k)) / wSum, REGION_LIMITS.main.minW)
+      // widthBounds 读节点实际生效的 minWidth（tabset）或子项聚合（row），
+      // 与 sync 落的属性同一来源；40 = §2.5 缩让底线
+      const minW = Math.max(widthBounds(k, k instanceof RowNode).min, 40)
+      px[i] = Math.max((rest * weightOf(k)) / wSum, minW)
     }
   } else {
     // 主栏整栏折叠（无吸收者）：富余给最后一个非轨列——分栏内部由
@@ -175,7 +180,7 @@ export const absorbSurplus = (m: Model) => {
     const b = widthBounds(k, k instanceof RowNode)
     return Math.min(Math.max(measured[i], b.min), b.max)
   })
-  const rest = avail - px.reduce((s, v) => s + Math.max(v, 0), 0)
+  let rest = avail - px.reduce((s, v) => s + Math.max(v, 0), 0)
   // 吸收者：主栏分栏按当前权重比例分吃 rest（各不低于实际生效 min——
   // sync 的过承诺缩让值）；没有主栏分栏 → 无上限列 → 最后一个非轨列
   // （右栏的 20px 轨贴在行尾，不能当吸收者）
@@ -198,6 +203,11 @@ export const absorbSurplus = (m: Model) => {
     }
     if (cand >= 0) {
       mains = [cand]
+      // 【2026-10-01 单测轮修复】候选吸收者先前按非吸收者钳制、其份额已计入
+      // rest 的扣减——只翻 -1 标记不归还，写入权重 Σ = 可用宽 − 吸收者原钳制
+      // 宽，根行不变式（§9 Σ=可用宽）被破坏（行内留白/与渲染真相对不齐）。
+      // 与 applyRootWeights 无主栏分支的 px[last] += rest 同构：先归还份额。
+      rest += Math.max(px[cand], 0)
       px[cand] = -1
     }
   }

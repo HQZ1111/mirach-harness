@@ -61,6 +61,27 @@ const PRIMARY_TYPES = new Set(
     .map(([t]) => t),
 )
 
+// 动作数据里的节点 id 键（flexlayout 工厂签名逐个对照——AGENTS 审计教训②：
+// 数据键不统一，DELETE_TAB/UPDATE_NODE_ATTRIBUTES/MAXIMIZE_TOGGLE=node、
+// SELECT_TAB/SET_ACTIVE_TABSET=tabNode、MOVE_NODE/ADD_TAB=fromNode/toNode、
+// ADJUST_WEIGHTS/ADJUST_BORDER_SPLIT=nodeId）
+const ACTION_ID_KEYS = ['node', 'nodeId', 'tabNode', 'fromNode', 'toNode'] as const
+
+/** 动作是否作用于非主布局（浮动/弹出窗）子树——这些动作放行原生
+ *  （docs/layout-design.md §8/§12：浮动窗格隔离，主布局的回家/关闭拦截、
+ *  rail 不变量、配重钳制都不适用于浮窗） */
+const actionInFloatLayout = (m: Model, action: Action): boolean => {
+  const d = action.data as Record<string, unknown> | undefined
+  if (!d) return false
+  for (const k of ACTION_ID_KEYS) {
+    const v = d[k]
+    if (typeof v !== 'string') continue
+    const n = m.getNodeById(v)
+    if (n && n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return true
+  }
+  return false
+}
+
 // 布局预设与各栏约束在 layout-presets.ts（docs/layout-design.md §2 数值）。
 
 const makeDefaultLayout = () => presetToModelJson(LAYOUT_PRESETS[0])
@@ -110,8 +131,9 @@ export function FlexLayoutShell() {
     try {
       const saved = localStorage.getItem(STORAGE_KEY)
       if (saved) return configure(Model.fromJson(JSON.parse(saved)))
-    } catch {
-      // 不可信输入 → 默认布局
+    } catch (e) {
+      // 不可信输入 → 默认布局；失败必须可见（铁律 12：错误就是错误）
+      console.error('[flex-layout] saved layout invalid, falling back to default', e)
     }
     return configure(Model.fromJson(makeDefaultLayout()))
   })
@@ -127,6 +149,10 @@ export function FlexLayoutShell() {
     if (sides.left) collapseSide('left')
     if (sides.right) collapseSide('right')
     measureRootPx(model)
+    // 窄屏判定单写者（P1-3：640 matchMedia 写者已删）——动态判据
+    // updateNarrowViewport 在 boot 先写一次初值（窄窗首启两侧栏立即撤成
+    // overlay 抽屉，不等首次 resize/结构动作）
+    updateNarrowViewport(model)
     let raf2 = 0
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
@@ -157,7 +183,9 @@ export function FlexLayoutShell() {
   const persist = useCallback((m: Model) => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(m.toJson()))
-    } catch {}
+    } catch (e) {
+      console.error('[flex-layout] persist layout failed', e)
+    }
   }, [])
 
   // 拖拽/迁移的再入护栏：迁移本身触发 onModelChange，别递归
@@ -241,8 +269,9 @@ export function FlexLayoutShell() {
         setAppliedTree(json)
         persist(next)
         bumpLayoutRev()
-      } catch {
-        // 不可信预设 JSON → 忽略
+      } catch (e) {
+        // 不可信预设 JSON → 忽略；失败必须可见（铁律 12：错误就是错误）
+        console.error('[flex-layout] apply preset json failed', e)
       }
       // 换预设 = 布局回到模板声明宽：清掉旧会话攒下的记忆宽（评审 #1：
       // rootPxMem 是模块级记忆，切预设/fullReset 必须显式回落）
@@ -308,6 +337,11 @@ export function FlexLayoutShell() {
   const lastAdjustRef = useRef<{ nodeId: string; weights: number[] } | null>(null)
   const onAction = useCallback(
     (action: Action): Action | undefined => {
+      // 浮动窗格隔离（§8/§12 待核查项落地，P2-5）：非主布局（浮动/弹出窗）
+      // 来源的动作一律放行原生——FloatWindow 自己的控制器也走本 onAction，
+      // 必须在此分派。浮窗内页签的 ✕ = flexlayout 原生行为（不触发回家）；
+      // 浮窗内的拖动/配重不受主布局的 rail 不变量与钳制管。
+      if (actionInFloatLayout(model, action)) return action
       if (action.type === Actions.ADJUST_WEIGHTS) {
         // 拖拽实时钳制（含 adjusting 中间帧）：把权重钳进各子项的
         // [minAlong, maxAlong]，手柄到 max 就推不动，不再和限制打架闪烁。
@@ -831,15 +865,30 @@ export function FlexLayoutShell() {
         down = null
       }
     }
+    // 系统打断（触摸取消/手势接管/窗口切换等，P2-4）：只监听 down/move/up
+    // 时 pointercancel 后 splitterDraggingRef 永真，串行重排通道被自续
+    // 定时器饿死（scheduleRebalance 的 while 拖拽守卫死循环）——参照
+    // drag-session.ts 的 onCancel 模式：全部丢弃、不提交，放行挂起的重排。
+    const onDocPointerCancel = () => {
+      if (down || lastClick || splitterDraggingRef.current) {
+        lastClick = null
+        down = null
+        moved = false
+        splitterDraggingRef.current = false
+        scheduleRebalance(false)
+      }
+    }
     document.addEventListener('pointerdown', onDocPointerDown, true)
     document.addEventListener('pointermove', onDocPointerMove, true)
     document.addEventListener('pointerup', onDocPointerUp, true)
+    document.addEventListener('pointercancel', onDocPointerCancel, true)
     return () => {
       document.removeEventListener('pointerdown', onDocPointerDown, true)
       document.removeEventListener('pointermove', onDocPointerMove, true)
       document.removeEventListener('pointerup', onDocPointerUp, true)
+      document.removeEventListener('pointercancel', onDocPointerCancel, true)
     }
-  }, [model, resetSplitToDefault])
+  }, [model, resetSplitToDefault, scheduleRebalance])
 
   // 离家一级窗格的"回家"钮（onRenderTab 注入）：拉伸头栏（单页签分栏）
   // **不渲染**原生 trailing 关闭钮（实测 hasTrailing=false）
@@ -944,8 +993,11 @@ export function FlexLayoutShell() {
       const target = e.target as HTMLElement
       // 双击分隔条的检测不在本 handler（见上方 document 捕获段的说明：
       // 第二击被指针捕获重定向，宿主 React 捕获段收不到）。
-      // 关闭按钮/回家钮/改名输入框/工具栏：原生行为优先
-      if (target.closest('.flexlayout__tab_button_trailing, .flexlayout__border_button_trailing, .fl-home-btn, input, textarea')) return
+      // 关闭按钮/回家钮/改名输入框/工具栏：原生行为优先。fl-close-btn 是
+      // 统一族（fl-home-btn 回家钮 / fl-stretch-close 拉伸头栏注入 ✕ 都是
+      // 它的子集）——拉伸头栏的关闭钮此前不在白名单，被拖拽接管
+      // preventDefault 吞掉 click 成了死钮（2026-10-01 审查 P1-1）。
+      if (target.closest('.flexlayout__tab_button_trailing, .flexlayout__border_button_trailing, .fl-close-btn, input, textarea')) return
       const btn = target.closest(`[id^="${TAB_BUTTON_ID}"]`) as HTMLElement | null
       if (!btn) return
       const tabId = btn.id.slice(TAB_BUTTON_ID.length)

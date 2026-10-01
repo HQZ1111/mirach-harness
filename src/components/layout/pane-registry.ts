@@ -162,9 +162,7 @@ export const sendPaneHome = (m: Model, paneId: string): boolean => {
 
   // 家乡大栏没有分栏了（被 tidy）→ 在大栏边缘重建一个分栏。
   // 锚点 region 感知（用户 2026-09-26 定稿："主栏就是中间栏"）：
-  // 左栏贴最左、右栏贴最右；**主栏插在左右两栏之间**（锚第一个右栏分栏
-  // 的左缘；没有右栏就贴最后一个子项的右缘）——此前主栏缺失时回退锚
-  // 第一个子节点，主会话回家被插到左栏左边、左栏被挤到中间。
+  // 左栏贴最左、右栏贴最右；主栏走 §5 回退链（见下方分支注释）。
   const root = m.getRootRow()
   // 锚点候选**排除竖轨**（轨是 20px 导航特殊子项，不参与列身份/锚点——
   // 否则"贴最左"会贴到轨的外侧）
@@ -189,13 +187,26 @@ export const sendPaneHome = (m: Model, paneId: string): boolean => {
     anchor = kids[kids.length - 1]
     dock = DockLocation.RIGHT
   } else if (def.region === 'main') {
-    const firstRight = kids.find((k) => kidRegion(k) === 'right')
-    if (firstRight) {
-      anchor = firstRight
-      dock = DockLocation.LEFT
-    } else {
-      anchor = kids[kids.length - 1]
+    // 主栏的家永远在中间（§5 回退链，与右栏是否隐藏/被拖走无关——
+    // "主栏的家只由左栏内容在哪结束"决定）：
+    // ① 最后一个左栏列（列 identity = left）的右缘 → ② 第一个右栏列的
+    // 左缘 → ③ 根行第一个非轨子项的左缘（左右栏均不存在时主栏贴最左，
+    // 其余列依次排其后）。此前只查第一个 right 列、缺 ①，左栏多列时
+    // 主会话回家被插到第一个左栏列旁边。
+    const leftKids = kids.filter((k) => kidRegion(k) === 'left')
+    const lastLeft = leftKids[leftKids.length - 1]
+    if (lastLeft) {
+      anchor = lastLeft
       dock = DockLocation.RIGHT
+    } else {
+      const firstRight = kids.find((k) => kidRegion(k) === 'right')
+      if (firstRight) {
+        anchor = firstRight
+        dock = DockLocation.LEFT
+      } else {
+        anchor = kids[0]
+        dock = DockLocation.LEFT
+      }
     }
   } else {
     anchor = kids[0]

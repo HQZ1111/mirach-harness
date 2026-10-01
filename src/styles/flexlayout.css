@@ -78,12 +78,13 @@
 }
 
 /* 横向多页签之间的分隔圆点（onRenderTab 对非首签注入 leading）：
-   骑在两签交界（前签右 padding 与本签左 padding 的中点），垂直对文字中线 */
+   骑在两签交界（前签右 padding 与本签左 padding 的中点 = 圆点半径 2.5px
+   从 --tab-dot-size 派生），垂直对文字中线 */
 .flexlayout-host .fl-tab-sep {
   background: var(--tab-dot-color);
   border-radius: 50%;
   height: var(--tab-dot-size);
-  left: -2.5px;
+  left: calc(var(--tab-dot-size) / -2);
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
@@ -129,9 +130,9 @@
   align-items: flex-start; /* 顶对齐：logo 上间距 = padding-top（居中会被余量压低） */
   box-sizing: border-box;
   display: flex;
-  gap: 12px;
+  gap: var(--logo-leading-gap);
   height: var(--logo-strip-h);
-  padding: 20px 0 0 20px;
+  padding: var(--logo-leading-pad) 0 0 var(--logo-leading-pad);
 }
 /* 条内 = 条顶满宽带（绝对定位脱离页签行流）：页签行不再被 logo 顶到右
    边（用户 2026-09-27：会话标签要左对齐）；pointer-events 放行点击。
@@ -185,17 +186,17 @@
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--zone-btn-radius);
   color: var(--tab-text);
   cursor: pointer;
   display: flex;
-  font-size: 13px;
-  height: 20px;
+  font-size: var(--zone-btn-font);
+  height: var(--zone-btn-size);
   justify-content: center;
   line-height: 1;
-  margin-left: 4px;
+  margin-left: var(--zone-btn-gap);
   padding: 0;
-  width: 20px;
+  width: var(--zone-btn-size);
 }
 
 .fl-min-btn:hover {
@@ -276,8 +277,9 @@
   right: 0 !important;
   top: 0 !important;
   transform: none !important;
-  /* 折叠轨道与栏级竖轨同规：上下各避 100（页签条带 + 圆角） */
-  padding: 100px 0;
+  /* 折叠轨道与栏级竖轨同规：上下各避一个页签条带（--logo-strip-h=100，
+     页签条带 + 圆角） */
+  padding: var(--logo-strip-h) 0;
 }
 .flexlayout-host .flexlayout__border_button {
   align-items: center;
@@ -329,9 +331,9 @@
   gap: 2px;
   left: 0;
   overflow-y: auto;
-  /* 上下各避 100（用户 2026-09-27：顶部让开 100px 页签条/标题栏带，
-     底部让开圆角曲线——20px 轨贴大栏外缘，两头都会撞） */
-  padding: 100px 2px;
+  /* 上下各避一个页签条带（用户 2026-09-27：顶部让开 100px 页签条/标题栏
+     带，底部让开圆角曲线——20px 轨贴大栏外缘，两头都会撞） */
+  padding: var(--logo-strip-h) 2px;
   position: absolute;
   right: 0;
   scrollbar-width: none;
