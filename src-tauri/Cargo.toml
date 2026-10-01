@@ -14,9 +14,12 @@ tauri = { version = "2", features = ["unstable", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 
-# pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：path 引 G 盘仓库；
+# pi SDK 集成（docs/pi-integration.md §7-1）：vendored 副本（src-tauri/vendor/，
+# 白名单拷贝自上游 zip 解包目录：src/examples/benches/themes + build.rs 嵌入资源，
+# 255MB→22MB；上游 session_index.rs 的 .read(true) 补丁（gh #239 同款）已随迁）。
+# 上游真源在 G:\pi_agent_rust-main（未进 git），同步上游时重拷并核对该补丁。
 # default-features=false 去 TUI 栈；nightly 钉版见 rust-toolchain.toml
-pi = { package = "pi_agent_rust", path = "G:/pi_agent_rust-main", default-features = false, features = ["sqlite-sessions"] }
+pi = { package = "pi_agent_rust", path = "vendor/pi_agent_rust", default-features = false, features = ["sqlite-sessions"] }
 asupersync = "0.5"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
