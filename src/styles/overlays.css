@@ -111,9 +111,11 @@
 }
 
 /* ── 全局设置浮层（settings-overlay.tsx，§7-7）——portal 到 body，
-   遮罩 + 居中卡片（.ep-* 卡片做法；z 130 在 ze-backdrop(120) 之上，
-   设置钮常驻标题栏，浮层打开时盖住一切 transient 面）。
-   颜色/间距一律引用 tokens.css 令牌；错误色 var(--destructive)
+   遮罩 + 居中卡片。主从两栏（hermes settings 同构）：.set-card 是
+   grid——头栏横跨两列，左栏节列表（.set-nav）+ 右栏内容（.set-content，
+   独立滚动）。z 层与阴影走 ui-primitives.css 的 --z-modal /
+   --shadow-dialog 令牌（浮层打开时盖住 ze-backdrop 等一切 transient
+   面）；颜色/间距一律引用 tokens.css 令牌；错误色 var(--destructive)
    （tailwind.css 既有令牌，非新字面值）。 ── */
 .set-overlay {
   align-items: center;
@@ -122,20 +124,22 @@
   inset: 0;
   justify-content: center;
   position: fixed;
-  z-index: 130;
+  z-index: var(--z-modal);
 }
 
 .set-card {
   background: var(--surface);
   border: 1px solid var(--stroke);
   border-radius: 12px;
-  box-shadow: var(--shadow-pop);
-  display: flex;
-  flex-direction: column;
+  box-shadow: var(--shadow-dialog);
+  display: grid;
+  grid-template-columns: 11.5rem minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 70vh;
   max-height: calc(100% - 6rem);
   max-width: calc(100% - 4rem);
   position: fixed;
-  width: 44rem;
+  width: 56rem;
 }
 
 .set-header {
@@ -143,6 +147,7 @@
   display: flex;
   flex-shrink: 0;
   gap: 12px;
+  grid-column: 1 / -1;
   justify-content: space-between;
   padding: 14px 16px 10px;
   user-select: none;
@@ -170,12 +175,74 @@
   color: var(--text);
 }
 
-.set-body {
+/* 左导航（节列表）：图标 + 名称；选中态 accent 底/边（铁律：全部走令牌） */
+.set-nav {
+  background: color-mix(in srgb, var(--hover-wash) 40%, transparent);
+  border-right: 1px solid var(--stroke-soft);
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 2px;
+  min-height: 0;
   overflow-y: auto;
-  padding: 0 16px 16px;
+  padding: 10px 8px;
+}
+
+.set-nav-item {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-2);
+  cursor: pointer;
+  display: flex;
+  flex-shrink: 0;
+  font-size: 12px;
+  gap: 8px;
+  padding: 6px 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.set-nav-item:hover {
+  background: var(--hover-wash);
+  color: var(--text);
+}
+
+.set-nav-item:focus-visible {
+  border-color: color-mix(in srgb, var(--fl-accent) 60%, transparent);
+}
+
+.set-nav-item.is-active {
+  background: color-mix(in srgb, var(--fl-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--fl-accent) 45%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.set-nav-item-icon {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.set-nav-item.is-active .set-nav-item-icon {
+  color: var(--fl-accent);
+}
+
+.set-nav-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 右内容区：只渲染选中节，独立滚动 */
+.set-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 0 20px 20px;
 }
 
 .set-section {
@@ -184,12 +251,24 @@
   gap: 8px;
 }
 
-.set-label {
-  color: var(--text-4);
-  font-size: 0.6rem;
+/* 节标题 sticky：滚动时钉在内容区顶（负 margin 让底色铺满滚动行宽，
+   压过下方滚动内容） */
+.set-section-head {
+  background: var(--surface);
+  border-bottom: 1px solid var(--stroke-soft);
+  flex-shrink: 0;
+  margin: 0 -20px 10px;
+  padding: 12px 20px 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.set-section-title {
+  color: var(--text);
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+  margin: 0;
 }
 
 .set-hint {

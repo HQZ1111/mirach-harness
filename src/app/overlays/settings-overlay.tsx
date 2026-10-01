@@ -20,10 +20,18 @@
  * z 130（overlays.css .set-overlay）才盖得住。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
-import { XIcon } from 'lucide-react'
+import { Cpu, Info, KeyRound, Layers, RefreshCw, Wrench, XIcon } from 'lucide-react'
 
 import pkg from '../../../package.json'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
@@ -278,17 +286,19 @@ function SetBoolField({ read, unsetLabel, onWrite }: {
 
 /** 非负整数输入：草稿态本地保存（受控输入每击写盘 + IPC 回写会吃字），
     落盘成功或失败后回显文档值。空文本 = 删键回默认；越界/非整数 = 不写
-    入，错误可见。 */
-function SetNumField({ read, max, placeholder, onWrite, onReject }: {
+    入，错误可见。草稿态由 overlay 顶层持有（numDrafts，状态提升）——
+    右栏按节条件渲染后，切节往返不丢未落盘的输入。 */
+function SetNumField({ read, max, placeholder, draft, onDraft, onWrite, onReject }: {
   read: FieldRead
   max: number
   placeholder: string
+  draft: string | null
+  onDraft: (value: string | null) => void
   onWrite: (value: number | undefined) => Promise<void>
   onReject: (message: string) => void
 }) {
   const view = numView(read)
   const committed = view.kind === 'set' ? String(view.value) : ''
-  const [draft, setDraft] = useState<string | null>(null)
   return (
     <>
       <input
@@ -297,9 +307,9 @@ function SetNumField({ read, max, placeholder, onWrite, onReject }: {
         min={0}
         onChange={(e) => {
           const text = e.target.value
-          setDraft(text)
+          onDraft(text)
           if (text.trim() === '') {
-            void onWrite(undefined).then(() => setDraft(null))
+            void onWrite(undefined).then(() => onDraft(null))
             return
           }
           const n = Number(text)
@@ -307,7 +317,7 @@ function SetNumField({ read, max, placeholder, onWrite, onReject }: {
             onReject(`「${text}」须为 0–${max} 的整数，未写入`)
             return
           }
-          void onWrite(n).then(() => setDraft(null))
+          void onWrite(n).then(() => onDraft(null))
         }}
         placeholder={placeholder}
         step={1}
@@ -352,6 +362,22 @@ function SetEnumField({ read, options, unsetLabel, onWrite }: {
   )
 }
 
+// ── 主从两栏（hermes settings 左导航右内容同构）────────────────────────
+// 左栏节列表 + 右栏条件渲染选中节；现有 section 一项不丢（上方顺序渲染
+// 的六段全部保留，只挪进各自的 sticky 标题 + 条件渲染壳）。id 仅用于左
+// 导航寻址（data-section-id），不进任何持久化面。
+
+type SectionId = 'model' | 'auth' | 'compaction' | 'retry' | 'raw' | 'about'
+
+const SECTIONS: readonly { icon: typeof Cpu; id: SectionId; label: string }[] = [
+  { icon: Cpu, id: 'model', label: '模型' },
+  { icon: KeyRound, id: 'auth', label: '提供方凭据' },
+  { icon: Layers, id: 'compaction', label: '压缩 · Compaction' },
+  { icon: RefreshCw, id: 'retry', label: '重试 · Retry' },
+  { icon: Wrench, id: 'raw', label: '高级 · 原始配置' },
+  { icon: Info, id: 'about', label: '关于' },
+]
+
 export function SettingsOverlay({ onClose }: { onClose: () => void }) {
   // Esc 关闭（escape-layers overlay 层=40）：拖拽层（50）在拖拽中更高，
   // Esc 只中止拖拽不关浮层；编辑模式（20）更低，浮层开着时 Esc 不退编辑模式。
@@ -390,6 +416,39 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [compactionError, setCompactionError] = useState<string | null>(null)
   const [retrySaved, setRetrySaved] = useState<string | null>(null)
   const [retryError, setRetryError] = useState<string | null>(null)
+  // ── 主从两栏状态 ──
+  // 选中节：左导航高亮 + 右栏条件渲染的依据，默认落模型节。
+  const [activeSection, setActiveSection] = useState<SectionId>('model')
+  // 数字字段草稿（键 = 段.键名，如 compaction.reserve_tokens）——从
+  // SetNumField 本地 state 提升到此，条件渲染下切节不丢未落盘输入。
+  const [numDrafts, setNumDrafts] = useState<Record<string, string | null>>({})
+  const numDraftFor = useCallback(
+    (key: string) => ({
+      draft: numDrafts[key] ?? null,
+      onDraft: (value: string | null) => {
+        setNumDrafts((prev) => ({ ...prev, [key]: value }))
+      },
+    }),
+    [numDrafts],
+  )
+
+  /** 左导航键盘：↑/↓ 环绕切换选中节并移动焦点；Enter/Space 走按钮原生
+      click（同一次选中）。只挂在导航容器上——右栏输入框（含 textarea）
+      里的方向键不受影响。 */
+  const onNavKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLElement>) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+      e.preventDefault()
+      const idx = SECTIONS.findIndex((s) => s.id === activeSection)
+      const dir = e.key === 'ArrowDown' ? 1 : -1
+      const next = SECTIONS[(idx + dir + SECTIONS.length) % SECTIONS.length]
+      setActiveSection(next.id)
+      e.currentTarget
+        .querySelector<HTMLButtonElement>(`[data-section-id="${next.id}"]`)
+        ?.focus()
+    },
+    [activeSection],
+  )
   // 结构化段写入队列（见 drainWrites）：settingsTextRef = 渲染期同步的
   // 最新已提交文本；writesRef.committed = 最后一笔成功落盘的完整文档。
   const settingsTextRef = useRef<string | null>(null)
@@ -710,10 +769,36 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
             <XIcon size={14} />
           </button>
         </div>
-        <div className="set-body">
+        {/* 主从两栏（.set-card 是 grid：头栏横跨，左导航 + 右内容两列落位）。
+            左导航：图标 + 名称，选中态高亮；↑/↓ 换选、Enter/Space 原生 click。 */}
+        <nav aria-label="设置节" className="set-nav" onKeyDown={onNavKeyDown}>
+          {SECTIONS.map((s) => {
+            const Icon = s.icon
+            const active = s.id === activeSection
+            return (
+              <button
+                aria-current={active ? 'true' : undefined}
+                className={active ? 'set-nav-item is-active' : 'set-nav-item'}
+                data-section-id={s.id}
+                key={s.id}
+                onClick={() => setActiveSection(s.id)}
+                tabIndex={active ? 0 : -1}
+                type="button"
+              >
+                <Icon aria-hidden className="set-nav-item-icon" size={14} />
+                <span className="set-nav-item-label">{s.label}</span>
+              </button>
+            )
+          })}
+        </nav>
+        {/* 右内容区：只渲染选中节，独立滚动（节标题 sticky 见 overlays.css） */}
+        <div className="set-content">
           {/* ── 模型：pi_list_models 目录 + 默认模型写 settings ── */}
+          {activeSection === 'model' && (
           <section className="set-section">
-            <span className="set-label">模型</span>
+            <header className="set-section-head">
+              <h3 className="set-section-title">模型</h3>
+            </header>
             {modelsError !== null && <div className="set-err">{modelsError}</div>}
             {models === null && modelsError === null && (
               <span className="set-file-missing">加载中…</span>
@@ -749,10 +834,14 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
               </>
             )}
           </section>
+          )}
 
           {/* ── 提供方凭据：pi_auth_status 状态列表 ── */}
+          {activeSection === 'auth' && (
           <section className="set-section">
-            <span className="set-label">提供方凭据</span>
+            <header className="set-section-head">
+              <h3 className="set-section-title">提供方凭据</h3>
+            </header>
             {authError !== null && <div className="set-err">{authError}</div>}
             {auth === null && authError === null && (
               <span className="set-file-missing">加载中…</span>
@@ -808,13 +897,17 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
               </>
             )}
           </section>
+          )}
 
           {/* ── 压缩：compaction 结构化段（vendor config.rs:359-371
               CompactionSettings + 顶层 compaction_mode，config.rs:231-234/
               1085-1089；枚举值见 compaction.rs 的 serde 表示）——开关/
               数字/枚举，逐笔组装完整文档整体写回 ── */}
+          {activeSection === 'compaction' && (
           <section className="set-section">
-            <span className="set-label">压缩 · Compaction</span>
+            <header className="set-section-head">
+              <h3 className="set-section-title">压缩 · Compaction</h3>
+            </header>
             <p className="set-hint">
               上下文逼近模型上限时 pi 自动压缩历史。改动写入 settings.json 的{' '}
               <span className="set-code">compaction</span> 对象与顶层{' '}
@@ -843,6 +936,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                 </SetField>
                 <SetField name="reserve_tokens" note="压缩前预留的空间（tokens）">
                   <SetNumField
+                    {...numDraftFor('compaction.reserve_tokens')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('compaction', msg)}
                     onWrite={(v) => writeCompactionKey(K_RESERVE_TOKENS, v)}
@@ -852,6 +946,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                 </SetField>
                 <SetField name="keep_recent_tokens" note="压缩时保留的近期对话（tokens）">
                   <SetNumField
+                    {...numDraftFor('compaction.keep_recent_tokens')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('compaction', msg)}
                     onWrite={(v) => writeCompactionKey(K_KEEP_RECENT_TOKENS, v)}
@@ -896,11 +991,15 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
             )}
             {compactionSaved !== null && <span className="set-saved">{compactionSaved}</span>}
           </section>
+          )}
 
           {/* ── 重试：retry 结构化段（vendor config.rs:380-404 RetrySettings；
               默认值取自 config.rs 访问器 997-1011/1112-1132）── */}
+          {activeSection === 'retry' && (
           <section className="set-section">
-            <span className="set-label">重试 · Retry</span>
+            <header className="set-section-head">
+              <h3 className="set-section-title">重试 · Retry</h3>
+            </header>
             <p className="set-hint">
               提供方请求瞬时失败（429/配额/过载）的自动重试。改动写入 settings.json
               的 <span className="set-code">retry</span> 对象；未设置的键 = pi
@@ -929,6 +1028,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                 </SetField>
                 <SetField name="max_retries" note="重试次数上限">
                   <SetNumField
+                    {...numDraftFor('retry.max_retries')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
                     onWrite={(v) => writeRetryKey(K_MAX_RETRIES, v)}
@@ -938,6 +1038,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                 </SetField>
                 <SetField name="base_delay_ms" note="退避基数（毫秒）">
                   <SetNumField
+                    {...numDraftFor('retry.base_delay_ms')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
                     onWrite={(v) => writeRetryKey(K_BASE_DELAY_MS, v)}
@@ -947,6 +1048,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                 </SetField>
                 <SetField name="max_delay_ms" note="退避上限（毫秒）">
                   <SetNumField
+                    {...numDraftFor('retry.max_delay_ms')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
                     onWrite={(v) => writeRetryKey(K_MAX_DELAY_MS, v)}
@@ -956,6 +1058,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                 </SetField>
                 <SetField name="failover_cooldown_secs" note="故障转移后回切主模型前的冷却秒数">
                   <SetNumField
+                    {...numDraftFor('retry.failover_cooldown_secs')}
                     max={SAFE_U64_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
                     onWrite={(v) => writeRetryKey(K_FAILOVER_COOLDOWN_SECS, v)}
@@ -968,6 +1071,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                   note="单轮最多故障转移次数（pi 运行期按 8 封顶）"
                 >
                   <SetNumField
+                    {...numDraftFor('retry.max_failovers_per_turn')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
                     onWrite={(v) => writeRetryKey(K_MAX_FAILOVERS_PER_TURN, v)}
@@ -986,10 +1090,14 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
             )}
             {retrySaved !== null && <span className="set-saved">{retrySaved}</span>}
           </section>
+          )}
 
           {/* ── 高级：原始配置（settings.json / models.json 整体替换）── */}
+          {activeSection === 'raw' && (
           <section className="set-section">
-            <span className="set-label">高级 · 原始配置</span>
+            <header className="set-section-head">
+              <h3 className="set-section-title">高级 · 原始配置</h3>
+            </header>
             <p className="set-hint">
               完整文档编辑，保存 = 整体替换写入（pi 语义：nested 对象不合并）。写入前经 pi
               自身 schema 校验，类型不符会被拒绝。
@@ -1072,10 +1180,14 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
               </>
             )}
           </section>
+          )}
 
           {/* ── 关于：应用名/版本（package.json 构建期真值）+ 配置文件路径 ── */}
+          {activeSection === 'about' && (
           <section className="set-section">
-            <span className="set-label">关于</span>
+            <header className="set-section-head">
+              <h3 className="set-section-title">关于</h3>
+            </header>
             <dl className="set-about-defs">
               <dt>应用名</dt>
               <dd>
@@ -1095,6 +1207,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
               )}
             </dl>
           </section>
+          )}
         </div>
       </div>
     </div>,
