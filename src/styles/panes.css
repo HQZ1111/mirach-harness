@@ -124,3 +124,164 @@
   min-width: max-content;
   white-space: pre;
 }
+
+/* ── 终端窗格（terminal-pane.tsx，真终端；令牌 = tokens.css 的 --term-*） ── */
+
+.term-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  position: relative;
+}
+
+/* 页签条（窗格内页签）：字号/选中色/悬停引用页签系统令牌 */
+.term-strip {
+  align-items: stretch;
+  border-bottom: 1px solid var(--stroke-soft);
+  display: flex;
+  flex: none;
+  height: var(--term-strip-h);
+  overflow-x: auto;
+}
+
+.term-tab {
+  align-items: center;
+  border-bottom: 2px solid transparent;
+  border-right: 1px solid var(--stroke-soft);
+  display: flex;
+  flex: none;
+  padding: 0 var(--tab-pad-x);
+}
+
+.term-tab.active {
+  border-bottom-color: var(--tab-accent);
+}
+
+.term-tab-label {
+  background: none;
+  border: none;
+  color: var(--tab-text);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--tab-font-size);
+  font-weight: var(--tab-font-weight);
+  overflow: hidden;
+  padding: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-tab.active .term-tab-label {
+  color: var(--tab-text-active);
+}
+
+.term-tab:not(.active) .term-tab-label:hover {
+  color: var(--tab-text-active);
+}
+
+.term-tab-close {
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--tab-close-color);
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  height: var(--tab-close-hit);
+  justify-content: center;
+  margin-left: 4px;
+  padding: 0;
+  visibility: hidden;
+  width: var(--tab-close-hit);
+}
+
+.term-tab:hover .term-tab-close,
+.term-tab.active .term-tab-close {
+  visibility: visible;
+}
+
+.term-tab-close:hover {
+  color: var(--tab-close-color-hover);
+}
+
+.term-add {
+  background: none;
+  border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  flex: none;
+  font-size: var(--zone-btn-font);
+  padding: 0 var(--tab-pad-x);
+}
+
+.term-add:hover {
+  color: var(--tab-text-active);
+}
+
+/* 终端体：hostEl 容器命令式管理（React 不掺和），空态提示浮在其上 */
+.term-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.term-host-container {
+  inset: 0;
+  position: absolute;
+}
+
+.term-host {
+  height: 100%;
+  width: 100%;
+}
+
+.term-empty {
+  align-items: center;
+  color: var(--text-3);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: absolute;
+}
+
+/* 退出/错误条：盖在终端体底部（进程已退出 (code N) + 重新打开钮） */
+.term-exit-bar {
+  align-items: center;
+  background: var(--surface);
+  border-top: 1px solid var(--stroke);
+  bottom: 0;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  left: 0;
+  padding: 6px var(--tab-pad-x);
+  position: absolute;
+  right: 0;
+}
+
+.term-exit-bar span {
+  color: var(--text-2);
+  font-size: var(--body-size);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-exit-reopen {
+  background: none;
+  border: 1px solid var(--stroke);
+  border-radius: var(--zone-btn-radius);
+  color: var(--tab-text-active);
+  cursor: pointer;
+  flex: none;
+  font-family: inherit;
+  font-size: var(--code-note-size);
+  padding: 3px 10px;
+}
+
+.term-exit-reopen:hover {
+  background: var(--tab-accent-wash);
+  border-color: var(--tab-text-active);
+}

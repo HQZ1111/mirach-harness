@@ -137,6 +137,38 @@
   --code-note-size: 12px;                     /* 超预算提示行字号 */
   --code-btn-radius: 4px;                     /* 复制钮圆角 */
 
+  /* ── 终端（xterm，terminal-pane；2026-10-01）──
+     终端体 = 暗色块（ZCode 终端配色同源；浅色壳内嵌暗色终端是常规桌面
+     形态）。颜色经 terminal-theme.ts 的 canvas 归一喂给 xterm（xterm 不认
+     var()），样式规则里只许引用这里的令牌。 */
+  --term-font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas,
+    'Cascadia Mono', 'JetBrains Mono', monospace;
+  --term-font-size: 13px;
+  --term-bg: #171717;
+  --term-fg: #e5e5e5;
+  --term-cursor: #e5e5e5;
+  --term-cursor-accent: #171717;
+  --term-selection: rgba(125, 125, 125, 0.35);
+  --term-selection-inactive: rgba(125, 125, 125, 0.2);
+  --term-black: #1f2937;
+  --term-red: #ef4444;
+  --term-green: #22c55e;
+  --term-yellow: #eab308;
+  --term-blue: #3b82f6;
+  --term-magenta: #a855f7;
+  --term-cyan: #06b6d4;
+  --term-white: #e5e7eb;
+  --term-bright-black: #6b7280;
+  --term-bright-red: #f87171;
+  --term-bright-green: #4ade80;
+  --term-bright-yellow: #facc15;
+  --term-bright-blue: #60a5fa;
+  --term-bright-magenta: #c084fc;
+  --term-bright-cyan: #22d3ee;
+  --term-bright-white: #f9fafb;
+  /* 终端页签条（窗格内页签，非 flexlayout 页签；字号/选中色引用页签系统令牌） */
+  --term-strip-h: 30px;
+
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被
      .flexlayout__layout 上的定义静默压掉） ────────────────────── */

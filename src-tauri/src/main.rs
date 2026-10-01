@@ -17,6 +17,10 @@ mod agui;
 // auth 三个配置文件的读改命令——配置真相 = pi 自己的配置文件（§5）
 mod pi_settings;
 
+// 终端 PTY 桥（terminal.rs 模块头有事件通道裁定）：终端是系统设施不是
+// Agent 数据——输出/退出走 Tauri Event，控制走 IPC invoke
+mod terminal;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -421,6 +425,9 @@ fn main() {
                 }
             });
             app.manage(agui_state);
+
+            // 终端会话注册表（terminal.rs）：PTY 会话句柄 + 输出泵线程
+            app.manage(std::sync::Arc::new(terminal::TerminalRegistry::new()));
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -456,7 +463,12 @@ fn main() {
             pi_settings::pi_auth_status,
             fs::fs_list,
             fs::fs_git_root,
-            fs::fs_read_data_url
+            fs::fs_read_data_url,
+            terminal::terminal_spawn,
+            terminal::terminal_write,
+            terminal::terminal_resize,
+            terminal::terminal_kill,
+            terminal::terminal_open_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running mirach-harness");

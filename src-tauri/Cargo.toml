@@ -29,3 +29,7 @@ tokio-stream = "0.1"
 # ExtensionUiHandler 是 #[async_trait] trait（pi extension_dispatcher），
 # impl 侧必须同宏展开签名（E0195 实证）
 async-trait = "0.1"
+# 终端 PTY（terminal.rs）：ConPTY/Unix 全跨——pi SDK 无 PTY 面，宿主自建
+portable-pty = "0.8"
+# 终端 http 链接投放（terminal_open_url）：系统默认浏览器
+open = "5"
