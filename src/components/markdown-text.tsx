@@ -3,7 +3,6 @@
 import "@assistant-ui/react-markdown/styles/dot.css";
 
 import {
-  type CodeHeaderProps,
   MarkdownTextPrimitive,
   unstable_memoizeMarkdownComponents as memoizeMarkdownComponents,
   useIsMarkdownCodeBlock,
@@ -11,10 +10,8 @@ import {
 import remarkGfm from "remark-gfm";
 import { type FC, memo, useMemo, useRef } from "react";
 import type { TextMessagePartProps } from "@assistant-ui/react";
-import { CheckIcon, CopyIcon } from "lucide-react";
 
-import { TooltipIconButton } from "@/components/tooltip-icon-button";
-import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
+import { SyntaxHighlighter } from "@/components/shiki/syntax-highlighter";
 import { cn } from "@/lib/utils";
 
 type MarkdownTextProps = Partial<TextMessagePartProps> & {
@@ -58,30 +55,6 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
 };
 
 export const MarkdownText = memo(MarkdownTextImpl);
-
-const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
-  const { isCopied, copyToClipboard } = useCopyToClipboard();
-  const onCopy = () => {
-    if (!code || isCopied) return;
-    copyToClipboard(code);
-  };
-
-  return (
-    <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
-      <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
-        {language}
-      </span>
-      <TooltipIconButton tooltip="Copy" onClick={onCopy}>
-        {!isCopied && (
-          <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
-        )}
-        {isCopied && (
-          <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-        )}
-      </TooltipIconButton>
-    </div>
-  );
-};
 
 const defaultComponents = memoizeMarkdownComponents({
   h1: ({ className, ...props }) => (
@@ -245,7 +218,9 @@ const defaultComponents = memoizeMarkdownComponents({
   pre: ({ className, ...props }) => (
     <pre
       className={cn(
-        "aui-md-pre border-border/50 bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl border border-t-0 p-3.5 text-[13px] leading-relaxed",
+        // 围栏外的 pre 兜底（pre 里没有 code 子元素时才走到这）；围栏代码块
+        // 由 SyntaxHighlighter（components/shiki/）整卡接管。
+        "aui-md-pre bg-muted/30 overflow-x-auto rounded-xl p-3.5 text-[13px] leading-relaxed",
         className,
       )}
       {...props}
@@ -264,5 +239,7 @@ const defaultComponents = memoizeMarkdownComponents({
       />
     );
   },
-  CodeHeader,
+  // 围栏代码块（shiki 高亮 + 内容键缓存 + 预算 + prose 判定）。
+  // 不提供 CodeHeader——管线默认 null，代码卡只有底色无头栏。
+  SyntaxHighlighter,
 });
