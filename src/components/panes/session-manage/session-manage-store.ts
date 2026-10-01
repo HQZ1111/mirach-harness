@@ -5,6 +5,8 @@
  * 持久化（任务定稿键）：
  * - mirach.harness.sessions.pinned.v1 = sessionId 数组（置顶组）
  * - mirach.harness.sessions.order.v1 = Record<sessionId, 序号>（非置顶手动序）
+ * - mirach.harness.session-groups.v1 = Record<组id, 是否折叠>（置顶/最近
+ *   分组标题的折叠态；缺省 = 展开）
  *
  * 禁止兜底：读到的持久化形状非法 console.error 可见并从空态起（不冒充旧
  * 数据）；写入失败 console.error（不装成功）。prune 只在列表非空时清理
@@ -16,6 +18,10 @@ import { pruneOrder, prunePins, togglePinId } from './session-order'
 
 export const PINNED_KEY = 'mirach.harness.sessions.pinned.v1'
 export const ORDER_KEY = 'mirach.harness.sessions.order.v1'
+export const GROUPS_KEY = 'mirach.harness.session-groups.v1'
+
+/** 分组 id（侧栏两组渲染：置顶组 + 最近组）。 */
+export type SessionGroupId = 'pinned' | 'recent'
 
 const safeGetItem = (key: string): string | null => {
   if (typeof localStorage === 'undefined') return null
@@ -77,6 +83,32 @@ export const parseOrder = (raw: string | null): Record<string, number> => {
   return out
 }
 
+/** 严格解析分组折叠表：Record<string, boolean> 之外 → console.error + 空表；
+ * 非布尔条目逐条报错跳过（其余保留）。 */
+export const parseGroups = (raw: string | null): Record<string, boolean> => {
+  if (raw === null) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error(`[session-manage] ${GROUPS_KEY} JSON 解析失败——从全展开起`, e)
+    return {}
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    console.error(`[session-manage] ${GROUPS_KEY} 形状非法（应为 Record<string, boolean>）——从全展开起`, parsed)
+    return {}
+  }
+  const out: Record<string, boolean> = {}
+  for (const [id, collapsed] of Object.entries(parsed)) {
+    if (typeof collapsed !== 'boolean') {
+      console.error(`[session-manage] ${GROUPS_KEY} 条目 ${id} 折叠态非法（应为 boolean）——跳过`, collapsed)
+      continue
+    }
+    out[id] = collapsed
+  }
+  return out
+}
+
 /** 行拖拽的落点信号：列表插入符（beforeId = 目标行 id，null = 尾部）或主会话页签。 */
 export interface SessionDragState {
   readonly sessionId: string
@@ -88,9 +120,13 @@ export interface SessionDragState {
 interface SessionManageState {
   pinned: readonly string[]
   order: Readonly<Record<string, number>>
+  /** 分组折叠态（组 id → 是否折叠；缺省 = 展开）。 */
+  groupsCollapsed: Readonly<Record<string, boolean>>
   drag: SessionDragState | null
   togglePin(id: string): void
   setOrder(map: Readonly<Record<string, number>>): void
+  /** 分组折叠切换（写通 GROUPS_KEY）。 */
+  setGroupCollapsed(id: SessionGroupId, collapsed: boolean): void
   setDrag(drag: SessionDragState | null): void
   /** 清理已消失会话的键（列表非空才清，见文件头）。 */
   prune(existingIds: readonly string[]): void
@@ -98,10 +134,12 @@ interface SessionManageState {
 
 const loadPinned = (): string[] => parsePinned(safeGetItem(PINNED_KEY))
 const loadOrder = (): Record<string, number> => parseOrder(safeGetItem(ORDER_KEY))
+const loadGroups = (): Record<string, boolean> => parseGroups(safeGetItem(GROUPS_KEY))
 
 export const sessionManageStore = createStore<SessionManageState>((set, get) => ({
   pinned: loadPinned(),
   order: loadOrder(),
+  groupsCollapsed: loadGroups(),
   drag: null,
   togglePin: (id) => {
     const next = togglePinId(get().pinned, id)
@@ -111,6 +149,11 @@ export const sessionManageStore = createStore<SessionManageState>((set, get) => 
   setOrder: (map) => {
     set({ order: map })
     safeSetItem(ORDER_KEY, JSON.stringify(map))
+  },
+  setGroupCollapsed: (id, collapsed) => {
+    const next = { ...get().groupsCollapsed, [id]: collapsed }
+    set({ groupsCollapsed: next })
+    safeSetItem(GROUPS_KEY, JSON.stringify(next))
   },
   setDrag: (drag) => set({ drag }),
   prune: (existingIds) => {

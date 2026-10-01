@@ -1,13 +1,16 @@
 /**
  * session-manage-store 单测：持久化键读写（严格解析——非法形状 console.error
  * 可见且从空态起）、togglePin/setOrder 的写通持久化、prune 的"非空才清"守卫、
- * 拖拽落点信号的 set/clear。IPC/渲染不在测试面。
+ * 拖拽落点信号的 set/clear、分组折叠态（parseGroups 严格解析 + 写通）。
+ * IPC/渲染不在测试面。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  GROUPS_KEY,
   ORDER_KEY,
   PINNED_KEY,
+  parseGroups,
   parseOrder,
   parsePinned,
   sessionManageStore,
@@ -18,7 +21,7 @@ const silenceErrors = () => vi.spyOn(console, 'error').mockImplementation(() => 
 
 const resetStore = () => {
   localStorage.clear()
-  sessionManageStore.setState({ pinned: [], order: {}, drag: null })
+  sessionManageStore.setState({ pinned: [], order: {}, groupsCollapsed: {}, drag: null })
 }
 
 describe('parsePinned / parseOrder（严格解析）', () => {
@@ -42,6 +45,30 @@ describe('parsePinned / parseOrder（严格解析）', () => {
     expect(parseOrder(JSON.stringify({ a: 'x' }))).toEqual({})
     expect(parseOrder(JSON.stringify({ a: Number.NaN }))).toEqual({})
     expect(spy).toHaveBeenCalledTimes(7)
+    spy.mockRestore()
+  })
+})
+
+describe('parseGroups（分组折叠持久化解析）', () => {
+  it('null → 空表（无持久化数据是常态非错误）', () => {
+    expect(parseGroups(null)).toEqual({})
+  })
+
+  it('合法形状原样解析', () => {
+    expect(parseGroups(JSON.stringify({ pinned: true, recent: false }))).toEqual({
+      pinned: true,
+      recent: false,
+    })
+  })
+
+  it('非法形状 → console.error + 空表（不冒充旧数据）；非布尔条目逐条报错跳过', () => {
+    const spy = silenceErrors()
+    expect(parseGroups('not-json')).toEqual({})
+    expect(parseGroups(JSON.stringify([true]))).toEqual({})
+    expect(parseGroups(JSON.stringify({ pinned: 'yes', recent: false }))).toEqual({
+      recent: false,
+    })
+    expect(spy).toHaveBeenCalledTimes(3)
     spy.mockRestore()
   })
 })
@@ -109,5 +136,42 @@ describe('sessionManageStore（zustand vanilla + localStorage 写通）', () => 
     expect(sessionManageStore.getState().drag?.target).toEqual({ kind: 'main-tab' })
     st.setDrag(null)
     expect(sessionManageStore.getState().drag).toBeNull()
+  })
+})
+
+describe('分组折叠（groupsCollapsed + GROUPS_KEY 写通）', () => {
+  beforeEach(resetStore)
+
+  it('setGroupCollapsed 写通 GROUPS_KEY，可来回切换', () => {
+    sessionManageStore.getState().setGroupCollapsed('pinned', true)
+    expect(sessionManageStore.getState().groupsCollapsed).toEqual({ pinned: true })
+    expect(JSON.parse(localStorage.getItem(GROUPS_KEY)!)).toEqual({ pinned: true })
+
+    sessionManageStore.getState().setGroupCollapsed('pinned', false)
+    expect(sessionManageStore.getState().groupsCollapsed).toEqual({ pinned: false })
+    expect(JSON.parse(localStorage.getItem(GROUPS_KEY)!)).toEqual({ pinned: false })
+  })
+
+  it('两组折叠态合并写回、互不覆盖', () => {
+    sessionManageStore.getState().setGroupCollapsed('pinned', true)
+    sessionManageStore.getState().setGroupCollapsed('recent', true)
+    expect(sessionManageStore.getState().groupsCollapsed).toEqual({
+      pinned: true,
+      recent: true,
+    })
+    expect(JSON.parse(localStorage.getItem(GROUPS_KEY)!)).toEqual({
+      pinned: true,
+      recent: true,
+    })
+
+    sessionManageStore.getState().setGroupCollapsed('recent', false)
+    expect(sessionManageStore.getState().groupsCollapsed).toEqual({
+      pinned: true,
+      recent: false,
+    })
+    expect(JSON.parse(localStorage.getItem(GROUPS_KEY)!)).toEqual({
+      pinned: true,
+      recent: false,
+    })
   })
 })

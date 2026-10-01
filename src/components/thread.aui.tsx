@@ -1318,9 +1318,12 @@ const UserMessage: FC = () => {
         </div>
       </div>
 
+      {/* 变体条独立成行：限定在气泡所在列（col-start-2）并跟随气泡右缘
+          （justify-end）——col-span-full 会铺满整行，长变体文本从行左缘起
+          排，视觉上挂在气泡左侧。empty:hidden：无变体时不占一行网格间隙。 */}
       <div
         data-slot="aui_user-branch-picker"
-        className="col-span-full col-start-1 -me-1 flex justify-end"
+        className="col-start-2 mt-1 flex justify-end empty:hidden"
       >
         <MessageVariantPicker />
       </div>

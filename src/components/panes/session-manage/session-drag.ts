@@ -102,9 +102,9 @@ const sameTarget = (a: SessionDragState['target'] | null, b: SessionDragState['t
 export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: SessionRowDragSpec) {
   if (e.button !== 0) return
 
-  // ⋯ 菜单钮 / 改名输入框 / 已打开的菜单：原生交互优先，不起拖。
+  // ⋯ 菜单钮 / 置顶切换钮 / 改名输入框 / 已打开的菜单：原生交互优先，不起拖。
   const pressTarget = e.target as HTMLElement | null
-  if (pressTarget?.closest('[data-slot="aui_thread-list-item-more"], input, textarea, [role="menu"]')) return
+  if (pressTarget?.closest('[data-slot="aui_thread-list-item-more"], [data-slot="aui_thread-list-item-pin-toggle"], input, textarea, [role="menu"]')) return
 
   const handle: Element = e.currentTarget
   const { pointerId } = e

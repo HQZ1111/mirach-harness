@@ -13,6 +13,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import {
+  ChevronDownIcon,
   GitForkIcon,
   Loader2Icon,
   MoreHorizontalIcon,
@@ -41,6 +42,7 @@ import { startSessionRowDrag } from "@/components/panes/session-manage/session-d
 import {
   sessionManageStore,
   useSessionManage,
+  type SessionGroupId,
 } from "@/components/panes/session-manage/session-manage-store";
 import {
   orderMapAfterMove,
@@ -234,6 +236,40 @@ const useSessionCommit = () => {
   );
 };
 
+// ── 分组标题行（置顶 / 最近）─────────────────────────────────────────────
+// chevron 点击收起/展开该组行；折叠态持久化在 sessionManageStore
+// .groupsCollapsed（mirach.harness.session-groups.v1，组 id → bool collapsed，
+// 缺省 = 展开）。空组不渲染标题（调用方按行数守卫）。日期分组分支（groups
+// 非空，当前 runtime 不可达）的标题行保持原样不折叠。
+const SessionGroupHeader: FC<{
+  groupId: SessionGroupId;
+  label: string;
+  collapsed: boolean;
+}> = ({ groupId, label, collapsed }) => {
+  return (
+    <button
+      type="button"
+      data-slot="aui_thread-list-group-label"
+      data-group-id={groupId}
+      aria-expanded={!collapsed}
+      title={collapsed ? "展开" : "收起"}
+      onClick={() =>
+        sessionManageStore.getState().setGroupCollapsed(groupId, !collapsed)
+      }
+      className="text-muted-foreground hover:text-(--text-2) flex w-full cursor-pointer items-center gap-1 rounded-md px-2.5 pt-3 pb-1 text-start text-xs font-medium"
+    >
+      <ChevronDownIcon
+        aria-hidden
+        className={cn(
+          "size-3 shrink-0 transition-transform",
+          collapsed && "-rotate-90",
+        )}
+      />
+      {label}
+    </button>
+  );
+};
+
 const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   searchQuery = "",
 }) => {
@@ -243,6 +279,12 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   const pinned = useSessionManage((s) => s.pinned);
   const order = useSessionManage((s) => s.order);
   const drag = useSessionManage((s) => s.drag);
+  const pinnedCollapsed = useSessionManage(
+    (s) => s.groupsCollapsed.pinned === true,
+  );
+  const recentCollapsed = useSessionManage(
+    (s) => s.groupsCollapsed.recent === true,
+  );
   const metas = useSessionRowMetas();
 
   // 死会话清理（任务：会话不存在于列表时清理键）。列表非空才清——首帧
@@ -307,23 +349,25 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
       <>
         {display.pinnedIndices.length > 0 && (
           <div data-slot="aui_thread-list-pinned" className="flex flex-col gap-0.5">
-            <div
-              data-slot="aui_thread-list-group-label"
-              className="text-muted-foreground px-2.5 pt-3 pb-1 text-xs font-medium"
-            >
-              置顶
-            </div>
-            {display.pinnedIndices.map(renderRow)}
+            <SessionGroupHeader groupId="pinned" label="置顶" collapsed={pinnedCollapsed} />
+            {!pinnedCollapsed && display.pinnedIndices.map(renderRow)}
           </div>
         )}
         <div data-slot="aui_thread-list-unpinned" className="flex flex-col gap-0.5">
-          {display.unpinnedIndices.map((index) => (
-            <Fragment key={threadIds[index]}>
-              {listDrag && listDrag.beforeId === threadIds[index] && caret(`caret-${threadIds[index]}`)}
-              {renderRow(index)}
-            </Fragment>
-          ))}
-          {listDrag && listDrag.beforeId === null && caret("caret-end")}
+          {display.unpinnedIndices.length > 0 && (
+            <SessionGroupHeader groupId="recent" label="最近" collapsed={recentCollapsed} />
+          )}
+          {!recentCollapsed && (
+            <>
+              {display.unpinnedIndices.map((index) => (
+                <Fragment key={threadIds[index]}>
+                  {listDrag && listDrag.beforeId === threadIds[index] && caret(`caret-${threadIds[index]}`)}
+                  {renderRow(index)}
+                </Fragment>
+              ))}
+              {listDrag && listDrag.beforeId === null && caret("caret-end")}
+            </>
+          )}
         </div>
       </>
     );
@@ -454,7 +498,7 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Trigger
           ref={triggerRef}
           data-slot="aui_thread-list-item-trigger"
-          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-start outline-none group-hover:pe-9 group-has-focus-visible:pe-9 group-has-data-[state=open]:pe-9 group-data-active:pe-9"
+          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-start outline-none group-hover:pe-15 group-has-focus-visible:pe-15 group-has-data-[state=open]:pe-15 group-data-active:pe-15"
         >
           <span
             aria-hidden
@@ -480,6 +524,25 @@ export const ThreadListItem: FC = () => {
           {isRunning && <span className="sr-only">Running</span>}
         </ThreadListItemPrimitive.Trigger>
       )}
+      {/* 直接置顶切换钮（与 ⋯ 并排，hover 显形同款）：已置顶 = 实心 accent
+          针（与行内常驻 pin 标记同语义）；未置顶 = 描边针。点击不切行——
+          按钮是 Trigger 的兄弟节点，且 startSessionRowDrag 对本 slot 豁免。 */}
+      <Button
+        variant="ghost"
+        size="icon"
+        type="button"
+        data-slot="aui_thread-list-item-pin-toggle"
+        title={isPinned ? "取消置顶" : "置顶"}
+        aria-label={isPinned ? "取消置顶" : "置顶"}
+        aria-pressed={isPinned}
+        onClick={() => sessionManageStore.getState().togglePin(threadId)}
+        className="absolute end-8 top-1/2 size-6 -translate-y-1/2 p-0 opacity-0 group-hover:opacity-100 group-has-focus-visible:opacity-100 group-data-active:opacity-100"
+      >
+        <PinIcon
+          aria-hidden
+          className={cn("size-3.5", isPinned && "fill-current text-(--fl-accent)")}
+        />
+      </Button>
       <ThreadListItemMore onRename={() => setIsRenaming(true)} />
     </ThreadListItemPrimitive.Root>
   );
@@ -533,7 +596,7 @@ const ThreadListItemRename: FC<{
       data-slot="aui_thread-list-item-rename"
       aria-label="Rename thread"
       value={value}
-      className="h-7 min-w-0 flex-1 ps-2.5 pe-9 text-sm"
+      className="h-7 min-w-0 flex-1 ps-2.5 pe-15 text-sm"
       onChange={(event) => setValue(event.target.value)}
       onBlur={() => commit(false)}
       onKeyDown={(event) => {
