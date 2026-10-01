@@ -104,8 +104,11 @@ src/
                        connection-store.ts / error-bridge.ts / usage-bridge.ts /
                        approval-bridge.ts / approval-cards.tsx /
                        model-selector.tsx / context-display.tsx /
-                       elements/（活文件 10 个：composer/surfaces/reasoning 等，
-                       2026-10-01 清掉 108 个脚手架死副本）
+                       elements/（**官方元件库全量在树 118 文件**【用户定稿
+                       2026-10-02】：10 个已接线为 .aui 连接版在跑，其余 108
+                       个为官方 elements 模板待按需接线——路径=拷入→写
+                       .aui 连接版→扩展成完善件挂 thread；勿删勿称死代码，
+                       曾误清后全量恢复）
   lib/                通用工具（tauri-window/escape-layers/drag-ghost/reorder）
   store/              Zustand 状态层（layout-store.ts；2026-09-26 从 nanostores
                        迁移，tab-selection.ts 同迁——vanilla store 供事件回调）
@@ -2150,6 +2153,16 @@ hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，
   icons/github、panes/logs-pane。方法：从 main.tsx 的 import 可达性 BFS
   （脚本在 %TEMP%，**不进仓库根**——vite watch 着）。**坑：清理连带删了 15 个
   空骨架目录，已 .gitkeep 重建**（git 不跟踪空目录，骨架位靠 .gitkeep 存活）。
+- **【2026-10-02 定性纠正 + 全量恢复（用户定稿）】**：elements/ 的 108 个
+  **不是死代码**——是官方 assistant-ui elements 库的未接线模板（官方默认件
+  = 最小演示，落地靠「拷入 → 写 .aui 连接版 → 扩展」），已全量恢复进树当
+  元件库，连带恢复其 shadcn 依赖（ui/{badge,label,resizable,separator,sheet,
+  sidebar}、icons/github、hooks/use-mobile）。恢复源=提交 4193a4d。两条教训：
+  ①**定性教训**——「未被 import」≠「可删」：元件库模板、官方示例这类
+  待接线资产，删除前先问定性；②**提交卫生**——聊天链路提交
+  `git add src/components/assistant-ui` 曾把 elements/ 的删除**连带暂存**
+  （elements/ 在该路径前缀下），分组提交时路径过宽会吞无关变更，
+  删除类变更必须与代码变更分开提交。
 - **pi vendored**：`src-tauri/vendor/pi_agent_rust`（255MB→22MB 白名单拷贝：
   src/examples/benches/themes/Cargo.toml/build.rs/CHANGELOG + build.rs 嵌入资源
   4 件 + legacy models.generated.ts；tests/ 187MB 安全排除——path 依赖不编译
