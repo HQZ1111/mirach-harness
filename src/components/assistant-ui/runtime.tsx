@@ -621,21 +621,29 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     [actorRef, hydratePiMessages, interruptIfRunning],
   )
 
-  /** 会话线「回到父会话」执行：守卫 → pi_open_session(路径)（返回新活动
-   * 会话 id）→ 重水合 + currentThreadId + 线程列表刷新 → 分支条刷新。
-   * 失败 console.error 不动本地态。 */
+  /** 会话线「回到父会话」执行：守卫 → pi_open_session(路径)（**返回的是
+   * 模型条目串不是会话 id**——实测 "amazon-bedrock/…"；sessionId 从
+   * pi_get_state 取）→ 重水合 + currentThreadId + 线程列表刷新 → 分支条
+   * 刷新。失败 console.error 不动本地态。 */
   const runOpenParent = useCallback(
     async (req: OpenParentRequest) => {
       if (!(await interruptIfRunning())) return
-      let sessionId: string
       try {
-        sessionId = await invoke<string>('pi_open_session', { path: req.path })
+        await invoke('pi_open_session', { path: req.path })
       } catch (e) {
         console.error('[pi] 回到父会话失败（保持当前会话）', e)
         return
       }
-      if (typeof sessionId !== 'string' || sessionId.length === 0) {
-        console.error('[pi] open_session 返回形状非法——不采纳', sessionId)
+      let sessionId: string
+      try {
+        const st = await invoke<{ sessionId?: unknown }>('pi_get_state')
+        if (typeof st?.sessionId !== 'string' || st.sessionId.length === 0) {
+          console.error('[pi] 回到父会话后 pi_get_state 无 sessionId——不采纳', st)
+          return
+        }
+        sessionId = st.sessionId
+      } catch (e) {
+        console.error('[pi] 回到父会话后读取会话 id 失败', e)
         return
       }
       try {

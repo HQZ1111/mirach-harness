@@ -68,17 +68,18 @@ export interface SessionLineage {
   branchedFrom: string | null
 }
 
+/** pi_get_session_lineage 返回解析：Tauri 命令返回**裸 Option<String>**——
+ * string = 父会话文件路径、null = 线性会话；也兼容 {branchedFrom} 包裹
+ * 形（防 Rust 侧日后改包结构）。其余形状 console.error + null。 */
 export const parseSessionLineage = (raw: unknown): SessionLineage | null => {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    console.error('[branch] pi_get_session_lineage 形状非法——丢弃', raw)
-    return null
+  if (raw === null) return { branchedFrom: null }
+  if (typeof raw === 'string') return { branchedFrom: raw }
+  if (typeof raw === 'object' && !Array.isArray(raw)) {
+    const b = (raw as { branchedFrom?: unknown }).branchedFrom
+    if (b === null || typeof b === 'string') return { branchedFrom: b }
   }
-  const b = (raw as { branchedFrom?: unknown }).branchedFrom
-  if (b !== null && typeof b !== 'string') {
-    console.error('[branch] lineage.branchedFrom 类型非法——按 null 处理', b)
-    return { branchedFrom: null }
-  }
-  return { branchedFrom: b }
+  console.error('[branch] pi_get_session_lineage 形状非法——丢弃', raw)
+  return null
 }
 
 /** UI 投递的「回到父会话」请求（runtime 执行器消费；按路径 open_session） */

@@ -1105,7 +1105,6 @@ const AssistantMessage: FC = () => {
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
       >
         <MessageTimeLabel />
-        <MessageVariantPicker />
         <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
@@ -1245,17 +1244,19 @@ const UserFilePart: FileMessagePartComponent = (part) => (
 );
 
 // ── 消息级变体切换（retry 语义，官方 message-branches 模板）──────────
-// 挂助手消息 footer：数据 = pi 同文件兄弟分支（pi_list_sibling_branches）。
-// 显示条件：本消息的**前置 user 消息**是分叉点（其 entryId 经 forkPoints
-// 序号映射后等于 branches.forkPointId）且分支数 > 1——retry（编辑重跑）在
-// 该 user turn 长出的各条线就是这条 assistant 回复的变体。切换 =
-// pi_switch_branch（runtime 执行器：守卫 + 重水合）。会话级 fork（新会话
-// 文件）在 SessionLineBar / 侧栏，两种语义不共用一个件。
+// 挂**user 消息** footer：pi 的分支模型是"从分叉点 user turn 长出的续接
+// 分支"（每条分支以各自的新 user 消息开头——retry_edit 把叶移到该 user
+// turn 的父级，重发即兄弟；fork 点之后的多条线同理），不是"同一 user 的
+// 多个 assistant 回复"，所以变体条的正确锚点是分叉点那条 user 消息。
+// 显示条件：本条 user 消息的 entryId（经 forkPoints 序号映射）===
+// branches.forkPointId 且分支数 > 1。切换 = pi_switch_branch（runtime
+// 执行器：守卫 + 重水合）。会话级 fork（新会话文件）在 SessionLineBar /
+// 侧栏，两种语义不共用一个件。
 const MessageVariantPicker: FC = () => {
   const userOrdinal = useAuiState((s) => {
     let count = 0;
     const msgs = s.thread.messages;
-    for (let i = 0; i < s.message.index && i < msgs.length; i++) {
+    for (let i = 0; i <= s.message.index && i < msgs.length; i++) {
       if (msgs[i]?.role === "user") count++;
     }
     return count - 1;
@@ -1317,10 +1318,12 @@ const UserMessage: FC = () => {
         </div>
       </div>
 
-      <BranchPicker
+      <div
         data-slot="aui_user-branch-picker"
-        className="col-span-full col-start-1 -me-1 justify-end"
-      />
+        className="col-span-full col-start-1 -me-1 flex justify-end"
+      >
+        <MessageVariantPicker />
+      </div>
     </MessagePrimitive.Root>
   );
 };
