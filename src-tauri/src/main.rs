@@ -13,6 +13,10 @@ mod fs;
 mod pi_session;
 mod agui;
 
+// pi 设置页配置面（docs/pi-integration.md §7-7/§4.5）：settings/models/
+// auth 三个配置文件的读改命令——配置真相 = pi 自己的配置文件（§5）
+mod pi_settings;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -94,17 +98,18 @@ fn get_agui_endpoint(
 }
 
 // ── pi 控制面 IPC（docs/pi-integration.md §4.5：HTTP 只管事件流，
-//    其余一切控制走 IPC）——命令都阻塞到大栈线程返回（引擎内部
-//    已按 16MiB 栈纪律处理；Tauri command 在 async 上下文外安全）。──
+//    其余一切控制走 IPC）——pi_* 命令带 (async)：同步 fn 走 Tauri
+//    线程池而非 WebView2 UI 线程（P1-1——流式期间 IPC 调用不再冻窗；
+//    引擎内部仍按 16MiB 大栈纪律处理，on_big_stack 形态不动）。──
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_get_state(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
     state.engine.state()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_get_messages(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
@@ -113,7 +118,7 @@ fn pi_get_messages(
 
 // 参数命名显式 camelCase（Tauri v2 默认即此，写明防签名漂移——前端
 // invoke 以 modelId 调用，静默错名会变成"参数缺失"错误）
-#[tauri::command(rename_all = "camelCase")]
+#[tauri::command(rename_all = "camelCase", async)]
 fn pi_set_model(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     provider: String,
@@ -122,7 +127,7 @@ fn pi_set_model(
     state.engine.set_model(&provider, &model_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_set_thinking_level(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     level: String,
@@ -130,12 +135,12 @@ fn pi_set_thinking_level(
     state.engine.set_thinking_level(&level)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_interrupt(state: tauri::State<std::sync::Arc<agui::AguiState>>) -> Result<(), String> {
     state.engine.interrupt()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_list_models(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
@@ -145,14 +150,14 @@ fn pi_list_models(
 // ── 扩展 UI 请求（§4.4 审批/问题卡）：请求经 SSE CUSTOM 到前端卡，
 //    应答走 IPC 回灌 oneshot。──
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_pending_approvals(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     Ok(state.approvals.list())
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[tauri::command(rename_all = "camelCase", async)]
 fn pi_extension_ui_response(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     id: String,
@@ -166,7 +171,7 @@ fn pi_extension_ui_response(
 
 // ── 会话持久化（§7-4 侧栏 sessions：对话真相在 pi，前端只持镜像）──
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_list_sessions(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
@@ -175,7 +180,7 @@ fn pi_list_sessions(
 
 /// New Chat 语义：flush 旧会话落盘 + 清空 handle；下一次 POST 按需建新会话
 /// （不立即创建，避免弃用的空会话文件堆积）。
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_discard_session(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<(), String> {
@@ -184,14 +189,14 @@ fn pi_discard_session(
 
 /// 前端挂载时取缓冲最新 seq 作为 EventSource 的 lastEventId 起点
 /// （跳过历史重放——会话历史经 pi_get_messages 水合）。
-#[tauri::command]
+#[tauri::command(async)]
 fn pi_stream_cursor(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<u64, String> {
     Ok(state.latest_seq("main"))
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[tauri::command(rename_all = "camelCase", async)]
 fn pi_open_session(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     path: String,
@@ -202,7 +207,7 @@ fn pi_open_session(
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[tauri::command(rename_all = "camelCase", async)]
 fn pi_rename_session(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     name: String,
@@ -210,7 +215,7 @@ fn pi_rename_session(
     state.engine.rename_session(&name)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[tauri::command(rename_all = "camelCase", async)]
 fn pi_delete_session(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     path: String,
@@ -332,6 +337,11 @@ fn main() {
             pi_open_session,
             pi_rename_session,
             pi_delete_session,
+            pi_settings::pi_get_settings,
+            pi_settings::pi_set_settings,
+            pi_settings::pi_get_models_config,
+            pi_settings::pi_set_models_config,
+            pi_settings::pi_auth_status,
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url

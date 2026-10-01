@@ -20,6 +20,7 @@
 //!   caller-polled 路径，不 panic 不 UB（loan 协议，WorkerSlot::Loaned）。
 //!   签名 block_on<F: Future> 无 'static 约束，故 messages() 可借 &handle。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi::sdk::{AgentEvent, AgentSessionHandle, SessionOptions, create_agent_session};
@@ -72,24 +73,43 @@ impl PiRuntime {
     }
 }
 
+/// abort 槽位条目：句柄 + 所属 run 代号。代号供 PromptGuard 清场时做
+/// 身份比对——并发排队时后一个 run 已写入自己的槽位，前一个 run 的
+/// Drop 不得抹掉后者的句柄（否则 interrupt 失灵）。
+struct AbortSlot {
+    run: u64,
+    handle: pi::sdk::AbortHandle,
+}
+
 /// 跨线程共享的引擎态（PiEngine 的全部字段；大栈线程经 Arc 访问）。
 struct EngineShared {
     runtime: PiRuntime,
     handle: Mutex<Option<AgentSessionHandle>>,
-    /// 最近一次 prompt 的 abort 句柄（pi_interrupt 置 abort；guard 清场）。
-    abort: Mutex<Option<pi::sdk::AbortHandle>>,
+    /// 最近一次 prompt 的 abort 句柄（pi_interrupt 置 abort；guard 按身份清场）。
+    abort: Mutex<Option<AbortSlot>>,
+    /// run 代号发生器（abort 槽位身份比对用，单调递增）。
+    run_counter: AtomicU64,
+    /// 审批注册表（§4.4）——与 AguiState 共享同一 Arc：登记在
+    /// UiBridgeHandle（handler 桥），会话 discard/切换成功后由引擎侧
+    /// 清理挂起项（P1-3 防鬼影卡片）。
+    approvals: Arc<ApprovalRegistry>,
 }
 
 /// prompt 期间的清场守卫。Drop 无法传播错误——这里的锁失败只能忽略：
 /// abort 槽位残留的最坏后果是 interrupt() 对已结束 run 置位（无害），
 /// 是资源清场的物理边界，不是业务兜底。
+/// 清场按 run 代号做身份比对：并发排队时后一个 run 已写入自己的槽位，
+/// 前一个 run 的 Drop 不得抹掉后者的句柄（P1-2 竞态修复的另一半）。
 struct PromptGuard<'a> {
-    abort: &'a Mutex<Option<pi::sdk::AbortHandle>>,
+    abort: &'a Mutex<Option<AbortSlot>>,
+    run: u64,
 }
 impl Drop for PromptGuard<'_> {
     fn drop(&mut self) {
         if let Ok(mut slot) = self.abort.lock() {
-            *slot = None;
+            if slot.as_ref().map(|s| s.run) == Some(self.run) {
+                *slot = None;
+            }
         }
     }
 }
@@ -166,8 +186,16 @@ impl PiEngine {
                 runtime: PiRuntime::new(),
                 handle: Mutex::new(None),
                 abort: Mutex::new(None),
+                run_counter: AtomicU64::new(0),
+                approvals: Arc::new(ApprovalRegistry::default()),
             }),
         }
+    }
+
+    /// 审批注册表共享柄（AguiState 与 PiEngine 持同一份真相——登记在
+    /// UiBridgeHandle，清理在会话切换路径，同一 Arc 才能对上）。
+    pub fn approvals(&self) -> Arc<ApprovalRegistry> {
+        Arc::clone(&self.shared.approvals)
     }
 
     /// 创建/打开进程内会话（provider/model 缺省读 ~/.pi settings；
@@ -221,6 +249,9 @@ impl PiEngine {
             .handle
             .lock()
             .map_err(|_| "pi handle mutex poisoned".to_string())? = Some(handle);
+        // P1-3：会话切换成功后清理上一会话的挂起审批（防鬼影卡片）。
+        // 失败路径不清理——此时旧会话仍在位，其审批仍有效。
+        self.shared.approvals.cleanup();
         Ok(format!("{provider}/{model_id}"))
     }
 
@@ -260,6 +291,8 @@ impl PiEngine {
             .handle
             .lock()
             .map_err(|_| "pi handle mutex poisoned".to_string())? = None;
+        // P1-3：会话已丢弃——挂起审批随之失效，清掉防鬼影卡片。
+        self.shared.approvals.cleanup();
         Ok(())
     }
 
@@ -375,11 +408,17 @@ impl PiEngine {
     }
 
     /// 发送一条 prompt（SDK 二参签名：text + on_event；Mutex 串行）。
-    /// 同时登记 abort 句柄（pi_interrupt 可中断；PromptGuard 清场）。
+    /// on_start：拿到 handle mutex 之后、起跑前调用的回调（P1-2——POST
+    /// 的 RUN_STARTED 经它推送，排队 run 不再提前入缓冲制造 §0.3-1 的
+    /// 协议违例序列）。
+    /// abort 句柄在拿到锁之后才登记（P1-2——此前拿锁前写入全局单槽：
+    /// 并发 prompt 时 interrupt 错杀排队 run、guard 清场抹掉后者句柄）；
+    /// PromptGuard 清场按 run 代号身份比对。
     pub fn prompt(
         &self,
         text: &str,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+        on_start: Box<dyn FnOnce() + Send>,
     ) -> Result<(), String> {
         // 重入防护：on_event 回调运行在 block_on 的 poll 里，asupersync 的
         // ScopedRuntimeHandle 是 thread-local——此刻 current_handle() 必
@@ -391,23 +430,20 @@ impl PiEngine {
                 "re-entrant prompt rejected: on_event 回调里禁止发起新 prompt（会死锁）".into(),
             );
         }
-        let (abort_handle, abort_signal) = pi::sdk::AbortHandle::new();
-        *self
-            .shared
-            .abort
-            .lock()
-            .map_err(|_| "pi abort mutex poisoned".to_string())? = Some(abort_handle);
+        let run = self.shared.run_counter.fetch_add(1, Ordering::SeqCst);
         let _guard = PromptGuard {
             abort: &self.shared.abort,
+            run,
         };
-        self.prompt_inner(text, on_event, Some(abort_signal))
+        self.prompt_inner(text, on_event, on_start, run)
     }
 
     fn prompt_inner(
         &self,
         text: &str,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-        abort_signal: Option<pi::sdk::AbortSignal>,
+        on_start: Box<dyn FnOnce() + Send>,
+        run: u64,
     ) -> Result<(), String> {
         let shared = Arc::clone(&self.shared);
         let text = text.to_string();
@@ -419,11 +455,19 @@ impl PiEngine {
                 .lock()
                 .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_mut().ok_or("no active session")?;
+            // P1-2：拿到锁之后才登记 abort；登记先于 on_start——前端看到
+            // RUN_STARTED 时 interrupt 已可用。run 代号保证 guard 清场只清
+            // 自己这次的槽位。
+            let (abort_handle, abort_signal) = pi::sdk::AbortHandle::new();
+            *shared
+                .abort
+                .lock()
+                .map_err(|_| "pi abort mutex poisoned".to_string())? =
+                Some(AbortSlot { run, handle: abort_handle });
+            // P1-2：启动信号（RUN_STARTED 等）在真正起跑前才发出。
+            on_start();
             let result = shared.runtime.block_on(async move {
-                match abort_signal {
-                    Some(sig) => handle.prompt_with_abort(text, sig, on_event).await,
-                    None => handle.prompt(text, on_event).await,
-                }
+                handle.prompt_with_abort(text, abort_signal, on_event).await
             });
             result.map(|_| ()).map_err(|e| e.to_string())
         })?
@@ -439,7 +483,7 @@ impl PiEngine {
             .map_err(|_| "pi abort mutex poisoned".to_string())?;
         match guard.as_ref() {
             Some(h) => {
-                h.abort();
+                h.handle.abort();
                 Ok(())
             }
             None => Err("no active run".into()),

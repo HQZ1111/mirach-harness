@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:build": "tauri build --config src-tauri/tauri.prod.conf.json",
     "test": "vitest run",
     "test:watch": "vitest"
   },

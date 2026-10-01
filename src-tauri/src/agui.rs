@@ -14,15 +14,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
-    response::{ IntoResponse, Sse},
+    extract::{Query, Request, State},
+    http::{header, HeaderName, HeaderValue, Method, StatusCode},
+    middleware,
+    response::{IntoResponse, Sse},
     routing::{get, post},
     Json, Router,
 };
 use pi::sdk::AgentEvent;
 use tokio_stream::wrappers::ReceiverStream;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 const BUFFER_CAP: usize = 2000;
 const AGUI_VERSION: &str = "v0.4";
@@ -103,6 +104,8 @@ impl ApprovalRegistry {
     }
 
     /// 应答回灌；id 不存在 = 错误（错误即错误，不静默）。
+    /// oneshot send 失败（对端 request_ui 已被丢弃——上游超时放弃/会话
+    /// discard 中止扩展任务）也 = 错误（P1-3：不假装成功，前端可见）。
     pub fn respond(&self, id: &str, answer: UiAnswer) -> Result<(), String> {
         let pending = self
             .pending
@@ -110,8 +113,19 @@ impl ApprovalRegistry {
             .expect("approval registry poisoned")
             .remove(id)
             .ok_or_else(|| format!("no pending approval with id {id}"))?;
-        let _ = pending.responder.send(answer);
-        Ok(())
+        pending.responder.send(answer).map_err(|_| {
+            format!("approval {id} responder gone (upstream timed out or session discarded)")
+        })
+    }
+
+    /// 会话 discard/切换成功后清理挂起审批（P1-3 防鬼影卡片）：移除全部
+    /// pending 项——oneshot Sender 析构后宿主桥的 request_ui 收到 Err，
+    /// 按 cancelled 回灌 pi（§4.4 宿主桥故障语义）。
+    pub fn cleanup(&self) {
+        self.pending
+            .lock()
+            .expect("approval registry poisoned")
+            .clear();
     }
 }
 
@@ -126,12 +140,16 @@ impl AguiState {
                 .expect("system clock before Unix epoch")
                 .subsec_nanos()
         );
+        // P1-3：审批注册表由 PiEngine 持有（会话 discard/切换成功后由引擎
+        // 侧清理挂起项）——这里共享同一 Arc，登记与清理一份真相。
+        let engine = crate::pi_session::PiEngine::new();
+        let approvals = engine.approvals();
         Self {
-            engine: crate::pi_session::PiEngine::new(),
+            engine,
             token,
             port: Mutex::new(None),
             buffers: Arc::new(Mutex::new(ThreadBuffers::default())),
-            approvals: Arc::new(ApprovalRegistry::default()),
+            approvals,
         }
     }
 
@@ -324,13 +342,14 @@ async fn agui_run(
     let created = match create {
         Ok(res) => res,
         Err(e) => {
-            st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread }));
+            // P2-1：失败路径只推 RUN_ERROR（payload 带错误信息）——不推无
+            // runId 的 RUN_STARTED（前端会残留空消息段；§0.3-1：STARTED
+            // 必须挂在真实 run 上）。
             st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
             return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
         }
     };
     if let Err(e) = created {
-        st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread }));
         st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
         return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
     }
@@ -342,7 +361,11 @@ async fn agui_run(
             .expect("system clock before Unix epoch")
             .as_millis()
     );
-    st.push(&thread, serde_json::json!({ "type": "RUN_STARTED", "threadId": thread, "runId": run_id }));
+    // P1-2：RUN_STARTED 不在 POST 里推——排队 run（前一个 run 未结束）的
+    // STARTED 提前入缓冲 = §0.3-1 协议违例序列（streaming 中收到另一
+    // runId 的 STARTED）。改经 on_start 回调在 PiEngine 拿到 handle mutex
+    // 后、起跑前推送。POST 仍立即返回 runId（生成逻辑不动）。
+    let run_id_for_start = run_id.clone();
 
     let st2 = st.clone();
     let thread2 = thread.clone();
@@ -359,11 +382,23 @@ async fn agui_run(
         .spawn(move || {
             let err_sink = sink.clone();
             let err_thread = thread2.clone();
+            let start_sink = sink.clone();
+            let start_thread = thread2.clone();
+            let on_start: Box<dyn FnOnce() + Send> = Box::new(move || {
+                start_sink.push(
+                    &start_thread,
+                    serde_json::json!({
+                        "type": "RUN_STARTED",
+                        "threadId": &start_thread,
+                        "runId": &run_id_for_start,
+                    }),
+                );
+            });
             let result = st2.engine.prompt(&message, move |event: AgentEvent| {
                 for v in map_agent_event(&event) {
                     sink.push(&thread2, v);
                 }
-            });
+            }, on_start);
             if let Err(e) = result {
                 err_sink.push(&err_thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
             }
@@ -375,7 +410,17 @@ async fn agui_run(
 async fn agui_stream(
     State(st): State<Arc<AguiState>>,
     Query(q): Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    // P0-1：与 POST 同款 token 校验（§2.1——GET 流 token 走 query 参数，
+    // EventSource 无法发自定义头，前端 URL 已带 token=…）
+    if !st.check_token(q.get("token")) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "bad token" })),
+        )
+            .into_response();
+    }
     // 错误即错误：缺 thread 不静默默认（兜底禁令）
     let thread = match q.get("thread") {
         Some(t) if !t.is_empty() => t.clone(),
@@ -387,7 +432,15 @@ async fn agui_stream(
                 .into_response();
         }
     };
-    let mut cursor: u64 = q.get("lastEventId").and_then(|s| s.parse().ok()).unwrap_or(0);
+    // P0-3：cursor 优先取 SSE 标准 Last-Event-ID 头（EventSource 原生重连
+    // 自动携带——此前只读 query，原生重连会拿陈旧 query 全量重放）；无头
+    // 或解析失败回退 query lastEventId；两者都有取 max（取更靠后的位置）。
+    let header_cursor = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let query_cursor = q.get("lastEventId").and_then(|s| s.parse::<u64>().ok());
+    let mut cursor: u64 = header_cursor.max(query_cursor).unwrap_or(0);
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::response::sse::Event, std::convert::Infallible>>(32);
 
     // 轮询放出（MVP：150ms 步进；per-thread 单消费，drain 后丢弃已送事件）
@@ -420,11 +473,618 @@ async fn healthz() -> impl IntoResponse {
     "agui ok"
 }
 
+/// Host 校验（P0-2，§2.1 DNS rebinding 防线）：Host 头必须落在
+/// 127.0.0.1:{port} / localhost:{port}，否则 403。浏览器发起的
+/// fetch/EventSource 自动携带目标地址的真实 Host，不受影响。端口未
+/// 就绪（serve 前物理上无请求可达）也 fail closed——500 拒绝，不敞门。
+async fn enforce_host(
+    State(st): State<Arc<AguiState>>,
+    req: Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let port = *st.port.lock().expect("agui port poisoned");
+    let Some(port) = port else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "agui endpoint not ready" })),
+        )
+            .into_response();
+    };
+    let allowed = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    let host_ok = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| allowed.iter().any(|a| a.eq_ignore_ascii_case(h)))
+        .unwrap_or(false);
+    if !host_ok {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "bad host" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 pub fn router(state: Arc<AguiState>) -> Router {
+    // P0-2：显式 CORS（替代 very_permissive）——白名单 = Tauri 生产源
+    // （http://tauri.localhost / tauri://localhost）+ dev 源（1430 vite）；
+    // 方法 GET/POST/OPTIONS；头 content-type（POST JSON）、authorization、
+    // last-event-id（EventSource 原生重连携带，跨源重连需预检放行）。
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list([
+            HeaderValue::from_static("http://tauri.localhost"),
+            HeaderValue::from_static("tauri://localhost"),
+            HeaderValue::from_static("http://127.0.0.1:1430"),
+            HeaderValue::from_static("http://localhost:1430"),
+        ]))
+        .allow_methods(AllowMethods::list([
+            Method::GET,
+            Method::POST,
+            Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("last-event-id"),
+        ]));
     Router::new()
         .route("/ag-ui", post(agui_run))
         .route("/ag-ui/stream", get(agui_stream))
         .route("/healthz", get(healthz))
-        .layer(CorsLayer::very_permissive())
+        .layer(cors)
+        // 层序：后加的在外层最先执行——Host 校验先于 CORS；坏 Host 的
+        // 403 不带 CORS 头也无所谓（rebinding 攻击请求本就不受 CORS 保护）。
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_host,
+        ))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    //! agui 单元测试（§7-2 欠债：§2.2 事件映射表逐行 + 环形缓冲语义 +
+    //! 审批注册表）。pi 事件样本按上游真实形状构造（G:\pi_agent_rust-main
+    //! 的 src/agent.rs AgentEvent、src/model.rs AssistantMessageEvent/
+    //! Usage/ToolCall、src/tools.rs ToolOutput），只 import pi::sdk /
+    //! pi::model / pi::tools 的事件类型面。全部同步断言（oneshot 用
+    //! try_recv，不依赖 tokio rt feature 进 dev 依赖）。
+
+    use super::*;
+    use pi::model::{AssistantMessage, AssistantMessageEvent, Message, Usage};
+    use pi::tools::ToolOutput;
+
+    // ---------- 样本助手 ----------
+
+    fn sess() -> Arc<str> {
+        Arc::from("sess-test")
+    }
+
+    /// 流式事件携带的累积 assistant 快照（AssistantMessageEvent 全家族
+    /// 变体都带 partial——映射器不读它，Default 即最小合法样本）。
+    fn partial() -> Arc<AssistantMessage> {
+        Arc::new(AssistantMessage::default())
+    }
+
+    fn msg_update(ev: AssistantMessageEvent) -> AgentEvent {
+        AgentEvent::MessageUpdate {
+            message: Message::assistant(AssistantMessage::default()),
+            assistant_message_event: ev,
+        }
+    }
+
+    fn tool_out() -> ToolOutput {
+        ToolOutput {
+            content: vec![],
+            details: None,
+            is_error: false,
+        }
+    }
+
+    fn answer(value: Option<serde_json::Value>, cancelled: bool) -> UiAnswer {
+        UiAnswer { value, cancelled }
+    }
+
+    fn empty_buffers() -> Mutex<ThreadBuffers> {
+        Mutex::new(ThreadBuffers::default())
+    }
+
+    // ---------- 映射器（§2.2 逐行） ----------
+
+    #[test]
+    fn agent_start_maps_empty_run_started_is_manual() {
+        // §2.2 行 1（AgentStart→RUN_STARTED）的有意偏差：RUN_STARTED 由
+        // POST 处理器经 on_start 回调挂在真实 run 上推送（runId 在那里才
+        // 生成），映射器对 AgentStart 不再重复发。
+        let e = AgentEvent::AgentStart { session_id: sess() };
+        assert!(map_agent_event(&e).is_empty());
+    }
+
+    #[test]
+    fn text_delta_maps_text_message_content() {
+        let e = msg_update(AssistantMessageEvent::TextDelta {
+            content_index: 0,
+            delta: "你好".into(),
+            partial: partial(),
+        });
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "TEXT_MESSAGE_CONTENT");
+        assert_eq!(v[0]["delta"], "你好");
+    }
+
+    #[test]
+    fn thinking_delta_maps_thinking_text_message_content() {
+        let e = msg_update(AssistantMessageEvent::ThinkingDelta {
+            content_index: 1,
+            delta: "推理中".into(),
+            partial: partial(),
+        });
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "THINKING_TEXT_MESSAGE_CONTENT");
+        assert_eq!(v[0]["delta"], "推理中");
+    }
+
+    #[test]
+    fn tool_call_start_maps_tool_call_start() {
+        let e = msg_update(AssistantMessageEvent::ToolCallStart {
+            content_index: 2,
+            partial: partial(),
+        });
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "TOOL_CALL_START");
+    }
+
+    #[test]
+    fn tool_call_delta_maps_tool_call_args() {
+        let e = msg_update(AssistantMessageEvent::ToolCallDelta {
+            content_index: 2,
+            delta: r#"{"path":"G:/x"}"#.into(),
+            partial: partial(),
+        });
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "TOOL_CALL_ARGS");
+        assert_eq!(v[0]["delta"], r#"{"path":"G:/x"}"#);
+    }
+
+    #[test]
+    fn message_end_maps_text_message_end() {
+        let e = AgentEvent::MessageEnd {
+            message: Message::assistant(AssistantMessage::default()),
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "TEXT_MESSAGE_END");
+    }
+
+    #[test]
+    fn message_update_block_starts_and_ends_currently_unmapped() {
+        // §2.2 表要求 MessageUpdate{TextStart/ThinkingStart}→*_MESSAGE_START、
+        // {TextEnd/ThinkingEnd}→*_MESSAGE_END（contentIndex 配对）——当前
+        // 映射器未实现（fall-through 空 vec）。前端 reducer 对这些事件名
+        // 无分支（default 透传，turn-actor.ts），无运行期破损。本用例钉住
+        // 现状作为将来补齐时的翻转点；本轮不改正事逻辑（§7-2 约束）。
+        for ev in [
+            AssistantMessageEvent::TextStart {
+                content_index: 0,
+                partial: partial(),
+            },
+            AssistantMessageEvent::TextEnd {
+                content_index: 0,
+                content: "done".into(),
+                partial: partial(),
+            },
+            AssistantMessageEvent::ThinkingStart {
+                content_index: 1,
+                partial: partial(),
+            },
+            AssistantMessageEvent::ThinkingEnd {
+                content_index: 1,
+                content: "r".into(),
+                partial: partial(),
+            },
+        ] {
+            let e = msg_update(ev);
+            assert!(
+                map_agent_event(&e).is_empty(),
+                "expected no events for {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_call_end_currently_unmapped() {
+        // §2.2 表要求 MessageUpdate{ToolCallEnd}→TOOL_CALL_END——当前未
+        // 映射（工具调用的 result/isError 由 CUSTOM tool_execution end
+        // 承载，§2.2 维度裁定；前端 TOOL_CALL_* 无 END 分支，现状无破损）。
+        // 同上：翻转点用例，本轮不改正事逻辑。
+        let e = msg_update(AssistantMessageEvent::ToolCallEnd {
+            content_index: 2,
+            tool_call: pi::model::ToolCall {
+                id: "tc-1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({ "path": "G:/x" }),
+                thought_signature: None,
+            },
+            partial: partial(),
+        });
+        assert!(map_agent_event(&e).is_empty());
+    }
+
+    #[test]
+    fn tool_execution_start_maps_custom_with_args() {
+        let e = AgentEvent::ToolExecutionStart {
+            tool_call_id: "tc-1".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({ "path": "G:/x" }),
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "CUSTOM");
+        assert_eq!(v[0]["name"], "tool_execution");
+        assert_eq!(v[0]["value"]["phase"], "start");
+        assert_eq!(v[0]["value"]["toolCallId"], "tc-1");
+        assert_eq!(v[0]["value"]["toolName"], "read");
+        // args 取自 Start（§2.2 维度裁定：参数流维度在 MessageUpdate 侧，
+        // 执行维度在 ToolExecution* 侧）
+        assert_eq!(v[0]["value"]["args"]["path"], "G:/x");
+    }
+
+    #[test]
+    fn tool_execution_update_maps_custom_with_partial() {
+        let e = AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "tc-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({}),
+            partial_result: tool_out(),
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "CUSTOM");
+        assert_eq!(v[0]["name"], "tool_execution");
+        assert_eq!(v[0]["value"]["phase"], "update");
+        assert_eq!(v[0]["value"]["toolCallId"], "tc-1");
+        // partial 是 pi ToolOutput 的序列化（content 数组 + isError skip）
+        assert!(v[0]["value"]["partial"].is_object());
+        assert_eq!(v[0]["value"]["partial"]["content"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn tool_execution_end_maps_custom_with_result_and_error_flag() {
+        let mut result = tool_out();
+        result.is_error = true;
+        let e = AgentEvent::ToolExecutionEnd {
+            tool_call_id: "tc-9".into(),
+            tool_name: "read".into(),
+            result,
+            is_error: true,
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "CUSTOM");
+        assert_eq!(v[0]["value"]["phase"], "end");
+        assert_eq!(v[0]["value"]["toolCallId"], "tc-9");
+        // end 带 result/isError（tool-error 元素数据源）
+        assert_eq!(v[0]["value"]["isError"], true);
+        assert_eq!(v[0]["value"]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn turn_end_maps_step_finished() {
+        let e = AgentEvent::TurnEnd {
+            session_id: sess(),
+            turn_index: 0,
+            message: Message::assistant(AssistantMessage::default()),
+            tool_results: vec![],
+            latency_breakdown: None,
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "STEP_FINISHED");
+        // 当前契约：用量不在 STEP_FINISHED 上——前端 turn-actor 只消费
+        // RUN_FINISHED.usage（turn-actor.ts RUN_FINISHED 分支），§2.2 表
+        // 的"STEP_FINISHED 带 usage"行由 RUN_FINISHED 承担。
+        assert!(v[0].get("usage").is_none());
+    }
+
+    #[test]
+    fn agent_end_success_maps_run_finished_with_usage() {
+        let e = AgentEvent::AgentEnd {
+            session_id: sess(),
+            messages: vec![Message::assistant(AssistantMessage {
+                usage: Usage {
+                    input: 1234,
+                    output: 567,
+                    cache_read: 89,
+                    total_tokens: 1801,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })],
+            error: None,
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "RUN_FINISHED");
+        // usage 字段非空路径（ContextDisplay 唯一数据源）：取最后一条
+        // assistant 消息的 usage，input/output/cachedRead/total 全带上
+        assert!(v[0]["usage"].is_object());
+        assert_eq!(v[0]["usage"]["inputTokens"], 1234);
+        assert_eq!(v[0]["usage"]["outputTokens"], 567);
+        assert_eq!(v[0]["usage"]["cachedInputTokens"], 89);
+        assert_eq!(v[0]["usage"]["totalTokens"], 1801);
+    }
+
+    #[test]
+    fn agent_end_without_assistant_messages_usage_null() {
+        // 无 assistant 消息 → RUN_FINISHED 照发（不能没有 run 终态），
+        // usage = null（前端 reducer 对缺字段保留旧值）
+        let e = AgentEvent::AgentEnd {
+            session_id: sess(),
+            messages: vec![],
+            error: None,
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "RUN_FINISHED");
+        assert!(v[0]["usage"].is_null());
+    }
+
+    #[test]
+    fn agent_end_error_maps_run_error() {
+        let e = AgentEvent::AgentEnd {
+            session_id: sess(),
+            messages: vec![],
+            error: Some("provider down".into()),
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "RUN_ERROR");
+        assert_eq!(v[0]["message"], "provider down");
+    }
+
+    #[test]
+    fn auto_compaction_maps_custom() {
+        let v = map_agent_event(&AgentEvent::AutoCompactionStart {
+            reason: "context full".into(),
+        });
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "CUSTOM");
+        assert_eq!(v[0]["name"], "compaction");
+        assert_eq!(v[0]["value"]["phase"], "start");
+        assert_eq!(v[0]["value"]["reason"], "context full");
+
+        let v = map_agent_event(&AgentEvent::AutoCompactionEnd {
+            result: None,
+            aborted: false,
+            will_retry: false,
+            error_message: None,
+        });
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "CUSTOM");
+        assert_eq!(v[0]["name"], "compaction");
+        assert_eq!(v[0]["value"]["phase"], "end");
+    }
+
+    #[test]
+    fn turn_start_and_message_start_unmapped() {
+        // §2.2 行 2：TurnStart 内部计数不外发；MessageStart 无映射行。
+        // 两者 fall-through 空 vec 是有意行为。
+        let ts = AgentEvent::TurnStart {
+            session_id: sess(),
+            turn_index: 0,
+            timestamp: 0,
+        };
+        assert!(map_agent_event(&ts).is_empty());
+        let ms = AgentEvent::MessageStart {
+            message: Message::assistant(AssistantMessage::default()),
+        };
+        assert!(map_agent_event(&ms).is_empty());
+    }
+
+    #[test]
+    fn token_check_rejects_missing_or_wrong() {
+        // POST/GET 同款 token 校验（另一代理刚修的 P0-1）
+        let st = AguiState::new();
+        let token = st.endpoint()["token"].as_str().expect("token").to_string();
+        assert!(!st.check_token(None));
+        assert!(!st.check_token(Some(&"wrong".to_string())));
+        assert!(st.check_token(Some(&token)));
+    }
+
+    // ---------- 环形缓冲 ----------
+
+    #[test]
+    fn push_shared_seq_starts_at_one_monotonic() {
+        let b = empty_buffers();
+        assert_eq!(push_shared(&b, "t", serde_json::json!({ "e": 1 })), 1);
+        assert_eq!(push_shared(&b, "t", serde_json::json!({ "e": 2 })), 2);
+        assert_eq!(push_shared(&b, "t", serde_json::json!({ "e": 3 })), 3);
+    }
+
+    #[test]
+    fn push_shared_seq_per_thread_isolated() {
+        // per-thread 计数器：每个 thread 的 seq 各自从 1 起（§2.1 per-thread）
+        let b = empty_buffers();
+        assert_eq!(push_shared(&b, "a", serde_json::json!({})), 1);
+        assert_eq!(push_shared(&b, "b", serde_json::json!({})), 1);
+        assert_eq!(push_shared(&b, "a", serde_json::json!({})), 2);
+    }
+
+    #[test]
+    fn buffer_cap_evicts_oldest_keeps_seq_continuity() {
+        let b = empty_buffers();
+        let last = 2500u64;
+        for i in 1..=last {
+            push_shared(&b, "t", serde_json::json!({ "i": i }));
+        }
+        let guard = b.lock().expect("buffers poisoned");
+        let dq = guard.events.get("t").expect("thread events");
+        assert_eq!(dq.len(), BUFFER_CAP);
+        // 淘汰最旧后 seq 连续性保持：首条 = last - cap + 1，尾条 = last
+        assert_eq!(dq.front().expect("non-empty").0, last - BUFFER_CAP as u64 + 1);
+        assert_eq!(dq.back().expect("non-empty").0, last);
+        // VecDeque 无 windows：相邻 zip 比对 seq 连续
+        assert!(dq
+            .iter()
+            .zip(dq.iter().skip(1))
+            .all(|(a, b)| a.0 + 1 == b.0));
+    }
+
+    #[test]
+    fn push_shared_concurrent_single_lock_seq_monotonic() {
+        // 共享单锁：并发写同一 thread，seq 仍唯一且严格递增（无丢失/重号）
+        let b = Arc::new(empty_buffers());
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let b = Arc::clone(&b);
+                std::thread::spawn(move || {
+                    for i in 0..250u64 {
+                        push_shared(&b, "t", serde_json::json!({ "i": i }));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("pusher thread panicked");
+        }
+        let guard = b.lock().expect("buffers poisoned");
+        let dq = guard.events.get("t").expect("thread events");
+        assert_eq!(dq.len(), 1000);
+        assert_eq!(dq.front().expect("non-empty").0, 1);
+        assert_eq!(dq.back().expect("non-empty").0, 1000);
+        assert!(dq
+            .iter()
+            .zip(dq.iter().skip(1))
+            .all(|(a, b)| a.0 + 1 == b.0));
+    }
+
+    #[test]
+    fn drain_filters_after_seq_readonly() {
+        let st = AguiState::new();
+        for i in 1..=3 {
+            st.push("t", serde_json::json!({ "e": i }));
+        }
+        let first = st.drain("t", 1);
+        assert_eq!(
+            first.iter().map(|(s, _)| *s).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        // 只读过滤不删：同 cursor 再 drain 结果不变（重放语义）
+        assert_eq!(st.drain("t", 1), first);
+        // 全消费后为空；未知 thread 空默认
+        assert!(st.drain("t", 3).is_empty());
+        assert!(st.drain("missing", 0).is_empty());
+    }
+
+    #[test]
+    fn drain_batches_at_200() {
+        // SSE 单次放出上限 200（per-thread 单消费的批上限）
+        let st = AguiState::new();
+        for i in 1..=250u64 {
+            st.push("t", serde_json::json!({ "e": i }));
+        }
+        let batch = st.drain("t", 0);
+        assert_eq!(batch.len(), 200);
+        assert_eq!(batch.first().expect("non-empty").0, 1);
+        let rest = st.drain("t", 200);
+        assert_eq!(rest.len(), 50);
+        assert_eq!(rest.last().expect("non-empty").0, 250);
+    }
+
+    #[test]
+    fn latest_seq_tracks_counter() {
+        let st = AguiState::new();
+        assert_eq!(st.latest_seq("t"), 0);
+        st.push("t", serde_json::json!({}));
+        st.push("t", serde_json::json!({}));
+        assert_eq!(st.latest_seq("t"), 2);
+        // 未知 thread = 0（前端挂载时作 lastEventId 起点照常可用）
+        assert_eq!(st.latest_seq("missing"), 0);
+    }
+
+    // ---------- 审批注册表（§4.4） ----------
+
+    #[test]
+    fn register_then_list_returns_request() {
+        let reg = ApprovalRegistry::default();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<UiAnswer>();
+        let request = serde_json::json!({ "id": "ap-1", "method": "confirm" });
+        reg.register("ap-1".into(), request.clone(), tx);
+        // 挂载/刷新拉取（§4.4 pending_approvals 列表）
+        assert_eq!(reg.list(), vec![request]);
+    }
+
+    #[test]
+    fn respond_resolves_oneshot_and_consumes_id() {
+        let reg = ApprovalRegistry::default();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<UiAnswer>();
+        reg.register("ap-1".into(), serde_json::json!({ "id": "ap-1" }), tx);
+        reg
+            .respond("ap-1", answer(Some(serde_json::json!({ "allow": true })), false))
+            .expect("respond should resolve");
+        // oneshot 回灌到达宿主桥（§4.4）
+        let got = rx.try_recv().expect("answer should arrive");
+        assert!(got.value.is_some());
+        assert!(!got.cancelled);
+        // 应答即出列：list 空、重复 respond = Err（不假装成功）
+        assert!(reg.list().is_empty());
+        assert!(
+            reg.respond("ap-1", answer(None, true)).is_err(),
+            "responded id must be consumed"
+        );
+    }
+
+    #[test]
+    fn respond_unknown_id_is_err() {
+        // 错误即错误：id 不存在必须 Err（兜底禁令）
+        let reg = ApprovalRegistry::default();
+        let err = reg
+            .respond("nope", answer(None, false))
+            .expect_err("unknown id must error");
+        assert!(err.contains("no pending approval"));
+    }
+
+    #[test]
+    fn respond_after_receiver_drop_is_err() {
+        // 宿主桥侧 await 已被丢弃（上游超时放弃/会话 discard 中止扩展
+        // 任务）——oneshot send 失败必须传播为 Err（P1-3：不假装成功）
+        let reg = ApprovalRegistry::default();
+        let (tx, rx) = tokio::sync::oneshot::channel::<UiAnswer>();
+        reg.register("ap-1".into(), serde_json::json!({ "id": "ap-1" }), tx);
+        drop(rx);
+        let err = reg
+            .respond("ap-1", answer(None, true))
+            .expect_err("responder gone must error");
+        assert!(err.contains("responder gone"));
+    }
+
+    #[test]
+    fn cleanup_clears_pending_and_drops_responders() {
+        // 会话 discard/切换成功后清理（P1-3 防鬼影卡片）：pending 清空，
+        // 残留 oneshot 断开 = 宿主桥按 cancelled 回灌 pi（§4.4 故障语义）
+        let reg = ApprovalRegistry::default();
+        let (tx1, mut rx1) = tokio::sync::oneshot::channel::<UiAnswer>();
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel::<UiAnswer>();
+        reg.register("ap-1".into(), serde_json::json!({ "id": "ap-1" }), tx1);
+        reg.register("ap-2".into(), serde_json::json!({ "id": "ap-2" }), tx2);
+        assert_eq!(reg.list().len(), 2);
+        reg.cleanup();
+        assert!(reg.list().is_empty());
+        assert!(matches!(
+            rx1.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(matches!(
+            rx2.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        // 清理后 respond 同样 Err（id 已随 cleanup 移除）
+        assert!(reg.respond("ap-1", answer(None, true)).is_err());
+    }
 }
