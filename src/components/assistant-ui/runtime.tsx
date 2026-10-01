@@ -39,6 +39,8 @@ import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
+import { sessionUnreadStore } from '@/components/panes/session-manage/session-unread'
+import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import {
   BoundarySpeechSynthesisAdapter,
   ensureSpeechSupportLogged,
@@ -117,9 +119,7 @@ interface ThreadListRow {
   id: string
   title?: string
   custom?: Record<string, unknown>
-}
-
-/** 渲染错误兜底：归约链路的任何意外不得白屏整个应用（只隔离聊天树）。 */
+}/** 渲染错误兜底：归约链路的任何意外不得白屏整个应用（只隔离聊天树）。 */
 class RuntimeBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
   static getDerivedStateFromError(error: Error) {
@@ -179,17 +179,41 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
   const threadsRef = useRef<ThreadListRow[]>([])
   threadsRef.current = threads
+  // 会话列表刷新是异步回调——ingestRows 需要"当前选中的会话"（选中恒
+  // 确认已读），ref 保证回调里拿到最新值（closure 陈旧是已踩过的坑）。
+  const currentThreadIdRef = useRef<string | null>(null)
+  currentThreadIdRef.current = currentThreadId
 
   const refreshThreads = useCallback(async () => {
     try {
       const metas = await invoke<PiSessionMeta[]>('pi_list_sessions')
-      setThreads(
-        (metas ?? []).map((m) => ({
-          status: 'regular' as const,
-          id: m.id,
-          title: m.name ?? undefined,
-          custom: { path: m.path, messageCount: m.messageCount, lastModifiedMs: m.lastModifiedMs },
+      const rows = (metas ?? []).map((m) => ({
+        status: 'regular' as const,
+        id: m.id,
+        title: m.name ?? undefined,
+        // custom = SessionMeta 的前端投影面：path（打开/删除/导出）、
+        // messageCount（未读水位）、lastModifiedMs（行龄）、cwd（工作区
+        // 分组）、timestamp（created 排序）。
+        custom: {
+          path: m.path,
+          messageCount: m.messageCount,
+          lastModifiedMs: m.lastModifiedMs,
+          cwd: m.cwd,
+          timestamp: m.timestamp,
+        },
+      }))
+      setThreads(rows)
+      // 未读水位播种（hermes ingestRows：未知会话按当前 count 播种不亮绿、
+      // 选中会话恒确认已读）——列表刷新即真相面。
+      sessionUnreadStore.getState().ingestRows(
+        rows.map((r) => ({
+          id: r.id,
+          messageCount:
+            typeof r.custom.messageCount === 'number' && Number.isFinite(r.custom.messageCount)
+              ? r.custom.messageCount
+              : 0,
         })),
+        currentThreadIdRef.current,
       )
     } catch (e) {
       console.error('[pi] 会话列表读取失败', e)
@@ -799,6 +823,51 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     })
   }, [rewindRequest, runRewind])
 
+  // ── 「选择工作区新建会话」执行器（session-workspace 请求桥，branch/
+  //    checkpoint 同款请求-执行形态）──
+  // pi_new_session（working_directory 透传 SessionOptions）→ pi_get_state
+  // 取 sessionId → RESET（新会话无历史）+ currentThreadId 采纳 + 列表刷新。
+  // 守卫照抄 switchToThread：prompt 持锁跨整个 run，先 pi_interrupt。
+  // 任一步失败 console.error 并丢弃请求（不排队重试——用户重选即可）。
+  const workspaceRequest = useStore(sessionWorkspaceStore, (s) => s.request)
+  const handledWorkspaceSeqRef = useRef(0)
+  const workspaceBusyRef = useRef(false)
+
+  useEffect(() => {
+    if (!workspaceRequest || workspaceRequest.seq <= handledWorkspaceSeqRef.current) return
+    if (workspaceBusyRef.current) {
+      console.error('[pi] 会话操作进行中——忽略新工作区请求', workspaceRequest)
+      sessionWorkspaceStore.getState().clearRequest(workspaceRequest.seq)
+      return
+    }
+    handledWorkspaceSeqRef.current = workspaceRequest.seq
+    workspaceBusyRef.current = true
+    const { seq, cwd } = workspaceRequest
+    void (async () => {
+      try {
+        if (!(await interruptIfRunning())) return
+        await invoke('pi_new_session', { cwd })
+        const st = await invoke<{ sessionId: string | null }>('pi_get_state')
+        if (typeof st?.sessionId !== 'string' || st.sessionId.length === 0) {
+          console.error('[pi] 工作区新建会话后 pi_get_state 无 sessionId——不采纳', st)
+          return
+        }
+        actorRef.send({ type: 'RESET' })
+        setCurrentThreadId(st.sessionId)
+        await refreshThreads()
+        resetSessionScopedBridges(st.sessionId)
+        // 新会话——分支条/fork 点投影清空（同 New Chat 语义）
+        branchBridge.getState().requestRefresh()
+      } catch (e) {
+        console.error(`[pi] 在工作区新建会话失败（${cwd}）——保持当前会话`, e)
+      } finally {
+        sessionWorkspaceStore.getState().clearRequest(seq)
+      }
+    })().finally(() => {
+      workspaceBusyRef.current = false
+    })
+  }, [workspaceRequest, interruptIfRunning, refreshThreads, resetSessionScopedBridges, actorRef])
+
   // ── run 收尾（streaming → idle 迁移，RUN_FINISHED 与 RUN_ERROR 都走
   // 此迁移）三件事 ─────────────────────────────────────────────────────
   // ① 分支数据刷新：user 消息落盘后才成为 fork 点（「从此分支探索」钮
@@ -1065,7 +1134,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
     },
     onArchive: async () => {
-      console.error('[pi] 会话归档未实现（pi 无 archive 概念）')
+      // 归档的实现在行菜单/手势（session-archive 客户端归档，重审计 #6）；
+      // assistant-ui 的 archive API 本工程未接线——到达这里即未预期路径。
+      console.error('[pi] threadListAdapter.onArchive 未接线（归档走行菜单）')
     },
   }
 

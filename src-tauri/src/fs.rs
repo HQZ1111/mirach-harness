@@ -237,3 +237,18 @@ pub fn fs_read_data_url(path: String) -> Result<String, String> {
 
     Ok(format!("data:{};base64,{}", mime_for(&file), encoded))
 }
+
+/// 导出落盘（hermes row.export 的写半边：save 对话框给出目标路径后由
+/// 宿主写文件——Electron 里走 Blob 下载，Tauri 无下载通道）。UTF-8 直写；
+/// 路径非法/写失败一律 Err 传播（禁止兜底），不创建缺失的父目录。
+#[tauri::command(rename_all = "camelCase")]
+pub fn fs_write_text_file(path: String, contents: String) -> Result<(), String> {
+    let trimmed = path.trim();
+
+    if trimmed.is_empty() {
+        return Err("invalid-path".to_string());
+    }
+
+    fs::write(PathBuf::from(trimmed), contents.into_bytes())
+        .map_err(|error| error_code(&error).to_string())
+}

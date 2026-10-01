@@ -14,18 +14,30 @@ import {
 import {
   AlignJustifyIcon,
   ArrowDownAZIcon,
+  ArchiveIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ClipboardIcon,
+  CircleDotIcon,
   ClockIcon,
+  CreditCardIcon,
+  DownloadIcon,
+  FolderIcon,
+  FolderOpenIcon,
   GitForkIcon,
+  GitPullRequestIcon,
+  InboxIcon,
   GripVerticalIcon,
+  HashIcon,
   ListFilterIcon,
   ListIcon,
   ListOrderedIcon,
+  MailIcon,
+  MailOpenIcon,
   MoreVerticalIcon,
   PencilIcon,
+  UserIcon,
   PinIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -49,10 +61,21 @@ import {
 } from "react";
 import { ContextMenu as ContextMenuPrimitive, DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 import { useStore } from "zustand";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import { branchBridge } from "@/components/assistant-ui/branch-store";
+import {
+  sessionArchiveStore,
+  useSessionArchive,
+} from "@/components/panes/session-manage/session-archive";
+import {
+  projectSessionActions,
+  type SessionActionId,
+} from "@/components/panes/session-manage/session-actions";
 import { DeleteSessionDialog, RenameSessionDialog } from "@/components/panes/session-manage/session-dialogs";
 import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
+import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
+import { exportSessionHtml } from "@/components/panes/session-manage/session-export";
 import {
   sessionManageStore,
   useSessionManage,
@@ -62,24 +85,35 @@ import {
   buildSessionDisplay,
   buildSessionSearch,
   matchesTitleSearch,
+  workspaceGroupLabel,
 } from "@/components/panes/session-manage/session-display";
 import {
   commitRecentMove,
   moveBefore,
   type SessionRowMeta,
 } from "@/components/panes/session-manage/session-order";
-import {
-  projectSessionActions,
-  type SessionActionId,
-} from "@/components/panes/session-manage/session-actions";
 import { resolveSessionRowClick } from "@/components/panes/session-manage/session-row-gesture";
 import type { SessionListRow } from "@/components/panes/session-manage/session-date-groups";
+import {
+  formatMessageTimestamp,
+  parseTimestampMs,
+  sessionRowAge,
+  THREAD_TIME_LABELS,
+} from "@/components/panes/session-manage/session-time";
+import {
+  isRowUnread,
+  sessionUnreadStore,
+  useSessionUnread,
+} from "@/components/panes/session-manage/session-unread";
+import { sessionUsageStore, useSessionUsage } from "@/components/panes/session-manage/session-usage";
+import { sessionWorkspaceStore } from "@/components/panes/session-manage/session-workspace";
 import {
   effectiveOrdering,
   isSidebarViewCustomized,
   sidebarViewStore,
   useSidebarView,
   type SidebarGroupingMode,
+  type SidebarRowMeta,
 } from "@/components/panes/session-manage/sidebar-view";
 
 /**
@@ -96,6 +130,9 @@ import {
 
 interface SessionListCtxValue {
   group: SessionRowGroup | "search";
+  /** 该行的展示元数据（SessionRowMeta 投影——figures/未读/归档/导出从
+   *  这里读，行组件不再各自订阅 threadItems）。 */
+  meta?: SessionRowMeta;
   commitListMove(sessionId: string, group: SessionRowGroup, beforeId: string | null): void;
   commitMainTab(sessionId: string): void;
 }
@@ -212,29 +249,52 @@ const useSessionRowMetas = (): SessionRowMeta[] => {
     const byId = new Map(threadItems.map((item) => [item.id, item] as const));
     return threadIds.map((id) => {
       const item = byId.get(id);
-      const ms = item?.custom?.lastModifiedMs;
-      const title = item?.title;
+      const custom = item?.custom;
+      const ms = custom?.lastModifiedMs;
+      const createdRaw = custom?.timestamp;
+      const countRaw = custom?.messageCount;
+      const createdMs =
+        typeof createdRaw === "string" ? parseTimestampMs(createdRaw) : undefined;
       return {
         id,
         lastActiveMs: typeof ms === "number" && Number.isFinite(ms) ? ms : 0,
-        title: typeof title === "string" ? title : undefined,
+        title: typeof item?.title === "string" ? item.title : undefined,
+        // pi SessionMeta 直投影（runtime.tsx refreshThreads 写进 custom）：
+        // 工作区分组（cwd）/created 排序（timestamp）/未读水位与用量过期键
+        // （messageCount）/导出（path）。
+        path: typeof custom?.path === "string" ? custom.path : undefined,
+        cwd: typeof custom?.cwd === "string" ? custom.cwd : undefined,
+        createdMs,
+        messageCount:
+          typeof countRaw === "number" && Number.isFinite(countRaw) ? countRaw : undefined,
       };
     });
   }, [threadIds, threadItems]);
 };
-
 const useThreadDisplay = (searchQuery: string) => {
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const threadItems = useAuiState((s) => s.threads.threadItems);
-  const metas = useSessionRowMetas();
+  const allMetas = useSessionRowMetas();
   const pinned = useSessionManage((s) => s.pinned);
   const order = useSessionManage((s) => s.order);
   const collapsed = useSessionManage((s) => s.groupsCollapsed);
+  const archived = useSessionArchive((s) => s.archived);
   // 侧栏选项（hermes $sidebarGrouping/$sidebarOrdering 同构：manual 压过
   // 排序键——拖拽 IS 选择手动序）。
   const grouping = useSidebarView((s) => s.grouping);
   const ordering = useSidebarView(effectiveOrdering);
+  const showArchived = useSidebarView((s) => s.showArchived);
   const query = searchQuery.trim();
+
+  // 归档过滤（hermes $sidebarShowArchived 关 = 归档行整个不渲染；开 =
+  // 归位显示，行 lead 换归档字形）。搜索同样只搜未归档面。
+  const metas = useMemo(
+    () =>
+      showArchived
+        ? allMetas
+        : allMetas.filter((m) => !archived.includes(m.id)),
+    [allMetas, archived, showArchived],
+  );
 
   return useMemo(() => {
     if (query) {
@@ -242,11 +302,12 @@ const useThreadDisplay = (searchQuery: string) => {
       const matched = metas.filter((m) =>
         matchesTitleSearch(byId.get(m.id)?.title ?? "", query),
       );
-      return { mode: "search" as const, threadIds, search: buildSessionSearch(matched) };
+      return { mode: "search" as const, threadIds, metas, search: buildSessionSearch(matched) };
     }
     return {
       mode: "groups" as const,
       threadIds,
+      metas,
       display: buildSessionDisplay(metas, pinned, order, collapsed, {
         view: { grouping, ordering },
       }),
@@ -288,12 +349,45 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
 }) => {
   const grouping = useSidebarView((s) => s.grouping);
   const ordering = useSidebarView(effectiveOrdering);
+  const rowMeta = useSidebarView((s) => s.rowMeta);
+  const showArchived = useSidebarView((s) => s.showArchived);
   const density = useSidebarView((s) => s.density);
+  const showAll = useSidebarView((s) => s.showAll);
+  const inboxStyle = useSidebarView((s) => s.inboxStyle);
+  const projectFilter = useSidebarView((s) => s.projectFilter);
   const customized = useSidebarView(isSidebarViewCustomized);
+  // 「全部标记为已读」的可用面：当前渲染的行里有未读（hermes：disabled 当
+  // unreadIds 空——markAllSessionsRead 清 transient 面，这里 ack 可见面）。
+  const metas = useThreadVisibleMetas();
+  // 项目过滤子菜单的候选 = 全量 metas 的 distinct cwd（Home 桶=空串）
+  const allMetasForProjects = useSessionRowMetas();
+  const projectChoices = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of allMetasForProjects) set.add(m.cwd ?? "");
+    return [...set].sort();
+  }, [allMetasForProjects]);
+  const seen = useSessionUnread((s) => s.seen);
+  const markers = useSessionUnread((s) => s.markers);
+  const unreadCount = metas.filter((m) =>
+    isRowUnread({ id: m.id, messageCount: m.messageCount ?? 0 }, seen, markers),
+  ).length;
 
   const onCollapseAll = () => {
     const st = sessionManageStore.getState();
     for (const key of dividerKeys) st.setGroupCollapsed(key, !foldCollapsed);
+  };
+
+  // 「选择工作区新建会话」：目录对话框 → sessionWorkspaceStore 请求桥 →
+  // runtime 执行 pi_new_session（working_directory 透传）。取消选择不发
+  // 请求；失败在 runtime 的执行器 console.error。
+  const onPickWorkspace = async () => {
+    try {
+      const dir = await openDialog({ directory: true });
+      if (!dir || typeof dir !== "string") return;
+      sessionWorkspaceStore.getState().requestCreate(dir);
+    } catch (e) {
+      console.error("[session] 工作区选择失败（Tauri 对话框不可用？）", e);
+    }
   };
 
   return (
@@ -320,12 +414,13 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           sideOffset={6}
         >
           {/* 分组（hermes Grouping 子菜单：触发行显示当前值 + chevron-right；
-              选项 = 数据面支持的 date/none 两档） */}
+              选项 = 数据面支持的 date/project/none 三档——project 按
+              SessionMeta.cwd 分组，pi 无项目实体的直投影） */}
           <DropdownMenuPrimitive.Sub>
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
               <span>分组</span>
               <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-                {grouping === "date" ? "按日期" : "平铺"}
+                {grouping === "date" ? "按日期" : grouping === "project" ? "按项目" : "平铺"}
                 <ChevronRightIcon className="size-3" />
               </span>
             </DropdownMenuPrimitive.SubTrigger>
@@ -354,6 +449,18 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
                   onSelect={keepViewMenuOpen}
+                  value="project"
+                >
+                  <ViewIndicatorSlot>
+                    <DropdownMenuPrimitive.ItemIndicator>
+                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                    </DropdownMenuPrimitive.ItemIndicator>
+                  </ViewIndicatorSlot>
+                  <ViewOptionRow icon={FolderIcon} label="按项目" />
+                </DropdownMenuPrimitive.RadioItem>
+                <DropdownMenuPrimitive.RadioItem
+                  className={VIEW_MENU_ITEM_BASE}
+                  onSelect={keepViewMenuOpen}
                   value="none"
                 >
                   <ViewIndicatorSlot>
@@ -367,8 +474,9 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             </DropdownMenuPrimitive.SubContent>
           </DropdownMenuPrimitive.Sub>
 
-          {/* 排序（hermes Ordering 子菜单；Manual 项仅在拖拽声明后出现——
-              它是当前态的展示位，选任意排序键 = 退出并清掉手动序） */}
+          {/* 排序（hermes Ordering 子菜单：updated/created/…——created 用
+              pi header.timestamp；Manual 项仅在拖拽声明后出现——它是当前态
+              的展示位，选任意排序键 = 退出并清掉手动序） */}
           <DropdownMenuPrimitive.Sub>
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
               <span>排序</span>
@@ -380,7 +488,9 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               <DropdownMenuPrimitive.RadioGroup
                 onValueChange={(value) => {
                   if (value === "manual") return;
-                  sidebarViewStore.getState().setOrdering(value as "title" | "updated");
+                  sidebarViewStore
+                    .getState()
+                    .setOrdering(value as "title" | "updated" | "created");
                 }}
                 value={ordering}
               >
@@ -395,6 +505,19 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
                   <ViewOptionRow icon={ClockIcon} label="最近活动" />
+                </DropdownMenuPrimitive.RadioItem>
+                <DropdownMenuPrimitive.RadioItem
+                  className={VIEW_MENU_ITEM_BASE}
+                  onSelect={keepViewMenuOpen}
+                  value="created"
+                >
+                  <ViewIndicatorSlot>
+                    <DropdownMenuPrimitive.ItemIndicator>
+                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                    </DropdownMenuPrimitive.ItemIndicator>
+                  </ViewIndicatorSlot>
+                  {/* hermes ORDERINGS.created 的图标字面量 = 'add' */}
+                  <ViewOptionRow icon={PlusIcon} label="创建时间" />
                 </DropdownMenuPrimitive.RadioItem>
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
@@ -426,14 +549,66 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             </DropdownMenuPrimitive.SubContent>
           </DropdownMenuPrimitive.Sub>
 
-          {/* 密度（任务定稿选项，hermes 无——checkbox 同「Inbox style」行
-              形制：渲染变体，不属分组/排序） */}
+          {/* 显示（hermes Show 子菜单：rowMeta 多选——数据面支持
+              updated（行龄）/tokens/cost（pi stats 每文件聚合，懒拉）；
+              preview 是卡片行专属、pr/profile 无数据 → 不设） */}
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
+              <span>显示</span>
+            </DropdownMenuPrimitive.SubTrigger>
+            <DropdownMenuPrimitive.SubContent
+              className={VIEW_MENU_CONTENT_CLASS}
+              sideOffset={6}
+            >
+              {(
+                [
+                  { id: "updated", label: "时间", icon: ClockIcon },
+                  { id: "tokens", label: "Tokens", icon: HashIcon },
+                  { id: "cost", label: "成本", icon: CreditCardIcon },
+                ] as const satisfies readonly { id: SidebarRowMeta; label: string; icon: FC<{ className?: string }> }[]
+              ).map((option) => (
+                <DropdownMenuPrimitive.CheckboxItem
+                  checked={rowMeta.includes(option.id)}
+                  className={VIEW_MENU_ITEM_BASE}
+                  key={option.id}
+                  onCheckedChange={() =>
+                    sidebarViewStore.getState().toggleRowMeta(option.id)
+                  }
+                  onSelect={keepViewMenuOpen}
+                >
+                  <ViewIndicatorSlot>
+                    <DropdownMenuPrimitive.ItemIndicator>
+                      <CheckIcon className="size-3" />
+                    </DropdownMenuPrimitive.ItemIndicator>
+                  </ViewIndicatorSlot>
+                  <ViewOptionRow icon={option.icon} label={option.label} />
+                </DropdownMenuPrimitive.CheckboxItem>
+              ))}
+              {/* 紧凑行高（工程扩展旋钮，hermes Show 子菜单形制内收纳） */}
+              <DropdownMenuPrimitive.CheckboxItem
+                checked={density === "compact"}
+                className={VIEW_MENU_ITEM_BASE}
+                onCheckedChange={(checked) =>
+                  sidebarViewStore.getState().setDensity(checked ? "compact" : "comfortable")
+                }
+                onSelect={keepViewMenuOpen}
+              >
+                <ViewIndicatorSlot>
+                  <DropdownMenuPrimitive.ItemIndicator>
+                    <CheckIcon className="size-3" />
+                  </DropdownMenuPrimitive.ItemIndicator>
+                </ViewIndicatorSlot>
+                <ViewOptionRow icon={AlignJustifyIcon} label="紧凑行高" />
+              </DropdownMenuPrimitive.CheckboxItem>
+            </DropdownMenuPrimitive.SubContent>
+          </DropdownMenuPrimitive.Sub>
+
+          {/* hermes 主区两行：显示所有会话（filters 旁路）+ Inbox style
+              （卡片行形态）——checkbox 行形制（图标+标签+指示位）。 */}
           <DropdownMenuPrimitive.CheckboxItem
-            checked={density === "compact"}
+            checked={showAll}
             className={VIEW_MENU_ITEM_BASE}
-            onCheckedChange={(checked) =>
-              sidebarViewStore.getState().setDensity(checked ? "compact" : "comfortable")
-            }
+            onCheckedChange={(checked) => sidebarViewStore.getState().setShowAll(Boolean(checked))}
             onSelect={keepViewMenuOpen}
           >
             <ViewIndicatorSlot>
@@ -441,38 +616,194 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 <CheckIcon className="size-3" />
               </DropdownMenuPrimitive.ItemIndicator>
             </ViewIndicatorSlot>
-            <ViewOptionRow icon={AlignJustifyIcon} label="紧凑行高" />
+            <ViewOptionRow icon={ListIcon} label="显示所有会话" />
+          </DropdownMenuPrimitive.CheckboxItem>
+          <DropdownMenuPrimitive.CheckboxItem
+            checked={inboxStyle}
+            className={VIEW_MENU_ITEM_BASE}
+            onCheckedChange={(checked) => sidebarViewStore.getState().setInboxStyle(Boolean(checked))}
+            onSelect={keepViewMenuOpen}
+          >
+            <ViewIndicatorSlot>
+              <DropdownMenuPrimitive.ItemIndicator>
+                <CheckIcon className="size-3" />
+              </DropdownMenuPrimitive.ItemIndicator>
+            </ViewIndicatorSlot>
+            <ViewOptionRow icon={InboxIcon} label="Inbox style" />
           </DropdownMenuPrimitive.CheckboxItem>
 
-          {dividerKeys.length > 0 && (
-            <>
-              <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
-              {/* hermes「Expand all / Collapse all」：一个动作项、标签随
-                  状态翻转——全折叠时展开全部，否则收起全部。 */}
-              <DropdownMenuPrimitive.Item className={VIEW_MENU_ITEM_BASE} onSelect={onCollapseAll}>
-                {foldCollapsed ? "全部展开" : "全部收起"}
-              </DropdownMenuPrimitive.Item>
-            </>
-          )}
-
-          {customized && (
-            <>
-              <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
-              {/* hermes「Reset to defaults」：分组与排序一并回出厂。 */}
-              <DropdownMenuPrimitive.Item
-                className={VIEW_MENU_ITEM_BASE}
-                onSelect={() => sidebarViewStore.getState().resetView()}
+          {/* ── 筛选组（hermes「Filters」label 组：Status/PR/Profile/Project
+              /Archived/Reset to defaults）。pi 无状态桶/gh/多配置档——
+              状态/PR/Profile 三项渲染但禁用（hermes 对无 gh 环境同样隐藏
+              PR 子菜单，禁用是数据面诚实）。项目=pi cwd 过滤；已归档=
+              showArchived；重置=resetView（hermes 置组尾）。 */}
+          <DropdownMenuPrimitive.Label className="text-(--text-3) px-2 pt-1.5 pb-1 text-[11px]">
+            筛选
+          </DropdownMenuPrimitive.Label>
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+              <ViewOptionRow icon={CircleDotIcon} label="状态" />
+              <ChevronRightIcon className="ml-auto size-3" />
+            </DropdownMenuPrimitive.SubTrigger>
+          </DropdownMenuPrimitive.Sub>
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+              <ViewOptionRow icon={GitPullRequestIcon} label="Pull request" />
+              <ChevronRightIcon className="ml-auto size-3" />
+            </DropdownMenuPrimitive.SubTrigger>
+          </DropdownMenuPrimitive.Sub>
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+              <ViewOptionRow icon={UserIcon} label="Profile" />
+              <ChevronRightIcon className="ml-auto size-3" />
+            </DropdownMenuPrimitive.SubTrigger>
+          </DropdownMenuPrimitive.Sub>
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
+              <ViewOptionRow icon={FolderIcon} label="项目" />
+              <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
+                {projectFilter ? workspaceGroupLabel(projectFilter) : "全部"}
+                <ChevronRightIcon className="size-3" />
+              </span>
+            </DropdownMenuPrimitive.SubTrigger>
+            <DropdownMenuPrimitive.SubContent
+              className={VIEW_MENU_CONTENT_CLASS}
+              sideOffset={6}
+            >
+              <DropdownMenuPrimitive.RadioGroup
+                onValueChange={(value) =>
+                  sidebarViewStore
+                    .getState()
+                    .setProjectFilter(
+                      value === "__all__"
+                        ? null
+                        : value === "__home__"
+                          ? ""
+                          : value,
+                    )
+                }
+                value={
+                  projectFilter === null
+                    ? "__all__"
+                    : projectFilter === ""
+                      ? "__home__"
+                      : projectFilter
+                }
               >
-                <RotateCcwIcon className={VIEW_OPTION_GLYPH} />
-                <span>重置为默认</span>
-              </DropdownMenuPrimitive.Item>
-            </>
+                <DropdownMenuPrimitive.RadioItem
+                  className={VIEW_MENU_ITEM_BASE}
+                  onSelect={keepViewMenuOpen}
+                  value="__all__"
+                >
+                  <ViewIndicatorSlot>
+                    <DropdownMenuPrimitive.ItemIndicator>
+                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                    </DropdownMenuPrimitive.ItemIndicator>
+                  </ViewIndicatorSlot>
+                  <span>全部</span>
+                </DropdownMenuPrimitive.RadioItem>
+                {projectFilter !== null && projectFilter !== "" && !projectChoices.includes(projectFilter) && (
+                  <DropdownMenuPrimitive.RadioItem
+                    className={VIEW_MENU_ITEM_BASE}
+                    onSelect={keepViewMenuOpen}
+                    value={projectFilter}
+                  >
+                    <ViewIndicatorSlot>
+                      <DropdownMenuPrimitive.ItemIndicator>
+                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                      </DropdownMenuPrimitive.ItemIndicator>
+                    </ViewIndicatorSlot>
+                    <span className="truncate">{workspaceGroupLabel(projectFilter)}</span>
+                  </DropdownMenuPrimitive.RadioItem>
+                )}
+                {projectChoices.map((cwd) => (
+                  <DropdownMenuPrimitive.RadioItem
+                    className={VIEW_MENU_ITEM_BASE}
+                    key={cwd || "__home__"}
+                    onSelect={keepViewMenuOpen}
+                    value={cwd || "__home__"}
+                  >
+                    <ViewIndicatorSlot>
+                      <DropdownMenuPrimitive.ItemIndicator>
+                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                      </DropdownMenuPrimitive.ItemIndicator>
+                    </ViewIndicatorSlot>
+                    <span className="truncate">{workspaceGroupLabel(cwd)}</span>
+                  </DropdownMenuPrimitive.RadioItem>
+                ))}
+              </DropdownMenuPrimitive.RadioGroup>
+            </DropdownMenuPrimitive.SubContent>
+          </DropdownMenuPrimitive.Sub>
+          <DropdownMenuPrimitive.CheckboxItem
+            checked={showArchived}
+            className={VIEW_MENU_ITEM_BASE}
+            onCheckedChange={(checked) => sidebarViewStore.getState().setShowArchived(Boolean(checked))}
+            onSelect={keepViewMenuOpen}
+          >
+            <ViewIndicatorSlot>
+              <DropdownMenuPrimitive.ItemIndicator>
+                <CheckIcon className="size-3" />
+              </DropdownMenuPrimitive.ItemIndicator>
+            </ViewIndicatorSlot>
+            <ViewOptionRow icon={ArchiveIcon} label="已归档" />
+          </DropdownMenuPrimitive.CheckboxItem>
+          <DropdownMenuPrimitive.Item
+            className={VIEW_MENU_ITEM_BASE}
+            disabled={!customized}
+            onSelect={() => sidebarViewStore.getState().resetView()}
+          >
+            <RotateCcwIcon className={VIEW_OPTION_GLYPH} />
+            <span>重置为默认</span>
+          </DropdownMenuPrimitive.Item>
+
+          <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
+
+          {/* hermes 底部动作组：Collapse all（标签随态翻转）+ Mark all as
+              read（无未读禁用）。 */}
+          {dividerKeys.length > 0 && (
+            <DropdownMenuPrimitive.Item className={VIEW_MENU_ITEM_BASE} onSelect={onCollapseAll}>
+              {foldCollapsed ? "全部展开" : "全部收起"}
+            </DropdownMenuPrimitive.Item>
           )}
+          <DropdownMenuPrimitive.Item
+            className={VIEW_MENU_ITEM_BASE}
+            disabled={unreadCount === 0}
+            onSelect={() => {
+              sessionUnreadStore.getState().ackAll(
+                metas.map((m) => ({ id: m.id, messageCount: m.messageCount ?? 0 })),
+              );
+            }}
+          >
+            全部标记为已读
+          </DropdownMenuPrimitive.Item>
+          {/* pi 特有入口（hermes 项目树的新建等价）：选工作区建会话 */}
+          <DropdownMenuPrimitive.Item className={VIEW_MENU_ITEM_BASE} onSelect={() => void onPickWorkspace()}>
+            <FolderOpenIcon className={VIEW_OPTION_GLYPH} />
+            <span>选择工作区…</span>
+          </DropdownMenuPrimitive.Item>
         </DropdownMenuPrimitive.Content>
       </DropdownMenuPrimitive.Portal>
     </DropdownMenuPrimitive.Root>
   );
 };
+
+/** 当前渲染面（归档/项目过滤后）的行 metas——Mark all as read 的 ack 面与
+ *  未读计数共用。与 ThreadListSections 的 metas 消费同源。
+ *  showAll（hermes「显示所有会话」）旁路归档与项目过滤；projectFilter=
+ *  pi cwd 直投影过滤（hermes Filters>Project 的等价物）。 */
+function useThreadVisibleMetas(): SessionRowMeta[] {
+  const allMetas = useSessionRowMetas();
+  const archived = useSessionArchive((s) => s.archived);
+  const showArchived = useSidebarView((s) => s.showArchived);
+  const showAll = useSidebarView((s) => s.showAll);
+  const projectFilter = useSidebarView((s) => s.projectFilter);
+  return useMemo(() => {
+    let rows = allMetas;
+    if (!showAll && !showArchived) rows = rows.filter((m) => !archived.includes(m.id));
+    if (!showAll && projectFilter) rows = rows.filter((m) => (m.cwd ?? "") === projectFilter);
+    return rows;
+  }, [allMetas, archived, showArchived, showAll, projectFilter]);
+}
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
 
@@ -559,6 +890,45 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
   );
 };
 
+/**
+ * 工作区分隔线（分组=按项目；hermes grouping='project' 的组头——项目树
+ * 节点在此简化为 cwd 组头：folder 字形 + 组名（pathLeaf）+ 折叠 caret；
+ * 折叠语义与日期桶相同：组头保留、其下行隐藏，键 = `w:<cwd>`）。
+ */
+const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
+  const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
+  return (
+    <div
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-0.5 pt-(--tl-div-pt,0.5rem) select-none"
+      data-slot="aui_thread-list-workspace-divider"
+    >
+      <button
+        aria-expanded={!collapsed}
+        className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left"
+        onClick={() =>
+          sessionManageStore.getState().setGroupCollapsed(bucketKey, !collapsed)
+        }
+        title={collapsed ? "展开" : "收起"}
+        type="button"
+      >
+        <FolderIcon
+          aria-hidden
+          className="text-(--text-4) size-3 shrink-0"
+        />
+        <span className="text-(--text-2) min-w-0 truncate text-xs font-medium">{label}</span>
+        <ChevronDownIcon
+          aria-hidden
+          className={cn(
+            "text-(--text-3) size-3 shrink-0 opacity-0 transition group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100",
+            collapsed && "-rotate-90",
+          )}
+        />
+        <span aria-hidden className="bg-(--stroke-soft) h-px min-w-4 flex-1" />
+      </button>
+    </div>
+  );
+};
+
 /** 已置顶空态（hermes SidebarPinnedEmptyState 照抄——置顶手势的常驻教学位）。 */
 const PinnedEmptyState: FC = () => (
   <div className="text-(--text-3) flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-xs">
@@ -579,7 +949,7 @@ const DropCaret: FC = () => (
 );
 
 const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
-  const { mode, threadIds, display, search } = useThreadDisplay(searchQuery);
+  const { mode, threadIds, metas, display, search } = useThreadDisplay(searchQuery);
   const drag = useSessionManage((s) => s.drag);
   const groupsCollapsed = useSessionManage((s) => s.groupsCollapsed);
   const collapsedPinned = useSessionManage((s) => s.groupsCollapsed.pinned === true);
@@ -587,9 +957,24 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
   const aui = useAui();
 
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
+  // 归档表/未读水位同纪律（归档会话被 pi_delete_session 后不留死键）。
   useEffect(() => {
     sessionManageStore.getState().prune(threadIds);
+    sessionArchiveStore.getState().prune(threadIds);
+    sessionUnreadStore.getState().prune(threadIds);
   }, [threadIds]);
+
+  // rowMeta 开了 Tokens/成本 → 拉取可见行的用量（缺/过期才发 IPC，缓存键
+  // 带 messageCount；rowMeta 未开不发——懒计算，任务定稿）。
+  const rowMeta = useSidebarView((s) => s.rowMeta);
+  useEffect(() => {
+    if (!rowMeta.includes("tokens") && !rowMeta.includes("cost")) return;
+    const rows = metas
+      .filter((m) => typeof m.path === "string" && typeof m.messageCount === "number")
+      .map((m) => ({ path: m.path!, messageCount: m.messageCount! }));
+    if (rows.length === 0) return;
+    void sessionUsageStore.getState().ensure(rows);
+  }, [metas, rowMeta]);
 
   // 拖拽落点提交通道（置顶区拖 = pinned 数组重排 hermes reorderPinned；
   // 会话区拖 = 可见序改后拼回全量序——折叠桶藏行不丢排序；会话区拖拽
@@ -626,6 +1011,11 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
     [threadIds],
   );
 
+  const metasById = useMemo(
+    () => new Map(metas.map((m) => [m.id, m] as const)),
+    [metas],
+  );
+
   // 「全部收起/展开全部」的折面（hermes foldIds = 当前屏上的日期桶；
   // 平铺分组无分隔线 → 空面，动作项整个不出现）。foldCollapsed =
   // hermes 同款判定：面非空且每一只桶都已显式收起。
@@ -648,7 +1038,7 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
         />
       }
       key={key}
-      value={{ ...ctxValue, group }}
+      value={{ ...ctxValue, group, meta: metasById.get(id) }}
     />
   );
 
@@ -726,7 +1116,11 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
         ) : (
           rows.map((row) =>
             row.kind === "divider" ? (
-              <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+              row.variant === "project" ? (
+                <WorkspaceDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+              ) : (
+                <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+              )
             ) : (
               <Fragment key={`s-${row.id}`}>
                 {recentCaret === row.id && <DropCaret key={`rc-${row.id}`} />}
@@ -831,8 +1225,13 @@ const ACTION_ICONS: Record<SessionActionId, FC<{ className?: string }>> = {
   rename: PencilIcon,
   // hermes identity 组的 pin 项图标恒为 'pin'（文案才随状态翻转）
   pin: PinIcon,
+  // read-state 项的图标随状态（hermes：unread → 'mail-read'，read → 'mail'
+  // ——见 renderDropdownItems 的动态分支；此处为缺省位）
+  unread: MailIcon,
   "copy-id": ClipboardIcon,
   branch: GitForkIcon,
+  export: DownloadIcon,
+  archive: ArchiveIcon,
   delete: TrashIcon,
 };
 
@@ -849,7 +1248,18 @@ export const ThreadListItem: FC = () => {
   const forkPoints = useStore(branchBridge, (s) => s.forkPoints);
   const ctx = useContext(SessionListContext);
   const group: SessionRowGroup | "search" = ctx?.group ?? "recent";
+  // 行展示元数据（ThreadListSections 经 context 下发）——figures/时间戳/
+  // 未读水位/导出路径从这里读，行组件不各自订阅 threadItems。
+  const meta = ctx?.meta;
+  const path = meta?.path;
+  const messageCount = meta?.messageCount ?? 0;
   const aui = useAui();
+
+  // 未读/归档态（客户端水位语义——hermes session-unread/archive 对偶）。
+  const isArchived = useSessionArchive((s) => s.archived.includes(threadId));
+  const isUnread = useSessionUnread((s) =>
+    isRowUnread({ id: threadId, messageCount }, s.seen, s.markers),
+  );
 
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -872,6 +1282,15 @@ export const ThreadListItem: FC = () => {
       setRenameOpen(true);
     },
     pin: () => sessionManageStore.getState().togglePin(threadId),
+    // hermes read-state 项：未读 → 确认已读（水位 := 当前 count + 撤显式
+    // 标记）；已读 → 显式标记未读（水位之外的第二未读源）。
+    unread: () => {
+      if (isUnread) {
+        sessionUnreadStore.getState().ackSession(threadId, messageCount);
+      } else {
+        sessionUnreadStore.getState().markSessionUnread(threadId);
+      }
+    },
     "copy-id": () => {
       navigator.clipboard.writeText(threadId).catch((err) => {
         console.error("[session] 复制会话 ID 失败", err);
@@ -882,6 +1301,16 @@ export const ThreadListItem: FC = () => {
       if (!last) return;
       branchBridge.getState().requestFork(forkPoints.length - 1, last.text);
     },
+    export: () => {
+      if (typeof path !== "string") {
+        console.error(`[session] 会话 ${threadId} 缺少 path，无法导出`);
+        return;
+      }
+      void exportSessionHtml({ sessionId: threadId, path, title }).catch((e) => {
+        console.error("[session] 导出失败（HTML 未落盘）", e);
+      });
+    },
+    archive: () => sessionArchiveStore.getState().toggleArchive(threadId),
     delete: () => {
       suppressCloseFocusRef.current = true;
       setDeleteOpen(true);
@@ -893,9 +1322,38 @@ export const ThreadListItem: FC = () => {
       projectSessionActions({
         pinned: isPinned,
         branchDisabled: !isActive || forkPoints.length === 0,
+        unread: isUnread,
+        archived: isArchived,
       }),
-    [isPinned, isActive, forkPoints],
+    [isPinned, isActive, forkPoints, isUnread, isArchived],
   );
+
+  // ── 行尾标注（hermes session-row figures 段照抄）：
+  //    rowMeta 开关（时间/tokens/成本）共享一个右对齐槽，` · ` 连读；
+  //    hermes「The last thing in the trailing slot hands its place to the
+  //    ⋯ button on hover」——tail 元素 hover 隐没（min-w-5 = kebab 宽，
+  //    布局不跳），kebab 转绝对定位压进该槽。age 显示时全部 figures 归
+  //    head、tail = age；age 不显示时最后一项 figures 留在 tail。
+  const rowMetaFlags = useSidebarView((s) => s.rowMeta);
+  const usage = useSessionUsage((s) => (path ? s.rows[path] : undefined));
+  // hermes：timestamp = last_active || started_at——lastActiveMs 缺失回退
+  // 创建时刻（pi header.timestamp）。
+  const inboxStyle = useSidebarView((s) => s.inboxStyle);
+  const tsMs = meta?.lastActiveMs || meta?.createdMs || 0;
+  const age =
+    rowMetaFlags.includes("updated") && tsMs > 0 ? sessionRowAge(tsMs) : null;
+  const absoluteAge =
+    tsMs > 0 ? formatMessageTimestamp(new Date(tsMs), THREAD_TIME_LABELS) : "";
+  const figures = buildSessionFigures(
+    rowMetaFlags.filter((m): m is "cost" | "tokens" => m !== "updated"),
+    usage,
+  );
+  const figParts = figures ? figures.split(" · ") : [];
+  const head = age ? figParts.join(" · ") : figParts.slice(0, -1).join(" · ");
+  const tailText =
+    age ?? (figParts.length > 0 ? figParts[figParts.length - 1]! : null);
+  // Inbox style：第二行承载时间·消息数，行尾标注让位（hermes 卡片行）
+  const hasTrailing = !inboxStyle && (head !== "" || tailText !== null);
 
   const renderDropdownItems = () =>
     specs.map((spec) =>
@@ -915,7 +1373,11 @@ export const ThreadListItem: FC = () => {
           onSelect={() => handlers[spec.id]()}
         >
           {(() => {
-            const Icon = ACTION_ICONS[spec.id];
+            // read-state 项动态图标（hermes session-actions-menu identityItems
+            // 第三项：unread → 'mail-read'，read → 'mail'——文案随状态、
+            // 图标也随状态，是清单里唯一的一处）。
+            const Icon =
+              spec.id === "unread" && isUnread ? MailOpenIcon : ACTION_ICONS[spec.id];
             return <Icon className="size-3.5 shrink-0" />;
           })()}
           <span>{spec.label}</span>
@@ -938,7 +1400,9 @@ export const ThreadListItem: FC = () => {
           onSelect={() => handlers[spec.id]()}
         >
           {(() => {
-            const Icon = ACTION_ICONS[spec.id];
+            // read-state 项动态图标（同 renderDropdownItems）
+            const Icon =
+              spec.id === "unread" && isUnread ? MailOpenIcon : ACTION_ICONS[spec.id];
             return <Icon className="size-3.5 shrink-0" />;
           })()}
           <span>{spec.label}</span>
@@ -960,9 +1424,9 @@ export const ThreadListItem: FC = () => {
           data-session-row-id={threadId}
           onClickCapture={(e) => {
             // 修饰键手势解析（hermes resolveSessionRowClick）：⇧ = 置顶；
-            // 纯点击 = 恢复会话（Trigger 原生语义放行）。newTab / newWindow /
-            // archive 数据面不适用（主区单会话投影、pi 无归档/独立窗口），
-            // 吞掉默认行为不误伤。
+            // ⌥+⇧ = 归档（客户端归档——重审计 #6 落地）；纯点击 = 恢复会话
+            // （Trigger 原生语义放行）。newTab / newWindow 数据面不适用
+            // （主区单会话投影，重审计 #7），吞掉默认行为不误伤。
             const target = e.target as HTMLElement | null;
             if (target?.closest("[data-row-actions]")) return;
             const action = resolveSessionRowClick(
@@ -973,6 +1437,10 @@ export const ThreadListItem: FC = () => {
               e.preventDefault();
               e.stopPropagation();
               sessionManageStore.getState().togglePin(threadId);
+            } else if (action === "archive") {
+              e.preventDefault();
+              e.stopPropagation();
+              sessionArchiveStore.getState().toggleArchive(threadId);
             } else if (action !== "resume") {
               e.preventDefault();
               e.stopPropagation();
@@ -992,21 +1460,33 @@ export const ThreadListItem: FC = () => {
             className="flex h-full min-w-0 items-center gap-1.5 self-stretch rounded-md py-0.5 pr-2 pl-2 text-start outline-none"
             data-slot="aui_thread-list-item-trigger"
           >
-            {/* lead：状态圆点，hover 与拖拽把手互换（hermes SidebarRowGrab） */}
+            {/* lead：状态圆点，hover 与拖拽把手互换（hermes SidebarRowGrab）。
+                未读 = 成功绿实心（hermes --ui-success，DOT_VARIANTS.unread）；
+                归档行 = lead 位换归档字形（hermes：archived has no live
+                status to paint——archive glyph takes the dot's slot）。 */}
             <span
               aria-hidden
               className="relative grid size-3.5 shrink-0 place-items-center overflow-hidden"
               data-slot="aui_thread-list-item-lead"
             >
-              <span
-                className={cn(
-                  "rounded-full transition-opacity group-hover/row:opacity-0",
-                  isRunning ? "bg-(--fl-accent) size-1.5" : "bg-(--text-4) size-1",
-                )}
-                data-slot="aui_thread-list-item-running"
-              />
+              {isArchived ? (
+                <ArchiveIcon className="text-(--text-4) size-3 transition-opacity group-hover/row:opacity-0" />
+              ) : (
+                <span
+                  className={cn(
+                    "rounded-full transition-opacity group-hover/row:opacity-0",
+                    isRunning
+                      ? "bg-(--fl-accent) size-1.5"
+                      : isUnread
+                        ? "bg-(--success) size-1.5"
+                        : "bg-(--text-4) size-1",
+                  )}
+                  data-slot="aui_thread-list-item-running"
+                />
+              )}
               <GripVerticalIcon className="text-(--text-4) absolute size-3 opacity-0 transition group-hover/row:opacity-80" />
             </span>
+            {isUnread && !isRunning && <span className="sr-only">已完成 — 未读</span>}
             <span className="min-w-0 flex-1 self-center">
               <span
                 className="hover-marquee text-(--text-2) group-hover/row:text-(--text) block truncate text-[0.8125rem] leading-[1.35] font-normal"
@@ -1018,21 +1498,52 @@ export const ThreadListItem: FC = () => {
                   <ThreadListItemPrimitive.Title fallback="New Chat" />
                 </span>
               </span>
+              {/* Inbox style（hermes 卡片行）：第二行 = 时间 · 消息数；
+                  行尾标注让位（tail 不渲染）。 */}
+              {inboxStyle && (
+                <span
+                  className="text-(--text-3) block truncate text-[0.6875rem] leading-[1.3]"
+                  data-slot="aui_thread-list-item-inbox-line"
+                >
+                  {absoluteAge || "刚刚"}
+                  {typeof messageCount === "number" ? ` · ${messageCount} 条消息` : ""}
+                </span>
+              )}
             </span>
             {isRunning && <span className="sr-only">会话运行中</span>}
           </ThreadListItemPrimitive.Trigger>
-          {/* 行操作簇（hermes [data-row-actions]：拖拽豁免区，只装 ⋯——
-              置顶走 ⇧+点击/菜单，hermes 行上没有独立置顶钮） */}
+          {/* 行操作簇（hermes [data-row-actions]：拖拽豁免区。行尾标注
+              （figures/age）占槽在先，kebab 转 absolute 压进槽尾——tail 元素
+              hover 隐没让位，同 hermes session-row 的 TAIL_HIDES/KEBAB 机制） */}
           <div
             className="z-[2] relative flex shrink-0 items-center justify-end gap-1 self-stretch"
             data-row-actions=""
           >
+            {hasTrailing && (
+              <span className="text-(--text-3) pointer-events-none whitespace-nowrap text-[0.625rem] leading-none">
+                {head ? (
+                  <span>
+                    {head}
+                    {" · "}
+                  </span>
+                ) : null}
+                <time
+                  aria-label={age ? `${age}, ${absoluteAge}` : undefined}
+                  className="inline-block min-w-5 text-right transition-opacity group-hover/row:opacity-0"
+                  dateTime={age ? new Date(tsMs).toISOString() : undefined}
+                  title={age ? absoluteAge : undefined}
+                >
+                  {tailText}
+                </time>
+              </span>
+            )}
             <ThreadListItemMorePrimitive.Root sharedFocusGroup>
               <ThreadListItemMorePrimitive.Trigger asChild>
                 <button
                   aria-label="会话操作"
                   className={cn(
                     "text-transparent group-hover/row:text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) focus-visible:bg-(--hover-wash) focus-visible:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 transition-colors duration-100",
+                    hasTrailing && "absolute right-0",
                   )}
                   data-slot="aui_thread-list-item-more"
                   type="button"

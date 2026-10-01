@@ -205,7 +205,10 @@ impl PiEngine {
 
     /// 创建/打开进程内会话（provider/model 缺省读 ~/.pi settings；
     /// no_session:false = 会话持久化到 ~/.pi/agent/sessions 并自动进索引，
-    /// 对话真相在 pi（§5）；session_path 打开历史会话时上游自动装填）。
+    /// 对话真相在 pi（§5）；session_path 打开历史会话时上游自动装填；
+    /// working_directory = 会话工作区（SessionOptions.working_directory，
+    /// sdk.rs:311——header.cwd 与项目本地配置加载都从它推导，前端
+    /// 「选择工作区」入口经 pi_new_session 到此）。
     /// ui_bridge：扩展 UI 请求桥（§4.4 审批/问题卡）——None 时保持上游
     /// fail-closed（能力提示直接 deny）。
     /// 返回 "provider/model" 标识（仅供日志；消费方经 pi_get_state 结构化获取）。
@@ -215,6 +218,7 @@ impl PiEngine {
         model: Option<String>,
         ui_bridge: Option<UiBridgeHandle>,
         session_path: Option<std::path::PathBuf>,
+        working_directory: Option<std::path::PathBuf>,
     ) -> Result<String, String> {
         // 先 flush 旧会话（失败即中止——handle 未换、消息不丢，用户可重试；
         // 也避免 flush 失败后重试堆积空会话文件）
@@ -233,6 +237,13 @@ impl PiEngine {
             // change），实测恢复后见下方冒烟记录。
             no_session: false,
             session_path,
+            // 工作区信任决定（sdk.rs:312-315 上游注释：程序化调用方默认
+            // fail-closed；CLI 宿主传 workspace_trust::establish 的决定）。
+            // 本宿主的信任决定 = 用户在目录对话框里显式选了这个文件夹——
+            // 有 working_directory 即 trusted；未选（cwd 继承进程目录）维持
+            // 上游默认 false，项目本地配置不加载。
+            workspace_trusted: working_directory.is_some(),
+            working_directory,
             // handler 仅在加载了扩展时被咨询；挂上桥后能力提示/扩展 UI
             // 请求经 CUSTOM 事件到前端卡片（§4.4）
             extension_ui_handler: ui_bridge.map(|h| {
@@ -267,7 +278,20 @@ impl PiEngine {
         model: Option<String>,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        self.create_session_opts(provider, model, ui_bridge, None)
+        self.create_session_opts(provider, model, ui_bridge, None, None)
+    }
+
+    /// 在指定工作区新建（空）会话（前端「选择工作区」入口）：working_directory
+    /// 透传 SessionOptions（header.cwd = 该目录，侧栏按工作区分组的数据源），
+    /// workspace_trusted = true（用户显式选择 = 信任决定，见 create_session_opts
+    /// 注释）。与 New Chat（discard 延迟建会话）不同——用户点名了工作区，
+    /// 立即建会话文件。返回 "provider/model"。
+    pub fn new_session_with_cwd(
+        &self,
+        cwd: &str,
+        ui_bridge: Option<UiBridgeHandle>,
+    ) -> Result<String, String> {
+        self.create_session_opts(None, None, ui_bridge, None, Some(std::path::PathBuf::from(cwd)))
     }
 
     /// 确保有活跃会话：已有则原样复用（多轮对话上下文保持），
@@ -307,7 +331,7 @@ impl PiEngine {
         path: &str,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        self.create_session_opts(None, None, ui_bridge, Some(std::path::PathBuf::from(path)))
+        self.create_session_opts(None, None, ui_bridge, Some(std::path::PathBuf::from(path)), None)
     }
 
     /// 当前会话的 fork 谱系：SessionHeader.parent_session（serde 名
@@ -388,6 +412,108 @@ impl PiEngine {
                 })
                 .collect();
             Ok(serde_json::Value::Array(rows))
+        })?
+    }
+
+    /// 每会话 tokens/cost 汇总（侧栏 rowMeta「Tokens/成本」数据源）。
+    /// pi 官方面 = stats 模块（lib.rs:310 pub mod stats）：`aggregate` 逐行
+    /// 流式解析会话 JSONL 的 assistant usage（有界内存），本命令对每个请求
+    /// 的会话文件各跑一次单文件聚合。调用前先 flush 当前会话（list_sessions
+    /// 同款：读面即新鲜真相）。返回 {path: {totalTokens, costUsd}}——
+    /// 缺失/损坏的文件不静默跳过：aggregate 对坏行跳过是上游解析语义，
+    /// 文件级读失败（aggregate 不报错）如实产出 0 值（stats 语义：没有
+    /// 可入账条目），调用方的缓存键带 messageCount，文件变化会重取。
+    pub fn sessions_usage(&self, paths: &[String]) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let paths = paths.to_vec();
+        on_big_stack(move || {
+            let mut out = serde_json::Map::new();
+            for p in &paths {
+                let report = pi::stats::aggregate(
+                    &[std::path::PathBuf::from(p)],
+                    &pi::stats::StatsFilter::default(),
+                );
+                out.insert(
+                    p.clone(),
+                    serde_json::json!({
+                        "totalTokens": report.tokens.total,
+                        "costUsd": report.cost.total,
+                    }),
+                );
+            }
+            Ok(serde_json::Value::Object(out))
+        })?
+    }
+
+    /// 导出会话为独立 HTML 文档（hermes row.export 数据面的 pi 实现）。
+    /// 上游能力：Session::to_html()（session.rs:5235 render_session_html），
+    /// 非活跃会话可经 Session::open(path) 独立装载——不动活动 handle。
+    /// 请求的是当前活动会话 → 走 export_snapshot()（轻量快照，上游注释
+    /// 推荐的导出通道；flush 已在此前完成）；否则独立 open（strict 持久化
+    /// 下磁盘即真相）。返回完整 HTML 文本；落盘由前端
+    /// （save 对话框 + fs_write_text_file）负责。
+    pub fn export_session_html(&self, path: &str) -> Result<String, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        let path = path.to_string();
+        on_big_stack(move || {
+            // 活动会话路径比对（fork_session 同款 inner.path 读取；.await 的
+            // 内层锁必须住在 block_on 里）。
+            let is_active = {
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                match guard.as_mut() {
+                    // 无活动会话 = 目标必非活动（域状态，不是错误）
+                    None => false,
+                    Some(handle) => {
+                        shared.runtime.block_on(async {
+                            let cx = pi::agent_cx::AgentCx::for_request();
+                            let agent_session = handle.session_mut();
+                            let store = Arc::clone(&agent_session.session);
+                            let inner = store
+                                .lock(cx.cx())
+                                .await
+                                .map_err(|e| format!("session lock failed: {e}"))?;
+                            // 尾部显式标注（E0283：async 块的错误侧推不出来）
+                            Ok::<bool, String>(inner
+                                .path
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .as_deref()
+                                == Some(path.as_str()))
+                        })?
+                    }
+                }
+            };
+            let html: String = if is_active {
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                let handle = guard
+                    .as_mut()
+                    .ok_or_else(|| "no active session".to_string())?;
+                shared.runtime.block_on(async {
+                    let cx = pi::agent_cx::AgentCx::for_request();
+                    let agent_session = handle.session_mut();
+                    let store = Arc::clone(&agent_session.session);
+                    let inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    Ok::<String, String>(inner.export_snapshot().to_html())
+                })?
+            } else {
+                shared.runtime.block_on(async {
+                    let session = pi::session::Session::open(&path)
+                        .await
+                        .map_err(|e| format!("会话文件打开失败: {e}"))?;
+                    Ok::<String, String>(session.to_html())
+                })?
+            };
+            Ok(html)
         })?
     }
 

@@ -63,7 +63,9 @@ describe('sidebar-view 严格解析', () => {
 
   it('非法形状 → console.error + 默认（不冒充旧数据）', () => {
     const spy = silenceErrors()
-    expect(parseGrouping('project')).toBe('date')
+    // 'project' 重审计 #2 起为合法分组（按工作区）；'status'/'profile'
+    // 仍无数据面 → 回默认。
+    expect(parseGrouping('status')).toBe('date')
     expect(parseOrdering('cost')).toBe('updated')
     expect(parseDensity('cozy')).toBe('comfortable')
     expect(parseManual('yes')).toBe(false)

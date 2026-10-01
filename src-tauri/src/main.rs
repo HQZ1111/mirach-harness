@@ -191,6 +191,42 @@ fn pi_discard_session(
     state.engine.discard_session()
 }
 
+/// 在指定工作区新建（空）会话（侧栏「选择工作区」入口）：working_directory
+/// 透传 SessionOptions（header.cwd = 该目录——侧栏按工作区分组的数据源；
+/// workspace_trusted = 用户显式选择即信任决定）。返回 pi_get_state 快照
+/// （sessionId 供前端直接采纳，省一次往返）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_new_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    cwd: String,
+) -> Result<serde_json::Value, String> {
+    state
+        .engine
+        .new_session_with_cwd(&cwd, Some(state.ui_bridge("main")))?;
+    state.engine.state()
+}
+
+/// 每会话 tokens/cost 汇总（侧栏 rowMeta「Tokens/成本」）：paths = 需要的
+/// 会话文件，逐文件走 pi stats 聚合。返回 {path: {totalTokens, costUsd}}。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_sessions_usage(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    paths: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    state.engine.sessions_usage(&paths)
+}
+
+/// 导出会话为独立 HTML 文档（hermes row.export 的 pi 实现：
+/// Session::to_html / export_snapshot）。返回 HTML 文本；落盘由前端
+/// save 对话框 + fs_write_text_file 完成。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_export_session_html(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    path: String,
+) -> Result<String, String> {
+    state.engine.export_session_html(&path)
+}
+
 /// 前端挂载时取缓冲最新 seq 作为 EventSource 的 lastEventId 起点
 /// （跳过历史重放——会话历史经 pi_get_messages 水合）。
 #[tauri::command(async)]
@@ -443,6 +479,9 @@ fn main() {
             pi_extension_ui_response,
             pi_list_sessions,
             pi_discard_session,
+            pi_new_session,
+            pi_sessions_usage,
+            pi_export_session_html,
             pi_stream_cursor,
             pi_open_session,
             pi_get_session_lineage,
@@ -464,6 +503,7 @@ fn main() {
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url,
+            fs::fs_write_text_file,
             terminal::terminal_spawn,
             terminal::terminal_write,
             terminal::terminal_resize,

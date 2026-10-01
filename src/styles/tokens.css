@@ -48,6 +48,10 @@
   --hover-wash: rgba(0, 0, 0, 0.07);
   --surface: #ffffff;
   --brand: #006fff;                           /* 品牌色/主题色（用户定稿） */
+  --success: #10b981;                         /* 成功绿（未读圆点，hermes
+                                   --ui-success 的基色 #10b981——hermes
+                                   主题经 harmonize 向中景旋转 25%，浅色
+                                   主题下取基色） */
   --fl-accent: var(--brand);                   /* hermes --theme-primary。原 --accent
                                    被 tailwind.css（shadcn 主题，import 在后）的
                                    近白 --accent 覆盖——落点预览/veil/分隔条

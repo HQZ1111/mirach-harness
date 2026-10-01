@@ -31,7 +31,16 @@ export interface SessionListEntry {
 
 export type SessionListRow =
   | { readonly kind: 'session'; readonly id: string }
-  | { readonly kind: 'divider'; readonly key: string; readonly label: string }
+  | {
+      readonly kind: 'divider'
+      readonly key: string
+      readonly label: string
+      /** 'date'（默认）= 日历桶分隔线；'project' = 工作区分组头（按
+       *  SessionMeta.cwd，session-display 的 groupEntriesByWorkspace 产出）
+       *  ——渲染形制不同（日期线小体量大字距 caption vs 组头），折叠语义
+       *  相同：分隔线保留、其下行隐藏。 */
+      readonly variant?: 'date' | 'project'
+    }
 
 // ── lib/time.ts：日历桶（逐语义） ─────────────────────────────────────────
 

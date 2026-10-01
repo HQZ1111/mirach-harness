@@ -13,7 +13,9 @@
  *   逐语义照抄）：日历桶由新近性钉死，手动顺序只决定桶内次序。
  *
  * 数据源行 = {id, lastActiveMs}（aui threadItems[].custom.lastModifiedMs，
- * runtime.tsx refreshThreads 写入；缺 0）。
+ * runtime.tsx refreshThreads 写入；缺 0）。cwd/createdMs/messageCount 来自
+ * pi SessionMeta 的同键投影（工作区分组/created 排序/未读水位用；缺省
+ * 按无数据处理——createdMs 缺省 0、cwd 缺省归 Home 桶）。
  */
 
 export interface SessionRowMeta {
@@ -22,6 +24,14 @@ export interface SessionRowMeta {
   /** 会话标题（排序键 title 用；缺省行按 'New Chat' 兜底名参与，与
    *  matchesTitleSearch 同约定——不改 recencyCompare 的键）。 */
   readonly title?: string
+  /** 会话文件路径（pi SessionMeta.path；导出/用量缓存键用）。 */
+  readonly path?: string
+  /** 会话工作区（pi SessionMeta.cwd = header.cwd；工作区分组键）。 */
+  readonly cwd?: string
+  /** 创建时刻 ms（pi header.timestamp 的 Date.parse；排序键 created 用）。 */
+  readonly createdMs?: number
+  /** 消息条数（pi SessionMeta.messageCount；未读水位/用量过期键用）。 */
+  readonly messageCount?: number
 }
 
 /** 最后活跃降序（同毫秒按 id 稳定排序——避免每次渲染顺序抖动） */
