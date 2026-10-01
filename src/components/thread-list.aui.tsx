@@ -13,10 +13,12 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import {
-  ArchiveIcon,
+  GitForkIcon,
   Loader2Icon,
   MoreHorizontalIcon,
   PencilIcon,
+  PinIcon,
+  PinOffIcon,
   PlusIcon,
   SearchIcon,
   TrashIcon,
@@ -24,6 +26,7 @@ import {
 import {
   forwardRef,
   Fragment,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -31,6 +34,19 @@ import {
   type ComponentPropsWithoutRef,
   type FC,
 } from "react";
+import { useStore } from "zustand";
+
+import { branchBridge } from "@/components/assistant-ui/branch-store";
+import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
+import {
+  sessionManageStore,
+  useSessionManage,
+} from "@/components/panes/session-manage/session-manage-store";
+import {
+  orderMapAfterMove,
+  orderedSessionIds,
+  type SessionRowMeta,
+} from "@/components/panes/session-manage/session-order";
 
 export const ThreadList: FC = () => {
   const [search, setSearch] = useState("");
@@ -178,12 +194,80 @@ export const useThreadListGroups = (searchQuery = "") => {
   }, [threadIds, threadItems, query]);
 };
 
+// ── 会话管理（置顶 / 手动顺序 / 拖拽切换，hermes sidebar 对标）───────────────
+
+/** 行活跃元数据：id → lastActiveMs（pi SessionMeta.lastModifiedMs，runtime
+ *  refreshThreads 写进 custom；缺 0。会话侧栏排序的 lastActive 数据源）。 */
+const useSessionRowMetas = (): SessionRowMeta[] => {
+  const threadIds = useAuiState((s) => s.threads.threadIds);
+  const threadItems = useAuiState((s) => s.threads.threadItems);
+  return useMemo(() => {
+    const byId = new Map(threadItems.map((item) => [item.id, item] as const));
+    return threadIds.map((id) => {
+      const ms = byId.get(id)?.custom?.lastModifiedMs;
+      return {
+        id,
+        lastActiveMs: typeof ms === "number" && Number.isFinite(ms) ? ms : 0,
+      };
+    });
+  }, [threadIds, threadItems]);
+};
+
+/** 拖拽/投放提交通道：list 移动 → orderMapAfterMove 重排并持久化；主会话
+ *  页签投放 → aui.threads.switchToThread（assistant-ui 公开切换入口，直通
+ *  runtime threadListAdapter.onSwitchToThread——中断守卫/pi_open_session/
+ *  重水合都在 runtime 实现，失败 console.error 可见。**无需 runtime 改动**）。 */
+const useSessionCommit = () => {
+  const aui = useAui();
+  const metas = useSessionRowMetas();
+  return useMemo(
+    () => ({
+      commitListMove: (sessionId: string, beforeId: string | null) => {
+        const st = sessionManageStore.getState();
+        st.setOrder(orderMapAfterMove(metas, st.pinned, st.order, sessionId, beforeId));
+      },
+      commitMainTab: (sessionId: string) => {
+        void aui.threads.switchToThread(sessionId);
+      },
+    }),
+    [aui, metas],
+  );
+};
+
 const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
   searchQuery = "",
 }) => {
   const { threadIds, filteredIndices, groups } =
     useThreadListGroups(searchQuery);
   const query = searchQuery.trim();
+  const pinned = useSessionManage((s) => s.pinned);
+  const order = useSessionManage((s) => s.order);
+  const drag = useSessionManage((s) => s.drag);
+  const metas = useSessionRowMetas();
+
+  // 死会话清理（任务：会话不存在于列表时清理键）。列表非空才清——首帧
+  // threads=[] 是"未加载"不是"已删光"，不得借机毁持久化。
+  useEffect(() => {
+    sessionManageStore.getState().prune(threadIds);
+  }, [threadIds]);
+
+  // 展示序（纯函数）：置顶组（组内最后活跃降序）永远在非置顶组之上；非置顶
+  // 组 = 手动顺序 + hermes mergeFreshByPosition 折回（新会话不沉底）。搜索态
+  // 只在过滤后的行里排（filteredIndices 与原渲染同源）。日期分组态
+  // （groups != null；当前 runtime 无 lastMessageAt，不可达）保持原渲染
+  // 不动——分组与手动顺序的合并未实现，诚实留空。
+  const display = useMemo(() => {
+    if (groups) return null;
+    const visible = new Set(filteredIndices.map((index) => threadIds[index]));
+    const visibleMetas = metas.filter((m) => visible.has(m.id));
+    const { pinnedIds, unpinnedIds } = orderedSessionIds(visibleMetas, pinned, order);
+    const indexOfId = new Map(threadIds.map((id, index) => [id, index] as const));
+    const toIndices = (ids: readonly string[]) =>
+      ids
+        .map((id) => indexOfId.get(id))
+        .filter((index): index is number => index !== undefined);
+    return { pinnedIndices: toIndices(pinnedIds), unpinnedIndices: toIndices(unpinnedIds) };
+  }, [groups, metas, pinned, order, threadIds, filteredIndices]);
 
   if (query && filteredIndices.length === 0) {
     return (
@@ -196,17 +280,56 @@ const ThreadListItemGroups: FC<{ searchQuery?: string }> = ({
     );
   }
 
-  if (!groups) {
-    return filteredIndices.map((index) => (
+  if (display) {
+    // 拖拽中（行拖拽会话写入的落点信号）：列表模式画插入符（beforeId =
+    // 目标行 id，null = 尾部）；置顶组不是排序目标，插入符只出现在非置顶组。
+    const dragTarget = drag?.target;
+    const listDrag = drag !== null && dragTarget?.kind === "list" ? dragTarget : null;
+
+    const renderRow = (index: number) => (
       <ThreadListPrimitive.ItemByIndex
         key={threadIds[index]}
         index={index}
         components={{ ThreadListItem }}
       />
-    ));
+    );
+
+    const caret = (key: string) => (
+      <div
+        key={key}
+        aria-hidden
+        data-slot="aui_session-drop-caret"
+        className="bg-(--fl-accent) mx-2 h-0.5 shrink-0 rounded-full"
+      />
+    );
+
+    return (
+      <>
+        {display.pinnedIndices.length > 0 && (
+          <div data-slot="aui_thread-list-pinned" className="flex flex-col gap-0.5">
+            <div
+              data-slot="aui_thread-list-group-label"
+              className="text-muted-foreground px-2.5 pt-3 pb-1 text-xs font-medium"
+            >
+              置顶
+            </div>
+            {display.pinnedIndices.map(renderRow)}
+          </div>
+        )}
+        <div data-slot="aui_thread-list-unpinned" className="flex flex-col gap-0.5">
+          {display.unpinnedIndices.map((index) => (
+            <Fragment key={threadIds[index]}>
+              {listDrag && listDrag.beforeId === threadIds[index] && caret(`caret-${threadIds[index]}`)}
+              {renderRow(index)}
+            </Fragment>
+          ))}
+          {listDrag && listDrag.beforeId === null && caret("caret-end")}
+        </div>
+      </>
+    );
   }
 
-  return groups.map((group) => (
+  return groups!.map((group) => (
     <Fragment key={group.label}>
       <div
         data-slot="aui_thread-list-group-label"
@@ -285,6 +408,11 @@ const ThreadListSkeleton: FC = () => {
 
 export const ThreadListItem: FC = () => {
   const isRunning = useAuiState((s) => s.threadListItem.isRunning);
+  const threadId = useAuiState((s) => s.threadListItem.id);
+  const title = useAuiState((s) => s.threadListItem.title);
+  const isPinned = useSessionManage((s) => s.pinned.includes(threadId));
+  const isDragging = useSessionManage((s) => s.drag?.sessionId === threadId);
+  const commit = useSessionCommit();
   const [isRenaming, setIsRenaming] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
@@ -298,7 +426,22 @@ export const ThreadListItem: FC = () => {
   return (
     <ThreadListItemPrimitive.Root
       data-slot="aui_thread-list-item"
-      className="group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative flex min-h-9 items-center rounded-md transition-colors focus-visible:outline-none"
+      // 行标记（session-drag 的快照/候选识别按它找行；与 SESSION_ROW_ATTR
+      // 同串，改一处必须改另一处）
+      data-session-row-id={threadId}
+      onPointerDown={(e) =>
+        startSessionRowDrag(e, {
+          sessionId: threadId,
+          title: title ?? "New Chat",
+          onCommitListMove: (beforeId) => commit.commitListMove(threadId, beforeId),
+          onCommitMainTab: () => commit.commitMainTab(threadId),
+        })
+      }
+      className={cn(
+        "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative flex min-h-9 items-center rounded-md transition-colors focus-visible:outline-none",
+        // 拖拽中的行半透明：插入符说去哪，变淡的说什么在动（同 hermes 行拖）
+        isDragging && "opacity-45",
+      )}
     >
       {isRenaming ? (
         <ThreadListItemRename
@@ -321,6 +464,13 @@ export const ThreadListItem: FC = () => {
               isRunning ? 'animate-pulse bg-emerald-500' : 'bg-(--stroke)',
             )}
           />
+          {isPinned && (
+            <PinIcon
+              aria-hidden
+              data-slot="aui_thread-list-item-pin"
+              className="text-(--fl-accent) me-1.5 size-3 shrink-0 fill-current"
+            />
+          )}
           <span
             data-slot="aui_thread-list-item-title"
             className="min-w-0 flex-1 truncate text-[0.8125rem] text-(--text-2)"
@@ -399,7 +549,19 @@ const ThreadListItemRename: FC<{
   );
 };
 
+const MORE_ITEM_CLASS =
+  "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
+
 const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
+  const threadId = useAuiState((s) => s.threadListItem.id);
+  // 活动行判定：mainThreadId 与本行 id 同源（threadId = pi 会话 id）
+  const isActive = useAuiState((s) => s.threads.mainThreadId === s.threadListItem.id);
+  const isPinned = useSessionManage((s) => s.pinned.includes(threadId));
+  // fork 点清单（branchBridge 投影；runtime 关键路径后 requestRefresh 保持
+  // 新鲜）。活动行的「从此分支探索」在最后一个 fork 点（最新已落盘 user
+  // 消息）分叉 = 整段对话的副本分支。
+  const forkPoints = useStore(branchBridge, (s) => s.forkPoints);
+
   return (
     <ThreadListItemMorePrimitive.Root sharedFocusGroup>
       <ThreadListItemMorePrimitive.Trigger asChild>
@@ -422,21 +584,35 @@ const ThreadListItemMore: FC<{ onRename: () => void }> = ({ onRename }) => {
       >
         <ThreadListItemMorePrimitive.Item
           data-slot="aui_thread-list-item-more-item"
-          className="hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
+          className={MORE_ITEM_CLASS}
+          onSelect={() => sessionManageStore.getState().togglePin(threadId)}
+        >
+          {isPinned ? <PinOffIcon className="size-4" /> : <PinIcon className="size-4" />}
+          {isPinned ? "取消置顶" : "置顶"}
+        </ThreadListItemMorePrimitive.Item>
+        {/* pi fork 只对活动会话（pi_fork_session 作用于当前打开的会话文件）——
+            非活动行禁用；活动行还需 fork 点（历史 user 消息已落盘）才可分叉。 */}
+        <ThreadListItemMorePrimitive.Item
+          data-slot="aui_thread-list-item-more-item"
+          className={MORE_ITEM_CLASS}
+          disabled={!isActive || forkPoints.length === 0}
+          onSelect={() => {
+            const last = forkPoints[forkPoints.length - 1];
+            if (!last) return;
+            branchBridge.getState().requestFork(forkPoints.length - 1, last.text);
+          }}
+        >
+          <GitForkIcon className="size-4" />
+          从此分支探索
+        </ThreadListItemMorePrimitive.Item>
+        <ThreadListItemMorePrimitive.Item
+          data-slot="aui_thread-list-item-more-item"
+          className={MORE_ITEM_CLASS}
           onSelect={onRename}
         >
           <PencilIcon className="size-4" />
           重命名
         </ThreadListItemMorePrimitive.Item>
-        <ThreadListItemPrimitive.Archive asChild>
-          <ThreadListItemMorePrimitive.Item
-            data-slot="aui_thread-list-item-more-item"
-            className="hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
-          >
-            <ArchiveIcon className="size-4" />
-            归档
-          </ThreadListItemMorePrimitive.Item>
-        </ThreadListItemPrimitive.Archive>
         <ThreadListItemPrimitive.Delete asChild>
           <ThreadListItemMorePrimitive.Item
             data-slot="aui_thread-list-item-more-item"
