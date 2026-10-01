@@ -2184,3 +2184,82 @@ hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，
   未映射（前端无分支，无影响）；TurnEnd→STEP_FINISHED 未实现——usage 实际随
   RUN_FINISHED 下发且前端只消费它（pi-integration.md §2.2 该行已改注）。
 - layout-design.md §5「离家 ✕ 常显」已按 §4.1 定稿改注（撤销常显）。
+
+## elements 接线轮（2026-10-02，pi 支持面全接）
+
+用户定稿「恢复后看 pi 支持哪些，支持的都接上」。两轮调查（elements 118 文件
+分类矩阵 + pi 能力面实锤）后五批代理落地：Rust 桥接、前端 elements、fork
+调查、fork 四命令、fork 前端。测试 77→105（TS）+ 30→39（Rust）。
+
+### pi 能力面实锤（修正了三个旧错误认知）
+- **pi 消息有 timestamp（i64 毫秒）**——runtime.tsx:118 旧注释「无 id/
+  timestamp」是错的（id 无、timestamp 有，model.rs:106），day-separator
+  因此可接。
+- **每条 assistant 消息自带 usage.cost（美元）**（model.rs:384-397）——
+  RUN_FINISHED.usage 补 costUsd（run 内全部 assistant 消息 cost.total 加和）
+  与 cacheWriteTokens。
+- **fork/分支原语全 pub**（照抄 TUI）：plan_fork_from_user_message（**实际
+  签名是 Result<ForkPlan> 不是调查初判的 Option**）→ create_with_dir →
+  header 直写 branchedFrom → init_from_fork_plan（**历史批量注入唯一正确
+  入口**，直写 entries 会破坏缓存）→ save → 复用 open_session 换装。分支
+  切换 = tree_ui 的 stage_and_commit 配方（clone→navigate_to→save→
+  to_messages_for_current_path→replace_messages）。**Agent 只是投影，改
+  历史必须走 Session**（rpc.rs:303-308）。分支 preview=**离根最近**的 user
+  文本（path_preview 逐条覆盖，不是离叶最近——单测抓到的上游行为细节）。
+  上游 fork 语义：选中 user 消息**不进**新文件（叶停其父级），selectedText
+  供 composer 预填、重新提交成新分支。RPC 面 37 命令**没有**分支切换——
+  BranchPicker 只在 in-process 可做（rpc_subprocess 反而拿不到）。
+
+### 新增 8 个 IPC 命令 + 图片契约
+- `pi_retry_edit`（prepare_retry_branch，返回 {text, abandonedEntryId}；
+  下一次 POST = 兄弟分支，旧分支保留在同一 JSONL）/
+  `pi_mark_checkpoint`（**手工带回 entryId——Checkpoint.entry_id 被 serde
+  skip，直接序列化会丢**）/ `pi_list_checkpoints`（枚举 JSONL Custom 条目，
+  上游只有按名查找无枚举）/ `pi_rewind`（摘要失败 Err 传播——有意分歧自
+  上游的降级文本，禁兜底）。
+- `pi_fork_session(entryId)`（大栈闭包内 Phase1+2 合并免 pi 结构跨线程
+  Send；Phase 3 复用 open_session 换装链）/ `pi_get_fork_points` /
+  `pi_list_sibling_branches` / `pi_switch_branch`（leafId）。
+- 图片：POST body `images:[{data /*纯base64*/, mimeType}]`，白名单
+  png/jpeg/webp/gif 外 400；带图走 `run_with_content_with_abort`（SDK 无
+  内容块 prompt 包装，message_*/tool_execution_* 扩展扇出缺席=上游注释明示
+  受支持的形态，注释在 pi_session.rs:748-756）。
+
+### 前端接线（全部真实挂载，冒烟截图确认）
+- runtime：onEdit/onReload（isRunning 先 interrupt → pi_retry_edit →
+  postRun；parentId 只支持最后一条 user 消息——诚实拒绝）、postRun images、
+  attachments adapter（**此前缺失——附件按钮点击直接抛 "Attachments are
+  not supported"**）、hydrate 时间戳+历史 image 块（契约形
+  `{type:'image', data, mimeType}`，与 pi_get_messages 序列化对齐一处）。
+- 挂载 12 件：tool-call 结构化（默认）/terminal-block（bash）/web-search
+  （web_search，严格解析不符回退通用）/tool-error/message-actions（复制+
+  regenerate 复用 reload 通道）/message-timing（run 级 usage+costUsd，仅
+  最后一条 assistant）/day-separator（createdAt 日期）/error-state（替换
+  RunErrorBar 内部，带 Retry）/stopped-run/connection-state（四相，替换
+  ConnectionBanner）/empty-state（Welcome 槽，中文起步语）/guardrail-notice
+  （压缩横幅，吃 compaction CUSTOM）。
+- fork 入口（user 消息「从此分支探索」，GitBranch 图标）+ BranchPicker 条
+  （message-branches 真数据）+ branch-store.ts（投影/刷新信号/请求通道/
+  composer 预填）。fork 点 entryId 用 **index 映射**（thread 第 N 条 user
+  消息=pi_get_fork_points 第 N 项）+ 钮级文本预判 + 执行级复核双重防漂移。
+
+### 官方模板的坑（接线时逐个撞上）
+- **day-separator 是自带迷你消息列表的整块演示组件**——嵌不进真实消息循环，
+  只能提取分隔行喂 DatedMessage 形状。EmptyStateComposer 纯展示无输入框。
+  guardrail-notice 无 errorMessage 槽位（宿主补一行红字）。message-branches
+  是纯 props 模板（好用）。
+- StartRunConfig **没有 modelOverride**（实际 {parentId, sourceId,
+  runConfig.custom}）——onReload 两处探测兼容。
+- 100/118 模板是纯 props 驱动（不用 assistant-ui 钩子）——接线=喂 props。
+
+### 验证
+- 门禁：tsc 0 / vitest **105**（branch-store 15 新用例）/ cargo check 净 /
+  cargo test **39**（映射器 4 + fork 5 新用例）。
+- 真窗口冒烟（CDP）：UI 发送→RUN_ERROR 条；**fork 真通**（新会话文件+
+  sessionId+composer 预填）；retry_edit→POST→**sibling_branches 真树**
+  （双分支+isCurrent+forkPointId）；坏 mime **400**；1×1 png POST **200+
+  runId**；截图见 BranchPicker「‹ 2/2 ›」+ 日期分隔行 + 图片消息渲染 +
+  新错误卡。**注意：直连 POST 的 token 走 query 参数，Authorization 头
+  不认（冒烟脚本第一版踩的 401 就是这个）**。
+- 代理卫生：仓库根出现碎片文件 `fn`（grep 重定向事故）——代理跑
+  findstr/grep 重定向一律指向 %TEMP%，不进仓库根。
