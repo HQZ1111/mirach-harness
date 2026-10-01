@@ -92,28 +92,42 @@ src/
     quick-entry/      【空骨架】快捷入口子应用（components/ lib/ 空子目录已建）
     wake-indicator/   【空骨架】唤醒指示
     pet-overlay/      【空骨架】宠物悬浮层
-    overlays/         【空骨架】全局 overlay（boot-failure 等）
+    overlays/         全局 overlay（settings-overlay.tsx 设置页 §7-7 已落位；
+                       boot-failure 等仍空）
   components/
     layout/           flexlayout 布局引擎与拖拽系统（=hermes components/pane-shell）
     panes/            窗格内容（占位）
     ui/               通用 UI 原语（codicons.tsx；未来 shadcn 原语）
-    assistant-ui/     【空骨架】assistant-ui 聊天渲染（L1 核心接入位）
-  lib/                通用工具（tauri-window/escape-layers/drag-ghost/reorder/storage）
+    assistant-ui/     聊天渲染 L1 核心：runtime.tsx（ExternalStore 适配器）/
+                       turn-actor.ts（**XState v5 轮次机+reduceAguiEvent 落位在
+                       此**，src/agent/ 空骨架仍保留待未来归位）/
+                       connection-store.ts / error-bridge.ts / usage-bridge.ts /
+                       approval-bridge.ts / approval-cards.tsx /
+                       model-selector.tsx / context-display.tsx /
+                       elements/（活文件 10 个：composer/surfaces/reasoning 等，
+                       2026-10-01 清掉 108 个脚手架死副本）
+  lib/                通用工具（tauri-window/escape-layers/drag-ghost/reorder）
   store/              Zustand 状态层（layout-store.ts；2026-09-26 从 nanostores
                        迁移，tab-selection.ts 同迁——vanilla store 供事件回调）
-  agent/               【空骨架】XState Agent 轮次状态机（AG-UI 事件归约，
-                      见「待办 3」轮次状态机专条）
+  agent/               【空骨架】XState Agent 轮次状态机（turn-actor 实际落位
+                      components/assistant-ui/，未来归位到此）
   api/                【空骨架】L2：AG-UI HTTP+SSE 客户端
   ipc/                【空骨架】L2：Tauri IPC 调用层
   contrib/            【空骨架】窗格/能力注册表（hermes contrib 对应位）
   hooks/ types/ i18n/ themes/ test/  【空骨架】
-  agent/               【空骨架】XState Agent 轮次状态机（AG-UI 事件归约，
-                      见「待办 3」轮次状态机专条）
   public/brand/        品牌物料（2026-09-25 落位）：logo.png / avatar.png（头像）/
                        splash.png（启动页）/ logo.svg（8 色 SVG，39.7KB，UI 缩放用）/
                        logo-detail.svg（24 色 SVG，154KB，细节版）/
                        avatars/{agents,users}/（空占位）/ backgrounds/（9 张壁纸壁画）
-src-tauri/            L3 Rust 应用层（+未来 L4 pi-adapter）
+src-tauri/            L3 Rust 应用层（+未来 L4 pi-adapter）：
+                       pi_session.rs（PiRuntime/PiEngine/审批桥）/
+                       agui.rs（AG-UI HTTP 桥+环形缓冲+映射器+30 内嵌单测）/
+                       pi_settings.rs（§7-7 设置面 5 命令）/
+                       fs.rs / main.rs（18+5 IPC 命令）
+  src-tauri/vendor/pi_agent_rust/   **pi vendored 副本**（2026-10-01：白名单拷贝，
+                       255MB→22MB；含上游 gh #239 同款 .read(true) 补丁；
+                       上游真源 G:\pi_agent_rust-main 不进 git，同步上游=重拷
+                       并核对补丁）
 ```
 规矩：新文件按层归位；空骨架目录内的实现文件落位时不许再建平行目录
 （先来本表登记）。
@@ -225,6 +239,10 @@ src-tauri/            L3 Rust 应用层（+未来 L4 pi-adapter）
 
 ## mock seam（`src/mock/desktop-bridge.ts`）——无后端进主页面的关键
 
+> **【2026-10-01 状态】mock seam 已整体删除**（`src/mock/` 目录不存在，
+> main.tsx 无 mock 导入）——pi 真引擎切换（§6/§7）完成后 mock 面无消费方。
+> 下文全部保留为**历史记录**，键名/路由/行为描述均已过时，勿按此补代码。
+
 - `main.tsx` **第一行**导入，安装 `window.hermesDesktop`（替代 Electron
   preload；真桥存在时自动让位）。
 - 组成：`api()` REST 路由器（status/config/profiles/sessions/models/cron/
@@ -285,17 +303,16 @@ src-tauri/            L3 Rust 应用层（+未来 L4 pi-adapter）
 | @tauri-apps/api 等 | 2.11.x | 上一轮验证过的 Tauri 基线（见 package.json） |
 | vitest | 4.1.10 | harness 单测（2026-09-27 引入；与主工程钉版一致）；无 jsdom，node 环境 + localStorage 替身 |
 
-**harness 测试**：`npm test`（vitest run）/ `npm run test:watch`；配置 = vitest.config.ts（node 环境、@ 别名）+ vitest.setup.ts（localStorage 替身）。已覆盖 constraints/rebalance 依赖的聚合与钳制纯函数、rowfix 修正语义、pane-registry 不变量。
+**harness 测试**：`npm test`（vitest run）/ `npm run test:watch`；配置 = vitest.config.ts（node 环境、@ 别名）+ vitest.setup.ts（localStorage 替身）。2026-10-01 起 **77 用例**（constraints 14 / constraints-sync 9 / rebalance 25 / turn-actor 22 / pane-registry 4 / flexlayout-rowfix 3），覆盖聚合与钳制纯函数、absorbSurplus 唯一吸收者、syncTabsetConstraints identity 四步优先级、applyRootWeights/fitWindowWidth/updateNarrowViewport、rowfix 修正语义、AG-UI 归约（thinking/交错 run/run 外 drop）。**Rust 侧 30 用例**（`cargo test`，agui.rs 内嵌：映射器逐行/环形缓冲 seq/审批注册表 respond+cleanup）。
 
 package-lock.json 已生成（2026-09-20，含上面全部钉版）；重装依赖后先跑
 tsc + vitest 再动别的。改依赖版本先看上表——每个钉版都有一次翻车在背后。
 
 ## 待办（按优先级）
 
-### 1. mock seam 深化（按需）
-`window.hermesDesktop` 桥已建（见上"mock seam"），主页面可进。深化方向
-按用户需求驱动：网关 RPC mock（让发消息出假回复流）、更多 REST 路由形状
-（对着 `[mock-api]` 日志补）、窗口控制接 Rust（`toggle_main_maximize` 已在）。
+### 1. ~~mock seam 深化~~ ✅ 已终结（2026-10-01）
+mock seam 整体删除（`src/mock/` 已不存在），真引擎（pi + AG-UI）上线，
+无待办。历史方案见上"mock seam"段的状态横幅。
 
 ### 2. 设置页用户自己做
 hermes 的 `src/app/settings/` 115 个文件**全量在树里**（不是最终形态）。
@@ -2042,3 +2059,115 @@ hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，
 `src-tauri/src/lib.rs` 里 HUD / quick-entry / fs 的命令面已经完整，
 注释里有全部踩坑记录（WebView2 环境单例、DWM 线框、停车 vs 销毁…），
 动 Rust 之前先读。
+
+## 生产就绪收口轮（2026-10-01，全量审查驱动，子代理执行）
+
+四域审查（Rust/聊天链路/布局/完成度盘点）后的一轮修复。审查结论「内测级」，
+本轮清掉 3 个 P0 + 10 个 P1 + 全部低成本 P2，测试 30→77（TS）+ 30（Rust）。
+
+### Rust 安全与正确性（agui.rs / pi_session.rs / main.rs / tauri.conf.json）
+- **P0 鉴权**：GET /ag-ui/stream 加 token 校验（此前 POST 有校验、数据出口裸奔）；
+  very_permissive CORS → 显式白名单（tauri.localhost/tauri://localhost/dev 1430）
+  + Host 校验中间件（127.0.0.1:{port}/localhost:{port}，否则 403——DNS rebinding
+  防线）；生产 CSP 进 tauri.conf（dev 不注入）。
+- **P0 SSE 重连全量重放**（双代理独立发现的头号 bug）：EventSource 原生重连
+  复用挂载 URL 的陈旧 query → 服务端从挂载游标重放全部缓冲 → 消息整段重复。
+  修法：服务端 cursor 优先取标准 `Last-Event-ID` 头，与 query 取 max。
+- **交付面**：bundle.active:true + targets:["nsis"]；`tauri.prod.conf.json`
+  （`npm run tauri:build`）剥 CDP 9223——**坑：--config 是 RFC 7386 合并，数组
+  整体替换，app.windows 必须带完整窗口对象，只写 additionalBrowserArgs 会抹掉
+  width/height**；`additionalBrowserArgs:""` 空串剥参（null 是删键）。
+- **主线程冻结**：全部 pi_* 命令 `#[tauri::command(async)]`（同步 fn 加此参走
+  线程池；**实际是 14 个 pi_*，不是 16**）——此前流式期间调 pi_get_state 等
+  会冻住 tao 事件循环整个 run（pi_list_sessions 撞 stale lock 可冻 15s）。
+- **abort 竞态**：AbortSlot{run,handle}+run_counter，PromptGuard Drop 身份比对
+  （不匹配不清）；abort 注册挪到拿 handle mutex 之后。RUN_STARTED 移入
+  on_start 回调（Box<dyn FnOnce>，拿锁后起跑前）——排队 run 不再提前入缓冲
+  （§0.3-1 协议违例序列不再由后端制造）。
+- **审批清账**：respond 的 oneshot send 失败返回 Err（含 id，不再假装成功）；
+  ApprovalRegistry::cleanup 在 discard/open 会话时清空（registry 所有权移到
+  PiEngine，AguiState 共享同一 Arc）；ensure_session 失败只推 RUN_ERROR
+  （不再先推无 runId 的 RUN_STARTED 留空消息段）。
+
+### 聊天链路（turn-actor / runtime / thread.aui / composer-wired 等）
+- **RUN_ERROR 可见**：error-bridge（zustand）+ thread.aui RunErrorBar——此前
+  error 存进机器 context 全工程零消费，run 失败界面零反馈。
+- **SSE 断开可见**：connection-store + ConnectionBanner（null≠断开防启动误报）。
+- **交错 RUN_STARTED**：console.error 协议违例 + reduce 追加新段（此前 targetless
+  transition 只 warn，delta 会并进旧消息）。
+- **run 外守卫**：TEXT/TOOL_CALL/THINKING/tool_execution 在 currentRunId===null
+  时 drop+warn；compaction 等 run 外 CUSTOM 照常透传（§0.3-5）。
+- **铁律三处**：hydrate catch 区分 "no active session" 域态（正常置 null）与真
+  错误（console.error 保持状态）；postRun 查 res.ok（401 时消息上屏无回复的
+  根因）；挂载 effect 每个 await 后查 cancelled（StrictMode 泄漏）。
+- **流式中切换会话**：先 pi_interrupt 再切（prompt 持锁跨整个 run，切换会挂到
+  run 结束）；onDelete 命中当前会话 → discard+RESET（此前删了文件机器还拿着
+  旧 handle）。switchToThread/onDelete/rename 全补 try/catch（失败不改本地态）。
+- **thinking 渲染接通**：TurnPart 加 {type:'thinking'}（THINKING_* 三分支），
+  **出口 convertMessage 必须映射成 "reasoning"**（ThreadMessageLike 形状，
+  类型错误就在这）；历史水合的 thinking 块仍 MVP 不渲染。
+- **effort 档位接线**（此前断链）：onEffortChange → pi_set_thinking_level(level)
+  → pi_get_state 回读成功才写本地态（禁乐观更新；ModelSelector effort 传空串
+  保持受控）。除零红环（contextWindow<=0 不渲染 Bar）、Esc 关菜单 setState、
+  审批卡 respond 失败也 refresh 一并修。
+
+### 布局引擎（对照 layout-design.md v3.1）
+- **拉伸头栏死钮**：onHostPointerDown 白名单缺 `.fl-close-btn`——可关窗格独占
+  zone 时 ✕ 被 pointer 接管吞掉（同类坑第三次：fl-restore-btn/fl-home-btn
+  都修过，这个 2026-09-27 新增时漏了）。**规矩：注入页签按钮必须进白名单**。
+- **列 identity 四步优先级**（§2.1）：config 戳 → primary 家乡锚定 → 邻居传播
+  （仅无 primary 列）→ main；dropBlock 预戳仅当投放内容无 primary 或 region
+  一致——此前邻居传播先跑，主会话拖到左栏旁会被永久戳成 left（420 钳死）。
+- **narrowViewport 单写者**：删 layout-store 的 matchMedia(640)（与 rebalance
+  动态判据打架，窄窗收/展横跳）；boot 由 updateNarrowViewport 写初值。
+- **浮动隔离**：sync/onAction 对 getLayoutId()!==Model.MAIN_LAYOUT_ID 跳过/放行
+  （此前浮动 tabset 被推 minWidth 395、浮窗一级 ✕ 被拦——§12 待核查项落地）。
+- **absorbSurplus 真 bug（测试探出）**：无主栏回退路径里吸收者份额已计入 rest
+  扣减、槽位又被覆写为 rest → 行内留白（差值=吸收者原宽）。修法与
+  applyRootWeights 同构（rest += 归还份额）。**单测第一次抓住几何真 bug**。
+- 其余：主栏回家链①（最后一个 left 列右缘）；applyRootWeights 下限读实际生效
+  minWidth（不再顶回缩让）；appliedTree/activePresetId 持久化（新键
+  `mirach.harness.layout.applied.v1`）；REGION_LIMITS 单源化（删 presets 死副本）；
+  pointercancel 兜底（分隔条拖拽被系统打断后重排通道饿死）；100px 避让带
+  令牌化（flexlayout.css×2 + base.css 标题栏 height）；空 catch → console.error。
+
+### 设置页 §7-7（pi_settings.rs + settings-overlay.tsx）
+- 5 命令：pi_get/set_settings、pi_get/set_models_config（**整体替换写入**、
+  写前反序列化进 pi 的 Config/ModelsConfig 校验——坏文档不落盘）、
+  pi_auth_status（只报存在性绝不回 key 内容；坏 auth.json 如实报错——
+  不用 AuthStorage::load，它对损坏 JSON 静默回空目录）。
+- **pi 配置面实锤（源码核实）**：settings.json=~/.pi/agent/settings.json
+  （PI_CONFIG_PATH 可整体覆盖；**serde 写 snake_case、读 camelCase alias**
+  ——手写键名注意）；默认模型键=default_provider/default_model；
+  models.json providers map（凭据引用四种：!命令/env:VAR/file:/裸大写名）；
+  auth.json type tag（api_key/oauth/aws_credentials/bearer_token/service_key）。
+- **UI 坑**：设置浮层必须 portal 到 body（标题栏 z-50 是 stacking context，
+  组件树内渲染会被 veil(55)/投放(60) 压住）；Esc 走 escape-layers overlay 层。
+
+### 死代码清理 + pi vendored
+- **删 119 文件 / 16,474 行**：elements/ 108 个脚手架副本（活文件仅 10 个）、
+  ui/ 6 个 shadcn 未用原语、顶层 reasoning.tsx 重复、lib/storage、use-mobile、
+  icons/github、panes/logs-pane。方法：从 main.tsx 的 import 可达性 BFS
+  （脚本在 %TEMP%，**不进仓库根**——vite watch 着）。**坑：清理连带删了 15 个
+  空骨架目录，已 .gitkeep 重建**（git 不跟踪空目录，骨架位靠 .gitkeep 存活）。
+- **pi vendored**：`src-tauri/vendor/pi_agent_rust`（255MB→22MB 白名单拷贝：
+  src/examples/benches/themes/Cargo.toml/build.rs/CHANGELOG + build.rs 嵌入资源
+  4 件 + legacy models.generated.ts；tests/ 187MB 安全排除——path 依赖不编译
+  其 test targets）。**坑：cmd 里 `if exist X rmdir Y & robocopy Z` 会把整条
+  & 链当 if 语句体**（目录不存在=整链跳过，看似成功实则没跑）。上游同步
+  流程：重拷 + 核对**两个 vendor 本地补丁**：①session_index.rs:778 的
+  .read(true)（gh #239 同款）；②**push-protection 脱敏**——auth.rs 的
+  Google Gemini CLI/Antigravity OAuth client id/secret 四常量 +
+  secrets.rs 夹具表 google/slack 假字面量，替换为 MIRACH-VENDOR-REDACTED
+  （均为上游公开 installed-app 元数据/明显假夹具，上游带 ubs:ignore 注释；
+  GitHub Push Protection 不认，首次推送被 GH013 拦截后就地占位化——
+  上游真源 G:\pi_agent_rust-main 不动）。
+
+### 测试与文档同步
+- TS 77 用例（新增 rebalance.test 25 / constraints-sync.test 9 / turn-actor+13）；
+  Rust 30 用例（agui.rs 内嵌首个 src-tauri 测试：映射器逐行/缓冲 seq 从 1
+  monotonic/cap 淘汰连续性/审批 respond+cleanup）。
+- **spec-debt（测试钉住的翻转点，非 bug）**：MessageUpdate 的 *_START/*_END
+  未映射（前端无分支，无影响）；TurnEnd→STEP_FINISHED 未实现——usage 实际随
+  RUN_FINISHED 下发且前端只消费它（pi-integration.md §2.2 该行已改注）。
+- layout-design.md §5「离家 ✕ 常显」已按 §4.1 定稿改注（撤销常显）。

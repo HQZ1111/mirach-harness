@@ -161,7 +161,7 @@ Action 是唯一业务入口；不在 Tokio 里 block_on；AI 非确定性工作
 ### 2.1 端点
 
 `POST /ag-ui`（起 run，**返回 {runId}，不携事件流**）+ 
-`GET /ag-ui/stream?thread&lastEventId`（**常驻事件流，唯一消费口**；
+`GET  /ag-ui/stream?thread&lastEventId`（**常驻事件流，唯一消费口**；
 重放自实现，Last-Event-ID 跨 run 段连续续放，§0.3）。axum 绑
 `127.0.0.1:0`，**不透明随机 token**（uuid，经 IPC 下发）+ Origin/Host
 校验；(port, token) 存 AppState，前端 `invoke("get_agui_endpoint")`
@@ -170,6 +170,12 @@ POST body 带 `{threadId, message, images?}`（runId 由 Rust 生成）；GET
 流 token 走 query 参数（localhost 场景可接受）。**MVP 只为活跃 thread
 开一条常驻流（每 thread 一个 XState actor）**；后台 thread 的 delegate
 事件只进缓冲，切回时 Last-Event-ID 补放。
+**实现状态（2026-10-01 收口轮）**：token 校验 POST/GET 双端点已实装
+（GET 校验 query，前端 EventSource URL 已带）；CORS 显式白名单
+（tauri.localhost / tauri://localhost / dev:1430）+ Host 校验中间件
+（非 127.0.0.1:{port}/localhost:{port} → 403）；cursor 优先取 SSE 标准
+`Last-Event-ID` 头（EventSource 原生重连续放的关键——只认 query 会导致
+重连全量重放，已实测为 P0），与 query 取 max。
 
 ### 2.2 事件映射（pi::AgentEvent → AG-UI EventType）
 
@@ -184,7 +190,7 @@ POST body 带 `{threadId, message, images?}`（runId 由 Rust 生成）；GET
 | `ToolExecutionStart` | `CUSTOM`（tool_execution 载荷） | thinking-indicator「正在使用 X」 |
 | `ToolExecutionUpdate { partial_result }` | `CUSTOM`（执行进度流） | 终端块、web-preview 等工具 UI |
 | `ToolExecutionEnd { result, is_error }` | `CUSTOM`（tool_execution_end，error 标记） | tool-error 元素 |
-| `TurnEnd` | `STEP_FINISHED`（**带 usage**——ContextDisplay/token 计量的唯一来源） | ContextDisplay.Bar |
+| `TurnEnd` | （未外发——usage 实际随 `RUN_FINISHED` 下发，前端只消费 RUN_FINISHED.usage；本行旧定稿"STEP_FINISHED 带 usage"未实现，实现与消费方自洽，2026-10-01 改注） | — |
 | `MessageUpdate { TextEnd/ThinkingEnd }` | `TEXT_MESSAGE_END` / `THINKING_TEXT_MESSAGE_END`（与同 contentIndex 的 START 配对） | 轮次机 |
 | `AgentEnd { messages, error }` | `RUN_FINISHED` / `RUN_ERROR`；usage 快照落 SQLx | 轮次机 done/error |
 | `AutoCompactionStart/End` | `CUSTOM`（compaction 提示，**idle 态也可到达**，§0.3-5） | 会话横幅 |
@@ -299,7 +305,12 @@ a2ui_bridge/lifecycle 五文件职责原样保留）。
      不写盘）→ 草稿的"仅本次"（`{"allow":bool,"persist":false}`）
      按钮无意义，不设。
    - oneshot 超时 MVP 未实现（卡片挂起直到用户应答）；上游
-     `deadline` 字段私有。**待办**。
+     `deadline` 字段私有。**待办**。→ **2026-10-01 已清**：上游 manager
+     request_ui 对每请求 bind_deadline（超时 fail 非挂死，§9）——宿主无需
+     计时。同轮加固：`respond` 的 oneshot send 失败返回 Err（含 id，不再
+     假装成功）；`ApprovalRegistry::cleanup()` 在 discard/open 会话时清空
+     pending（registry 所有权在 PiEngine，AguiState 共享同一 Arc）——
+     鬼影卡片根治；前端 respond 失败也 refresh 拉取面。
    - ask 工具问题卡（ask_response）未实现，待 ask 工具启用。
 2. **ask 工具**：questions[{question, options, multi}] + timeoutMs，
    答案按 ask_response 语义回灌；超时=模型收到未回答错误（上游语义，
