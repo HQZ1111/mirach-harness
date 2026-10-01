@@ -61,9 +61,13 @@
    数字、thinking 流式（代码已就绪）。配 key 途径（pi 源码实锤）：
    env var（如 ANTHROPIC_API_KEY）/ auth.json / models.json 凭据引用
    （!命令、env:VAR、file:、裸大写名）——设置页「提供方凭据」段有指引。
-2. **打包**：`npm run tauri:build`（tauri.prod.conf.json 已剥 CDP、
-   bundle.active:true + nsis）——**尚未实际跑过一次**（Rust release 全量
-   编译较久）；首跑可能遇 NSIS 下载/工具链问题。
+2. **打包 ✓ 首跑已过**：`npm run tauri:build` 产出
+   `src-tauri\target\release\bundle\nsis\Mirach Harness_0.1.0_x64-setup.exe`
+   （83MB；release 全量 32m18s）。**坑（两连）**：①全量并行编译会 OOM
+   （asupersync 单 crate 编译期占 6GB+，`memory allocation failed`）——
+   `CARGO_BUILD_JOBS=2` 限并行解决；②cmd `set VAR=2 && ...` 会把尾随空格
+   带进值里，tauri CLI 报 "could not parse `2 `"——用 PowerShell
+   `$env:CARGO_BUILD_JOBS='2'` 或 `set "VAR=2"`。更新机制（updater）未配。
 3. **A2UI §7-6**：维持 MVP 后（§9 扫雷已清：三层全自建，属独立立项）。
 4. **等扩展生态**：审批 select/input 真实形状；ask_response 卡。
 5. **人工验收**：真机拖拽/多显示器/主题/长会话滚动；i18n（空骨架，
