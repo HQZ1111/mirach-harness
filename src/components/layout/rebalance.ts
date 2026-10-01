@@ -63,7 +63,9 @@ export const fitWindowWidth = (m: Model, allowGrowRevert: boolean) => {
 // 直接定根行权重：track=20、左右栏=记忆值（钳进约束）、主栏吃剩余。
 export const rootPxMem: Record<Region, number> = { left: 350, main: 746, right: 700 }
 
-/** 记忆根行各列的当前 px（onModelChange/boot/resize 时刷新） */
+/** 记忆根行各列的当前 px（onModelChange/boot/resize 时刷新）。
+ *  **钉回挂起期（pinPending）不得调用**——渲染中间态（钳制值）会污染
+ *  记忆（hidePin 契约，见 flex-layout pinAfterLayout）。 */
 export const measureRootPx = (m: Model) => {
   const root = m.getRootRow()
   for (const k of root?.getChildren() ?? []) {
@@ -74,12 +76,24 @@ export const measureRootPx = (m: Model) => {
   }
 }
 
-export const applyRootWeights = (m: Model) => {
+/** 根行解析式配重（竖轨引入的 20px 节点会触发权重归一化重排——
+ *  富余被顶到各分栏 max 钳制后 flexbox 无人吸收 → 白带）。按记忆 px
+ *  直接定根行权重：track=20、左右栏=记忆值（钳进约束）、主栏吃剩余。
+ *  返回是否实际施加（守卫拦截 = false，调用方可顺延重试——
+ *  整侧收起/恢复的 pinAfterLayout 依赖此值）。
+ *
+ *  语义照抄 hermes 的**声明式固定轨道**（controller.tsx：zone 宽度是
+ *  声明 px，不参与兄弟再分配）+ ZCode 的 expandedSize 记忆
+ *  （useAnimatedResizablePanel：panel.expand() 时 resize 回记忆尺寸）：
+ *  flexlayout 删列从不归一化剩余兄弟权重（RowNode.tidy 只删空子行），
+ *  渲染按 weight/Σ 比例膨胀——整侧收起后必须显式把在场固定轨钉回
+ *  记忆宽，禁止默认再归一结果裸露到渲染。 */
+export const applyRootWeights = (m: Model): boolean => {
   const root = m.getRootRow()
   const kids = root?.getChildren() ?? []
-  if (!root || kids.length < 2) return
+  if (!root || kids.length < 2) return false
   const avail = rootAvailPx() - SPLITTER_PX * (kids.length - 1)
-  if (avail < 300) return // 窗口不可信（最小化/CDP 伪影），配重会烙进存档
+  if (avail < 300) return false // 窗口不可信（最小化/CDP 伪影），配重会烙进存档
   // 布局未就绪守卫（同 absorbSurplus）：flexlayout 首次布局前
   // calculatedMin/Max 全 0，widthBounds = {0,0} 会把左右栏目标钳成 0、
   // 主栏吃满全部可用宽（weight 100）——量不到就整体放弃
@@ -88,7 +102,7 @@ export const applyRootWeights = (m: Model) => {
     const b = widthBounds(k, k instanceof RowNode)
     return Number.isFinite(b.min) && Number.isFinite(b.max) && b.max > 0
   })
-  if (!ready) return
+  if (!ready) return false
   const px: number[] = kids.map(() => 0)
   let rest = avail
   kids.forEach((k, i) => {
@@ -142,6 +156,7 @@ export const applyRootWeights = (m: Model) => {
       m.doAction(Actions.updateNodeAttributes(k.getId(), { weight: w }))
     }
   })
+  return true
 }
 
 /** 富余兜底（常跑版）：量测根行各列实际 px，非主栏列钳进聚合约束

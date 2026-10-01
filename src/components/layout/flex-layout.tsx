@@ -90,6 +90,141 @@ const makeDefaultLayout = () => presetToModelJson(LAYOUT_PRESETS[0])
 // 废弃竖轨实验的残骸——停车轨/吸收区/合并式轨——整体作废，直接默认布局）
 const STORAGE_KEY = 'mirach.harness.layout.v6'
 
+// ── 整侧隐藏（2026-10-01 定稿：**全隐藏**，不走边框轨——隐藏后不出现
+// 竖轨标签条；border 轨只保留给终端折叠与窄屏抽屉特性）────────────────────
+// 参照（照抄不发明）：
+// - hermes tree/store.ts $collapsedTreeSides：side collapse 是**纯可见性**
+//   ——树与声明式固定轨 px 原封不动，展开即原样回来；store.ts 2095：
+//   reset 重开收起侧，否则"隐藏在 reset 后悄悄存活，下一次 ⌘B 变成
+//   显示"（= 持久化标志脱同步的出处）；
+// - ZCode useAnimatedResizablePanel：panel.collapse() 期间
+//   rememberExpandedSize 保留展开尺寸，expand 时 panel.resize 钉回。
+// flexlayout 没有"隐藏"原语：页签只能删或折。折进 border 留 24px 竖排
+// 标签轨（用户否掉）；删则该侧列被 tidy 拆掉、剩余列权重按 weight/Σ
+// 比例膨胀（flexlayout 删节点**从不归一化**剩余兄弟权重——用户实测：
+// 隐藏右栏后左栏 350 → 420）。修法：隐藏前把该侧根行列子树 JSON
+// （含轨）+ 页签 id 清单快照落盘（= hermes"树不动"的等价物：结构在
+// 快照里原样保活），显示时整树拼回（+孤儿页签 addNode 回填），配重由
+// pinAfterLayout 按记忆 px（rebalance.rootPxMem = 声明轨/ZCode
+// expandedSize 的等价物）重钉，主栏吃剩余。
+const SIDE_HIDE_KEY = 'mirach.harness.layout.sideHide.v1'
+
+interface SideHideRecord {
+  /** 该侧根行列子树 JSON（含轨；隐藏前的结构原样） */
+  cols?: unknown[]
+  /** 该侧全部页签 id（含被拖去别栏/轨里的孤儿——恢复时回填） */
+  panes?: string[]
+}
+
+const readSideHide = (): { left?: SideHideRecord; right?: SideHideRecord } => {
+  try {
+    const raw = localStorage.getItem(SIDE_HIDE_KEY)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const r = parsed as Record<string, unknown>
+    const one = (v: unknown): SideHideRecord | undefined => {
+      if (!v || typeof v !== 'object') return undefined
+      const o = v as Record<string, unknown>
+      return {
+        cols: Array.isArray(o.cols) ? (o.cols as unknown[]) : undefined,
+        panes: Array.isArray(o.panes) ? (o.panes as string[]) : undefined,
+      }
+    }
+    return { left: one(r.left), right: one(r.right) }
+  } catch {
+    return {}
+  }
+}
+
+const writeSideHide = (v: { left?: SideHideRecord; right?: SideHideRecord }) => {
+  try {
+    localStorage.setItem(SIDE_HIDE_KEY, JSON.stringify(v))
+  } catch (e) {
+    console.error('[flex-layout] persist side hide record failed', e)
+  }
+}
+
+const sideHideRecord: { left?: SideHideRecord; right?: SideHideRecord } = readSideHide()
+
+/** JSON 级 zone 读取（与 constraints.regionCfgOfNode 同构：行不带 config，
+ *  下钻第一个带 config 的 tabset）。 */
+const jsonZoneOf = (n: unknown): { region: Region; track: boolean } | undefined => {
+  if (!n || typeof n !== 'object') return undefined
+  const node = n as { type?: string; config?: { region?: string; track?: boolean }; children?: unknown[] }
+  if (node.type === 'tabset') {
+    const cfg = node.config
+    if (cfg && (cfg.region === 'left' || cfg.region === 'main' || cfg.region === 'right')) {
+      return { region: cfg.region, track: cfg.track === true }
+    }
+    return undefined
+  }
+  if (node.type === 'row') {
+    for (const c of node.children ?? []) {
+      const deep = jsonZoneOf(c)
+      if (deep) return deep
+    }
+  }
+  return undefined
+}
+
+/** 折叠期间被关闭的页签不复活：快照里只保留仍存活的页签（= 边框轨里
+ *  还在的），剪空的分栏/行整枝删除（单子行按 RowNode.tidy 语义解包）。
+ *  **轨列例外**：20px 竖轨本来就是空的（RailNav 渲染在占位层），剪空
+ *  逻辑不得吞掉它——否则竖轨形态的侧栏隐藏后恢复丢轨。 */
+const pruneSideCols = (cols: unknown[], alive: Set<string>): unknown[] => {
+  const walk = (n: unknown): unknown => {
+    if (!n || typeof n !== 'object') return null
+    const node = n as { type?: string; id?: string; children?: unknown[] }
+    if (node.type === 'tab') return node.id && alive.has(node.id) ? node : null
+    if (node.type === 'tabset' && jsonZoneOf(node)?.track) return node
+    const kids = Array.isArray(node.children) ? node.children.map(walk).filter(Boolean) : []
+    if (kids.length === 0) return null
+    if (node.type === 'row' && kids.length === 1) return kids[0]
+    return { ...node, children: kids }
+  }
+  return cols.map(walk).filter(Boolean) as unknown[]
+}
+
+const collectTabIds = (cols: unknown[]): Set<string> => {
+  const out = new Set<string>()
+  const walk = (n: unknown) => {
+    if (!n || typeof n !== 'object') return
+    const node = n as { type?: string; id?: string; children?: unknown[] }
+    if (node.type === 'tab' && node.id) out.add(node.id)
+    for (const c of node.children ?? []) walk(c)
+  }
+  for (const c of cols) walk(c)
+  return out
+}
+
+/** 快照里多出的边框页签（边角：折叠期间从别处拖进轨的页签）并入快照
+ *  最后一个 tabset，保证不丢。 */
+const lastTabsetOf = (n: unknown): { children?: unknown[] } | undefined => {
+  if (!n || typeof n !== 'object') return undefined
+  const node = n as { type?: string; children?: unknown[] }
+  if (node.type === 'tabset') return node
+  const kids = (node.children ?? []).filter((c) => (c as { type?: string })?.type !== 'tab')
+  for (let i = kids.length - 1; i >= 0; i--) {
+    const found = lastTabsetOf(kids[i])
+    if (found) return found
+  }
+  return undefined
+}
+
+/** 该侧在主布局网格里是否还有分栏——展开态判定 = **实际模型状态**
+ *  （hermes resetLayoutTree 注释同款问题：持久化标志与实际脱同步后，
+ *  一次点击被空轨 expand 的 no-op 吃掉，第二次才生效）。 */
+const sideHasGridZone = (m: Model, side: Region): boolean => {
+  let found = false
+  m.visitNodes((n) => {
+    if (found || !(n instanceof TabSetNode) || n.getChildren().length === 0) return
+    if (n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
+    if (zoneConfigOf(n)?.region === side) found = true
+  })
+  return found
+}
+
 // ── zone 的 region / 形态 / 约束（docs/layout-design.md §2/§5/§12） ─────────
 // region 约束数值（REGION_LIMITS）与窗格类型表都在 pane-registry.ts。
 
@@ -146,8 +281,12 @@ export function FlexLayoutShell() {
   useEffect(() => {
     syncTabsetConstraints(model)
     const sides = useLayoutStore.getState().sideCollapsed
-    if (sides.left) collapseSide('left')
-    if (sides.right) collapseSide('right')
+    // 存量脱同步（flag 收起、页签在网格）在 boot 折叠——折叠确实发生时
+    // 必须接配重重钉：否则 90ms 重排的量测会把再归一中间态（剩余列被
+    // 顶到 max 的钳制值）写进记忆，漂移从此定格
+    const foldedL = sides.left ? hideSide('left') : false
+    const foldedR = sides.right ? hideSide('right') : false
+    if (foldedL || foldedR) pinAfterLayout()
     measureRootPx(model)
     // 窄屏判定单写者（P1-3：640 matchMedia 写者已删）——动态判据
     // updateNarrowViewport 在 boot 先写一次初值（窄窗首启两侧栏立即撤成
@@ -174,10 +313,15 @@ export function FlexLayoutShell() {
   const sideCollapsed = useLayoutStore(s => s.sideCollapsed)
   const zoneEditorOpen = useLayoutStore(s => s.zoneEditorOpen)
 
-  // 调试句柄（CDP 探针用）：window.__flModel = 活动布局模型
+  // 调试句柄（CDP 探针用）：window.__flModel = 活动布局模型；
+  // __rootPxMem = 根行记忆 px（rebalance 模块态的活引用）；__pinLog =
+  // 钉回轨迹（[px 左,主,右…], avail, 是否落笔）
   useEffect(() => {
-    (window as { __flModel?: Model }).__flModel = model
-    return () => { if ((window as { __flModel?: Model }).__flModel === model) (window as { __flModel?: Model }).__flModel = undefined }
+    const w = window as { __flModel?: Model; __rootPxMem?: typeof rootPxMem; __pinLog?: unknown[] }
+    w.__flModel = model
+    w.__rootPxMem = rootPxMem
+    if (!w.__pinLog) w.__pinLog = []
+    return () => { if (w.__flModel === model) w.__flModel = undefined }
   }, [model])
 
   const persist = useCallback((m: Model) => {
@@ -190,10 +334,63 @@ export function FlexLayoutShell() {
 
   // 拖拽/迁移的再入护栏：迁移本身触发 onModelChange，别递归
   const migratingRef = useRef(false)
+  // 拖拽标志的逃逸阀数据：最后一次指针活动时刻（document 捕获段刷新）。
+  // pointerup 整体缺失时（CDP 合成 button:none 释放只出 mouseup、捕获
+  // 丢失等），deferred 分支按超时强制放行重排通道。
+  const lastPointerActivityRef = useRef(0)
 
   // 根行 px 记忆的时效守卫（延迟量测——onModelChange 时 DOM 还是旧渲染）
   const modelRef = useRef(model)
   modelRef.current = model
+
+  // 模型替换的同步句柄：setModel 要到下一次 render 才反映进 modelRef，
+  // 同一拍内的连续调用（窄屏恢复连展两侧、toggleSide 收尾 persist）必须
+  // 立即读到新模型——否则会拿旧模型 toJson/doAction（整侧快照还原引入）
+  const adoptModel = useCallback((next: Model) => {
+    modelRef.current = next
+    setModel(next)
+  }, [])
+
+  // 折叠/隐藏后的配重重钉（hermes 声明式固定轨 / ZCode expandedSize 的
+  // 等价物）：非主栏列按记忆 px（rootPxMem）显式钉回、主栏吃剩余——
+  // 禁止 flexlayout 的默认兄弟权重再归一结果裸露到渲染。**同步施加**：
+  // bounds 就绪靠强制 calcMinMaxSize（纯属性计算，flexlayout 布局期跑的
+  // 就是它——fromJson 后未布局的模型也能同步算）；不追加 absorbSurplus
+  // ——钉回后 Σ=可用宽、富余为零，而 absorb 读到的是写入前的旧 rect，
+  // 反而会把钉回砸回钳制值（rAF 版实测：350 → 420 复现；且 rAF 在被
+  // 遮挡的 WebView2 里被节流，钉回整个不落地）。pinPending 挂起到下一
+  // 帧：hideSide/showSide 触发的 90ms 串行重排不得读中间态写记忆。
+  const pinPendingRef = useRef(false)
+  const pinRafsRef = useRef<number[]>([])
+  const pinNow = useCallback((m: Model): boolean => {
+    ;(m.getRootRow() as unknown as { calcMinMaxSize?: () => void } | null)?.calcMinMaxSize?.()
+    const ok = applyRootWeights(m)
+    try {
+      const w = window as { __pinLog?: unknown[]; __rootPxMem?: Record<string, number> }
+      if (w.__pinLog) {
+        w.__pinLog.push({
+          t: Math.round(performance.now()),
+          mem: w.__rootPxMem ? { ...w.__rootPxMem } : null,
+          applied: ok,
+        })
+        if (w.__pinLog.length > 40) w.__pinLog.shift()
+      }
+    } catch { /* 调试句柄不干扰主流程 */ }
+    return ok
+  }, [])
+  const pinAfterLayout = useCallback(() => {
+    const m = modelRef.current
+    if (!m) return
+    pinPendingRef.current = true
+    pinNow(m)
+    updateNarrowViewport(m)
+    for (const id of pinRafsRef.current) cancelAnimationFrame(id)
+    pinRafsRef.current = [
+      requestAnimationFrame(() => {
+        pinPendingRef.current = false
+      }),
+    ]
+  }, [pinNow])
 
   // 布局变化 → 持久化；手动拖动后清除激活预设标记 + bump 版本（徽标刷新）。
   // 用回调传入的 m（applyJson 在 setModel 前做程序化动作，闭包 model 是旧的）。
@@ -210,7 +407,23 @@ export function FlexLayoutShell() {
     window.clearTimeout(rebalanceTimerRef.current)
     rebalanceStructuralRef.current = rebalanceStructuralRef.current || structural
     rebalanceTimerRef.current = window.setTimeout(() => {
+      const wLog = window as { __rebalanceLog?: unknown[] }
+      const log = (v: unknown) => {
+        if (wLog.__rebalanceLog) {
+          wLog.__rebalanceLog.push(v)
+          if (wLog.__rebalanceLog.length > 60) wLog.__rebalanceLog.shift()
+        }
+      }
       if (splitterDraggingRef.current) {
+        // 逃逸阀：拖拽结束的 pointerup 整体缺失（pointer 事件层异常）时
+        // 拖拽标志永真，这里会自续饿死串行通道——指针活动超时即视为
+        // 拖拽已结束，强制放行
+        if (lastPointerActivityRef.current > 0 && performance.now() - lastPointerActivityRef.current > 1500) {
+          splitterDraggingRef.current = false
+        }
+      }
+      if (splitterDraggingRef.current) {
+        log({ t: Math.round(performance.now()), ran: 'deferred-dragging' })
         scheduleRebalance(rebalanceStructuralRef.current)
         return
       }
@@ -218,6 +431,7 @@ export function FlexLayoutShell() {
       if (!m) return
       const allowRevert = rebalanceStructuralRef.current
       rebalanceStructuralRef.current = false
+      log({ t: Math.round(performance.now()), ran: pinPendingRef.current ? 'pending-skip' : 'full', structural: allowRevert })
       // 自适应窗宽（用户 2026-09-26 定稿）：Σ(各列聚合 min) + 轨 + 缝装不
       // 下当前窗口 → 窗宽自动长到 need；关闭/合并腾出空间（结构动作触发
       // 且 need ≤ 1800）→ 回 1800 设计宽。先于 sync（长窗后缩让不误触发）
@@ -225,6 +439,14 @@ export function FlexLayoutShell() {
       // 挤压级联①：装不下各列 min → 每大栏合并分栏进一级栏（单向，用户
       // 定稿："机器人在会话栏右边单独开一栏，这一栏属于左栏的一部分"）
       if (window.innerWidth + 2 < rootNeededMin(m)) mergeZonesPerColumn(m)
+      if (pinPendingRef.current) {
+        // 配重重钉挂起中：渲染中间态（权重再归一的钳制值）不可信——
+        // 不得写记忆（measureRootPx）也不得写权重（absorbSurplus 与钉回
+        // 打架）；只做约束修复与窄屏判定，配重由钉回落地承担
+        syncTabsetConstraints(m)
+        updateNarrowViewport(m)
+        return
+      }
       measureRootPx(m)
       syncTabsetConstraints(m)
       absorbSurplus(m)
@@ -264,7 +486,22 @@ export function FlexLayoutShell() {
         // 约束先修（其间 onModelChange 会 setActivePreset(null)/persist(next)——
         // 无妨），再记预设标记，避免被程序化动作的 onModelChange 清掉
         syncTabsetConstraints(next)
-        setModel(next)
+        adoptModel(next)
+        // 侧栏收起标志以新模型实际状态重导（hermes resetLayoutTree：
+        // "Restore everything includes collapsed SIDES ... so hiding never
+        // appears to persist"——预设/镜像/重置后的新模型页签全在网格或
+        // 全按 JSON 摆好，残留的旧标志会把下一次隐藏点击变成空轨 expand
+        // 的 no-op，第二次点击才生效）。隐藏记录同步清理：标志翻 false
+        // 的侧，快照作废（预设把页签带回网格了）
+        const leftNow = !sideHasGridZone(next, 'left')
+        const rightNow = !sideHasGridZone(next, 'right')
+        setSideCollapsed('left', leftNow)
+        setSideCollapsed('right', rightNow)
+        if (!leftNow || !rightNow) {
+          if (!leftNow) delete sideHideRecord.left
+          if (!rightNow) delete sideHideRecord.right
+          writeSideHide(sideHideRecord)
+        }
         setActivePreset(presetId)
         setAppliedTree(json)
         persist(next)
@@ -277,7 +514,7 @@ export function FlexLayoutShell() {
       // rootPxMem 是模块级记忆，切预设/fullReset 必须显式回落）
       Object.assign(rootPxMem, REGION_DEFAULT_W)
     },
-    [persist],
+    [persist, adoptModel],
   )
 
   const applyTemplate = useCallback(
@@ -351,6 +588,34 @@ export function FlexLayoutShell() {
         const data = action.data as { nodeId?: string; weights?: number[] }
         const adjusting = (action as unknown as { isAdjusting?: () => boolean }).isAdjusting?.() ?? false
         const row = model.getNodeById(data.nodeId ?? '')
+        // 负/非有限权重防线（隔离测试实锤：拖拽与 fresh reset 渲染竞争时
+        // flexlayout 的 adjusting 数学算出 [-565] 级负权重并写进模型——
+        // 渲染异常 + React 树停摆）。权重是非负比例，负值/NaN 只能来自
+        // 库内部的坏 rect 计算：直接拒收（错误可见），提交帧退回最后
+        // 一帧好权重。
+        const weights = Array.isArray(data.weights) ? data.weights : []
+        const insane = weights.some((w) => !Number.isFinite(w) || w < 0)
+        if (insane) {
+          console.error('[flex-layout] reject insane ADJUST_WEIGHTS', data.nodeId, weights)
+          const w2 = window as { __adjustLog?: unknown[] }
+          if (w2.__adjustLog) w2.__adjustLog.push({ t: Math.round(performance.now()), insane: true, weights, adjusting })
+          if (adjusting) {
+            const last = lastAdjustRef.current
+            if (last && last.nodeId === data.nodeId && last.weights.length > 0 && last.weights.every((w) => Number.isFinite(w) && w >= 0)) {
+              return Actions.adjustWeights(last.nodeId, last.weights).setAdjusting(true)
+            }
+            return undefined // 无好权重可退：拒收本帧（拖拽停摆优于写坏模型）
+          }
+          if (row instanceof RowNode) {
+            const sane = row.getChildren().map((c) => (c as unknown as { getWeight?: () => number }).getWeight?.() ?? 100)
+            return Actions.adjustWeights(row.getId(), sane)
+          }
+          return undefined
+        }
+        const wAdj = window as { __adjustLog?: unknown[] }
+        if (wAdj.__adjustLog && wAdj.__adjustLog.length < 200) {
+          wAdj.__adjustLog.push({ t: Math.round(performance.now()), weights, adjusting })
+        }
         if (adjusting) {
           lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: data.weights ?? [] }
           if (row instanceof RowNode && Array.isArray(data.weights) && (window as { __noClamp?: boolean }).__noClamp !== true) {
@@ -395,15 +660,18 @@ export function FlexLayoutShell() {
     [model, persist],
   )
 
-  // ── 整侧收起（标题栏 positional toggles）——当前住在该侧大栏分栏里的页签
-  // 全部折进对应 border 轨道（被拖去别栏的不抓），展开回同 region 分栏。
-  const collapseSide = useCallback(
-    (side: 'left' | 'right') => {
+  // ── 整侧收起（**窄屏抽屉专用**的 border 折叠）——该侧大栏分栏里的页签
+  // 折进对应 border 轨道（VS 式 overlay 抽屉）；标题栏「隐藏」不走这条
+  // 路径（hideSide 全隐藏）。不触碰 hideSide 的记录（两个特性独立）。
+  const foldSide = useCallback(
+    (side: 'left' | 'right'): boolean => {
+      const m = modelRef.current
       const borderId = side === 'left' ? 'border_left' : 'border_right'
       let idx = 0
       const ids: string[] = []
-      model.visitNodes((n) => {
+      m.visitNodes((n) => {
         if (!(n instanceof TabNode)) return
+        if (n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return // 浮动窗格不折叠（§8）
         const ptype = paneTypeOf(n.getId())
         if (!ptype || PANE_TYPES[ptype].region !== side) return
         const set = n.getParent()
@@ -413,45 +681,179 @@ export function FlexLayoutShell() {
         if (cfg?.region !== side) return
         ids.push(n.getId())
       })
+      if (ids.length === 0) return false
       for (const id of ids) {
-        model.doAction(Actions.moveNode(id, borderId, DockLocation.CENTER, idx++))
+        m.doAction(Actions.moveNode(id, borderId, DockLocation.CENTER, idx++))
       }
+      return true
     },
-    [model],
+    [],
   )
 
+  // ── 整侧隐藏（标题栏「隐藏左/右栏」）：全隐藏——页签从模型删除（不走
+  // border，不出现竖轨），该侧列结构在快照里原样保活，主栏吃满。孤儿
+  // 页签（被拖去别栏/轨里的该侧页签）一并记录。浮窗页签不动（§8）。
+  const hideSide = useCallback(
+    (side: 'left' | 'right'): boolean => {
+      const m = modelRef.current
+      const ids: string[] = []
+      m.visitNodes((n) => {
+        if (!(n instanceof TabNode)) return
+        if (n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return // 浮动窗格不隐藏（§8）
+        const ptype = paneTypeOf(n.getId())
+        if (!ptype || PANE_TYPES[ptype].region !== side) return
+        ids.push(n.getId())
+      })
+      if (ids.length === 0) return false
+      // 删除前快照该侧根行列子树（含轨）——展开按原结构拼回
+      const json = m.toJson() as { layout?: { children?: unknown[] } }
+      const rootKids = Array.isArray(json.layout?.children) ? json.layout.children! : []
+      sideHideRecord[side] = {
+        cols: rootKids.filter((k) => jsonZoneOf(k)?.region === side),
+        panes: ids,
+      }
+      writeSideHide(sideHideRecord)
+      // 程序化 deleteTab 不经过 onAction（回家/关闭拦截不适用——隐藏是
+      // chrome 语义，一级窗格也照藏）；DELETE_TAB 触发串行通道，钉回
+      // 挂起期由调用方调度
+      for (const id of ids) {
+        m.doAction(Actions.deleteTab(id))
+      }
+      return true
+    },
+    [],
+  )
+
+  // ── 整侧显示：首选整树拼回快照（hermes 语义——隐藏不改树，展开按原
+  // 结构回来，宽度由 pinAfterLayout 按记忆 px 钉回）；快照缺失/不可信
+  // （如升级前隐藏的存量布局）→ 按记录的页签 id 在大栏边缘重建一个
+  // 分栏堆叠回填；连记录都没有 → 重建一级窗格兜底 + console.error。
+  const showSide = useCallback(
+    (side: 'left' | 'right'): boolean => {
+      const m = modelRef.current
+      if (sideHasGridZone(m, side)) return false // 已在场（flag 脱同步防御）
+      const rec = sideHideRecord[side]
+      // ① 结构快照拼回
+      if (rec && Array.isArray(rec.cols) && rec.cols.length > 0) {
+        try {
+          const modelTabIds = new Set<string>()
+          m.visitNodes((n) => {
+            if (n instanceof TabNode) modelTabIds.add(n.getId())
+          })
+          const cols = rec.cols
+          const snapIds = collectTabIds(cols)
+          // 快照页签与现模型的撞 id 防御（正常隐藏期不可能重建同 id——
+          // 无分栏可投放；防外部篡改）
+          for (const id of modelTabIds) snapIds.delete(id)
+          const pruned = pruneSideCols(cols, snapIds)
+          if (pruned.length > 0) {
+            const json = m.toJson() as { layout: { children?: unknown[] } }
+            const rootKids = Array.isArray(json.layout.children) ? json.layout.children : []
+            // 拼回外缘：左=最左（轨贴外缘时插在轨后）、右=最右（轨前）
+            if (side === 'left') {
+              let at = 0
+              while (at < rootKids.length && jsonZoneOf(rootKids[at])?.track) at++
+              rootKids.splice(at, 0, ...pruned)
+            } else {
+              let end = rootKids.length
+              while (end > 0 && jsonZoneOf(rootKids[end - 1])?.track) end--
+              rootKids.splice(end, 0, ...pruned)
+            }
+            // 孤儿页签回填（隐藏时不在该侧列里的：拖去别栏/轨里的）
+            const restoredIds = collectTabIds(pruned)
+            const orphans = (rec.panes ?? []).filter((id) => !restoredIds.has(id) && !modelTabIds.has(id))
+            if (orphans.length > 0) {
+              const host = lastTabsetOf(pruned[pruned.length - 1])
+              for (const id of orphans) {
+                if (host) host.children = [...(host.children ?? []), paneTabJson(id)]
+              }
+            }
+            const next = configure(Model.fromJson(json as import('flexlayout-react').IJsonModel))
+            syncTabsetConstraints(next)
+            adoptModel(next)
+            delete sideHideRecord[side]
+            writeSideHide(sideHideRecord)
+            pinAfterLayout()
+            return true
+          }
+        } catch (e) {
+          // 快照 JSON 不可信 → 清掉走重建回退（铁律 12：错误可见）
+          console.error('[flex-layout] side show from snapshot failed, falling back to rebuild', e)
+          sideHideRecord[side] = undefined
+          writeSideHide(sideHideRecord)
+        }
+      }
+      // ② 回退：按记录 id（缺则一级窗格）在大栏边缘重建分栏堆叠回填
+      const ids = rec?.panes && rec.panes.length > 0 ? rec.panes : [PRIMARY_PANE[side]]
+      const root = m.getRootRow()
+      const kids = (root?.getChildren() ?? []).filter(
+        (k) => !(k instanceof TabSetNode && zoneConfigOf(k)?.track),
+      )
+      if (kids.length === 0) return false
+      const anchor = (side === 'left' ? kids[0] : kids[kids.length - 1]) as TabSetNode | RowNode
+      const leadId = ids[0]
+      m.doAction(
+        Actions.addNode(paneTabJson(leadId), anchor.getId(), side === 'left' ? DockLocation.LEFT : DockLocation.RIGHT, 0),
+      )
+      const newSet = m.getNodeById(leadId)?.getParent()
+      if (newSet instanceof TabSetNode) {
+        // 重建分栏直接按记忆宽写权重（不依赖延迟计算——否则 flexbox 默认
+        // 权重会被 max 钳住、measureRootPx 又把钳制值记回记忆）
+        const lim = REGION_LIMITS[side]
+        const memW = Math.min(Math.max(rootPxMem[side], lim.minW), lim.maxW ?? 99999)
+        const availNow = Math.max(rootAvailPx() - SPLITTER_PX * kids.length, 1)
+        m.doAction(
+          Actions.updateNodeAttributes(newSet.getId(), {
+            config: { region: side, rail: false },
+            weight: (memW / availNow) * 100,
+          }),
+        )
+        for (const id of ids.slice(1)) {
+          if (!m.getNodeById(id)) {
+            m.doAction(Actions.addNode(paneTabJson(id), newSet.getId(), DockLocation.CENTER, newSet.getChildren().length))
+          }
+        }
+      }
+      delete sideHideRecord[side]
+      writeSideHide(sideHideRecord)
+      pinAfterLayout()
+      return true
+    },
+    [adoptModel, pinAfterLayout],
+  )
+
+  // 窄屏抽屉的 border 展开（foldSide 的逆操作）：页签从 border 收编回
+  // 同 region 分栏；无分栏 → 大栏边缘重建 + pinAfterLayout 收尾。
   const expandSide = useCallback(
     (side: 'left' | 'right'): boolean => {
+      const m = modelRef.current
       const borderId = side === 'left' ? 'border_left' : 'border_right'
-      const border = model.getNodeById(borderId)
+      const border = m.getNodeById(borderId)
       if (!(border instanceof BorderNode)) return false
       const tabs = border.getChildren().filter((c): c is TabNode => c instanceof TabNode)
       if (tabs.length === 0) return false
-      // 目标分栏：同 region 的现有分栏；无 → 大栏边缘重建（region 显式补上）。
-      // 返回是否**重建**了分栏——重建产生默认权重的新 tabset，需要记忆
-      // 配重收尾；并入现有分栏则不需要（权重漂移由 absorb 兜底）。
-      let rebuilt = false
+      // 目标分栏：同 region 的现有分栏；无 → 大栏边缘重建（region 显式补上）
       let target: TabSetNode | undefined
-      model.visitNodes((n) => {
+      m.visitNodes((n) => {
         if (target || !(n instanceof TabSetNode) || n.getChildren().length === 0) return
         if (zoneConfigOf(n)?.region === side) target = n
       })
+      let rebuilt = false
       const lead = tabs[0]
       if (target) {
-        model.doAction(Actions.moveNode(lead.getId(), target.getId(), DockLocation.CENTER, target.getChildren().length))
+        m.doAction(Actions.moveNode(lead.getId(), target.getId(), DockLocation.CENTER, target.getChildren().length))
       } else {
         rebuilt = true
-        const root = model.getRootRow()
+        const root = m.getRootRow()
         // 重建锚点候选排除竖轨（轨贴大栏外缘，不参与锚点）
         const kids = (root?.getChildren() ?? []).filter(
           (k) => !(k instanceof TabSetNode && zoneConfigOf(k)?.track),
         )
         if (kids.length === 0) return false
-        // 重建锚点：左栏贴最左、右栏贴最右（此前都锚第一个子节点——两侧
-        // 同收再展开时右栏被插到左栏旁边，主栏被挤到最后 = "栏的位置自己
-        // 变"，2026-09-26 窄视口往返实测抓到）
+        // 重建锚点：左栏贴最左、右栏贴最右（两侧同收再展开时右栏被插到
+        // 左栏旁边 = "栏的位置自己变"，2026-09-26 窄视口往返实测抓到）
         const anchor = (side === 'left' ? kids[0] : kids[kids.length - 1]) as TabSetNode | RowNode
-        model.doAction(
+        m.doAction(
           Actions.moveNode(
             lead.getId(),
             anchor.getId(),
@@ -461,13 +863,12 @@ export function FlexLayoutShell() {
         )
         const newSet = lead.getParent()
         if (newSet instanceof TabSetNode) {
-          // 重建分栏直接按记忆宽写权重（常量表钳制，不依赖延迟计算——
-          // 否则 flexbox 默认权重会被 max 钳住、measureRootPx 又把钳制值
-          // 记回记忆，来回都是 420）
+          // 重建分栏直接按记忆宽写权重（不依赖延迟计算——否则 flexbox
+          // 默认权重会被 max 钳住、measureRootPx 又把钳制值记回记忆）
           const lim = REGION_LIMITS[side]
           const memW = Math.min(Math.max(rootPxMem[side], lim.minW), lim.maxW ?? 99999)
           const availNow = Math.max(rootAvailPx() - SPLITTER_PX * kids.length, 1)
-          model.doAction(
+          m.doAction(
             Actions.updateNodeAttributes(newSet.getId(), {
               config: { region: side, rail: false },
               weight: (memW / availNow) * 100,
@@ -478,37 +879,49 @@ export function FlexLayoutShell() {
       for (const t of tabs.slice(1)) {
         const host = lead.getParent()
         if (host instanceof TabSetNode) {
-          model.doAction(Actions.moveNode(t.getId(), host.getId(), DockLocation.CENTER, host.getChildren().length))
+          m.doAction(Actions.moveNode(t.getId(), host.getId(), DockLocation.CENTER, host.getChildren().length))
         }
       }
+      if (rebuilt) pinAfterLayout()
       return rebuilt
     },
-    [model],
+    [pinAfterLayout],
   )
 
   const toggleSide = useCallback(
     (side: 'left' | 'right') => {
-      const collapsed = useLayoutStore.getState().sideCollapsed[side]
+      const st = useLayoutStore.getState()
+      if (st.narrowViewport) {
+        // 窄屏抽屉模式：页签已在 border 轨（模型不动），只记录展开/收起
+        // 意图——hermes 语义：collapsible 窗格窄屏留在 overlay 轨道，宽屏
+        // 才收编
+        setSideCollapsed(side, !st.sideCollapsed[side])
+        return
+      }
+      // 展开/隐藏判定以**实际模型状态**为准（该侧在网格里还有没有分栏），
+      // 不信持久化标志——全重置/应用预设后标志与实际脱同步时，第一次
+      // 点击会被空轨 expand 的 no-op 吃掉（hermes resetLayoutTree 注释的
+      // "flipping the next ⌘B into a SHOW"同款问题）
+      const hidden = !sideHasGridZone(modelRef.current, side)
       migratingRef.current = true
       try {
-        if (collapsed) {
-          if (useLayoutStore.getState().narrowViewport) {
-            setSideCollapsed(side, false)
-          } else {
-            expandSide(side)
-            setSideCollapsed(side, false)
-          }
+        if (hidden) {
+          showSide(side)
+          setSideCollapsed(side, false)
         } else {
-          collapseSide(side)
+          hideSide(side)
           setSideCollapsed(side, true)
+          // 隐藏后剩余列按记忆 px 重钉（等首帧布局后量测就绪）——主栏
+          // 吸收腾出的宽度，剩余侧栏不动（hermes 声明轨语义）
+          pinAfterLayout()
         }
       } finally {
         migratingRef.current = false
       }
-      persist(model)
+      persist(modelRef.current)
       bumpLayoutRev()
     },
-    [model, persist, collapseSide, expandSide],
+    [hideSide, showSide, pinAfterLayout, persist],
   )
 
   // 竖轨 ⇄ 横向 双形态切换（v3 定稿）：竖轨 = 该栏外缘一条 **20px 空轨**
@@ -682,17 +1095,20 @@ export function FlexLayoutShell() {
   // 本 effect 重跑 → setActivePreset(null)）；②applyRootWeights 只在确实
   // **重建**了分栏时跑——否则会用旧记忆覆盖刚应用的预设权重。
   useEffect(() => {
-    const borderOf = (side: 'left' | 'right') =>
-      model.getNodeById(side === 'left' ? 'border_left' : 'border_right')
+    const borderOf = (m: Model, side: 'left' | 'right') =>
+      m.getNodeById(side === 'left' ? 'border_left' : 'border_right')
     if (narrow) {
       migratingRef.current = true
       try {
-        collapseSide('left')
-        collapseSide('right')
+        foldSide('left')
+        foldSide('right')
+        // expandSide 可能 adoptModel（快照拼回）——边框形态翻转必须落在
+        // **当前**模型上，旧闭包 model 已失效
+        const m = modelRef.current
         for (const side of ['left', 'right'] as const) {
-          const b = borderOf(side)
+          const b = borderOf(m, side)
           if (b instanceof BorderNode && !b.isOverlay()) {
-            model.doAction(Actions.updateNodeAttributes(b.getId(), { borderType: 'overlay' }))
+            m.doAction(Actions.updateNodeAttributes(b.getId(), { borderType: 'overlay' }))
           }
         }
       } finally {
@@ -700,32 +1116,25 @@ export function FlexLayoutShell() {
       }
     } else {
       const sides = useLayoutStore.getState().sideCollapsed
-      let rebuilt = false
       migratingRef.current = true
       try {
-        if (!sides.left) rebuilt = expandSide('left') || rebuilt
-        if (!sides.right) rebuilt = expandSide('right') || rebuilt
+        if (!sides.left) expandSide('left')
+        if (!sides.right) expandSide('right')
+        // 同上：expandSide（快照拼回 adoptModel / moveNode）之后以
+        // modelRef.current 为准；重建分栏的配重收尾由 expandSide 的
+        // pinAfterLayout 自带（首帧布局后按记忆宽重排 + 富余兜底）
+        const m = modelRef.current
         for (const side of ['left', 'right'] as const) {
-          const b = borderOf(side)
+          const b = borderOf(m, side)
           if (b instanceof BorderNode && b.isOverlay()) {
-            model.doAction(Actions.updateNodeAttributes(b.getId(), { borderType: 'split' }))
+            m.doAction(Actions.updateNodeAttributes(b.getId(), { borderType: 'split' }))
           }
         }
       } finally {
         migratingRef.current = false
       }
-      if (rebuilt) {
-        // 重建的分栏是默认权重且新节点约束未算好（就绪守卫会拦掉同步
-        // 配重）——延迟到首次布局之后按记忆宽重排 + 富余兜底
-        window.setTimeout(() => {
-          if (modelRef.current === model) {
-            applyRootWeights(model)
-            absorbSurplus(model)
-          }
-        }, 120)
-      }
     }
-    persist(model)
+    persist(modelRef.current)
     bumpLayoutRev()
   }, [narrow, model, persist])
 
@@ -825,6 +1234,7 @@ export function FlexLayoutShell() {
     const splitterOf = (e: { target: EventTarget | null }) =>
       (e.target as HTMLElement)?.closest?.('.flexlayout__splitter') as HTMLElement | null
     const onDocPointerDown = (e: PointerEvent) => {
+      markPointerActivity()
       if (e.button !== 0) return
       const splitterHit = splitterOf(e)
       if (!splitterHit) {
@@ -846,6 +1256,7 @@ export function FlexLayoutShell() {
       moved = false
     }
     const onDocPointerMove = (e: PointerEvent) => {
+      markPointerActivity()
       if (!down) return
       if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) moved = true
     }
@@ -865,23 +1276,29 @@ export function FlexLayoutShell() {
         down = null
       }
     }
-    // 系统打断（触摸取消/手势接管/窗口切换等，P2-4）：只监听 down/move/up
-    // 时 pointercancel 后 splitterDraggingRef 永真，串行重排通道被自续
-    // 定时器饿死（scheduleRebalance 的 while 拖拽守卫死循环）——参照
-    // drag-session.ts 的 onCancel 模式：全部丢弃、不提交，放行挂起的重排。
-    const onDocPointerCancel = () => {
-      if (down || lastClick || splitterDraggingRef.current) {
-        lastClick = null
-        down = null
-        moved = false
-        splitterDraggingRef.current = false
-        scheduleRebalance(false)
-      }
+  // 系统打断（触摸取消/手势接管/窗口切换等，P2-4）：只监听 down/move/up
+  // 时 pointercancel 后 splitterDraggingRef 永真，串行重排通道被自续
+  // 定时器饿死（scheduleRebalance 的 while 拖拽守卫死循环）——参照
+  // drag-session.ts 的 onCancel 模式：全部丢弃、不提交，放行挂起的重排。
+  // 另外 pointerup 可能因捕获/驱动异常整体缺失（CDP 合成 button:none 的
+  // 释放只出 mouseup 不出 pointerup，实测）——deferred 分支带指针活动
+  // 超时逃逸阀（见 scheduleRebalance），拖拽标志绝不永久卡死通道。
+  const onDocPointerCancel = () => {
+    if (down || lastClick || splitterDraggingRef.current) {
+      lastClick = null
+      down = null
+      moved = false
+      splitterDraggingRef.current = false
+      scheduleRebalance(false)
     }
-    document.addEventListener('pointerdown', onDocPointerDown, true)
-    document.addEventListener('pointermove', onDocPointerMove, true)
-    document.addEventListener('pointerup', onDocPointerUp, true)
-    document.addEventListener('pointercancel', onDocPointerCancel, true)
+  }
+  const markPointerActivity = () => {
+    lastPointerActivityRef.current = performance.now()
+  }
+  document.addEventListener('pointerdown', onDocPointerDown, true)
+  document.addEventListener('pointermove', onDocPointerMove, true)
+  document.addEventListener('pointerup', onDocPointerUp, true)
+  document.addEventListener('pointercancel', onDocPointerCancel, true)
     return () => {
       document.removeEventListener('pointerdown', onDocPointerDown, true)
       document.removeEventListener('pointermove', onDocPointerMove, true)
