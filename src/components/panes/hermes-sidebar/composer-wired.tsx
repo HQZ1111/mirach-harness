@@ -11,6 +11,7 @@ import {
   useAuiState,
   unstable_useComposerInput,
 } from '@assistant-ui/react'
+import { useStore } from 'zustand'
 import { ArrowUpIcon, FileText, ImageIcon, Languages, SquareIcon, XIcon } from 'lucide-react'
 
 import {
@@ -24,6 +25,7 @@ import {
   useMentionMatches,
   useSlashMatches,
 } from '@/components/assistant-ui/elements/composer'
+import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
@@ -160,6 +162,19 @@ export function ComposerWired() {
     const cur = value
     setText(cur ? cur + ' ' + text : text)
   })
+
+  // ── fork 预填（branch store 通道）───────────────────────────────────
+  // fork 成功后 runtime 把 selectedText 写进 branchBridge.composerPrefill；
+  // 这里经 value 控制通道（unstable_useComposerInput.setText）写入 composer
+  // ——用户重新提交即开新分支（上游语义）。seq 防重复应用：store 值常驻，
+  // effect 随重渲重跑时不得把用户已编辑的内容盖回预填文本。
+  const prefill = useStore(branchBridge, (s) => s.composerPrefill)
+  const appliedPrefillSeqRef = useRef(0)
+  useEffect(() => {
+    if (!prefill || prefill.seq <= appliedPrefillSeqRef.current) return
+    appliedPrefillSeqRef.current = prefill.seq
+    setText(prefill.text)
+  }, [prefill, setText])
 
   // pi 控制面：模型目录 + 当前选中。挂载时拉目录；state 随 isRunning
   // 变化重拉（会话按需创建后 trigger 自动从 "Select model" 点亮为真名）。

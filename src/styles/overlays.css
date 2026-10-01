@@ -364,3 +364,11 @@
 
 .set-about-defs dt { color: var(--text-4); }
 .set-about-defs dd { margin: 0; }
+
+/* ── assistant-ui message-actions（官方 elements 模板）──────────────
+   feedback 能力未接入（runtime 无 FeedbackAdapter）时隐藏反馈两钮——
+   与旧版 AuiIf capabilities.feedback 门控等价（能力驱动的渲染选择，
+   非吞错；接入 FeedbackAdapter 后移除容器上的 .aui-hide-reactions 即恢复）。 */
+.aui-hide-reactions [aria-label^="Mark response"] {
+  display: none;
+}

@@ -10,7 +10,11 @@ export interface UsageState {
   inputTokens?: number
   outputTokens?: number
   cachedInputTokens?: number
+  /** RUN_FINISHED.usage 可选增补（缓存写入 token） */
+  cacheWriteTokens?: number
   totalTokens?: number
+  /** RUN_FINISHED.usage 可选增补（本 run 花费，美元） */
+  costUsd?: number
 }
 
 interface UsageBridgeState {

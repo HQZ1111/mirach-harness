@@ -2,8 +2,29 @@
 
 import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired'
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
-import { useConnectionBridge } from "@/components/assistant-ui/connection-store";
+import {
+  branchBridge,
+  toBranchPickerView,
+} from "@/components/assistant-ui/branch-store";
+import {
+  useConnectionBridge,
+  useConnectionPhase,
+} from "@/components/assistant-ui/connection-store";
 import { useErrorBridge } from "@/components/assistant-ui/error-bridge";
+import { useUsageBridge } from "@/components/assistant-ui/usage-bridge";
+import { EmptyState, EmptyStateComposer, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
+import { ErrorState } from "@/components/assistant-ui/elements/error-state";
+import { GuardrailNotice } from "@/components/assistant-ui/elements/guardrail-notice";
+import { ConnectionState } from "@/components/assistant-ui/elements/connection-state";
+import { MessageActions, type Reaction } from "@/components/assistant-ui/elements/message-actions";
+import { MessageBranches } from "@/components/assistant-ui/elements/message-branches";
+import { MessageTiming, type TimingStat } from "@/components/assistant-ui/elements/message-timing";
+import { StoppedRun } from "@/components/assistant-ui/elements/stopped-run";
+import { TerminalBlock } from "@/components/assistant-ui/elements/terminal-block";
+import { ToolCall } from "@/components/assistant-ui/elements/tool-call";
+import { ToolError } from "@/components/assistant-ui/elements/tool-error";
+import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
+import { WebSearch, type WebSearchResult } from "@/components/assistant-ui/elements/web-search";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
@@ -16,9 +37,7 @@ import {
   ReasoningText,
   ReasoningTrigger,
 } from "@/components/assistant-ui/elements/reasoning.aui";
-import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
-import { ThreadThinkingIndicator } from "@/components/assistant-ui/elements/thinking-indicator.aui";
-import {
+import { ThreadThinkingIndicator } from "@/components/assistant-ui/elements/thinking-indicator.aui";import {
   ToolGroupContent,
   ToolGroupRoot,
   ToolGroupTrigger,
@@ -39,11 +58,12 @@ import {
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  useAui,
+  useAuiState,
   type FileMessagePartComponent,
   type ImageMessagePartComponent,
   type TextMessagePartComponent,
   type ToolCallMessagePartComponent,
-  useAuiState,
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
@@ -53,21 +73,22 @@ import {
   ChevronRightIcon,
   CopyIcon,
   DownloadIcon,
+  GitBranchIcon,
   MicIcon,
-  MoreHorizontalIcon,
   PencilIcon,
   PhoneIcon,
-  RefreshCwIcon,
-  ThumbsDownIcon,
-  ThumbsUpIcon,
 } from "lucide-react";
 import {
   createContext,
   useContext,
+  useEffect,
+  useRef,
+  useState,
   type ComponentType,
   type FC,
   type PropsWithChildren,
 } from "react";
+import { useStore } from "zustand";
 
 export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
 
@@ -167,36 +188,487 @@ const ThreadHistorySkeleton: FC = () => (
   </div>
 );
 
-// SSE 连接态细横幅（L1 可见性，runtime.tsx onopen/onerror 经桥置位）：
-// 断开时顶部一条细横幅；重连成功（onopen）自动消失。connected: null =
-// 挂载后首连之前——不算断开（避免启动瞬间"连接已断开"误报）。
-// 样式只用 tokens.css 令牌（--stroke-soft/--text-3），无字面色值。
+// SSE 连接态横幅（L1 可见性，官方 connection-state 元素四相）：connecting
+// （首连之前）不渲染——启动瞬间不误报（既有语义）；reconnecting 带 attempt
+// 计数；dropped（浏览器放弃自动重连）提供手动 Reconnect。样式只用令牌
+// （覆盖模板的 max-w-sm/rounded-2xl，铺满顶部条）。
 const ConnectionBanner: FC = () => {
-  const { connected } = useConnectionBridge();
-  if (connected !== false) return null;
+  const phase = useConnectionPhase();
+  const { reconnectAttempts, requestReconnect } = useConnectionBridge();
+  if (phase === "online" || phase === "connecting") return null;
+  return (
+    <ConnectionState
+      data-slot="aui_connection-banner"
+      phase={phase}
+      attempt={phase === "reconnecting" ? reconnectAttempts : undefined}
+      onRetry={phase === "dropped" ? requestReconnect : undefined}
+      className="w-full max-w-none rounded-none border-x-0 border-t-0"
+    />
+  );
+};
+
+// ── runtime adapter state 通道（runtime.tsx state: {compaction, interrupted}）
+// 的严格解析：形状不符整体丢弃 + console.error 可见（渲染选择非吞错）。
+type TurnStateProjection = {
+  compaction?: {
+    phase?: unknown;
+    reason?: unknown;
+    tokensBefore?: unknown;
+    tokensAfter?: unknown;
+    aborted?: unknown;
+    errorMessage?: unknown;
+  } | null;
+  interrupted?: unknown;
+};
+
+const parseTurnState = (raw: unknown): TurnStateProjection | null => {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as TurnStateProjection;
+};
+
+// 压缩横幅（官方 guardrail-notice 元素，挂 thread 顶部）：CUSTOM
+// name=compaction 经轮次机归约进 context.compaction → adapter state 到达。
+// explanation = reason 或 tokensBefore→tokensAfter；errorMessage 红字独立
+// 行（模板无该槽位，宿主补一行 destructive 文本）。start 相标题“压缩中”。
+const CompactionBanner: FC = () => {
+  const raw = useAuiState((s) => s.thread.state);
+  const st = parseTurnState(raw);
+  const c = st?.compaction;
+  if (
+    !c ||
+    (c.phase !== "start" && c.phase !== "end")
+  ) {
+    if (c) console.error("[aui] compaction 投影形状非法——横幅不渲染", c);
+    return null;
+  }
+  const explanationParts: string[] = [];
+  if (typeof c.reason === "string" && c.reason) {
+    explanationParts.push(c.reason);
+  } else if (
+    typeof c.tokensBefore === "number" &&
+    typeof c.tokensAfter === "number"
+  ) {
+    explanationParts.push(`${c.tokensBefore} → ${c.tokensAfter} tokens`);
+  }
+  const explanation =
+    explanationParts.join(" · ") || "对话上下文已自动压缩，较早的内容已摘要收拢。";
+  const errorMessage =
+    typeof c.errorMessage === "string" && c.errorMessage ? c.errorMessage : null;
   return (
     <div
-      data-slot="aui_connection-banner"
-      className="border-(--stroke-soft) text-(--text-3) shrink-0 border-b px-4 py-1 text-center text-xs"
+      data-slot="aui_compaction-banner"
+      className="flex w-full flex-col gap-1 pt-2"
     >
-      连接已断开，正在重连…
+      <GuardrailNotice
+        title={c.phase === "start" ? "上下文压缩中" : "上下文已压缩"}
+        explanation={explanation}
+        policy="compaction"
+        alternatives={[]}
+        className="w-full max-w-none"
+      />
+      {errorMessage && (
+        <p className="text-destructive px-1 text-xs">{errorMessage}</p>
+      )}
     </div>
   );
 };
 
-// RUN_ERROR 用户可见面（§0.3 错误即错误）：轮次机 error 经 error-bridge
-// 到达；下一个 run 的 RUN_STARTED 归约清 error 后自动消失。语义令牌
-// 红色调（destructive，与 MessageError 同系）。
+// 分支切换条（官方 message-branches 模板，挂消息区顶部——CompactionBanner
+// 上方）：数据 = branch store 投影（pi_list_sibling_branches，真相在 pi），
+// null（无分支/无活动会话/拉取失败）不渲染。挂载 + refreshSeq 信号时拉取
+// （runtime 的 onReload/onEdit/fork/switch_branch/会话切换/run 收尾成功后
+// requestRefresh）。variants 吃各分支 preview、index 吃 isCurrent 项、
+// onIndexChange → pi_switch_branch 请求（runtime 执行器：守卫 + 重水合）。
+const BranchPickerBar: FC = () => {
+  const branches = useStore(branchBridge, (s) => s.branches);
+  const refreshSeq = useStore(branchBridge, (s) => s.refreshSeq);
+  useEffect(() => {
+    void branchBridge.getState().refresh();
+  }, [refreshSeq]);
+  if (!branches || branches.branches.length === 0) return null;
+  const view = toBranchPickerView(branches);
+  return (
+    <MessageBranches
+      data-slot="aui_branch-picker-bar"
+      variants={view.variants}
+      index={view.index}
+      onIndexChange={(index) => {
+        const leaf = branches.branches[index];
+        if (!leaf) {
+          console.error(`[aui] 分支选择越界（index=${index}）——忽略`);
+          return;
+        }
+        branchBridge.getState().requestSwitch(leaf.leafId);
+      }}
+      className="w-full max-w-none pt-2"
+    />
+  );
+};
+
+// 中断态横幅（官方 stopped-run 元素）：pi_interrupt 成功后 run 收尾、且无
+// 错误时展示（RUN_ERROR 路径由错误条负责，二者不叠显）。words = 最后一条
+// assistant 段已收到的文本。挂载点在 ViewportFooter（thread 级，无 message
+// scope）——只允许读 s.thread.*。
+const StoppedRunBanner: FC = () => {
+  const aui = useAui();
+  const interrupted =
+    useAuiState((s) => parseTurnState(s.thread.state)?.interrupted) === true;
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const error = useErrorBridge().error;
+  const lastAssistantText = useAuiState((s) => {
+    const msgs = s.thread.messages;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === "assistant") {
+        if (typeof m.content === "string") return m.content;
+        return m.content
+          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+          .map((p) => p.text)
+          .join("");
+      }
+    }
+    return null;
+  });
+  // 本地放弃标记：Discard 只收起本次横幅（UI 态——轮次真相里的
+  // interrupted 标记由下一个 run 的 RUN_STARTED 归约清除）
+  const [dismissed, setDismissed] = useState(false);
+  if (!interrupted || isRunning || dismissed || error) return null;
+  // 中断的是最后一个 run 段（最后一条消息是 assistant）才展示——若用户
+  // 中断后又发了新消息，横幅已无意义
+  const lastRole = aui.thread.getState().messages.at(-1)?.role;
+  if (lastRole !== "assistant") return null;
+
+  const onContinue = () => {
+    // 继续 = 重新生成最后一条 assistant（message.reload → startRun →
+    // runtime onReload → pi_retry_edit + POST），新 run 的 RUN_STARTED
+    // 归约清 interrupted 标记，横幅随之消失
+    const msgs = aui.thread.getState().messages;
+    const last = msgs[msgs.length - 1];
+    if (!last || last.role !== "assistant") {
+      console.error("[aui] 继续运行：最后一条消息不是 assistant 段——无法 reload");
+      return;
+    }
+    aui.thread.message({ index: last.index }).reload();
+  };
+
+  return (
+    <StoppedRun
+      data-slot="aui_stopped-run-banner"
+      // 模板按空格 join words——中文整段作为单个词传入，不切分
+      words={lastAssistantText ? [lastAssistantText] : []}
+      reason="已停止"
+      onContinue={onContinue}
+      onDiscard={() => setDismissed(true)}
+      className="w-full max-w-none pt-1"
+    />
+  );
+};
+
+// RUN_ERROR 用户可见面（§0.3 错误即错误）：官方 error-state 元素替换原
+// 手写条。轮次机 error 经 error-bridge 到达；下一个 run 的 RUN_STARTED
+// 归约清 error 后自动消失。onRetry = 重刷最后一条 assistant（与 Reload
+// 同一机制：message.reload → startRun → onReload）。
 const RunErrorBar: FC = () => {
   const { error } = useErrorBridge();
+  const aui = useAui();
   if (!error) return null;
+  const onRetry = () => {
+    const msgs = aui.thread.getState().messages;
+    const last = msgs[msgs.length - 1];
+    if (!last || last.role !== "assistant") {
+      console.error("[aui] 错误重试：最后一条消息不是 assistant 段——无法 reload");
+      return;
+    }
+    aui.thread.message({ index: last.index }).reload();
+  };
   return (
-    <div
+    <ErrorState
       data-slot="aui_run-error-bar"
-      className="border-destructive bg-destructive/10 text-destructive mt-1 rounded-(--composer-radius) border p-3 text-sm"
-    >
-      运行出错：{error}
-    </div>
+      title="运行出错"
+      detail={error}
+      retrying={false}
+      onRetry={onRetry}
+      className="mt-1 w-full max-w-none"
+    />
+  );
+};
+
+// ── 工具渲染分流（pi 默认工具的结构化渲染）────────────────────────────
+// 形状严格解析：args/result 不符时回退通用 ToolFallback——渲染选择非吞错
+// （回退仍完整可见 args/result，不丢信息）。
+
+/** 工具主要参数摘要（bash.command / web_search.query / 路径类优先） */
+const summarizeArgs = (args: unknown): string => {
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const a = args as Record<string, unknown>;
+    const primary = a.command ?? a.query ?? a.q ?? a.path ?? a.file ?? a.url;
+    if (typeof primary === "string" && primary) return primary;
+  }
+  try {
+    const s = JSON.stringify(args);
+    if (typeof s === "string") return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+  } catch {
+    // 不可序列化参数走 String()——展示用途，无数据流
+  }
+  return String(args);
+};
+
+/** 工具结果文本化：string 原样；其余 JSON 格式化（失败 String()） */
+const toolResultText = (result: unknown): string => {
+  if (typeof result === "string") return result;
+  if (result === undefined || result === null) return "";
+  try {
+    return JSON.stringify(result, null, 2) ?? String(result);
+  } catch {
+    return String(result);
+  }
+};
+
+/** web_search 结果严格解析：数组或 {results:[...]},单项 {title|url,
+ * domain|url}；任何一项不符整体返回 null（回退通用渲染） */
+const parseWebSearchResults = (
+  result: unknown,
+): readonly WebSearchResult[] | null => {
+  let items: unknown = result;
+  if (typeof result === "string") {
+    try {
+      items = JSON.parse(result);
+    } catch {
+      return null;
+    }
+  }
+  if (items && typeof items === "object" && !Array.isArray(items)) {
+    const r = (items as { results?: unknown }).results;
+    if (r !== undefined) items = r;
+  }
+  if (!Array.isArray(items)) return null;
+  const out: WebSearchResult[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const it = item as { title?: unknown; url?: unknown; domain?: unknown };
+    const title =
+      typeof it.title === "string" && it.title
+        ? it.title
+        : typeof it.url === "string"
+          ? it.url
+          : null;
+    if (!title) return null;
+    let domain = typeof it.domain === "string" && it.domain ? it.domain : null;
+    if (!domain && typeof it.url === "string") {
+      try {
+        domain = new URL(it.url).hostname;
+      } catch {
+        domain = null;
+      }
+    }
+    if (!domain) return null;
+    out.push({ title, domain });
+  }
+  return out;
+};
+
+// 通用工具卡（官方 tool-call 元素）：折叠面板 + Request/Result
+const GenericToolCall: FC<{
+  toolName: string;
+  argsText?: string;
+  args: unknown;
+  result: unknown;
+  running: boolean;
+}> = ({ toolName, argsText, args, result, running }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <ToolCall
+      label={toolName}
+      activeLabel={`${toolName} 运行中`}
+      query={summarizeArgs(args)}
+      request={argsText || summarizeArgs(args)}
+      result={toolResultText(result)}
+      running={running}
+      open={open}
+      onOpenChange={setOpen}
+    />
+  );
+};
+
+// 分流器：isError → tool-error（attempt 1/1，前端不自动重试，Retry/Skip
+// 保持模板的禁用态）；bash → terminal-block；web_search → web-search；
+// 其余 → 通用 tool-call；形状不符 → ToolFallback（官方完整回退，
+// 含 argsText 与审批面）。
+const PiToolUI: ToolCallMessagePartComponent = (part) => {
+  const { toolName, args, result, status, isError, argsText } = part;
+  const running = status?.type === "running";
+
+  if (isError === true) {
+    return (
+      <ToolError
+        name={toolName}
+        target={summarizeArgs(args)}
+        message={toolResultText(result)}
+        attempt={1}
+        maxAttempts={1}
+        retrying={false}
+      />
+    );
+  }
+
+  if (toolName === "bash") {
+    const command =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>).command
+        : undefined;
+    // 形状契约：command 为 string、result 为 string/未到——否则回退通用
+    if (typeof command === "string" && (result === undefined || typeof result === "string")) {
+      const lines = typeof result === "string" && result.length > 0 ? result.split("\n") : [];
+      return (
+        <TerminalBlock
+          command={command}
+          lines={lines}
+          visibleCount={lines.length}
+          done={!running}
+        />
+      );
+    }
+    return <ToolFallback {...part} />;
+  }
+
+  if (toolName === "web_search") {
+    const query =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>).query ?? (args as Record<string, unknown>).q
+        : undefined;
+    if (typeof query === "string" && query) {
+      const results = parseWebSearchResults(result);
+      // 运行中（result 未到）即可渲染搜索条；结果解析失败回退通用
+      if (results || result === undefined) {
+        return (
+          <WebSearch
+            query={query}
+            results={results ?? []}
+            visibleResults={results?.length ?? 0}
+            searching={running}
+            cycle={0}
+          />
+        );
+      }
+    }
+    return <ToolFallback {...part} />;
+  }
+
+  return (
+    <GenericToolCall
+      toolName={toolName}
+      argsText={argsText}
+      args={args}
+      result={result}
+      running={running}
+    />
+  );
+};
+
+// ── message-timing（官方元素）：run 级 usage 展示。轮次机只归并 run 级
+// 快照（RUN_FINISHED.usage，替换语义——不按消息归并），因此只在最后一条
+// assistant 上显示（旧消息显示过期快照会误导）；流式中蓝字。
+const RunTiming: FC = () => {
+  const role = useAuiState((s) => s.message.role);
+  const isLast = useAuiState((s) => s.message.isLast);
+  const streaming = useAuiState((s) => s.thread.isRunning);
+  const { usage } = useUsageBridge();
+  if (role !== "assistant" || !isLast || !usage) return null;
+  const stats: TimingStat[] = [];
+  if (usage.inputTokens !== undefined)
+    stats.push({ label: "输入", value: `${usage.inputTokens} tok` });
+  if (usage.outputTokens !== undefined)
+    stats.push({ label: "输出", value: `${usage.outputTokens} tok` });
+  if (usage.totalTokens !== undefined)
+    stats.push({ label: "总计", value: `${usage.totalTokens} tok` });
+  if (usage.costUsd !== undefined)
+    stats.push({ label: "费用", value: `$${usage.costUsd.toFixed(4)}` });
+  if (stats.length === 0) return null;
+  return <MessageTiming stats={stats} streaming={streaming} className="ms-2 mt-1" />;
+};
+
+// ── day-separator（官方模板行提取）：消息列表按 createdAt 日期插入分隔。
+// 模板 DaySeparator 是自带迷你消息列表的整块演示组件，无法嵌进真实消息
+// 循环——这里提取其日期分隔行（发丝线 + mono 日期）按消息间隙挂载，数据
+// 即模板的 DatedMessage{day,time}。无 createdAt 的消息跳过。
+const DAY_FMT = new Intl.DateTimeFormat("zh-CN", {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+const TIME_FMT = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+const dayLabel = (d: Date): string => DAY_FMT.format(d);
+const timeLabel = (d: Date): string => TIME_FMT.format(d);
+
+const DaySeparatorRow: FC<{ day: string; time: string }> = ({ day, time }) => (
+  <div data-slot="day-separator" className="flex items-center gap-2.5 py-1">
+    <span className="bg-foreground/[0.08] h-px flex-1" />
+    <span className="font-mono text-[11px] tracking-tight text-foreground/30">
+      {day}
+      <span className="ms-2 tabular-nums">{time}</span>
+    </span>
+    <span className="bg-foreground/[0.08] h-px flex-1" />
+  </div>
+);
+
+const MessageWithDaySeparator: FC = () => {
+  const day = useAuiState((s) =>
+    s.message.createdAt ? dayLabel(s.message.createdAt) : null,
+  );
+  const time = useAuiState((s) =>
+    s.message.createdAt ? timeLabel(s.message.createdAt) : null,
+  );
+  // 前一条消息的日期（无 createdAt 视为无日期——不触发分隔）
+  const prevDay = useAuiState((s) => {
+    const prev = s.thread.messages[s.message.index - 1];
+    return prev?.createdAt ? dayLabel(prev.createdAt) : null;
+  });
+  const showSeparator = day !== null && day !== prevDay;
+  return (
+    <>
+      {showSeparator && day && time && <DaySeparatorRow day={day} time={time} />}
+      <ThreadMessage />
+    </>
+  );
+};
+
+// ── empty-state（官方元素，挂 Welcome 槽位）────────────────────────────
+// 起步建议 + 罐头 composer：EmptyStateComposer 是纯展示模板（无输入框，
+// onSend 即发），发送走 aui.thread.append = 现有发送通道（onNew → POST）。
+const STARTER_PROMPT = "帮我梳理这个仓库的模块结构";
+const STARTER_SUGGESTIONS = [
+  "梳理这个仓库的模块结构",
+  "总结我们当前的对话进度",
+  "写一个 PowerShell 脚本批量重命名文件",
+  "帮我分析一段报错堆栈",
+] as const;
+
+const EmptyStateWelcome: FC = () => {
+  const aui = useAui();
+  return (
+    <EmptyState className="aui-thread-welcome-root mx-auto my-6">
+      <EmptyStateGreeting>有什么可以帮你的？</EmptyStateGreeting>
+      <EmptyStateSuggestions>
+        {STARTER_SUGGESTIONS.map((s, i) => (
+          <EmptyStateSuggestion
+            key={s}
+            index={i}
+            onClick={() => aui.thread.append(s)}
+          >
+            {s}
+          </EmptyStateSuggestion>
+        ))}
+      </EmptyStateSuggestions>
+      <EmptyStateComposer
+        placeholder={STARTER_PROMPT}
+        onSend={() => aui.thread.append(STARTER_PROMPT)}
+      />
+    </EmptyState>
   );
 };
 
@@ -217,7 +689,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   isEmpty,
   autoFocus,
 }) => {
-  const { Welcome = ThreadWelcome } = useContext(ThreadComponentsContext);
+  // Welcome 默认 = 官方 empty-state 元素（Greeting + 起步建议 + 罐头
+  // composer）；消费者仍可经 ThreadComponents.Welcome 整体替换
+  const { Welcome = EmptyStateWelcome } = useContext(ThreadComponentsContext);
 
   return (
     // asChild：Thread 不渲染自己的 div，行为合并到我们传入的容器上
@@ -252,6 +726,14 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <ThreadHistorySkeleton />
           </AuiIf>
 
+          {/* 分支切换条（官方 message-branches 模板）：pi 兄弟分支——
+              fork/重试建立分支后出现；无分支不渲染 */}
+          <BranchPickerBar />
+
+          {/* 压缩横幅（官方 guardrail-notice 元素）：CUSTOM name=compaction
+              经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
+          <CompactionBanner />
+
           {/* 运行状态行（官方 thinking-indicator 元素）：正文未到时显示
               "正在思考/正在使用 <tool>" + 耗时，正文流出即消失 */}
           <ThreadThinkingIndicator />
@@ -261,7 +743,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
             <ThreadPrimitive.Messages>
-              {() => <ThreadMessage />}
+              {() => <MessageWithDaySeparator />}
             </ThreadPrimitive.Messages>
           </div>
 
@@ -275,6 +757,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             <RunErrorBar />
+            <StoppedRunBanner />
             <ApprovalCards />
             <ComposerWired />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -417,16 +900,6 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
-const ThreadWelcome: FC = () => {
-  return (
-    <div className="aui-thread-welcome-root mb-6 flex flex-col px-2">
-      <p className="aui-thread-welcome-message-inner fade-in slide-in-from-bottom-1 animate-in fill-mode-both text-2xl font-medium tracking-tight duration-200">
-        How can I help you today?
-      </p>
-    </div>
-  );
-};
-
 const ThreadSuggestions: FC = () => {
   return (
     <div className="aui-thread-welcome-suggestions flex w-full flex-col">
@@ -473,7 +946,9 @@ const MessageError: FC = () => {
 
 const AssistantMessage: FC = () => {
   const {
-    ToolFallback: ToolFallbackComponent = ToolFallback,
+    // 工具渲染默认 = PiToolUI 分流（bash/web_search/isError/通用；形状
+    // 不符回退官方 ToolFallback）——消费者传入的 ToolFallback 槽位仍优先
+    ToolFallback: ToolFallbackComponent = PiToolUI,
     ToolGroup,
     ReasoningGroup,
     TaskGroup: TaskGroupComponent,
@@ -570,6 +1045,9 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
+      {/* run 级 usage（官方 message-timing 元素）——只在最后一条 assistant */}
+      <RunTiming />
+
       <div
         data-slot="aui_assistant-message-footer"
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
@@ -581,54 +1059,92 @@ const AssistantMessage: FC = () => {
   );
 };
 
+// 消息操作条（官方 message-actions 元素）：复制（copied 态）/ 反馈 /
+// 重新生成 / 更多。重新生成与 ActionBarPrimitive.Reload 同一机制
+// （aui.message.reload → startRun → runtime onReload）——不重复造重发
+// 管道；onReload 接通后 Reload 能力即活（capabilities.reload = true）。
+// feedback 能力未接入（无 FeedbackAdapter）时隐藏反馈钮（aui-no-feedback，
+// overlays.css）——与旧版 AuiIf capabilities.feedback 门控等价。
 const AssistantActionBar: FC = () => {
+  const aui = useAui();
+  const isCopied = useAuiState((s) => s.message.isCopied);
+  const feedbackEnabled = useAuiState((s) => s.thread.capabilities.feedback);
+  const [reaction, setReaction] = useState<Reaction>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== undefined)
+        clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
+
+  const onCopy = () => {
+    const text = aui.message.getCopyText();
+    if (!text) return;
+    // 与官方 useActionBarCopy 同语义：写入成功才点亮 copied，3s 后回落；
+    // 失败 console.error 可见（不装作已复制）
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        aui.message.setIsCopied(true);
+        if (copiedTimerRef.current !== undefined)
+          clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = setTimeout(() => {
+          copiedTimerRef.current = undefined;
+          aui.message.setIsCopied(false);
+        }, 3000);
+      })
+      .catch((e) => console.error("[aui] 复制失败", e));
+  };
+
+  const onReactionChange = (r: Reaction) => {
+    if (!feedbackEnabled) {
+      console.error("[aui] feedback 能力未接入（无 FeedbackAdapter），反馈未提交");
+      return;
+    }
+    setReaction(r);
+    // Reaction("up"/"down") → submitFeedback("positive"/"negative")
+    if (r) aui.message.submitFeedback({ type: r === "up" ? "positive" : "negative" });
+  };
+
+  const onRegenerate = () => {
+    aui.message.reload();
+  };
+
+  const onMore = () => {
+    // 模板的 More 是回调式按钮——经隐藏的 ActionBarMorePrimitive.Trigger
+    // 复用官方 ExportMarkdown 弹层（display:none 元素可程序化 click）
+    moreTriggerRef.current?.click();
+  };
+
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
       className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
     >
-      <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy">
-          <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
-          </AuiIf>
-          <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
-          </AuiIf>
-        </TooltipIconButton>
-      </ActionBarPrimitive.Copy>
-      <AuiIf condition={(s) => s.thread.capabilities.feedback}>
-        <ActionBarPrimitive.FeedbackPositive asChild>
-          <TooltipIconButton
-            tooltip="Helpful"
-            className="data-[submitted=true]:bg-accent data-[submitted=true]:text-accent-foreground"
-          >
-            <ThumbsUpIcon />
-          </TooltipIconButton>
-        </ActionBarPrimitive.FeedbackPositive>
-        <ActionBarPrimitive.FeedbackNegative asChild>
-          <TooltipIconButton
-            tooltip="Not helpful"
-            className="data-[submitted=true]:bg-accent data-[submitted=true]:text-accent-foreground"
-          >
-            <ThumbsDownIcon />
-          </TooltipIconButton>
-        </ActionBarPrimitive.FeedbackNegative>
-      </AuiIf>
-      <ActionBarPrimitive.Reload asChild>
-        <TooltipIconButton tooltip="Refresh">
-          <RefreshCwIcon />
-        </TooltipIconButton>
-      </ActionBarPrimitive.Reload>
+      <MessageActions
+        copied={isCopied}
+        reaction={reaction}
+        regenerating={false}
+        onCopy={onCopy}
+        onReactionChange={onReactionChange}
+        onRegenerate={onRegenerate}
+        onMore={onMore}
+        className={cn(!feedbackEnabled && "aui-hide-reactions")}
+      />
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
-          <TooltipIconButton
-            tooltip="More"
-            className="data-[state=open]:bg-accent"
-          >
-            <MoreHorizontalIcon />
-          </TooltipIconButton>
+          <button
+            ref={moreTriggerRef}
+            type="button"
+            aria-label="More response actions"
+            className="hidden"
+          />
         </ActionBarMorePrimitive.Trigger>
         <ActionBarMorePrimitive.Content
           side="bottom"
@@ -689,6 +1205,44 @@ const UserMessage: FC = () => {
 };
 
 const UserActionBar: FC = () => {
+  // ── fork 入口（「从此分支探索」）─────────────────────────────────────
+  // 需要该 user 消息的 fork 点：index 映射——thread 里第 N 条 user 消息 =
+  // pi_get_fork_points() 第 N 项（同源水合+流式追加，按序一一对应；清单
+  // 投影由 branch store 持有，随 runtime 的刷新信号更新）。
+  // 流式未落盘/清单未含的消息在清单中缺失 → 钮禁用（fork 点只在已水合
+  // 历史上有——诚实处理，注释即说明）；点击后的守卫（isRunning 中断）、
+  // entryId 解析、文本比对与 fork 执行都在 runtime 执行器。
+  const userOrdinal = useAuiState((s) => {
+    let count = 0;
+    const msgs = s.thread.messages;
+    for (let i = 0; i <= s.message.index && i < msgs.length; i++) {
+      if (msgs[i]?.role === "user") count++;
+    }
+    return count - 1;
+  });
+  const messageText = useAuiState((s) => {
+    const m = s.thread.messages[s.message.index];
+    if (!m) return null;
+    if (typeof m.content === "string") return m.content;
+    return m.content
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+  });
+  // fork 点存在且文本与投影一致才可点（防投影与 pi 路径漂移的错位 fork）
+  const forkable = useStore(branchBridge, (s) => {
+    if (userOrdinal < 0 || messageText === null) return false;
+    const point = s.forkPoints[userOrdinal];
+    return point !== undefined && point.text === messageText;
+  });
+  const onFork = () => {
+    if (userOrdinal < 0 || messageText === null) {
+      console.error("[aui] fork：无法定位该 user 消息的序号/文本——取消");
+      return;
+    }
+    branchBridge.getState().requestFork(userOrdinal, messageText);
+  };
+
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
@@ -700,6 +1254,14 @@ const UserActionBar: FC = () => {
           <PencilIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Edit>
+      <TooltipIconButton
+        tooltip="从此分支探索"
+        className="aui-user-action-fork"
+        disabled={!forkable}
+        onClick={onFork}
+      >
+        <GitBranchIcon />
+      </TooltipIconButton>
     </ActionBarPrimitive.Root>
   );
 };
