@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createActor } from 'xstate'
 
-import { reduceAguiEvent, turnMachine, type TurnContext } from './turn-actor'
+import { reduceAguiEvent, stabilizeMessages, turnMachine, type TurnContext, type TurnMessage } from './turn-actor'
 
 const ctx = (): TurnContext => ({
   messages: [],
@@ -434,5 +434,93 @@ describe('optimistic user message (attachments)', () => {
       { type: 'image', image: 'data:image/png;base64,aGVsbG8=' },
     ])
     expect(msgs[0].createdAt).toBeInstanceOf(Date)
+  })
+})
+
+describe('stabilizeMessages（增量同步：引用相等 = 未变）', () => {
+  const msg = (id: string, text: string): TurnMessage => ({
+    id,
+    role: 'assistant',
+    content: text,
+    createdAt: new Date(0),
+  })
+
+  it('all items reference-equal reuses the prev array itself (fast-path identity)', () => {
+    const prev = [msg('a', '1'), msg('b', '2')]
+    // 同内容、同引用（未变段）的不同数组实例（模拟零变化重建）
+    const next = [...prev]
+    expect(stabilizeMessages(prev, next)).toBe(prev)
+  })
+
+  it('prev === next short-circuits to the same array', () => {
+    const arr = [msg('a', '1')]
+    expect(stabilizeMessages(arr, arr)).toBe(arr)
+  })
+
+  it('changed tail returns next; unchanged prefix keeps object identity', () => {
+    const head = msg('a', '第一段')
+    const tailOld = msg('b', '')
+    const tailNew = msg('b', '增长中')
+    const prev = [head, tailOld]
+    const next = [head, tailNew]
+    expect(stabilizeMessages(prev, next)).toBe(next)
+    // 归约器不变式：未变的前段是同一对象（ExternalStore 转换缓存命中）
+    expect(next[0]).toBe(prev[0])
+  })
+
+  it('length change (append / hydrate replace) returns next as-is', () => {
+    const prev = [msg('a', '1')]
+    const appended = [...prev, msg('b', '')]
+    expect(stabilizeMessages(prev, appended)).toBe(appended)
+    const replaced = [msg('x', '全新')]
+    expect(stabilizeMessages(prev, replaced)).toBe(replaced)
+  })
+
+  it('empty prev with non-empty next returns next', () => {
+    const next = [msg('a', '1')]
+    expect(stabilizeMessages([], next)).toBe(next)
+  })
+
+  it('both empty reuses prev array (zero-change fast path)', () => {
+    const prev: TurnMessage[] = []
+    expect(stabilizeMessages(prev, [])).toBe(prev)
+  })
+})
+
+describe('machine-level reference stability (增量同步门)', () => {
+  it('duplicate THINKING_START (idempotent) keeps the SAME messages array reference', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'RUN_STARTED', runId: 'r1' }, id: 1 })
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'THINKING_TEXT_MESSAGE_START' }, id: 2 })
+    const afterStart = actor.getSnapshot().context.messages
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'THINKING_TEXT_MESSAGE_START' }, id: 3 })
+    // 重复 START 幂等：无任何消息变化 → 数组引用复用 → ExternalStore
+    // messages 全等快速通道（跳过全量转换）
+    expect(actor.getSnapshot().context.messages).toBe(afterStart)
+  })
+
+  it('text delta replaces the tail object but preserves the settled prefix reference', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'RUN_STARTED', runId: 'r1' }, id: 1 })
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'TEXT_MESSAGE_CONTENT', delta: '第一段' }, id: 2 })
+    const settled = actor.getSnapshot().context.messages[0]
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'RUN_STARTED', runId: 'r2' }, id: 3 })
+    const afterAppend = actor.getSnapshot().context.messages
+    expect(afterAppend[0]).toBe(settled)
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'TEXT_MESSAGE_CONTENT', delta: '流式' }, id: 4 })
+    const next = actor.getSnapshot().context.messages
+    // 尾段（当前 run 段）新对象，已定型前段引用原样保留
+    expect(next[0]).toBe(settled)
+    expect(next[1]).not.toBe(afterAppend[1])
+    expect(next[1].content).toBe('流式')
+  })
+
+  it('stabilization is transparent to contents (行为不变)', () => {
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'THINKING_TEXT_MESSAGE_START', {})
+    c = send(c, 'THINKING_TEXT_MESSAGE_START', {})
+    expect(c.messages[0].content).toEqual([{ type: 'thinking', text: '' }])
   })
 })

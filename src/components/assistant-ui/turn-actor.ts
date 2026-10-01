@@ -314,6 +314,27 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
   }
 }
 
+/**
+ * 消息数组稳定化（流式增量同步，hermes
+ * lib/incremental-external-store-runtime.ts 的「引用相等 = 未变」语义）：
+ * 归约器保证未变消息段复用旧对象引用、只替换当前 run 段（尾段）；
+ * 本函数是喂给 ExternalStore 前的最后一道门——
+ * - prev/next 逐项引用相等（零变化重建，如重复 THINKING_START 的幂等
+ *   路径）→ 返回 prev 数组本身：ExternalStore 的
+ *   `oldStore.messages === store.messages` 快速通道命中，跳过全量转换
+ *   与 repository 重写；
+ * - 有变化/新增 → 返回 next（未变项已是旧引用，变化项是新对象）。
+ * 纯函数，可单测；不改渲染结果（内容逐项相同，只动引用策略）。
+ */
+export function stabilizeMessages(prev: TurnMessage[], next: TurnMessage[]): TurnMessage[] {
+  if (prev === next) return next
+  if (prev.length !== next.length) return next
+  for (let i = 0; i < next.length; i++) {
+    if (prev[i] !== next[i]) return next
+  }
+  return prev
+}
+
 export const turnMachine = setup({
   types: {
     context: {} as TurnContext,
@@ -349,7 +370,11 @@ export const turnMachine = setup({
       if (event.type !== 'AGUI_EVENT') return context
       // RUN_ERROR 的 error 写入在 reduceAguiEvent 内（case 'RUN_ERROR'）——
       // 早期版本在此重复 set，已并入归约器单一来源。
-      return reduceAguiEvent(context, event.event, event.id)
+      const reduced = reduceAguiEvent(context, event.event, event.id)
+      // 增量同步门：归约只新建当前 run 段（RUN_STARTED 前的旧段对象引用
+      // 原样保留）；零变化重建复用旧数组本身，喂 ExternalStore 的引用
+      // 不变 → core 走 messages 全等快速通道（stabilizeMessages 详注）。
+      return { ...reduced, messages: stabilizeMessages(context.messages, reduced.messages) }
     }),
     markCancelled: assign({ interrupted: () => true }),
     clearInterrupt: assign({ interrupted: () => false }),

@@ -10,6 +10,13 @@ import {
   useConnectionBridge,
   useConnectionPhase,
 } from "@/components/assistant-ui/connection-store";
+import {
+  classifyScrollState,
+  getSavedThreadScroll,
+  saveThreadScroll,
+  threadScrollBridge,
+  threadScrollTargetTop,
+} from "@/components/assistant-ui/thread-scroll-store";
 import { useErrorBridge } from "@/components/assistant-ui/error-bridge";
 import { useUsageBridge } from "@/components/assistant-ui/usage-bridge";
 import { EmptyState, EmptyStateComposer, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
@@ -80,6 +87,7 @@ import {
 } from "lucide-react";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -696,6 +704,45 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   // composer）；消费者仍可经 ThreadComponents.Welcome 整体替换
   const { Welcome = EmptyStateWelcome } = useContext(ThreadComponentsContext);
 
+  // ── 滚动位置按会话持久化（hermes thread-scroll 对标，runtime 代理建店）──
+  // 恢复：runtime 在水合/切会话成功后投递 restoreRequest（seq 版一次性），
+  // 这里消费——用 'instant'（视口带 scroll-smooth，smooth 会横跨长会话做
+  // 动画）。采样：onScroll 300ms 节流写回（offset 存距底距离，上方内容
+  // 增删不摇晃阅读位）。
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const restoreRequest = useStore(threadScrollBridge, (s) => s.scrollRestoreRequest);
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!restoreRequest) return;
+    sessionIdRef.current = restoreRequest.sessionId;
+    const el = viewportRef.current;
+    if (!el) return;
+    const saved =
+      getSavedThreadScroll(restoreRequest.sessionId) ??
+      ({ mode: "bottom" as const } as const);
+    el.scrollTo({ top: threadScrollTargetTop(saved, el), behavior: "instant" });
+    threadScrollBridge.getState().consumeRestoreRequest(restoreRequest.seq);
+  }, [restoreRequest]);
+  const scrollTimerRef = useRef<number | undefined>(undefined);
+  useEffect(
+    () => () => {
+      if (scrollTimerRef.current !== undefined)
+        clearTimeout(scrollTimerRef.current);
+    },
+    [],
+  );
+  const onViewportScroll = useCallback(() => {
+    const el = viewportRef.current;
+    const sid = sessionIdRef.current;
+    if (!el || !sid || scrollTimerRef.current !== undefined) return;
+    scrollTimerRef.current = window.setTimeout(() => {
+      scrollTimerRef.current = undefined;
+      const elNow = viewportRef.current;
+      if (!elNow) return;
+      saveThreadScroll(sid, classifyScrollState(elNow));
+    }, 300);
+  }, []);
+
   return (
     // asChild：Thread 不渲染自己的 div，行为合并到我们传入的容器上
     // （FlexLayout tab content 就是滚动/布局容器——官方"已有容器"场景）
@@ -713,6 +760,8 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
         <ConnectionBanner />
         <ThreadPrimitive.Viewport asChild turnAnchor="top">
           <div
+            ref={viewportRef}
+            onScroll={onViewportScroll}
             data-slot="aui_thread-viewport"
             className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
           >

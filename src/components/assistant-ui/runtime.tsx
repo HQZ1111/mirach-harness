@@ -32,9 +32,32 @@ import {
 } from './branch-store'
 import { connectionBridge } from './connection-store'
 import { errorBridge } from './error-bridge'
+import { clearThreadScroll, threadScrollBridge } from './thread-scroll-store'
+import { deriveTitle, firstUserMessageText, nextTitleInLineage } from './session-title'
 import { usageBridge, type UsageState } from './usage-bridge'
 
 const THREAD = 'main'
+
+/** 自动命名已尝试过的会话（每会话只做一次——含失败，失败 console 可见、
+ * 不静默重试；跨重启由 pi 持久的 name 字段 + 默认态判定兜住重名） */
+const autoNamedSessions = new Set<string>()
+
+/** titling.auto_title 配置门（pi Config TitlingSettings，config.rs:434-440；
+ * settings.json 落盘 snake_case `auto_title`，读取侧 pi 另收 autoTitle/auto
+ * 别名——门保持同款别名集）。显式 false = 用户关掉自动命名；缺省（无
+ * settings 文件 / titling 键缺 / auto_title 缺 / true）= 开（上游默认 true）。 */
+const isAutoTitleEnabled = async (): Promise<boolean> => {
+  const settings = await invoke<unknown>('pi_get_settings')
+  if (settings === null || settings === undefined) return true // 无配置文件 = 上游默认
+  if (typeof settings !== 'object') {
+    console.error('[pi] 自动命名：pi_get_settings 返回形状非法——跳过', settings)
+    return false
+  }
+  const titling = (settings as Record<string, unknown>).titling
+  if (!titling || typeof titling !== 'object') return true
+  const t = titling as Record<string, unknown>
+  return (t.auto_title ?? t.autoTitle ?? t.auto) !== false
+}
 
 /** POST /ag-ui 图片契约白名单（png/jpeg/webp/gif） */
 const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -354,6 +377,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
             if (cancelled) return
             actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+            // 滚动位置恢复请求（挂载水合成功路径）：视口（thread.aui 侧）
+            // 消费后按持久化位置恢复阅读位
+            threadScrollBridge.getState().requestRestore(st.sessionId)
           }
         } catch (e) {
           // 区分"正常无会话"（pi_get_state 报 no active session——首启预期
@@ -381,6 +407,70 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     }
   }, [actorRef, refreshThreads, hydratePiMessages, reconnectSeq])
 
+  /** 自动会话命名（规则段，hermes title_generator 两段式的即时段）：
+   * POST 成功后对「默认态名」（pi SessionIndex 的 name 为 null/空 = 用户
+   * 未命名）的会话，从首条 user 消息派生标题（deriveTitle——首个非空行、
+   * 词边界截 48 字符+…），撞名走谱系编号追加 #N（nextTitleInLineage——
+   * 既有最大号+1），pi_rename_session 落名后刷新线程列表。受
+   * titling.auto_title 配置门约束（isAutoTitleEnabled）；每会话只尝试
+   * 一次（autoNamedSessions 内存 Set，含失败——失败可见不重试）；LLM
+   * 总结升级段不做（无凭据面）。全程独立 try/catch：命名失败不影响
+   * 消息发送/run 流。 */
+  const maybeAutoNameSession = useCallback(async () => {
+    let sessionId: string | null
+    try {
+      sessionId = (await invoke<{ sessionId: string | null }>('pi_get_state')).sessionId
+    } catch (e) {
+      console.error('[pi] 自动命名：pi_get_state 失败——跳过', e)
+      return
+    }
+    if (!sessionId) {
+      console.error('[pi] 自动命名：POST 成功但无活动会话（域异常）——跳过')
+      return
+    }
+    if (autoNamedSessions.has(sessionId)) return
+    // 配置门（titling.auto_title）：显式 false = 用户关掉自动命名——
+    // 不占命名名额（同一 run 内改回 true，下次 POST 即恢复触发）；
+    // settings 读取失败 = 错误可见并跳过本次（同样不占名额）。
+    try {
+      if (!(await isAutoTitleEnabled())) return
+    } catch (e) {
+      console.error('[pi] 自动命名：pi_get_settings 读取失败——跳过', e)
+      return
+    }
+    // 先占位再执行：并发 POST 不得重复触发同一会话的命名
+    autoNamedSessions.add(sessionId)
+    try {
+      const metas = await invoke<PiSessionMeta[]>('pi_list_sessions')
+      const self = (metas ?? []).find((m) => m.id === sessionId)
+      if (!self) {
+        console.error('[pi] 自动命名：会话不在索引中——跳过', sessionId)
+        return
+      }
+      // 默认态判定：已有自定义名（用户命名/历史命名）→ 不动
+      if (self.name) return
+      const firstUser = firstUserMessageText(actorRef.getSnapshot().context.messages)
+      if (!firstUser) {
+        console.error('[pi] 自动命名：没有可派生文本的首条 user 消息——跳过', sessionId)
+        return
+      }
+      const derived = deriveTitle(firstUser)
+      if (!derived) {
+        console.error('[pi] 自动命名：首行派生标题为空——跳过', sessionId)
+        return
+      }
+      // 谱系编号：与其它会话撞名时追加 #N（N = 既有最大号+1）
+      const others = (metas ?? [])
+        .filter((m) => m.id !== sessionId && m.name)
+        .map((m) => m.name!)
+      const title = nextTitleInLineage(derived, others)
+      await invoke('pi_rename_session', { name: title })
+      await refreshThreads()
+    } catch (e) {
+      console.error('[pi] 自动命名失败（会话保持默认名，可手动重命名）', e)
+    }
+  }, [actorRef, refreshThreads])
+
   const postRun = useCallback((message: string, images?: PiImagePayload[]) => {
     const ep = endpointRef.current
     if (!ep) return
@@ -399,8 +489,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出
         if (!res.ok) throw new Error(`POST /ag-ui 失败: ${res.status}`)
       })
+      // POST 成功即触发自动命名（maybeAutoNameSession 内部全 try/catch，
+      // 不向外抛——外层 catch 仍只服务 POST 本身的失败）
+      .then(() => maybeAutoNameSession())
       .catch((e) => console.error('[agui] POST 失败', e))
-  }, [])
+  }, [maybeAutoNameSession])
 
   /** 最后一条 user 消息（TurnMessage 形）——onReload 重发文本的来源 */
   const lastUserMessage = useCallback((): TurnMessage | null => {
@@ -550,6 +643,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(sessionId)
         await refreshThreads()
+        // 滚动位置恢复请求（回到父会话 = 打开既有历史会话，与
+        // switchToThread 同语义）
+        threadScrollBridge.getState().requestRestore(sessionId)
       } catch (e) {
         console.error('[pi] 回到父会话后重水合失败（服务端已切换，可从侧栏手动打开）', e)
         void refreshThreads()
@@ -751,6 +847,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(id)
         await refreshThreads()
+        // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
+        // 位置恢复阅读位
+        threadScrollBridge.getState().requestRestore(id)
         // 活动会话已换——分支条/fork 点随新会话刷新（防上一会话的投影残留）
         branchBridge.getState().requestRefresh()
       } catch (e) {
@@ -814,6 +913,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           branchBridge.getState().requestRefresh()
         }
         await invoke('pi_delete_session', { path })
+        // 删除成功清该会话的滚动位置记忆（内存 + 持久化）
+        clearThreadScroll(id)
         await refreshThreads()
       } catch (e) {
         console.error(`[pi] 会话 ${id} 删除失败（保持当前状态）`, e)
