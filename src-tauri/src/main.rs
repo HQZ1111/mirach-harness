@@ -223,6 +223,100 @@ fn pi_delete_session(
     state.engine.delete_session(&path)
 }
 
+// ── checkpoint / rewind / retry（pi::checkpoint pub 面，对话历史编辑）。
+//    时序约定：四个命令都要拿 handle mutex——prompt 在跑时（isRunning）会
+//    阻塞到该 run 结束，前端负责先 pi_interrupt 再调用。──
+
+/// 编辑重跑准备（/retry 语义）：leaf 移到最后一个可重试 user turn 的父级。
+/// **只准备分支**——重发由前端下一次 POST 完成（新 turn 落为兄弟分支，旧
+/// 分支及其回复保留在会话树里）。无可重试 turn = 明确 Err。返回
+/// {text, abandonedEntryId}（text 供前端回填 composer 重发）。
+#[tauri::command(async)]
+fn pi_retry_edit(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.retry_edit()
+}
+
+/// 在当前 leaf 打 checkpoint（label 空/缺省 = "checkpoint"）。返回完整
+/// checkpoint JSON（含 entryId/name——name 是 pi_rewind 的查找键）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_mark_checkpoint(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    label: Option<String>,
+) -> Result<serde_json::Value, String> {
+    state.engine.mark_checkpoint(label)
+}
+
+/// 列出当前会话活动路径上的 checkpoint（JSONL Custom 条目枚举——上游无
+/// 枚举 API）。entryId = 会话树条目 id；name = rewind 的查找键。
+#[tauri::command(async)]
+fn pi_list_checkpoints(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.list_checkpoints()
+}
+
+/// 回退到 checkpoint：active context 截断到该 checkpoint 边界（user-turn
+/// 对齐），span 折叠为一条摘要报告；会话树完整保留。checkpointId =
+/// checkpoint **名称**（pi find_checkpoint 的匹配键）。摘要失败 = Err。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_rewind(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    checkpoint_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.rewind(&checkpoint_id)
+}
+
+// ── 会话 fork / 分支（pi Session 树原生能力；上游先例 rpc fork/
+//    get_fork_messages 与 interactive/tree_ui 的 stage_and_commit——
+//    Session 是 durable authority，Agent 只是投影）。fork/switch 在 run
+//    进行中一律 Err（上游 session transition blocker 语义），前端先
+//    pi_interrupt。──
+
+/// 从指定 user 消息 fork 新会话：新会话叶 = 选中消息父级（选中消息不进
+/// 新文件——selectedText 预填 composer 重新提交即新分支）。返回
+/// {path, sessionId, selectedText}；换装走 open_session 链（审批清理/
+/// AG-UI/侧栏现成），前端随后重拉 pi_get_messages 水合新会话。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_fork_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    entry_id: String,
+) -> Result<serde_json::Value, String> {
+    state
+        .engine
+        .fork_session(&entry_id, Some(state.ui_bridge("main")))
+}
+
+/// 枚举当前活动路径上的 user 消息（fork 点清单；上游 get_fork_messages
+/// 同语义）。[{entryId, text}]
+#[tauri::command(async)]
+fn pi_get_fork_points(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.get_fork_points()
+}
+
+/// 最近分叉点的兄弟分支（null = 当前路径无分叉）。形状：
+/// {forkPointId, branches: [{rootId, leafId, preview, messageCount,
+/// isCurrent}]}。
+#[tauri::command(async)]
+fn pi_list_sibling_branches(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.list_sibling_branches()
+}
+
+/// 切换到指定叶（分支导航）。返回 {leafId}；前端之后重拉 pi_get_messages
+/// 重水合当前分支。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_switch_branch(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    leaf_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.switch_branch(&leaf_id)
+}
+
 fn main() {
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
     // 删除立即可见；默认 balanced 是定时 autosave，列表会延迟出现且
@@ -337,6 +431,14 @@ fn main() {
             pi_open_session,
             pi_rename_session,
             pi_delete_session,
+            pi_retry_edit,
+            pi_mark_checkpoint,
+            pi_list_checkpoints,
+            pi_rewind,
+            pi_fork_session,
+            pi_get_fork_points,
+            pi_list_sibling_branches,
+            pi_switch_branch,
             pi_settings::pi_get_settings,
             pi_settings::pi_set_settings,
             pi_settings::pi_get_models_config,

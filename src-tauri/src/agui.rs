@@ -267,15 +267,30 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
         AgentEvent::AgentEnd { messages, error, .. } => match error {
             Some(err) => vec![json!({ "type": "RUN_ERROR", "message": err })],
             None => {
+                // run 总成本：AgentEnd.messages 是本 run 的全部新消息（多次
+                // 工具迭代各带自己的 usage/cost），run 总成本 = Σ
+                // assistant.usage.cost.total（pi Cost 以美元计）。
+                let cost_total: f64 = messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        pi::sdk::Message::Assistant(a) => Some(a.usage.cost.total),
+                        _ => None,
+                    })
+                    .sum();
                 // 用量快照（ContextDisplay 数据面）：取最后一条 assistant
-                // 消息的 usage（= 最终 turn 的上下文规模，input 已含历史）
+                // 消息的 usage（= 最终 turn 的上下文规模，input 已含历史）；
+                // cacheWriteTokens/costUsd 为本轮增补字段
                 let usage = messages.iter().rev().find_map(|m| match m {
-                    pi::sdk::Message::Assistant(a) => Some(json!({
-                        "inputTokens": a.usage.input,
-                        "outputTokens": a.usage.output,
-                        "cachedInputTokens": a.usage.cache_read,
-                        "totalTokens": a.usage.total_tokens,
-                    })),
+                    pi::sdk::Message::Assistant(a) => {
+                        let mut o = serde_json::Map::new();
+                        o.insert("inputTokens".into(), json!(a.usage.input));
+                        o.insert("outputTokens".into(), json!(a.usage.output));
+                        o.insert("cachedInputTokens".into(), json!(a.usage.cache_read));
+                        o.insert("totalTokens".into(), json!(a.usage.total_tokens));
+                        o.insert("cacheWriteTokens".into(), json!(a.usage.cache_write));
+                        o.insert("costUsd".into(), json!(cost_total));
+                        Some(serde_json::Value::Object(o))
+                    }
                     _ => None,
                 });
                 vec![json!({
@@ -287,10 +302,77 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
         AgentEvent::AutoCompactionStart { reason } => vec![json!({
             "type": "CUSTOM", "name": "compaction", "value": { "phase": "start", "reason": reason },
         })],
-        AgentEvent::AutoCompactionEnd { .. } => vec![json!({
-            "type": "CUSTOM", "name": "compaction", "value": { "phase": "end" },
-        })],
+        AgentEvent::AutoCompactionEnd {
+            result,
+            aborted,
+            will_retry,
+            error_message,
+        } => {
+            // result 成功时 = auto_compaction_result_payload：{summary,
+            // firstKeptEntryId, tokensBefore, tokensAfter, details?}（agent.rs）
+            //——取 tokens 两个数透出；失败/中止时 result 为 None（可选键缺席）。
+            let (tokens_before, tokens_after) = match result {
+                Some(v) => (
+                    v.get("tokensBefore").and_then(|t| t.as_u64()),
+                    v.get("tokensAfter").and_then(|t| t.as_u64()),
+                ),
+                None => (None, None),
+            };
+            let mut value = serde_json::Map::new();
+            value.insert("phase".into(), json!("end"));
+            if let Some(tb) = tokens_before {
+                value.insert("tokensBefore".into(), json!(tb));
+            }
+            if let Some(ta) = tokens_after {
+                value.insert("tokensAfter".into(), json!(ta));
+            }
+            value.insert("aborted".into(), json!(aborted));
+            value.insert("willRetry".into(), json!(will_retry));
+            if let Some(em) = error_message {
+                value.insert("errorMessage".into(), json!(em));
+            }
+            vec![json!({
+                "type": "CUSTOM", "name": "compaction", "value": value,
+            })]
+        }
         _ => vec![],
+    }
+}
+
+/// POST body 的图片块（前端契约：`{threadId, message, images?: [{data,
+/// mimeType}]}`；data = 不带 data: 前缀的纯 base64）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AguiImage {
+    pub data: String,
+    pub mime_type: String,
+}
+
+/// 图片 MIME 白名单（位图四域；SVG 非位图不收）。白名单外 POST 层 400
+/// 拒绝——不静默丢（兜底禁令）。
+const IMAGE_MIME_ALLOWLIST: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// 解析并校验 POST body 的 images 字段（缺省/Null = 无图；形状错/MIME
+/// 越界/空 data = Err，调用方转 400）。
+fn parse_images(body: &serde_json::Value) -> Result<Vec<AguiImage>, String> {
+    match body.get("images") {
+        None | Some(serde_json::Value::Null) => Ok(vec![]),
+        Some(v) => {
+            let images: Vec<AguiImage> = serde_json::from_value(v.clone())
+                .map_err(|e| format!("images parse failed: {e}"))?;
+            for img in &images {
+                if img.data.is_empty() {
+                    return Err("images[].data must be non-empty base64".into());
+                }
+                if !IMAGE_MIME_ALLOWLIST.contains(&img.mime_type.as_str()) {
+                    return Err(format!(
+                        "unsupported image mimeType {:?} (allowed: png/jpeg/webp/gif)",
+                        img.mime_type
+                    ));
+                }
+            }
+            Ok(images)
+        }
     }
 }
 
@@ -317,6 +399,17 @@ async fn agui_run(
     if message.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "empty message"}))).into_response();
     }
+    // 图片块（可选）：形状/MIME 白名单在 POST 层校验，越界 400——不静默丢
+    let images = match parse_images(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
+        }
+    };
     // 会话按需创建（§7-3）：已有活跃会话时原样复用（多轮上下文保持），
     // 无才创建——【关键】不能每次 POST 都 create（否则每条消息换新会话，
     // 上下文全丢）。flush/create 的深递归 future 不能在 tokio worker 栈上
@@ -394,11 +487,22 @@ async fn agui_run(
                     }),
                 );
             });
-            let result = st2.engine.prompt(&message, move |event: AgentEvent| {
-                for v in map_agent_event(&event) {
-                    sink.push(&thread2, v);
+            let result = {
+                let sink2 = sink.clone();
+                let thread3 = thread2.clone();
+                let on_event = move |event: AgentEvent| {
+                    for v in map_agent_event(&event) {
+                        sink2.push(&thread3, v);
+                    }
+                };
+                // 无图 = 纯文本原路径（SDK prompt_with_abort 包装不变）；
+                // 有图 = prompt_with_content（同一锁/on_start/AbortSlot 内核）
+                if images.is_empty() {
+                    st2.engine.prompt(&message, on_event, on_start)
+                } else {
+                    st2.engine.prompt_with_content(&message, &images, on_event, on_start)
                 }
-            }, on_start);
+            };
             if let Err(e) = result {
                 err_sink.push(&err_thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
             }
@@ -553,7 +657,7 @@ mod tests {
     //! try_recv，不依赖 tokio rt feature 进 dev 依赖）。
 
     use super::*;
-    use pi::model::{AssistantMessage, AssistantMessageEvent, Message, Usage};
+    use pi::model::{AssistantMessage, AssistantMessageEvent, Cost, Message, Usage};
     use pi::tools::ToolOutput;
 
     // ---------- 样本助手 ----------
@@ -869,6 +973,131 @@ mod tests {
         assert_eq!(v[0]["type"], "CUSTOM");
         assert_eq!(v[0]["name"], "compaction");
         assert_eq!(v[0]["value"]["phase"], "end");
+    }
+
+    #[test]
+    fn auto_compaction_end_with_result_maps_tokens_payload() {
+        // 成功载荷（agent.rs auto_compaction_result_payload 同形状）：tokens
+        // 两个数从 result 透出；成功路径 aborted/willRetry false、无 errorMessage
+        let v = map_agent_event(&AgentEvent::AutoCompactionEnd {
+            result: Some(serde_json::json!({
+                "summary": "compacted",
+                "firstKeptEntryId": "entry-7",
+                "tokensBefore": 8000,
+                "tokensAfter": 1200,
+            })),
+            aborted: false,
+            will_retry: false,
+            error_message: None,
+        });
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "CUSTOM");
+        assert_eq!(v[0]["name"], "compaction");
+        assert_eq!(v[0]["value"]["phase"], "end");
+        assert_eq!(v[0]["value"]["tokensBefore"], 8000);
+        assert_eq!(v[0]["value"]["tokensAfter"], 1200);
+        assert_eq!(v[0]["value"]["aborted"], false);
+        assert_eq!(v[0]["value"]["willRetry"], false);
+        assert!(v[0]["value"].get("errorMessage").is_none());
+    }
+
+    #[test]
+    fn auto_compaction_end_aborted_without_result_maps_flags_only() {
+        // 失败/中止路径：result None → tokens 键缺席；aborted/willRetry/
+        // errorMessage 照发（前端可感知"压缩没成，稍后重试"）
+        let v = map_agent_event(&AgentEvent::AutoCompactionEnd {
+            result: None,
+            aborted: true,
+            will_retry: true,
+            error_message: Some("compactor down".into()),
+        });
+        assert_eq!(v[0]["value"]["phase"], "end");
+        assert_eq!(v[0]["value"]["aborted"], true);
+        assert_eq!(v[0]["value"]["willRetry"], true);
+        assert_eq!(v[0]["value"]["errorMessage"], "compactor down");
+        assert!(v[0]["value"].get("tokensBefore").is_none());
+        assert!(v[0]["value"].get("tokensAfter").is_none());
+    }
+
+    #[test]
+    fn agent_end_usage_carries_cache_write_and_run_cost() {
+        // usage 增补字段：cacheWriteTokens 取最后一条 assistant 的
+        // cache_write；costUsd = 本 run 全部 assistant 消息的 cost.total 加和
+        // （AgentEnd.messages 是 run 作用域的新消息）
+        let e = AgentEvent::AgentEnd {
+            session_id: sess(),
+            messages: vec![
+                Message::assistant(AssistantMessage {
+                    usage: Usage {
+                        input: 50,
+                        output: 4,
+                        total_tokens: 54,
+                        cost: Cost {
+                            total: 0.01,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                Message::assistant(AssistantMessage {
+                    usage: Usage {
+                        input: 100,
+                        output: 5,
+                        cache_read: 7,
+                        cache_write: 9,
+                        total_tokens: 121,
+                        cost: Cost {
+                            total: 0.002,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            ],
+            error: None,
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["type"], "RUN_FINISHED");
+        // usage 仍取最后一条 assistant（最终 turn 上下文规模）
+        assert_eq!(v[0]["usage"]["inputTokens"], 100);
+        assert_eq!(v[0]["usage"]["cacheWriteTokens"], 9);
+        // costUsd = 0.01 + 0.002（整 run 加和）
+        let cost = v[0]["usage"]["costUsd"].as_f64().expect("costUsd number");
+        assert!((cost - 0.012).abs() < 1e-9, "costUsd = {cost}");
+    }
+
+    #[test]
+    fn parse_images_rejects_non_allowlisted_mime_and_empty_data() {
+        // POST 层白名单：越界 MIME / 空 data = Err（调用方转 400，不静默丢）
+        let err = parse_images(&serde_json::json!({ "images": [
+            { "data": "aGk=", "mimeType": "image/svg+xml" }
+        ]}))
+        .expect_err("svg must be rejected");
+        assert!(err.contains("unsupported image mimeType"), "{err}");
+        let err = parse_images(&serde_json::json!({ "images": [
+            { "data": "", "mimeType": "image/png" }
+        ]}))
+        .expect_err("empty data must be rejected");
+        assert!(err.contains("non-empty"), "{err}");
+        let ok = parse_images(&serde_json::json!({ "images": [
+            { "data": "aGk=", "mimeType": "image/png" },
+            { "data": "eg==", "mimeType": "image/webp" }
+        ]}))
+        .expect("allowlisted images pass");
+        assert_eq!(ok.len(), 2);
+        assert_eq!(ok[0].mime_type, "image/png");
+        // 缺省/Null = 无图
+        assert!(parse_images(&serde_json::json!({})).unwrap().is_empty());
+        assert!(
+            parse_images(&serde_json::json!({ "images": null }))
+                .unwrap()
+                .is_empty()
+        );
+        // 形状错（非数组）= Err
+        assert!(parse_images(&serde_json::json!({ "images": "nope" })).is_err());
     }
 
     #[test]

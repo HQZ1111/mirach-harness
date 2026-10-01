@@ -4,7 +4,11 @@
 //! - pi 不是 tokio——pi 的 future 禁止进 tauri::async_runtime，asupersync
 //!   运行时由 PiRuntime 持有（'static 泄漏一次，进程生命周期内复用）；
 //! - AgentSessionHandle 被 Mutex 串行——同一时刻只有一个 prompt；
-//! - 消费面只准 import pi::sdk / pi::model（SemVer 稳定面）；
+//! - 消费面只准 import pi::sdk / pi::model（SemVer 稳定面）与 pub 模块：
+//!   pi::checkpoint（checkpoint/rewind/retry，2026-10-01 起）+
+//!   pi::agent_cx::AgentCx（Mutex<Session> 内层锁需要 Cx，for_request 是
+//!   上游顶层入口的规范构造）+ pi::session::SessionEntry（checkpoint 条目
+//!   枚举，上游无现成列举 API）——pub 模块最小例外，逐一记录在案；
 //! - **禁止兜底（2026-10-01 用户定稿）**：错误就是错误——失败一律传播
 //!   （Err），不降级、不用默认值替代、不假装成功；
 //! - **一切 block_on 都在 16MiB 大栈线程上**（E2E 实测：pi debug 构建的
@@ -23,9 +27,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use pi::model::{ContentBlock, ImageContent, TextContent, UserContent};
 use pi::sdk::{AgentEvent, AgentSessionHandle, SessionOptions, create_agent_session};
 
-use crate::agui::{ApprovalRegistry, ThreadBuffers, UiAnswer};
+use crate::agui::{AguiImage, ApprovalRegistry, ThreadBuffers, UiAnswer};
 
 /// block_on 的固定执行栈：16MiB（虚拟预留，惰性提交）。
 const PI_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -407,7 +412,477 @@ impl PiEngine {
         })?
     }
 
+    // ── checkpoint / rewind / retry（pi::checkpoint pub 面；会话树
+    //    append-only，编辑只作用于 active context。上游先例：rpc.rs 的
+    //    checkpoint/rewind 命令与 interactive/perf.rs 的 /rewind——同一组
+    //    API 的宿主集成形态）。
+    //
+    //    &mut Session 的获取路径：AgentSessionHandle::session_mut()
+    //    （sdk.rs:2211 → &mut AgentSession）→ AgentSession.session（pub
+    //    Arc<asupersync Mutex<Session>>，agent.rs:5413）→ Arc clone 后
+    //    .lock(cx.cx()).await。Cx 经 AgentCx::for_request()（agent_cx
+    //    pub 面，顶层请求入口的规范构造）。
+    //
+    //    时序约定：四个方法都要拿 handle mutex——prompt 在跑时（isRunning）
+    //    会阻塞到该 run 结束（std Mutex 串行不变量），与所有 pi_* 控制面
+    //    命令同款；前端负责先 pi_interrupt 再调用（pi_interrupt 本身不拿
+    //    锁、只置 abort 信号，是唯一的例外）。调用前先 flush_active_session：
+    //    树状态即新鲜真相（strict 持久化下近乎 no-op，保留以防模式回退）。──
+
+    /// 编辑重跑准备（/retry 语义）：把 leaf 移到最后一个可重试 user turn
+    /// 的父级。**本命令只准备分支**——重发由前端下一次 POST 完成（新 turn
+    /// 落为兄弟分支，被放弃的 turn 及其回复保留在会话树里）。无可重试
+    /// turn = 明确 Err。返回 {text, abandonedEntryId}（text 供前端回填
+    /// composer 重发）。
+    pub fn retry_edit(&self) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let preparation = {
+                    let mut inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    pi::checkpoint::prepare_retry_branch(&mut inner)
+                };
+                match preparation {
+                    None => Err("no retryable user turn".to_string()),
+                    Some(p) => {
+                        agent_session
+                            .persist_session()
+                            .await
+                            .map_err(|e| format!("会话持久化失败: {e}"))?;
+                        Ok(serde_json::json!({
+                            "text": p.text,
+                            "abandonedEntryId": p.abandoned_entry_id,
+                        }))
+                    }
+                }
+            })
+        })?
+    }
+
+    /// 在当前 leaf 打 checkpoint（label 空/缺省 = "checkpoint"）。返回完整
+    /// checkpoint JSON（手工带 entryId——上游 Checkpoint.entry_id 是
+    /// skip_serializing，序列化体里没有）。
+    pub fn mark_checkpoint(&self, label: Option<String>) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                // active_messages 快照（rewind 边界 = 打点时的活动消息数）；
+                // rpc checkpoint 命令同款顺序：先取 agent.messages() 再锁
+                // 内层会话树。
+                let messages = agent_session.agent.messages().to_vec();
+                let store = Arc::clone(&agent_session.session);
+                let checkpoint = {
+                    let mut inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    pi::checkpoint::mark_checkpoint(
+                        &mut inner,
+                        label.as_deref().unwrap_or("checkpoint"),
+                        None,
+                        &messages,
+                    )
+                };
+                agent_session
+                    .persist_session()
+                    .await
+                    .map_err(|e| format!("会话持久化失败: {e}"))?;
+                let mut value = serde_json::to_value(&checkpoint)
+                    .map_err(|e| format!("checkpoint 序列化失败: {e}"))?;
+                if let Some(id) = &checkpoint.entry_id {
+                    value["entryId"] = serde_json::json!(id);
+                }
+                Ok(value)
+            })
+        })?
+    }
+
+    /// 列出当前会话活动路径上的 checkpoint。上游 checkpoint 模块只有按
+    /// name 查找（find_checkpoint），无枚举 API——诚实实现：枚举活动路径
+    /// 的 Custom "checkpoint" 条目（session.rs PathRebuildState 重放逻辑
+    /// 同款形状）。data 缺失的条目跳过（上游 mark_checkpoint 序列化失败
+    /// 会写 Null 死条目，find_checkpoint 的 `.ok()?` 同语义——该条目从未
+    /// 可用）；data 存在但解析失败 = Err（错误即错误，不静默吞）。
+    pub fn list_checkpoints(&self) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let inner = store
+                    .lock(cx.cx())
+                    .await
+                    .map_err(|e| format!("session lock failed: {e}"))?;
+                let mut rows: Vec<serde_json::Value> = Vec::new();
+                for entry in inner.entries_for_current_path() {
+                    let pi::session::SessionEntry::Custom(custom) = entry else {
+                        continue;
+                    };
+                    if custom.custom_type != "checkpoint" {
+                        continue;
+                    }
+                    let Some(data) = &custom.data else {
+                        continue;
+                    };
+                    let mut checkpoint: pi::checkpoint::Checkpoint =
+                        serde_json::from_value(data.clone()).map_err(|e| {
+                            format!(
+                                "checkpoint 条目损坏（entryId={:?}）: {e}",
+                                custom.base.id.as_deref().unwrap_or("?")
+                            )
+                        })?;
+                    checkpoint.entry_id.clone_from(&custom.base.id);
+                    rows.push(serde_json::json!({
+                        "entryId": checkpoint.entry_id,
+                        "name": checkpoint.name,
+                        "note": checkpoint.note,
+                        "tokenEstimate": checkpoint.token_estimate,
+                        "messageCount": checkpoint.message_count,
+                        "atMs": checkpoint.at_ms,
+                    }));
+                }
+                Ok(serde_json::Value::Array(rows))
+            })
+        })?
+    }
+
+    /// 回退到 checkpoint：active context 截断到该 checkpoint 边界（内部
+    /// 对齐到 user-turn 起点，防 trailing tool_use 悬空），checkpoint 之后
+    /// 的 span 折叠为一条摘要报告消息；会话树完整保留（append-only，
+    /// 重启重放按 rewind 条目的 checkpointEntryId 复原折叠）。返回
+    /// RewindOutcome JSON（collapsedMessages/summary/summaryTokensEstimate/...）。
+    /// checkpointId = checkpoint **名称**（pi find_checkpoint 的匹配键：
+    /// 反向扫活动路径取最新同名；entryId 不是查找键——上游 CLI/rpc 同为
+    /// name 语义）。
+    /// 摘要失败 = Err 传播（mirach 兜底禁令；上游 rpc 在此降级为
+    /// "(summarization failed…)" 文本注记，我们不降级——回退半途而废比
+    /// 明确失败更糟）。
+    pub fn rewind(&self, checkpoint_id: &str) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        let checkpoint_id = checkpoint_id.to_string();
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let checkpoint = {
+                    let inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    pi::checkpoint::find_checkpoint(&inner, Some(&checkpoint_id))
+                        .ok_or_else(|| format!("no checkpoint named '{checkpoint_id}'"))?
+                };
+                // 与 rpc rewind 同流程：span 快照 → summarize → 截断。
+                let messages = agent_session.agent.messages().to_vec();
+                let span: Vec<pi::model::Message> =
+                    messages[checkpoint.message_count.min(messages.len())..].to_vec();
+                if span.is_empty() {
+                    // 与 rpc rewind 同款诚实结果：上下文已在该 checkpoint，
+                    // 无事可做（不是错误，也不假装折叠了东西）。
+                    return Ok(serde_json::json!({
+                        "checkpoint": checkpoint.name,
+                        "collapsedMessages": 0,
+                        "note": "active context already at checkpoint",
+                    }));
+                }
+                let provider = agent_session.agent.provider();
+                // 无凭据 provider（replay/test/local）摘要不需要 key；
+                // 有凭据的带自己的（rpc rewind 同源写法）。
+                let api_key = agent_session
+                    .agent
+                    .stream_options()
+                    .api_key
+                    .clone()
+                    .unwrap_or_default();
+                let summary = pi::checkpoint::summarize_span(
+                    &span,
+                    provider,
+                    &api_key,
+                    agent_session.compaction_settings(),
+                )
+                .await
+                .map_err(|e| format!("rewind 摘要失败: {e}"))?;
+                let outcome = pi::checkpoint::apply_rewind_to_active(
+                    &mut agent_session.agent,
+                    &checkpoint,
+                    summary,
+                );
+                // 持久化 rewind 条目：重启重放的折叠依据（session.rs
+                // PathRebuildState.apply_rewind 按 checkpointEntryId 复原）。
+                {
+                    let mut inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    let payload = serde_json::to_value(&outcome)
+                        .map_err(|e| format!("rewind outcome 序列化失败: {e}"))?;
+                    inner.append_custom_entry("rewind".to_string(), Some(payload));
+                }
+                agent_session
+                    .persist_session()
+                    .await
+                    .map_err(|e| format!("会话持久化失败: {e}"))?;
+                serde_json::to_value(&outcome)
+                    .map_err(|e| format!("rewind outcome 序列化失败: {e}"))
+            })
+        })?
+    }
+
+
+    // ── 会话 fork / 分支导航（pi Session 树原生能力。上游先例：rpc.rs 的
+    //    fork / get_fork_messages 命令与 interactive/tree_ui.rs 的
+    //    stage_and_commit_tree_navigation——**Session 是 durable authority，
+    //    Agent 只是内存投影**（rpc.rs:303-308）：改会话历史必须落 Session
+    //    并持久化，Agent 消息面靠 replace_messages 重投影；只改 Agent 的
+    //    历史会被下一次 run 前的重水合冲掉）。──
+    //
+    //    &mut Session 的获取路径与上一批 checkpoint 命令同款：session_mut()
+    //    → AgentSession.session（pub Arc<asupersync Mutex<Session>>）→
+    //    Arc clone 后 .lock(cx.cx()).await。
+    //
+    //    run 进行中的 fork/switch 一律拒绝（reject_if_run_in_progress，
+    //    对齐上游 rpc fork 的 session transition blocker 语义：流式期间
+    //    拒绝结构性会话切换）；读命令（fork 点清单/兄弟分支）与全部既有
+    //    控制面命令一样串行等锁。判定源 = abort 槽位（prompt 拿到 handle
+    //    锁后登记、PromptGuard 收尾清除——非 None 即有 run 在跑；排队未
+    //    起跑的 run 不占槽位，随后被 handle 锁自然串行）。──
+
+    /// run 进行中 → Err（fork/switch 专用前置）。
+    fn reject_if_run_in_progress(&self) -> Result<(), String> {
+        let guard = self
+            .shared
+            .abort
+            .lock()
+            .map_err(|_| "pi abort mutex poisoned".to_string())?;
+        if guard.is_some() {
+            return Err(
+                "run in progress: interrupt the active run before forking/switching the session"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// 从指定 user 消息 fork 新会话（上游 rpc fork 语义，rpc.rs:4306-4503）：
+    /// 新会话的叶 = 选中消息的**父级**（选中的 user 消息不进新文件——前端
+    /// 把 selectedText 预填 composer 重新提交，新 turn 即落为兄弟分支）；
+    /// entries 复制到父级为止。header 克隆 provider/model_id/thinking_level
+    /// 三项 + branchedFrom 指回源文件（rpc.rs:4343-4356 同款直写）。
+    /// 新文件落盘后**复用 open_session 链换装**（create_session_opts：
+    /// flush 旧会话 → create_agent_session(session_path=新文件) → 换
+    /// handle → 挂起审批清理）——AG-UI/侧栏切换全现成，前端随后重拉
+    /// pi_get_messages 水合新会话。返回 {path, sessionId, selectedText}；
+    /// sessionId = 新会话 header.id（与 pi_list_sessions 的 id 同源——索引
+    /// 行 id 即文件 header id）。
+    pub fn fork_session(
+        &self,
+        entry_id: &str,
+        ui_bridge: Option<UiBridgeHandle>,
+    ) -> Result<serde_json::Value, String> {
+        self.reject_if_run_in_progress()?;
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        let entry_id = entry_id.to_string();
+        // Phase 1+2 在一个大栈闭包内完成（fork 计划/条目数据不出线程，
+        // 免去 pi 数据结构跨线程 Send 的耦合）；handle 锁在 Phase 1 块尾
+        // 释放，Phase 2 无锁（上游 rpc 同构：Phase 2 注释 "without holding
+        // any lock"）。
+        let (path, session_id, selected_text) = on_big_stack(move || {
+            let (fork_plan, source_path, session_dir, header) = {
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                let handle = guard.as_mut().ok_or("no active session")?;
+                shared.runtime.block_on(async {
+                    let cx = pi::agent_cx::AgentCx::for_request();
+                    let agent_session = handle.session_mut();
+                    let store = Arc::clone(&agent_session.session);
+                    let inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    let plan = inner
+                        .plan_fork_from_user_message(&entry_id)
+                        .map_err(|e| format!("fork 计划失败: {e}"))?;
+                    let source_path = inner.path.as_ref().map(|p| p.display().to_string());
+                    let session_dir = inner.session_dir.clone();
+                    let header = inner.header.clone();
+                    Ok::<_, String>((plan, source_path, session_dir, header))
+                })?
+            };
+            let selected_text = fork_plan.selected_text.clone();
+            let mut new_session = pi::session::Session::create_with_dir(session_dir);
+            new_session.header.parent_session = source_path;
+            new_session.header.provider.clone_from(&header.provider);
+            new_session.header.model_id.clone_from(&header.model_id);
+            new_session
+                .header
+                .thinking_level
+                .clone_from(&header.thinking_level);
+            new_session.init_from_fork_plan(fork_plan);
+            let session_id = new_session.header.id.clone();
+            shared
+                .runtime
+                .block_on(new_session.save())
+                .map_err(|e| format!("fork 会话保存失败: {e}"))?;
+            // save() 成功后 path 必已赋值（save_inner 对 path=None 的会话
+            // 先建文件名再写盘）；None = 内部不变量被破坏，明确报错不兜底。
+            let path = new_session
+                .path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .ok_or_else(|| "fork 会话保存成功但没有文件路径".to_string())?;
+            // 尾部显式标注（E0283：on_big_stack 只约束 T: Send，闭包
+            // 返回的 Result 错误侧推不出来）。
+            Ok::<(String, String, String), String>((path, session_id, selected_text))
+        })??;
+        // Phase 3：复用 open_session 链换装（内部再 flush 一次源会话——
+        // Phase 1 后无新 mutations，strict 持久化下近似 no-op）。
+        self.open_session(&path, ui_bridge)?;
+        Ok(serde_json::json!({
+            "path": path,
+            "sessionId": session_id,
+            "selectedText": selected_text,
+        }))
+    }
+
+    /// 枚举当前活动路径上的 user 消息（fork 点清单；上游 get_fork_messages
+    /// 语义照抄——fork_messages_from_entries + extract_user_text，
+    /// rpc.rs:12317-12349：entryId 缺失给空串、text 取首个 Text 块）。
+    pub fn get_fork_points(&self) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let inner = store
+                    .lock(cx.cx())
+                    .await
+                    .map_err(|e| format!("session lock failed: {e}"))?;
+                Ok(serde_json::Value::Array(fork_points_json(&inner)))
+            })
+        })?
+    }
+
+    /// 最近分叉点的兄弟分支（上游 Session::sibling_branches 序列化）。
+    /// 无分叉 → null；有 → {forkPointId（根分叉点为 null）, branches:
+    /// [{rootId, leafId, preview, messageCount, isCurrent}]}。SiblingBranch
+    /// 无 Serialize（上游未派生）——手工映射，字段 camelCase。
+    pub fn list_sibling_branches(&self) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let inner = store
+                    .lock(cx.cx())
+                    .await
+                    .map_err(|e| format!("session lock failed: {e}"))?;
+                Ok(sibling_branches_json(&inner))
+            })
+        })?
+    }
+
+    /// 切换到指定叶（分支导航；interactive/tree_ui.rs:58-146
+    /// stage_and_commit_tree_navigation 配方：候选克隆 → navigate_to →
+    /// save → to_messages_for_current_path → *live = candidate 原子换回 →
+    /// agent.replace_messages 重投影 → persist_session）。候选落盘失败时
+    /// 活动会话原地不动（上游同语义："the active in-memory session was
+    /// left unchanged"）。返回 {leafId}；前端之后重拉 pi_get_messages
+    /// 重水合当前分支。
+    pub fn switch_branch(&self, leaf_id: &str) -> Result<serde_json::Value, String> {
+        self.reject_if_run_in_progress()?;
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        let leaf_id = leaf_id.to_string();
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let mut inner = store
+                    .lock(cx.cx())
+                    .await
+                    .map_err(|e| format!("session lock failed: {e}"))?;
+                let mut candidate = inner.clone();
+                if !candidate.navigate_to(&leaf_id) {
+                    return Err(format!("branch leaf not found: {leaf_id}"));
+                }
+                candidate
+                    .save()
+                    .await
+                    .map_err(|e| format!("分支切换保存失败: {e}"))?;
+                let messages = candidate.to_messages_for_current_path();
+                *inner = candidate;
+                drop(inner);
+                // Agent 只是投影：历史真相已落 Session，这里重投影内存面。
+                agent_session.agent.replace_messages(messages);
+                agent_session
+                    .persist_session()
+                    .await
+                    .map_err(|e| format!("会话持久化失败: {e}"))?;
+                Ok(serde_json::json!({ "leafId": leaf_id }))
+            })
+        })?
+    }
+
     /// 发送一条 prompt（SDK 二参签名：text + on_event；Mutex 串行）。
+    /// prompt_with_content 的 Text-only 特例——同一把锁/同一套 on_start
+    /// RUN_STARTED 推送/同一套 AbortSlot 语义（内核 prompt_inner 共用）。
     /// on_start：拿到 handle mutex 之后、起跑前调用的回调（P1-2——POST
     /// 的 RUN_STARTED 经它推送，排队 run 不再提前入缓冲制造 §0.3-1 的
     /// 协议违例序列）。
@@ -417,6 +892,19 @@ impl PiEngine {
     pub fn prompt(
         &self,
         text: &str,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+        on_start: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        self.prompt_with_content(text, &[], on_event, on_start)
+    }
+
+    /// 发送一条带内容块的 prompt（文本 + 图片；图片端到端）。空 images =
+    /// 纯文本（与 prompt(text) 走完全相同的 SDK 包装路径）。重入防护、
+    /// run 代号、PromptGuard 与 prompt 同源——公共内核 prompt_inner。
+    pub fn prompt_with_content(
+        &self,
+        text: &str,
+        images: &[AguiImage],
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
         on_start: Box<dyn FnOnce() + Send>,
     ) -> Result<(), String> {
@@ -435,18 +923,30 @@ impl PiEngine {
             abort: &self.shared.abort,
             run,
         };
-        self.prompt_inner(text, on_event, on_start, run)
+        // 内容块组装：Text 在前、Image 随后（上游 build_content_blocks_for_input
+        // 同序）。mime 白名单在 POST 层校验（400 拒绝），这里只组装。
+        let mut content = Vec::with_capacity(images.len() + 1);
+        if !text.is_empty() {
+            content.push(ContentBlock::Text(TextContent::new(text)));
+        }
+        for img in images {
+            content.push(ContentBlock::Image(ImageContent {
+                data: img.data.clone(),
+                mime_type: img.mime_type.clone(),
+            }));
+        }
+        self.prompt_inner(content, text.to_string(), on_event, on_start, run)
     }
 
     fn prompt_inner(
         &self,
-        text: &str,
+        content: Vec<ContentBlock>,
+        text: String,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
         on_start: Box<dyn FnOnce() + Send>,
         run: u64,
     ) -> Result<(), String> {
         let shared = Arc::clone(&self.shared);
-        let text = text.to_string();
         on_big_stack(move || {
             // 锁在大栈线程内拿并跨 block_on 持有——MutexGuard 不出线程，
             // 串行不变量靠 std Mutex 保证（其他 prompt 调用在此排队）。
@@ -466,8 +966,31 @@ impl PiEngine {
                 Some(AbortSlot { run, handle: abort_handle });
             // P1-2：启动信号（RUN_STARTED 等）在真正起跑前才发出。
             on_start();
+            // 纯文本走 SDK prompt_with_abort（make_combined_callback 的扩展
+            // 事件合并扇出 + retry 策略语义完整保留，与历史路径逐字节一致）；
+            // 带图走 session_mut() 直达 AgentSession::run_with_content_with_
+            // abort（abort 变体）——上游 SDK 没有内容块 prompt 包装
+            // （make_combined_callback 是 sdk 私有），带图路径的 message_*/
+            // tool_execution_* 扩展观察扇出缺席，与 ACP 等 AgentSession 直连
+            // 宿主同款取舍（agent.rs:12493 上游注释明示该形态是受支持的宿主
+            // 用法）；retry 策略本引擎未配置（SessionOptions 默认 None），
+            // apply_retry_policy 跳过无策略差异。
+            let has_images = content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image(_)));
             let result = shared.runtime.block_on(async move {
-                handle.prompt_with_abort(text, abort_signal, on_event).await
+                if has_images {
+                    // 与 SDK prompt_with_abort 同序：先同步扩展 MCP 注册，再起跑
+                    handle.sync_extension_mcp_registrations().await;
+                    let session = handle.session_mut();
+                    session
+                        .run_with_content_with_abort(content, Some(abort_signal), on_event)
+                        .await
+                } else {
+                    handle
+                        .prompt_with_abort(text, abort_signal, on_event)
+                        .await
+                }
             });
             result.map(|_| ()).map_err(|e| e.to_string())
         })?
@@ -599,5 +1122,186 @@ impl PiEngine {
                 .collect();
             Ok(serde_json::json!({ "models": models }))
         })?
+    }
+}
+
+// ── fork/分支的纯序列化助手（与引擎锁逻辑分离，可对 in_memory Session
+//    单测；语义逐条照抄上游 rpc.rs:12317-12349 / session.rs:5838-6018）──
+
+/// 当前路径 user 消息 → [{entryId, text}]（上游 fork_messages_from_entries
+/// 逐行同构：entryId 缺失给空串、text 取首个 Text 块、无 Text 块为 null）。
+fn fork_points_json(session: &pi::session::Session) -> Vec<serde_json::Value> {
+    session
+        .entries_for_current_path()
+        .into_iter()
+        .filter_map(|entry| {
+            let pi::session::SessionEntry::Message(m) = entry else {
+                return None;
+            };
+            let pi::session::SessionMessage::User { content, .. } = &m.message else {
+                return None;
+            };
+            let entry_id = m.base.id.clone().unwrap_or_default();
+            let text = extract_user_text(content);
+            Some(serde_json::json!({
+                "entryId": entry_id,
+                "text": text,
+            }))
+        })
+        .collect()
+}
+
+/// user 消息内容的文本提取（上游 rpc.rs:12338 extract_user_text 逐行照抄）。
+fn extract_user_text(content: &UserContent) -> Option<String> {
+    match content {
+        UserContent::Text(text) => Some(text.clone()),
+        UserContent::Blocks(blocks) => blocks.iter().find_map(|b| {
+            if let ContentBlock::Text(t) = b {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        }),
+    }
+}
+
+/// 兄弟分支 → null | {forkPointId, branches: [...]}（SiblingBranch 无
+/// Serialize——手工组装，camelCase 对齐其余 pi_* 命令的 JSON 面）。
+fn sibling_branches_json(session: &pi::session::Session) -> serde_json::Value {
+    match session.sibling_branches() {
+        None => serde_json::Value::Null,
+        Some((fork_point_id, branches)) => serde_json::json!({
+            "forkPointId": fork_point_id,
+            "branches": branches
+                .iter()
+                .map(|b| {
+                    serde_json::json!({
+                        "rootId": b.root_id,
+                        "leafId": b.leaf_id,
+                        "preview": b.preview,
+                        "messageCount": b.message_count,
+                        "isCurrent": b.is_current,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod fork_tests {
+    //! fork/分支纯逻辑单测：in_memory Session + append 家族（全 pub）构造
+    //! 会话树，验证 fork 点枚举的路径过滤与兄弟分支序列化形状、ForkPlan
+    //! 的"选中消息不进新文件"语义。fork/switch 的文件落盘与 agent 换装
+    //! 是端到端行为（真实 handle + provider），留冒烟验证。
+
+    use super::*;
+    use pi::model::{AssistantMessage, Message, UserMessage};
+
+    fn user_msg(text: &str) -> Message {
+        Message::User(UserMessage {
+            content: UserContent::Text(text.to_string()),
+            timestamp: 0,
+        })
+    }
+
+    fn assistant_msg(text: &str) -> Message {
+        Message::assistant(AssistantMessage {
+            content: vec![ContentBlock::Text(TextContent::new(text))],
+            ..AssistantMessage::default()
+        })
+    }
+
+    #[test]
+    fn fork_points_lists_user_messages_on_current_path() {
+        let mut s = pi::session::Session::in_memory();
+        let u1 = s.append_model_message(user_msg("第一条"));
+        let _a1 = s.append_model_message(assistant_msg("回复"));
+        let u2 = s.append_model_message(user_msg("第二条"));
+        let rows = fork_points_json(&s);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["entryId"], serde_json::json!(u1));
+        assert_eq!(rows[0]["text"], serde_json::json!("第一条"));
+        assert_eq!(rows[1]["entryId"], serde_json::json!(u2));
+        assert_eq!(rows[1]["text"], serde_json::json!("第二条"));
+
+        // 分叉后路径过滤：导航回 u1 再追加（兄弟分支），旧分支的
+        // 助手回复/第二条消息不在当前路径
+        assert!(s.navigate_to(&u1));
+        let u3 = s.append_model_message(user_msg("分支乙"));
+        let rows = fork_points_json(&s);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["entryId"], serde_json::json!(u1));
+        assert_eq!(rows[1]["entryId"], serde_json::json!(u3));
+        assert_eq!(rows[1]["text"], serde_json::json!("分支乙"));
+    }
+
+    #[test]
+    fn fork_points_skips_non_user_entries() {
+        let mut s = pi::session::Session::in_memory();
+        let _a = s.append_model_message(assistant_msg("只有助手消息"));
+        let rows = fork_points_json(&s);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn sibling_branches_reports_fork_point_and_leaves() {
+        let mut s = pi::session::Session::in_memory();
+        let u1 = s.append_model_message(user_msg("根问题"));
+        let a1 = s.append_model_message(assistant_msg("回答甲"));
+        let _u2 = s.append_model_message(user_msg("分支甲")); // 甲叶 = a1 的子链
+        assert!(s.navigate_to(&u1));
+        let u3 = s.append_model_message(user_msg("分支乙")); // u1 现在有两个孩子 = 分叉点
+
+        let v = sibling_branches_json(&s);
+        assert!(v.is_object());
+        assert_eq!(v["forkPointId"], serde_json::json!(u1));
+        let branches = v["branches"].as_array().expect("branches array");
+        assert_eq!(branches.len(), 2);
+        // 分支甲（先追加，排前）：root = a1，叶 = a1 的最深首子链 _u2，
+        // 消息数 = 路径上全部消息条目。preview = 路径上离根最近的 user
+        // 文本——上游 path_preview_and_message_count 从叶向根走、每条
+        // 非空 user 文本都覆盖 preview（session.rs:5922-5935 无 is_none
+        // 守卫），两条分支共用同一根前缀 → 预览同为 "根问题"。
+        assert_eq!(branches[0]["rootId"], serde_json::json!(a1));
+        assert_eq!(branches[0]["preview"], serde_json::json!("根问题"));
+        assert_eq!(branches[0]["messageCount"], serde_json::json!(3));
+        assert_eq!(branches[0]["isCurrent"], serde_json::json!(false));
+        // 分支乙：root 即叶（无孩子），当前分支
+        assert_eq!(branches[1]["rootId"], serde_json::json!(u3));
+        assert_eq!(branches[1]["leafId"], serde_json::json!(u3));
+        assert_eq!(branches[1]["preview"], serde_json::json!("根问题"));
+        assert_eq!(branches[1]["messageCount"], serde_json::json!(2));
+        assert_eq!(branches[1]["isCurrent"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn sibling_branches_null_without_fork() {
+        let mut s = pi::session::Session::in_memory();
+        let _u = s.append_model_message(user_msg("线性会话"));
+        assert!(sibling_branches_json(&s).is_null());
+    }
+
+    #[test]
+    fn fork_plan_leaf_stops_at_parent_of_selected_message() {
+        // fork 语义的核心：选中 user 消息不进新文件，叶停其父级——
+        // 前端预填 selectedText 重新提交即新分支（不会出现连续两条 user）
+        let mut s = pi::session::Session::in_memory();
+        let u1 = s.append_model_message(user_msg("第一条"));
+        let a1 = s.append_model_message(assistant_msg("回复"));
+        let u2 = s.append_model_message(user_msg("重新表述"));
+        let plan = s
+            .plan_fork_from_user_message(&u2)
+            .expect("fork plan for user message");
+        assert_eq!(plan.leaf_id.as_deref(), Some(a1.as_str()));
+        assert_eq!(plan.selected_text, "重新表述");
+        assert_eq!(plan.entries.len(), 2);
+        assert!(plan.entries.iter().all(|e| e.base_id() != Some(&u2)));
+        assert_eq!(plan.entries.last().and_then(|e| e.base_id()), Some(&a1));
+        // 根消息 fork：叶 = None（无父级），entries 为空
+        let root_plan = s.plan_fork_from_user_message(&u1).expect("root plan");
+        assert_eq!(root_plan.leaf_id, None);
+        assert!(root_plan.entries.is_empty());
+        assert_eq!(root_plan.selected_text, "第一条");
     }
 }
