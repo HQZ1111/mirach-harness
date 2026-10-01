@@ -2338,3 +2338,62 @@ hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，
   未重编（branch-store 铁律式清投影是正确行为）；重编后即愈。
 - on_big_stack 返回 Result<T,String>（spawn/join 层）——闭包内再返回
   Result 时记得 and_then 拍平（session_lineage 首版 E0308 的根因）。
+
+## 对标轮续（2026-10-02 深夜：终端/composer/代码高亮/预览）
+
+用户四条 UI 反馈 + 官方三页文档对照。测试 221→275（TS）+ 40（Rust）。
+
+### 终端真 PTY（terminal.rs 445 行 + xterm 前端）
+- **pi SDK 无 PTY 面**（bash 是工具内部 exec）——宿主自建：portable-pty
+  0.8.1 ConPTY 注册表（上限 8、输出泵 8KB 块 → `terminal-output:{id}`
+  Tauri Event、wait 线程统一上报退出码、双保险清理）。
+- **通道裁定**（模块头）：终端输出/退出走 Tauri Event **不违反** AG-UI
+  三通道纪律——AG-UI 只管 Agent 数据；终端是系统设施。输出载荷 = PTY
+  原始字节 base64（read 可能劈开 UTF-8，前端流式 TextDecoder）。
+- **cwd 裁定**：pi_get_state/fs.rs 均无 cwd 来源 → 系统 home。
+- 前端 xterm（@xterm/xterm+fit+clipboard，与 ZCode 同版）：**fit 先于
+  spawn**、resize 去重+在途守卫+pending 队列、**PSReadLine 40m 黑底重绘
+  归一**、buffer 折行合并扫链接、StrictMode 孤儿 PTY 回收（main.tsx 有
+  StrictMode 必要）、Ctrl+C 有选区走复制。多页签（+号新开/退出码上墙/
+  重开钮）。
+- **已知限制**：flexlayout 切换同 tabset 内页签会卸载隐藏窗格 → 按
+  「卸载=kill」语义终端会话结束（默认布局终端独占分栏不受影响；跨切换
+  保活=ZCode 式模块级 registry，独立一轮）。Windows IME 组合输入兜底
+  （ZCode 约 300 行）未抄——验收后按需补。
+
+### composer 对齐官方 elements（三页文档实测对照）
+- 构图：附件区在输入**上方**（empty:hidden 无附件不占位）；工具行左附件
+  右动作组=**模型→语音→上下文环→发送**；容器 paper+rounded-[24px]+p-2.5
+  （kit 默认，去掉自绘覆盖）。
+- **ContextDisplay.Ring**（18px 环+% 数值）嵌动作组，悬停 tooltip 明细——
+  数据照旧 usageBridge；除零守卫保留。
+- **官方三态 dictation**：active/recording/transcribing + 秒表；激活期
+  **ComposerVoice 替换输入行**（官方原句 "meant to replace ComposerInput
+  while active, not sit beside it"），波形（脉冲点+14 柱）+ mono 0:SS，
+  停止后 "Transcribing" 微光；Web Speech 逻辑与审查修复原样保留；激活期
+  Input 禁用（官方行为）。
+- **ComposerAttachments**：官方 56px tile（useAttachmentSrc：内存文件
+  object URL、图片缩略、右上移除、上传/失败遮罩、预览 Dialog）——替换
+  自绘文字 chip。ComposerSend 官方箭头↔方块动画。
+- 不可对齐项：data-compact 态（本仓 kit 快照未含该属性，不猜）；官方
+  ComposerPrimitive.Dictate 依赖 runtime dictation 能力面（我们保留
+  Web Speech useDictation，仅 UI 三态对齐）。
+
+### 代码高亮两处（shiki）
+- **聊天代码块**（components/shiki/ 8 文件）：hermes 四件套（lazy 单缝/
+  内容键 LRU 512 条/150k·3k 行预算分块/prose 判定含 CJK 适配）+ Expandable
+  Block 折叠。**关键升级：react-shiki `outputFormat:'react'`（hast→React
+  元素树）替代 hermes 的 codeToHtml+innerHTML——永不 innerHTML**；
+  github-light/dark-dimmed 双主题随 color-scheme；tailwind 坑：裸
+  `text-(--var)` 编译成 color，字号须 `text-(length:--var)`。
+- **文件预览**（components/preview/ 4 文件）：preview-file 的 200 行分块
+  固定 20px 行高窗口化（rAF+ResizeObserver）+ 行号槽 + 74 扩展名→Shiki
+  语言映射 + 512KB/3k 行预算降级（同窗口化布局纯文本分块，诚实提示）；
+  lazy 单缝独立（与聊天侧互不影响）；vite build 实证首屏零语法包（622KB
+  wasm 在按需 chunk）。顺手修一处旧兜底：预览读取失败伪装"二进制文件"
+  → 错误态可见。
+
+### 冒烟（真实鼠标）
+- 终端：xterm 挂载 + **PowerShell 提示符真实渲染**（截图）；composer
+  voice/send 钮在位；空态欢迎+中文建议+起步输入全活；侧栏自动命名行
+  （派生标题）+「最近」组标签；零控制台错误。

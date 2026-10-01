@@ -8,14 +8,17 @@
 
 ## 一句话状态
 
-elements 接线轮 + 会话管理/对标轮（ZCode+hermes 双参考）完成：**侧栏
-会话管理全套**（置顶/拖拽排序/拖到主会话标签/行菜单）、**设置页结构化**
-（压缩/重试段 + pi Config 65+ 字段盘点）、**分支语义双挂点**（顶部会话线
-谱系条 / user 消息变体条 2-2 切换实测通过）、**runtime 性能三件**（增量
-同步/滚动持久化/自动命名规则段）、**ZCode 文件树照抄落地**、user 复制/
-时间戳/滚动条弹窗令牌。门禁：tsc 0 / vitest **221** / cargo test **39**，
-真窗口冒烟全通（谱系条/变体切换/自动命名/零控制台错误）。
-**唯一阻塞项不变：真模型凭据未配。**
+elements 接线轮 + 会话管理/对标轮（ZCode+hermes 双参考）+ **对标轮续**
+完成：**侧栏会话管理全套**（置顶/拖拽排序/拖到主会话标签/行菜单/分组
+折叠）、**设置页主从两栏**（压缩/重试段 + pi Config 65+ 字段盘点）、
+**分支语义双挂点**（顶部会话线谱系条 / user 消息变体条 2-2 切换实测）、
+**runtime 性能三件**（增量同步/滚动持久化/自动命名规则段）、**ZCode 文
+件树照抄落地**、**终端真 PTY**（ConPTY + xterm 多页签，PowerShell 实跑）、
+**composer 对齐官方 elements**（附件上方/模型→语音→上下文环→发送/官方
+三态 dictation/56px 附件 tile）、**聊天代码块与文件预览 shiki 高亮**、
+user 复制/时间戳/滚动条弹窗令牌。门禁：tsc 0 / vitest **275** / cargo
+test **40**，真窗口冒烟全通（终端 PowerShell 实跑/谱系条/变体切换/自动
+命名/零控制台错误）。**唯一阻塞项不变：真模型凭据未配。**
 
 ## 提交与仓库
 
@@ -45,24 +48,27 @@ elements 接线轮 + 会话管理/对标轮（ZCode+hermes 双参考）完成：
    图片理解、压缩真触发、用量成本真数字、thinking 流式、自动命名 LLM 段。
 2. **最后一波接线**（可接件清零）：message-queue（宿主排队；pi 0.6.x
    后可切官方 steer/follow_up）、checkpoint UI（命令面已通）、cost-meter、
-   read-aloud（speechSynthesis）、shiki 高亮两件（react-shiki 移 deps）、
-   regenerate-menu。
+   read-aloud（speechSynthesis）、regenerate-menu。（shiki 两件已完成。）
 3. **pi 0.6.x 升级里程碑**（breaking：MCP project_trusted）+ 上游 FR
    提交（citations 模型/hostcall schema）。
 4. **谱系树嵌套**：list_sessions 透出 branchedFrom（Rust 小改）→ 接
    hermes session-branch-tree 语义（├─/└─）。
-5. ZCode 审计余项：重试计数徽章、异常轮强制展开、左 rail 回合导航（P3）。
-6. 人工验收 + i18n + L5。
+5. **终端已知限制**：flexlayout 同 tabset 内切页签会卸载隐藏窗格 →
+   「卸载=kill」语义下终端会话结束（默认布局独占分栏不受影响；跨切换
+   保活=ZCode 式模块级 registry，独立一轮）；Windows IME 组合输入兜底
+   未抄（验收后按需）。
+6. ZCode 审计余项：重试计数徽章、异常轮强制展开、左 rail 回合导航（P3）。
+7. 人工验收 + i18n + L5。
 
 ## 验证与环境速查
 
 - 启动：`npm run dev`（vite:1430）+ Start-Process 分离
   `src-tauri\target\debug\mirach-harness.exe`（或 cargo run）。CDP 9223。
-- 门禁：tsc（0）/ `npm test`（**221**）/ cargo check（零警告）/
-  `cargo test`（**39**）。
+- 门禁：tsc（0）/ `npm test`（**275**）/ cargo check（零警告）/
+  `cargo test`（**40**）。
 - 冒烟脚本（%TEMP%）：`aui-round3-smoke.cjs`（自动命名/键检查）、
   `aui-round3e-smoke.cjs`（刷新+真鼠标点击行）、`aui-round3f/g`（谱系条/
-  变体切换）——**侧栏行切换必须 CDP Input.dispatchMouseEvent 真实鼠标**
+  composer 观感）——**侧栏行切换必须 CDP Input.dispatchMouseEvent 真实鼠标**
   （行挂拖拽机器，合成 click 不可靠）；断言侧栏内容查行 DOM 不查 body
   全文（消息气泡同文会假阳性）。
 - 直连 POST token 走 query；exe 报 "Command not found" = 未重编。
