@@ -1,5 +1,7 @@
 # AGENTS.md — mirach-harness 工程须知（新会话必读）
 
+> **【新会话第一站】交接快照：docs/HANDOFF.md（当前状态/未做清单/环境速查）。**
+
 > **本文件是 G:\参考文档\AGENTS.md 的副本（2026-09-25 拆分时随迁）。**
 > mirach-harness 是活跃项目，本体已独立在 `G:\mirach-harness`；
 > 原 MIRACH 主工程（hermes 移植，本项目的参考实现/素材库）在
