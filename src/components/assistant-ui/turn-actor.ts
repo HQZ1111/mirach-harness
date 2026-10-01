@@ -12,8 +12,22 @@ import { assign, setup } from 'xstate'
 export interface TurnMessage {
   id: string
   role: 'user' | 'assistant'
-  content: string
+  /** string = 纯文本（用户消息/简单助手）；parts = 结构化（文本 + 工具调用） */
+  content: string | TurnPart[]
 }
+
+/** 结构化内容部件（ThreadMessageLike 兼容形状；args 限 JSON 对象——
+ * ThreadMessageLike 的 tool-call args 要求 ReadonlyJSONObject） */
+export type TurnPart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'tool-call'
+      toolCallId: string
+      toolName: string
+      args?: Record<string, unknown>
+      result?: unknown
+      isError?: boolean
+    }
 
 /** 会话用量快照（ContextDisplay 数据面；RUN_FINISHED.usage 原样投影） */
 export interface TurnUsage {
@@ -56,29 +70,64 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
         ],
       }
     case 'TEXT_MESSAGE_CONTENT': {
-      // 追加到最后一条 assistant 消息（当前 run 段）
+      // 追加到最后一条 assistant 消息（当前 run 段）。content 已是 parts
+      // （工具调用后又有文本）时追加/合并最后的 text part。
       const messages = [...ctx.messages]
+      const delta = String(ev.delta ?? '')
       for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'assistant') {
-          messages[i] = { ...messages[i], content: messages[i].content + String(ev.delta ?? '') }
-          break
+        if (messages[i].role !== 'assistant') continue
+        const c = messages[i].content
+        if (typeof c === 'string') {
+          messages[i] = { ...messages[i], content: c + delta }
+        } else {
+          const parts = [...c]
+          const last = parts[parts.length - 1]
+          if (last?.type === 'text') parts[parts.length - 1] = { ...last, text: last.text + delta }
+          else parts.push({ type: 'text', text: delta })
+          messages[i] = { ...messages[i], content: parts }
         }
+        break
       }
       return { ...next, messages }
     }
     case 'CUSTOM': {
-      // 工具执行维度（§2.2 裁定）：行内标记呈现，真工具 UI 等数据面
-      const value = ev.value as { phase?: string; toolName?: string } | undefined
-      if (ev.name === 'tool_execution' && value?.phase === 'start') {
+      // 工具执行维度（§2.2）：start = push 工具调用部件（args 来自
+      // 模型参数流）；end = 填结果。行内标记呈现退役，真工具 UI
+      // （thread.aui 的 ToolFallback）按 parts 渲染。
+      const value = ev.value as
+        | { phase?: string; toolCallId?: string; toolName?: string; args?: unknown; result?: unknown; isError?: boolean }
+        | undefined
+      if (ev.name === 'tool_execution' && value?.phase === 'start' && value.toolCallId) {
+        const args =
+          value.args && typeof value.args === 'object' && !Array.isArray(value.args)
+            ? (value.args as Record<string, unknown>)
+            : undefined
         const messages = [...ctx.messages]
         for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = {
-              ...messages[i],
-              content: messages[i].content + `[使用工具 ${value.toolName ?? ''}]\n`,
-            }
-            break
-          }
+          if (messages[i].role !== 'assistant') continue
+          const c = messages[i].content
+          const parts: TurnPart[] =
+            typeof c === 'string'
+              ? c
+                ? [{ type: 'text', text: c }, { type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args }]
+                : [{ type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args }]
+              : [...c, { type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args }]
+          messages[i] = { ...messages[i], content: parts }
+          break
+        }
+        return { ...next, messages }
+      }
+      if (ev.name === 'tool_execution' && value?.phase === 'end' && value.toolCallId) {
+        const messages = [...ctx.messages]
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role !== 'assistant' || typeof messages[i].content === 'string') continue
+          const parts = (messages[i].content as TurnPart[]).map((p) =>
+            p.type === 'tool-call' && p.toolCallId === value.toolCallId
+              ? { ...p, result: value.result, isError: value.isError === true }
+              : p,
+          )
+          messages[i] = { ...messages[i], content: parts }
+          break
         }
         return { ...next, messages }
       }

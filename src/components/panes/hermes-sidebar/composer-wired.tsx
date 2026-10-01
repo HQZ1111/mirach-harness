@@ -170,7 +170,7 @@ export function ComposerWired() {
   // 原始目录（取当前模型的 contextWindow 给用量环）
   const modelEntriesRef = useRef<PiModelEntry[]>([])
   const [currentModel, setCurrentModel] = useState<string | null>(null)
-  const usage = useUsageBridge((s) => s.usage)
+  const { usage } = useUsageBridge()
   useEffect(() => {
     let cancelled = false
     void (async () => {

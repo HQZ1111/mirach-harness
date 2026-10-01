@@ -222,10 +222,11 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
         AgentEvent::ToolExecutionStart {
             tool_call_id,
             tool_name,
+            args,
             ..
         } => vec![json!({
             "type": "CUSTOM", "name": "tool_execution",
-            "value": { "phase": "start", "toolCallId": tool_call_id, "toolName": tool_name },
+            "value": { "phase": "start", "toolCallId": tool_call_id, "toolName": tool_name, "args": args },
         })],
         AgentEvent::ToolExecutionUpdate {
             tool_call_id,
@@ -237,11 +238,12 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
         })],
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
+            result,
             is_error,
             ..
         } => vec![json!({
             "type": "CUSTOM", "name": "tool_execution",
-            "value": { "phase": "end", "toolCallId": tool_call_id, "isError": is_error },
+            "value": { "phase": "end", "toolCallId": tool_call_id, "result": result, "isError": is_error },
         })],
         AgentEvent::TurnEnd { .. } => vec![json!({ "type": "STEP_FINISHED" })],
         AgentEvent::AgentEnd { messages, error, .. } => match error {

@@ -497,6 +497,21 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     6. **UI 全链实测**（CDP）：侧栏 5 行渲染（命名行显示真名）、点击
        "历史会话A" → 主区水合该会话两条历史消息 + 行 active 高亮、
        multi-sess 七步（建/多轮/列表/重命名/discard/新会话/切回）全绿。
+  - **工具调用结构化（2026-10-01 深夜续）**：TurnMessage.content 从
+    string 升级为 `string | TurnPart[]`（text + tool-call，形状对齐
+    ThreadMessageLike）。归约：TEXT_MESSAGE_CONTENT 在 parts 形态下
+    追加/合并最后 text part（工具后又有文本 = 新 text part）；CUSTOM
+    tool_execution start = 转 parts + push 工具调用部件（args 取自
+    ToolExecutionStart——参数流与执行维度在此汇合）；end = 按
+    toolCallId 填 result/isError。映射器同步带上 args/result。
+    **hydrate 升级**：pi 历史 assistant 的 toolCall blocks → 部件、
+    toolResult 消息按 toolCallId 归并到前一条 assistant（孤儿结果
+    跳过）；thinking/media blocks MVP 不渲染。
+    convertMessage 对 tool-call part 的 args 做 ReadonlyJSONObject
+    断言（pi arguments 运行时即 JSON 对象）。
+    **单测**：turn-actor.test.ts 9 用例（文本/工具交错、end 归并、
+    usage 替换语义、usage 缺失保留）全绿——"reduceAguiEvent 纯函数
+    可单测"铁律首次兑现。tsc 0；cargo check 零警告；冒烟全绿。
 
 ## 工具（`scripts/`）
 
