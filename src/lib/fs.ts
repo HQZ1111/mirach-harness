@@ -9,6 +9,8 @@ export interface FsEntry {
   name: string
   path: string
   isDirectory: boolean
+  /** 入口本身是符号链接/junction（fs.rs symlink_metadata 探测；文件树自动展开链用） */
+  isSymlink?: boolean
 }
 
 export interface FsListResult {

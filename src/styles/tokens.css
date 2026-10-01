@@ -115,6 +115,12 @@
   /* ── 全局设置浮层（settings-overlay，§7-7；2026-10-01 写进令牌） ── */
   --overlay-mask: rgba(0, 0, 0, 0.32);        /* 遮罩 scrim（.ze-backdrop 同系） */
 
+  /* ── 文件树（workspace-file-tree，ZCode 移植；2026-10-01） ──
+     行字号 = ZCode text-ui-base（--ui-font-size 14px）；其余语义色/悬停/
+     描边引用既有令牌（--text* / --hover-wash / --stroke / --fl-accent），
+     引导线颜色用 tailwind.css 的 --color-border（两工程同在）。 */
+  --filetree-row-font-size: 14px;             /* 行文字/标题字号（ZCode text-ui-base） */
+
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被
      .flexlayout__layout 上的定义静默压掉） ────────────────────── */

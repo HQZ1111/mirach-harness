@@ -47,6 +47,10 @@ pub struct FsEntry {
     path: String,
     #[serde(rename = "isDirectory")]
     is_directory: bool,
+    /// 入口本身是符号链接/junction（不跟随也成立的标记）。文件树的空目录链
+    /// 自动展开靠它跳过软链接目录，避免 junction 指向祖先时无限递归加载。
+    #[serde(rename = "isSymlink")]
+    is_symlink: bool,
 }
 
 /// hermes' `HermesReadDirResult`: `error` is omitted on success.
@@ -112,11 +116,16 @@ pub fn fs_list(path: String) -> FsListResult {
         // reason). An entry we can't stat stays a leaf rather than dropping the
         // whole listing.
         let is_directory = fs::metadata(&full).map(|meta| meta.is_dir()).unwrap_or(false);
+        // `symlink_metadata` 不跟随链接：入口自己是 symlink/junction 时为 true。
+        let is_symlink = fs::symlink_metadata(&full)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
 
         entries.push(FsEntry {
             name,
             path: full.to_string_lossy().into_owned(),
             is_directory,
+            is_symlink,
         });
     }
 
