@@ -844,7 +844,6 @@ export const ThreadListItem: FC = () => {
     (s) => s.threads.mainThreadId === s.threadListItem.id,
   );
   const isPinned = useSessionManage((s) => s.pinned.includes(threadId));
-  const isDragging = useSessionManage((s) => s.drag?.sessionId === threadId);
   // fork 点清单（活动会话才谈得上「分支」——pi fork 作用于当前打开的会话
   // 文件；非活动行/无落盘 user 消息 → 该项禁用）。
   const forkPoints = useStore(branchBridge, (s) => s.forkPoints);
@@ -953,8 +952,6 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Root
           className={cn(
             "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-(--tl-row-min-h,1.625rem) grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md pr-2 transition-colors focus-visible:outline-none",
-            // 拖拽中的行半透明：插入符说去哪，变淡的说什么在动
-            isDragging && "opacity-45",
           )}
           data-session-row-group={group}
           data-slot="aui_thread-list-item"
@@ -985,7 +982,6 @@ export const ThreadListItem: FC = () => {
             if (!ctx) return;
             startSessionRowDrag(e, {
               sessionId: threadId,
-              title: title ?? "New Chat",
               group,
               onCommitListMove: (beforeId) => ctx.commitListMove(threadId, group as SessionRowGroup, beforeId),
               onCommitMainTab: () => ctx.commitMainTab(threadId),

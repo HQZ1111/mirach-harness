@@ -2,10 +2,14 @@
  * 会话行拖拽会话（侧栏手动排序 + 投放主会话页签切换）。
  *
  * 机器照抄 layout/drag-session.ts 的 startDragSession（4px 阈值 / rAF 合帧 /
- * pointer capture / ghost chip / Esc 顶层逃生层 / engaged 后吞合成 click），
- * 独立实现——startDragSession 的提示通道耦合 layout-store 的 DropHint（窗格
- * 投放形状，DropOverlay 消费），侧栏插入符形状不同，不复用以免污染窗格
- * overlay。
+ * pointer capture / Esc 顶层逃生层 / engaged 后吞合成 click），独立实现——
+ * startDragSession 的提示通道耦合 layout-store 的 DropHint（窗格投放形状，
+ * DropOverlay 消费），侧栏插入符形状不同，不复用以免污染窗格 overlay。
+ *
+ * 视觉（DragOverlay 观感，不引 dnd-kit）：engage 起整行克隆浮层跟手
+ * （session-drag-ghost.ts：尺寸/内容=原行快照、抓取点跟光标），原行隐藏
+ * 占位防跳动——hermes dnd-kit 语义「原行消失、整行随光标、落点让位」
+ * （落点指示=本机制的插入符，落下提交即让位）。
  *
  * 命中面（engage 时快照，拖拽中纯数学——无 elementsFromPoint）：
  * - 主会话页签：#flexlayout-tabbutton-<PRIMARY_PANE.main>（id 方案见
@@ -18,10 +22,11 @@
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
 import { PRIMARY_PANE } from '@/components/layout/pane-registry'
-import { createDragGhost, type DragGhost } from '@/lib/drag-ghost'
+import type { DragGhost } from '@/lib/drag-ghost'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 
 import { sessionManageStore, type SessionDragState, type SessionRowGroup } from './session-manage-store'
+import { createRowDragGhost } from './session-drag-ghost'
 
 const DRAG_THRESHOLD_PX = 4
 const TAB_BUTTON_ID = 'flexlayout-tabbutton-'
@@ -35,7 +40,6 @@ export const SESSION_ROW_GROUP_ATTR = 'data-session-row-group'
 
 export interface SessionRowDragSpec {
   sessionId: string
-  title: string
   /** 被拖行所在组（落点候选只收同组行） */
   group: SessionRowGroup | 'search'
   /** 松手在列表插入符上（beforeId = 目标行 id，null = 该组尾部） */
@@ -115,7 +119,7 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   const pressTarget = e.target as HTMLElement | null
   if (pressTarget?.closest('[data-row-actions], input, textarea, [role="menu"], [role="dialog"]')) return
 
-  const handle: Element = e.currentTarget
+  const handle = e.currentTarget as HTMLElement
   const { pointerId } = e
   const sx = e.clientX
   const sy = e.clientY
@@ -124,6 +128,7 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   let engaged = false
   let releaseEscapeLayer: (() => void) | null = null
   let ghost: DragGhost | null = null
+  let restoreRowOpacity = ''
   let cursor: string | null = null
   let raf = 0
   let pending: { x: number; y: number } | null = null
@@ -170,7 +175,11 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     setCursor('grabbing')
     document.body.style.userSelect = 'none'
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
-    ghost = createDragGhost(spec.title)
+    // 整行克隆浮层跟手（DragOverlay 观感），原行隐藏占位防跳动——内联
+    // opacity 压过行类，恢复在 finish（commit/abort 同一条清场路径）。
+    restoreRowOpacity = handle.style.opacity
+    handle.style.opacity = '0'
+    ghost = createRowDragGhost(handle, sx, sy)
 
     mainTab = mainTabButton()
     const mr = mainTab?.getBoundingClientRect()
@@ -260,6 +269,7 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     document.body.style.userSelect = restoreSelect
     ghost?.destroy()
     ghost = null
+    handle.style.opacity = restoreRowOpacity
     releaseEscapeLayer?.()
     releaseEscapeLayer = null
 
