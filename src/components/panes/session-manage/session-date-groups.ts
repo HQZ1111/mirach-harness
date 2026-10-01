@@ -266,6 +266,14 @@ export function groupEntriesByRecency(
 }
 
 /**
+ * 平铺投影（hermes session-date-groups.ts 的 toSessionRows：无分隔线，
+ * 行序 = 传入序——侧栏选项「平铺」分组模式用）。
+ */
+export function toSessionRows(entries: readonly SessionListEntry[]): SessionListRow[] {
+  return entries.map((entry) => ({ id: entry.id, kind: 'session' as const }))
+}
+
+/**
  * 分隔线之下折叠时只掉会话、分隔线保留（可再展开）。首条分隔线之前的
  * （未标名头部）永不折叠。无隐藏时原数组返回（引用稳定）。
  */

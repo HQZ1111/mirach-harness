@@ -19,6 +19,9 @@
 export interface SessionRowMeta {
   readonly id: string
   readonly lastActiveMs: number
+  /** 会话标题（排序键 title 用；缺省行按 'New Chat' 兜底名参与，与
+   *  matchesTitleSearch 同约定——不改 recencyCompare 的键）。 */
+  readonly title?: string
 }
 
 /** 最后活跃降序（同毫秒按 id 稳定排序——避免每次渲染顺序抖动） */

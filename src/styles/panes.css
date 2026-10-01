@@ -311,3 +311,18 @@
     transform: translateX(calc(-1 * var(--marquee-d, 0px)));
   }
 }
+
+/* ── 会话侧栏密度令牌（侧栏选项钮「紧凑行高」，任务定稿 hermes 无）──
+   载体 = ThreadList 根的 data-density（thread-list.aui.tsx），行/分隔线
+   规则只引用变量——切密度不改任何行规则。comfortable（默认）= 现行几何
+   （行盒 26px / 分隔线上距 8px）；compact = 行盒 22px / 上距 4px。
+   变量带 fallback：行组件独立于 ThreadListRoot 使用时保持现行几何。 */
+[data-density='comfortable'] {
+  --tl-row-min-h: 1.625rem;
+  --tl-div-pt: 0.5rem;
+}
+
+[data-density='compact'] {
+  --tl-row-min-h: 1.25rem;
+  --tl-div-pt: 0.25rem;
+}
