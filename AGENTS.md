@@ -2263,3 +2263,78 @@ hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，
   不认（冒烟脚本第一版踩的 401 就是这个）**。
 - 代理卫生：仓库根出现碎片文件 `fn`（grep 重定向事故）——代理跑
   findstr/grep 重定向一律指向 %TEMP%，不进仓库根。
+
+## 会话管理/对标轮（2026-10-02 续：ZCode+hermes 双参考落地）
+
+用户指令「全部按你说的做」。五批代理 + 宿主修复，测试 105→221（TS）+
+39（Rust）。上游 pi 实锤与 FR 清单见 `docs/upstream-feature-requests.md`。
+
+### 上游 pi 实锤（修正认知）
+- **上游真仓库 = Dicklesworthstone/pi_agent_rust**（Cargo.toml repository；
+  badlogic/pi-mono 是 TS 版另一生态，别查错）。最新 **v0.6.1**：**SDK 已加
+  live steering/follow-up/abort within a turn + turn-wide deadlines**
+  （旧结论"in-process 无 steer/follow_up"是 0.5.1 时代事实，升级即得）；
+  **Windows 保存 Access denied 已修**（= 我们的 session_index 补丁，升级
+  退休）；citations / UI hostcall select-input schema / SDK 层自动命名
+  **仍无**（FR 清单已建）。
+- **pi Config 本来就有**：`titling.auto_title`（bool 默认 true）、
+  `steering_mode`/`follow_up_mode`（枚举 one-at-a-time）、
+  `approval.mode`（always-ask/write/yolo）——自动命名与排队必须对齐这些
+  键，别自造开关。`system_prompt`/`enabled_tools` **不在 Config**（CLI/
+  SDK 参数），settings.json 无法表达，别造 UI。
+- **自动命名机制在 TUI 层**（interactive/agent.rs:1189，首轮后小模型要
+  名字、手动优先、fire-and-forget）——宿主自实现语义即可（已做规则段）。
+- **pi 分支模型 = user turn 续接线**：prepare_retry_branch 把叶移到
+  user turn 父级，重发是**新 user 消息兄弟**（每条分支以各自 user 消息
+  开头）——不是"同一 user 的多个 assistant 回复"。变体条锚点 =
+  **分叉点 user 消息**（踩过：挂 assistant footer 永不命中）。
+- **pi_open_session 返回模型条目串**（"amazon-bedrock/…"）不是
+  sessionId——按路径切换后 sessionId 从 pi_get_state 取。
+
+### 本轮落地（全部真实鼠标冒烟确认）
+- **侧栏会话管理**：置顶（`mirach.harness.sessions.pinned.v1`，置顶组
+  标签+图钉，组内 lastActive 降序）、指针拖拽排序
+  （`mirach.harness.sessions.order.v1`，插入符预览，mergeFreshByPosition：
+  新会话不沉底旧页不跳顶）、拖到主会话标签切换（命中
+  `#flexlayout-tabbutton-workspace`，走 aui threads.switchToThread 既有
+  通道——**零 runtime 改动**）、行菜单（fork 非活动行禁用；移除 archive
+  死钮）。prune 守卫：列表非空才清持久化（首帧空=未加载）。谱系树嵌套
+  **跳过**（list_sessions 无 branchedFrom 字段——Rust 待办：透出后接
+  hermes session-branch-tree.ts 语义）。
+- **设置页扩展**：压缩（enabled/reserve_tokens/keep_recent_tokens/mode +
+  顶层 compaction_mode）与重试（六控件）结构化段；**串行写队列**（Tauri
+  async 命令落盘不保序）；snake_case 写回（camelCase 是读取别名，写错键
+  静默失效——Config 无 deny_unknown_fields）；文档已有别名形式原地更新
+  防双键并存；「高级」段有未保存手改时拒绝结构化写。
+- **runtime 性能**：stabilizeMessages（引用相等=未变——零变化重建返回
+  prev 数组本身，命中 ExternalStore 快速通道跳过全量转换；有测试的不变
+  式而非实现巧合）；滚动位置按会话持久化（thread-scroll-store LRU-50，
+  offset 存**距底距离**；视口接线在 thread.aui ThreadRoot：恢复 'instant'
+  防长会话动画、采样 300ms 节流）；自动命名规则段（derive_title 48 字符
+  词边界截断 + 撞名 #N 取最大号+1 + auto_title 配置门 + 默认态判定=
+  list_sessions name null；**pi_open_session 返回模型串的坑在此修复**）。
+- **ZCode 构图审计快赢**：user 消息 hover 条补复制（copied 1.5s 复位）、
+  assistant footer 补时间戳（createdAt→Intl HH:mm）。审计结论：构图基本
+  一致、多处超集（日期分隔/RunTiming/run 级 Retry/断连四相 ZCode 都没有）。
+- **文件树**：ZCode workspace-file-tree 16 文件照抄（虚拟化自写等价替
+  换 @tanstack/react-virtual——不引新依赖；吸顶/空目录链压缩 a/b/c/软链
+  接豁免），fs.rs 加 is_symlink（junction 指向祖先会无限递归 fs_list），
+  预览通道复用；git 状态/watcher/搜索无 IPC 未随（头注释在案）。
+- **变体条**：MessageVariantPicker 挂 user 消息 footer（分叉点 entryId
+  经 forkPoints 序号映射比对 forkPointId；2/2 切换真鼠标实测通过）。
+- **全局原语样式**：ui-primitives.css（hermes 滚动条三段 CSS：平时隐形
+  hover 18%/40%；--shadow-dialog 四段阴影；--z-modal 令牌；Chromium 121+
+  同时给标准与 webkit 时忽略 webkit——只用 webkit）。
+
+### 本轮新坑
+- **Tauri 命令返回 Option<String> 时 invoke 得到裸 string**——branch-store
+  按 {branchedFrom} 对象解析导致谱系条永不渲染（冒烟抓到）；parse 兼容
+  裸 string/null/对象三形。
+- **冒烟假阳性**：断言"命名成功"时派生标题=首条消息文本，body textContent
+  同时含消息气泡——必须查侧栏行/DOM 特定槽位，不能查 body 全文。
+- **合成 click 过不了拖拽机器**：侧栏行挂 pointer 拖拽机器后，行切换必须
+  CDP Input.dispatchMouseEvent 真实鼠标序列（press→move→release）。
+- **exe 陈旧 vs 前端新**：前端调新 IPC 命令报 "Command not found" = exe
+  未重编（branch-store 铁律式清投影是正确行为）；重编后即愈。
+- on_big_stack 返回 Result<T,String>（spawn/join 层）——闭包内再返回
+  Result 时记得 and_then 拍平（session_lineage 首版 E0308 的根因）。

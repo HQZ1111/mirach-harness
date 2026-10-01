@@ -1,90 +1,81 @@
-# mirach-harness 交接文档（2026-10-02 · elements 接线轮后）
+# mirach-harness 交接文档（2026-10-02 · 会话管理/对标轮后）
 
 > 本文是**会话交接快照**：新会话从这里接手。工程规矩/历史踩坑的
-> 唯一规范仍是 `AGENTS.md`（必读——本轮新增「elements 接线轮」大节，
-> 收口轮大节在其上方）；pi 集成的架构规范是 `docs/pi-integration.md`。
-> 三者不重复，本文只记录"现在在哪、下一步做什么"。
+> 唯一规范仍是 `AGENTS.md`（必读——最新两大节：「elements 接线轮」、
+> 「会话管理/对标轮」）；pi 集成架构规范 `docs/pi-integration.md`；
+> 上游 FR 清单 `docs/upstream-feature-requests.md`。不重复，本文只记
+> "现在在哪、下一步做什么"。
 
 ## 一句话状态
 
-收口轮（安全/正确性/测试/死代码/vendor/设置页/打包）之后，完成了
-**elements 接线轮**：官方 elements 库 118 件全量在树，pi 支持面全接——
-图片端到端、编辑重跑（retry_edit 兄弟分支）、checkpoint/rewind、
-fork 建新会话独立探索、分支切换（BranchPicker）、消息时间戳、工具结构化
-渲染（bash→终端块、web_search→搜索卡）、usage 美元成本、压缩横幅、
-错误/断连/空态全面升级。门禁全绿（tsc 0 / vitest **105** / cargo test
-**39**），真窗口冒烟确认 fork 真通、分支真树、图片链真通、零控制台错误。
-**唯一阻塞项不变：真模型凭据未配，端到端从未见过真模型回复。**
+elements 接线轮 + 会话管理/对标轮（ZCode+hermes 双参考）完成：**侧栏
+会话管理全套**（置顶/拖拽排序/拖到主会话标签/行菜单）、**设置页结构化**
+（压缩/重试段 + pi Config 65+ 字段盘点）、**分支语义双挂点**（顶部会话线
+谱系条 / user 消息变体条 2-2 切换实测通过）、**runtime 性能三件**（增量
+同步/滚动持久化/自动命名规则段）、**ZCode 文件树照抄落地**、user 复制/
+时间戳/滚动条弹窗令牌。门禁：tsc 0 / vitest **221** / cargo test **39**，
+真窗口冒烟全通（谱系条/变体切换/自动命名/零控制台错误）。
+**唯一阻塞项不变：真模型凭据未配。**
 
 ## 提交与仓库
 
-- 工作目录 `G:\mirach-harness`，分支 main。本轮（elements 接线轮）提交链
-  见 `git log`（Rust 桥接批 / 前端 elements+fork 批 / 文档批）；此前
-  收口轮提交链（d6476fd…f22e01a）与 elements 恢复（abd6848）均已推送。
-- **上游 pi**：vendored 于 `src-tauri/vendor/pi_agent_rust`（白名单拷贝）。
-  同步上游流程：重拷白名单子集 + 核对**两个 vendor 本地补丁**
-  （①session_index.rs:778 `.read(true)`，gh #239 同款；②push-protection
-  脱敏：auth.rs Google OAuth 四常量 + secrets.rs 夹具字面量 →
-  MIRACH-VENDOR-REDACTED）。上游真源 `G:\pi_agent_rust-main` 不进 git。
+- 分支 main，本轮提交链（时间序）：14ad69d 分支语义拆分 → 85fc06f 文件
+  树 → f01e8b0 设置页 → 494cc72 runtime 性能/命名+FR 清单 → 1e4aa9e
+  侧栏管理 → b8c06a4 冒烟修复三件。均已推送。
+- **上游 pi**：vendored 0.5.1 于 `src-tauri/vendor/pi_agent_rust`。同步
+  流程：重拷白名单 + 核对两个 vendor 补丁（①session_index.rs:778
+  `.read(true)`；②push-protection 脱敏）。**上游已发布 v0.6.1**（steer/
+  follow_up SDK 原语 + Windows 保存修复=补丁①退休；breaking：
+  MCP project_trusted）——升级立为里程碑，**等真模型端到端基线**。
 
-## 已完成（按 pi-integration.md §7 + 本轮增量）
+## 已完成（累计口径）
 
-1. **§7-1..5 + §7-7** 全部完成（收口轮，详见 AGENTS「生产就绪收口轮」）。
-2. **§7-6 A2UI** 仍 MVP 后（本轮的宿主渲染约定 `{render, payload}` 是其
-   最小雏形，未实装）。
-3. **elements 接线轮增量**（AGENTS「elements 接线轮」大节有全文）：
-   - 8 个新 IPC：pi_retry_edit / pi_mark_checkpoint / pi_list_checkpoints /
-     pi_rewind / pi_fork_session / pi_get_fork_points /
-     pi_list_sibling_branches / pi_switch_branch。
-   - 图片端到端（POST images → run_with_content_with_abort，白名单 400）。
-   - 前端：onEdit/onReload、attachments adapter、hydrate 时间戳+图片块、
-     12 个官方组件挂载（bash 终端块/web_search 卡/工具错误/复制重生成/
-     耗时成本/日期分隔/错误卡/中断卡/断连四相/空态/压缩横幅/工具结构化）、
-     fork 入口 + BranchPicker + branch-store。
+1. pi-integration.md §7-1..5 + §7-7：完成（收口轮）。
+2. **elements 接线**：23 个官方组件在跑（含工具结构化分流
+   bash→终端块/web_search→搜索卡）、分支语义双挂点、图片端到端、
+   8 个新 IPC（retry_edit/checkpoint 三件/fork 四件/lineage）。
+3. **会话管理**：置顶/拖拽排序/拖到主标签/行菜单/自动命名/滚动恢复。
+4. **设置页**：模型/凭据/压缩/重试/原始 JSON/关于。
+5. **文件树**：ZCode 版真树（懒加载/虚拟化/吸顶/预览联动）。
 
-## 未做清单（含确切阻塞）
+## 未做清单
 
-1. **真模型端到端（唯一硬阻塞）**：`~/.pi/agent/` 无 auth.json/models.json。
-   配 key（env var / auth.json / models.json 凭据引用）后验证：多轮上下文、
-   **工具真调用渲染**（bash 终端块/web_search 卡的真数据形状）、图片理解、
-   压缩横幅真触发、用量环与成本真数字、thinking 流式。
-2. **elements 剩余批次**（pi 支持面之外，按价值排序）：
-   - message-queue 可视化（宿主本地排队——isRunning 时输入入队，run 结束
-     自动发）；
-   - read-aloud（浏览器 speechSynthesis，零 pi 依赖）；
-   - checkpoint UI（命令面 pi_mark_checkpoint/pi_list_checkpoints/pi_rewind
-     已通，缺 UI 挂载）；
-   - sources 卡（web_search 结果解析出 URL——形状需真模型实测后定）；
-   - 图表类（chart/data-table/code-diff/file-tree）——等宿主 details
-     渲染约定 `{render, payload}` 立约定 + 自定义工具示例。
-3. **pi 不支持、明确不接**：citations/sources（数据模型无）、steer/follow_up
-   （in-process 无，POST 排队等价；message-queue 走宿主自管）、
-   feedback/语音后端（无服务端）。
-4. 打包：首跑已过（NSIS 83MB，`npm run tauri:build`，CARGO_BUILD_JOBS=2
-   防 OOM）；updater 未配。
-5. 人工验收 + i18n（UI 中英混排）+ L5 移动端：未启动。
+1. **真模型端到端（唯一硬阻塞）**：配凭据（env var/auth.json/models.json
+   凭据引用——设置页「提供方凭据」段有指引）后验证：工具真数据形状、
+   图片理解、压缩真触发、用量成本真数字、thinking 流式、自动命名 LLM 段。
+2. **最后一波接线**（可接件清零）：message-queue（宿主排队；pi 0.6.x
+   后可切官方 steer/follow_up）、checkpoint UI（命令面已通）、cost-meter、
+   read-aloud（speechSynthesis）、shiki 高亮两件（react-shiki 移 deps）、
+   regenerate-menu。
+3. **pi 0.6.x 升级里程碑**（breaking：MCP project_trusted）+ 上游 FR
+   提交（citations 模型/hostcall schema）。
+4. **谱系树嵌套**：list_sessions 透出 branchedFrom（Rust 小改）→ 接
+   hermes session-branch-tree 语义（├─/└─）。
+5. ZCode 审计余项：重试计数徽章、异常轮强制展开、左 rail 回合导航（P3）。
+6. 人工验收 + i18n + L5。
 
-## 验证与环境速查（细节见 AGENTS.md）
+## 验证与环境速查
 
-- 启动：`npm run dev`（vite:1430）+ Start-Process 分离启动
+- 启动：`npm run dev`（vite:1430）+ Start-Process 分离
   `src-tauri\target\debug\mirach-harness.exe`（或 cargo run）。CDP 9223。
-- 门禁：tsc（0）/ `npm test`（**105**）/ `cargo check`（零警告）/
+- 门禁：tsc（0）/ `npm test`（**221**）/ cargo check（零警告）/
   `cargo test`（**39**）。
-- 冒烟脚本（%TEMP%）：`aui-round2-smoke.cjs`（发送/fork/mime/截图）+
-  `aui-round2b-smoke.cjs`（图片 POST/retry_edit 分支链）——**直连 POST 的
-  token 走 query 参数，Authorization 头不认**。旧脚本 aui-smoke-v4 等同目录。
-- 直连 IPC 冒烟可用页内 `window.__TAURI_INTERNALS__.invoke`（CDP
-  Runtime.evaluate awaitPromise 短超时）。
-- exe 改 Rust 后必须重编重启；前端行为不变先怀疑 vite 陈旧模块缓存。
-- GitHub push 偶发抽风：重试即可。**Push Protection 拦截时检查 vendor
-  脱敏补丁是否还在（见上）**。
+- 冒烟脚本（%TEMP%）：`aui-round3-smoke.cjs`（自动命名/键检查）、
+  `aui-round3e-smoke.cjs`（刷新+真鼠标点击行）、`aui-round3f/g`（谱系条/
+  变体切换）——**侧栏行切换必须 CDP Input.dispatchMouseEvent 真实鼠标**
+  （行挂拖拽机器，合成 click 不可靠）；断言侧栏内容查行 DOM 不查 body
+  全文（消息气泡同文会假阳性）。
+- 直连 POST token 走 query；exe 报 "Command not found" = 未重编。
 
-## 本轮新坑速记（AGENTS「elements 接线轮」有全文）
+## 本轮新坑速记（AGENTS「会话管理/对标轮」有全文）
 
-- pi 消息**有** timestamp；每条 assistant 消息带美元成本——旧认知两条都错。
-- 官方模板三个不通用：day-separator（自带迷你列表，只能提取分隔行）、
-  EmptyStateComposer（无输入框）、guardrail-notice（无错误槽位）。
-- `plan_fork_from_user_message` 返回 Result 非 Option；分支 preview=离根
-  最近；Agent 是投影改历史必须走 Session。
-- StartRunConfig 无 modelOverride（探测 runConfig.custom）。
-- 直连 POST token 走 query；仓库根不落地任何临时文件（`fn` 事故）。
+- pi_open_session 返回**模型条目串**非 sessionId——按路径切换后从
+  pi_get_state 取 id。
+- Tauri 命令返回 Option<String> → invoke 得**裸 string**——parse 别按
+  包裹对象写（谱系条永不渲染的根因）。
+- pi 分支模型 = **user turn 续接线**（每条分支以各自 user 消息开头）——
+  变体条锚点=分叉点 user 消息。
+- pi Config 有 titling.auto_title / steering_mode / follow_up_mode——
+  自建逻辑先对齐这些键；system_prompt/enabled_tools 不在 Config。
+- 自动命名派生标题=会话**开场消息**的截断，不是最新消息。
+- prune 持久化守卫：列表非空才清（首帧空=未加载）。
