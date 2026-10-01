@@ -1,35 +1,45 @@
 /**
  * 接线版 composer：官方 elements/composer kit + @assistant-ui/react 原语。
- * 语音=Web Speech；斜杠/@=kit 匹配器；附件=运行时适配器（图片/文本）；
- * 模型选择=pi 控制面（§4.5 IPC：pi_list_models/pi_get_state/pi_set_model）。
+ * 构图对齐官方（/elements/composer）：附件区在输入上方（无附件不占位）、
+ * 工具行=左附件钮 / 右动作组（模型触发器 → 语音钮 → 上下文环 → 发送/
+ * 停止）、容器=kit 默认 paper rounded-[24px] p-2.5。语音=Web Speech，
+ * 交互对齐官方 Dictation（/elements/composer-voice）：激活期输入行被
+ * ComposerVoice（波形+计时/Transcribing 微光）替换（官方："replace
+ * ComposerInput while active, not sit beside it"），按钮 ink/ghost 两态。
+ * 附件 UI=官方 attachment.aui 元素（图片缩略 tile + composer 专属移除钮
+ * + 上传态遮罩）。斜杠/@=kit 匹配器；模型选择=pi 控制面（§4.5 IPC：
+ * pi_list_models/pi_get_state/pi_set_model）。
  */
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
-  useAui,
   useAuiState,
   unstable_useComposerInput,
 } from '@assistant-ui/react'
 import { useStore } from 'zustand'
-import { ArrowUpIcon, FileText, ImageIcon, Languages, SquareIcon, XIcon } from 'lucide-react'
+import { FileText, ImageIcon, Languages } from 'lucide-react'
 
 import {
   Composer,
+  ComposerActions,
   ComposerAttachButton,
   ComposerBar,
   ComposerCommandItem,
   ComposerMenu,
   ComposerPersonItem,
+  ComposerSend,
   ComposerToolbar,
+  ComposerVoice,
+  ComposerVoiceButton,
   useMentionMatches,
   useSlashMatches,
 } from '@/components/assistant-ui/elements/composer'
+import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assistant-ui/elements/attachment.aui'
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
-import { cn } from '@/lib/utils'
 
 /** pi 模型目录条目（pi_list_models 返回形状）。 */
 interface PiModelEntry {
@@ -61,28 +71,46 @@ const PEOPLE = [
   { name: 'reviewer', role: 'human' },
 ] as const
 
-function MicGlyph() {
-  return (
-    <svg className="size-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-      <path d="M12 19v3" />
-      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" />
-      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-    </svg>
-  )
-}
-
+/**
+ * 官方 Dictation 三态（/elements/composer-voice）：active=从点下麦克风
+ * 到最终文本落定（拾音+沉降两段）；recording=仅拾音期（波形+计时）；
+ * transcribing=停止后的收尾（波形沉降为 "Transcribing" 微光）。识别
+ * 最终文本在拾音期即时进 composer（官方 runtime 语义："straight into
+ * s.composer.text as it arrives"）。
+ */
 function useDictation(onFinal: (text: string) => void) {
   const [recording, setRecording] = useState(false)
+  const [transcribing, setTranscribing] = useState(false)
+  const [seconds, setSeconds] = useState(0)
   const recRef = useRef<{ stop: () => void } | null>(null)
   // 识别实例启动后不会重绑回调——必须经 ref 读最新 onFinal。否则闭包
   // 捕获启动那一刻的 value：第一段识别写入后 value 变了，第二段识别
   // 仍按旧 value 追加 = 覆盖第一段（审查 #2 实锤）。
   const onFinalRef = useRef(onFinal)
   onFinalRef.current = onFinal
-  const stop = useCallback(() => {
-    recRef.current?.stop()
+  // 计时器（官方模板同款）：recording 期间每秒走字，重新开始归零。
+  useEffect(() => {
+    if (!recording) return
+    setSeconds(0)
+    const timer = window.setInterval(() => setSeconds((s) => s + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [recording])
+  // 身份校验收尾：onend 触发时用户可能已重新 start（recRef 指向新
+  // 实例）——旧实例的收尾只清自己的状态，不得停掉新识别（审查 #3 实锤）。
+  const settle = useCallback(() => {
     recRef.current = null
     setRecording(false)
+    setTranscribing(false)
+  }, [])
+  const stop = useCallback(() => {
+    const rec = recRef.current
+    if (!rec) return
+    // 先摘句柄再 stop：onend 身份校验失配 → 不重复清态；recording
+    // 立即落假 → ComposerVoice 沉降为 Transcribing 微光（官方两段态）。
+    recRef.current = null
+    rec.stop()
+    setRecording(false)
+    setTranscribing(true)
   }, [])
   const start = useCallback(() => {
     const w = window as unknown as Record<string, unknown>
@@ -107,48 +135,18 @@ function useDictation(onFinal: (text: string) => void) {
         if (e.results[i].isFinal) onFinalRef.current(e.results[i][0].transcript)
       }
     }
-    // 身份校验：onend 触发时用户可能已重新 start（recRef 指向新实例）——
-    // 旧实例的收尾只清自己的状态，不得停掉新识别（审查 #3 实锤）。
     rec.onend = () => {
-      if (recRef.current === rec) {
-        recRef.current = null
-        setRecording(false)
-      }
+      if (recRef.current === rec) settle()
     }
     rec.start()
     recRef.current = rec
+    setTranscribing(false)
     setRecording(true)
-  }, [stop])
+  }, [settle])
   const supported =
     typeof window !== 'undefined' &&
     !!((window as unknown as Record<string, unknown>).SpeechRecognition ?? (window as unknown as Record<string, unknown>).webkitSpeechRecognition)
-  return { recording, supported, start, stop }
-}
-
-function AttachmentsChips() {
-  const attachments = useAuiState((s) => s.composer.attachments)
-  const aui = useAui()
-  if (!attachments || attachments.length === 0) return null
-  return (
-    <div className="flex flex-wrap gap-2 px-1 pt-1">
-      {attachments.map((a) => (
-        <span
-          className="flex items-center gap-1.5 rounded-xl border border-(--stroke-soft) px-2 py-1 text-xs text-(--text-2)"
-          key={a.id}
-        >
-          {a.name}
-          <button
-            aria-label={`移除附件 ${a.name}`}
-            className="text-(--text-4) hover:text-(--text)"
-            onClick={() => void aui.composer.attachment({ id: a.id }).remove()}
-            type="button"
-          >
-            <XIcon className="size-3" />
-          </button>
-        </span>
-      ))}
-    </div>
-  )
+  return { active: recording || transcribing, recording, transcribing, seconds, supported, start, stop }
 }
 
 export function ComposerWired() {
@@ -328,8 +326,10 @@ export function ComposerWired() {
           660）。twMerge 下 max-w-none 覆盖 kit 默认，宽度全权归外层。 */}
       <Composer className="w-full max-w-none">
         <ComposerPrimitive.AttachmentDropzone asChild>
-          <ComposerBar className="rounded-(--composer-radius) border border-(--stroke-soft) bg-transparent p-2.5">
-            <AttachmentsChips />
+          {/* 官方容器默认：paper 面 + rounded-[24px] + p-2.5 + gap-2 */}
+          <ComposerBar>
+            {/* 官方构图第一条：附件区在输入上方；empty:hidden，无附件不占位 */}
+            <ComposerAttachmentsRow />
             {slashOpen && (
               <ComposerMenu open>
                 {slash.map((c, i) => (
@@ -354,38 +354,34 @@ export function ComposerWired() {
                 ))}
               </ComposerMenu>
             )}
-            <ComposerPrimitive.Input
-              aria-label="消息输入"
-              className="max-h-40 min-h-10 w-full resize-none bg-transparent px-2 text-[0.9375rem] leading-6 text-(--text) outline-none placeholder:text-(--text-4)"
-              enterKeyHint="send"
-              onKeyDown={onInputKeyDown}
-              placeholder="输入消息，/ 指令，@ 成员…"
-              rows={1}
-            />
+            {/* 官方 Dictation：激活期输入行被 ComposerVoice 替换（波形+
+                计时；停止后沉降 Transcribing 微光），Input 卸载即禁用 */}
+            {dictation.active ? (
+              <ComposerVoice
+                className="flex-1"
+                recording={dictation.recording}
+                seconds={dictation.seconds}
+              />
+            ) : (
+              <ComposerPrimitive.Input
+                aria-label="消息输入"
+                className="max-h-40 min-h-11 w-full resize-none bg-transparent px-3 text-[0.9375rem] leading-6 text-(--text) outline-none placeholder:text-(--text-4)"
+                enterKeyHint="send"
+                onKeyDown={onInputKeyDown}
+                placeholder="输入消息，/ 指令，@ 成员…"
+                rows={1}
+              />
+            )}
+            {/* 官方工具行：左附件钮 / 右动作组（模型触发器 → 语音钮 →
+                上下文环 → 发送/停止），顺序照 /elements/composer */}
             <ComposerToolbar>
               <ComposerPrimitive.AddAttachment asChild>
-                <ComposerAttachButton className="text-(--text-3) hover:text-(--text)" />
+                <ComposerAttachButton aria-label="添加附件" />
               </ComposerPrimitive.AddAttachment>
-              <div className="ml-auto flex items-center gap-1.5">
-                {/* 用量环（官方 ContextDisplay）：usage 与模型上下文窗口
-                    任一缺失即不渲染；窗口 <=0 同样不渲染（除零 → clamp 100
-                    红环误报，审查 #7） */}
-                {usage &&
-                  currentModel &&
-                  currentContextWindow !== undefined &&
-                  currentContextWindow > 0 && (
-                  <ContextDisplay.Bar
-                    modelContextWindow={currentContextWindow}
-                    usage={{
-                      inputTokens: usage.inputTokens,
-                      outputTokens: usage.outputTokens,
-                      cachedInputTokens: usage.cachedInputTokens,
-                      totalTokens: usage.totalTokens,
-                    }}
-                  />
-                )}
+              <ComposerActions>
                 <ModelSelector
                   align="end"
+                  className="rounded-full"
                   effort={currentEffort ?? ''}
                   models={models}
                   value={currentModel ?? undefined}
@@ -395,40 +391,41 @@ export function ComposerWired() {
                   variant="ghost"
                 />
                 {dictation.supported && (
-                  <button
+                  <ComposerVoiceButton
+                    active={dictation.recording}
                     aria-label={dictation.recording ? '停止语音' : '语音输入'}
-                    className={cn(
-                      'grid size-8 place-items-center rounded-full',
-                      dictation.recording ? 'bg-(--text) text-(--surface)' : 'text-(--text-3) hover:text-(--text)',
-                    )}
+                    disabled={dictation.transcribing}
                     onClick={() => (dictation.recording ? dictation.stop() : dictation.start())}
-                    title={dictation.recording ? '停止语音' : '语音输入'}
-                    type="button"
-                  >
-                    {dictation.recording ? <SquareIcon className="size-3.5 fill-current" /> : <MicGlyph />}
-                  </button>
+                  />
+                )}
+                {/* 用量环（官方 compact 形态：环+百分比嵌动作组，悬停出
+                    明细浮层）：usage 与模型上下文窗口任一缺失即不渲染；
+                    窗口 <=0 同样不渲染（除零 → clamp 100 红环误报，审查
+                    #7） */}
+                {usage &&
+                  currentModel &&
+                  currentContextWindow !== undefined &&
+                  currentContextWindow > 0 && (
+                  <ContextDisplay.Ring
+                    modelContextWindow={currentContextWindow}
+                    usage={{
+                      inputTokens: usage.inputTokens,
+                      outputTokens: usage.outputTokens,
+                      cachedInputTokens: usage.cachedInputTokens,
+                      totalTokens: usage.totalTokens,
+                    }}
+                  />
                 )}
                 {isRunning ? (
                   <ComposerPrimitive.Cancel asChild>
-                    <button aria-label="停止生成" className="grid size-8 place-items-center rounded-full bg-(--text) text-(--surface)" type="button">
-                      <SquareIcon className="size-3.5 fill-current" />
-                    </button>
+                    <ComposerSend aria-label="停止生成" idle={false} streaming />
                   </ComposerPrimitive.Cancel>
                 ) : (
                   <ComposerPrimitive.Send asChild>
-                    <button
-                      aria-label="发送"
-                      className={cn(
-                        'grid size-8 place-items-center rounded-full transition-colors',
-                        value.trim() ? 'bg-(--fl-accent) text-white' : 'bg-(--stroke-soft) text-(--text-4)',
-                      )}
-                      type="button"
-                    >
-                      <ArrowUpIcon className="size-4" />
-                    </button>
+                    <ComposerSend aria-label="发送" idle={!value.trim()} streaming={false} />
                   </ComposerPrimitive.Send>
                 )}
-              </div>
+              </ComposerActions>
             </ComposerToolbar>
           </ComposerBar>
         </ComposerPrimitive.AttachmentDropzone>
