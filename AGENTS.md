@@ -2339,6 +2339,30 @@ hermes 侧栏/文件树视觉移植（用户 2026-09-29："左侧栏的会话，
 - on_big_stack 返回 Result<T,String>（spawn/join 层）——闭包内再返回
   Result 时记得 and_then 拍平（session_lineage 首版 E0308 的根因）。
 
+## 侧栏重审计轮（2026-10-02，用户质疑"不适用"潦草→逐条重查）
+
+上一代理把 hermes 侧栏特性批量判"不适用"，用户实测反驳成立——重审计
+（读 pi 源码逐条）后落地：**行右侧时间**（SessionMeta.lastModifiedMs/
+timestamp 一直在，旧判"无 age 字段"是错的）、**按工作区分组**（cwd 直
+投影）+ **选工作区建会话**（pi working_directory 透传，fs_workspace_*
+三命令：校验/默认目录/目录对话框）、**created 排序**、rowMeta
+时间·Tokens·成本（pi stats 每文件聚合懒拉+单飞）、**未读**（客户端
+last-seen 水位+全部已读）、**客户端归档**（pi 无 archive 属实→客户端
+面：行菜单归档/取消归档+已归档开关）、导出 HTML（pi export_html 属实
+无→宿主自渲染）。真正不可行仅：live 状态桶/PR/多 profile/每行
+tokens 排序键（全表 rank 与懒拉冲突，诚实不做）。
+
+菜单重构为 hermes filter-menu 逐行结构：分组▸/排序/显示▸（含紧凑
+行高）/显示所有会话/Inbox style/──筛选（状态·PR·Profile 禁用+项目▸+
+已归档+重置为默认）/──全部收起/全部标记为已读/选择工作区…。
+store 三新旋钮：inboxStyle（卡片行第二行=时间·消息数）/showAll（过滤
+旁路）/projectFilter（cwd 过滤，__all__/__home__ 哨兵位绕 Radix 空串
+value 限制）。406 用例。
+
+**教训（用户两次纠正）**："不适用"必须逐条读源码实证，不许凭印象；
+交互对齐不许简化（拖拽 DragOverlay 让位、右键全区域接管——简化版被
+打回，dnd-kit 照抄版在排）。
+
 ## 对标轮续（2026-10-02 深夜：终端/composer/代码高亮/预览）
 
 用户四条 UI 反馈 + 官方三页文档对照。测试 221→275（TS）+ 40（Rust）。
