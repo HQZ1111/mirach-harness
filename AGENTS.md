@@ -512,6 +512,17 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     **单测**：turn-actor.test.ts 9 用例（文本/工具交错、end 归并、
     usage 替换语义、usage 缺失保留）全绿——"reduceAguiEvent 纯函数
     可单测"铁律首次兑现。tsc 0；cargo check 零警告；冒烟全绿。
+  - **A 项清账 + 上游确认（2026-10-01 深夜续）**：
+    ①**oneshot 超时清账**——上游 manager request_ui 对每请求
+    bind_deadline 并 honor effective timeout（超时 fail 非挂死），宿主
+    桥无需计时；§4.4 的 Registry 计时说法作废。
+    ②**A25/A26 清账**——generative-ui 0.0.21 无 useAgUiRuntime/
+    useAgUiSendA2uiAction；真实面 = JSONGenerativeUI（present 前端工具/
+    promptUser 人审）+ UINode IR + ActionRegistry；它是 present 树渲染
+    底座，非 A2UI 绑定。
+    ③**A22 清账**——crates.io a2ui v0.0.0 占位（后端全桌面 GUI，无
+    Web）；a2ui-rs 不存在。A2UI 三层全自建，维持 MVP 后（文档新增 §9）。
+    ④全量回归 30/30（constraints/rowfix/pane-registry/turn-actor）。
 
 ## 工具（`scripts/`）
 

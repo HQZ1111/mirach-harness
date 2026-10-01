@@ -399,16 +399,40 @@ Tool/ToolDefinition/ToolRegistry/ToolFactory/default_tool_registry，
 **待源码确认**：A5/A6（RunContext 相关——若走 Agent::run() 路径才需要；
 MVP 只用 session.prompt() 可绕开）A11/A12/A20（ag-ui crate 的
 Agent trait/mount_agent 签名——装依赖后查）A13（逐步落地时对签名）
-A14（环形缓冲容量/sequence 起点——实现时定，建议 sequence 从 1 起）
-A22（a2ui-rs 来源——crates.io 查证）A23（catalog 注入与
-append_system_prompt 兼容性）A24（ACTIVITY_SNAPSHOT payload）A25/A26
-（assistant-ui present 注册/useAgUiSendA2uiAction——查已装的
-@assistant-ui/react-generative-ui 导出面）A28（ts-rs/specta 类型生成）
-A29（delegate 队列触发回调——实现时定）A30（handler async_trait——
-ActionDef::handler 已是 boxed async Fn，无需）。
+A14（环形缓冲容量/sequence 起点——已定：sequence 从 1 起，cap 2000）
+A23（catalog 注入与 append_system_prompt 兼容性）A24（ACTIVITY_
+SNAPSHOT payload）A28（ts-rs/specta 类型生成）A29（delegate 队列
+触发回调——实现时定）。**A30 已清**（handler async_trait——
+ExtensionUiHandler 即 #[async_trait]，宿主 impl 同宏）。
 
 **风险**：asupersync≠tokio（§0.1）；G 盘 path 引用出包前换 git
 rev-pin/vendored；nightly 工具链与本机 rustup 对齐（上游 pin
 nightly-2026-08-31，rust-toolchain.toml 自动拉取）；A2UI catalog 前后
 端同步成本（ts-rs 生成，变更频率低可控）；agent-visible Action 数量
 红线 15-20。
+
+## 9. §7-6 前置清账（2026-10-01，A2UI 扫雷）
+
+- **A22 已清（不可用）**：crates.io 有 `a2ui v0.0.0` 占位 crate
+  （"render JSON streaming UIs authored by AI agents"），后端为桌面
+  GUI 工具集（ratatui/Slint/egui/Bevy/Dioxus），**无 Web/React 后端**；
+  `a2ui-rs` 不存在（404）。A2UI Rust 渲染层不可引入。
+- **A25/A26 已清（API 名不成立）**：@assistant-ui/react-generative-ui
+  0.0.21 导出面 = JSONGenerativeUI 类（present() 前端工具 /
+  promptUser() 人审工具）、renderGenerativeUI、buildPresentParameters、
+  defineGenerativeComponents、defaultGenerativeUILibrary、
+  createActionRegistry、UINode/UISpec IR 类型——**无 useAgUiRuntime /
+  useAgUiSendA2uiAction**。该包不是 A2UI 协议绑定，而是
+  "模型经 present 前端工具画 {\$type,...props} 树"的 generative-ui
+  工具集；其 UINode 渲染库是 A2UI→React 自建渲染器的**候选底座**。
+- **oneshot 超时已清（上游承担）**：manager request_ui 对每个请求
+  bind_deadline 并 "honor the request's effective timeout（超时 fail
+  而非挂死）"——宿主桥无需计时；宿主 oneshot 悬挂的上游侧收尾 =
+  manager 超时放弃 + sender drop → rx Err → cancelled 路径（语义
+  正确）。§4.4 的"oneshot 超时归 ApprovalRegistry 计时"作废。
+- **审批卡 select/input**：上游 UI hostcall（HostcallKind::Ui）的
+  method/payload 形状在源码/文档中未定（需真实扩展样本）——卡片
+  维持 confirm 全支持 + 其它 method 显示 payload + 取消。
+- **A2UI 结论（维持 MVP 后）**：协议 Rust crate 占位 + 无 Web 后端 +
+  前端无现成绑定 = 三层全自建。若启动：前端渲染器以 generative-ui
+  包的 UINode 库为底座（结构同构），pi 侧 catalog/ts-rs 另行设计。
