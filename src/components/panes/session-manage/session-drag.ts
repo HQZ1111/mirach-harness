@@ -21,18 +21,24 @@ import { PRIMARY_PANE } from '@/components/layout/pane-registry'
 import { createDragGhost, type DragGhost } from '@/lib/drag-ghost'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 
-import { sessionManageStore, type SessionDragState } from './session-manage-store'
+import { sessionManageStore, type SessionDragState, type SessionRowGroup } from './session-manage-store'
 
 const DRAG_THRESHOLD_PX = 4
 const TAB_BUTTON_ID = 'flexlayout-tabbutton-'
 
 /** 行元素标记（ThreadListItem 的 Root 上挂，快照/候选识别用） */
 export const SESSION_ROW_ATTR = 'data-session-row-id'
+/** 行所在列表组（'pinned' | 'recent' | 'search'）——拖拽落点按组匹配：
+ *  置顶区与会话区各自独立可排、互不越组（hermes 每区一个 ReorderableList）；
+ *  搜索区不可排（hermes 搜索结果段不接 sortable）。 */
+export const SESSION_ROW_GROUP_ATTR = 'data-session-row-group'
 
 export interface SessionRowDragSpec {
   sessionId: string
   title: string
-  /** 松手在列表插入符上（beforeId = 目标行 id，null = 追加到尾部） */
+  /** 被拖行所在组（落点候选只收同组行） */
+  group: SessionRowGroup | 'search'
+  /** 松手在列表插入符上（beforeId = 目标行 id，null = 该组尾部） */
   onCommitListMove(beforeId: string | null): void
   /** 松手在主会话页签上（切换主线程到该会话） */
   onCommitMainTab(): void
@@ -93,7 +99,9 @@ const sameTarget = (a: SessionDragState['target'] | null, b: SessionDragState['t
   (a !== null &&
     b !== null &&
     a.kind === b.kind &&
-    (a.kind !== 'list' || b.kind !== 'list' || a.beforeId === b.beforeId))
+    (a.kind !== 'list' ||
+      b.kind !== 'list' ||
+      (a.beforeId === b.beforeId && a.group === b.group)))
 
 /**
  * 起一次会话行拖拽。阈值内松开 = 普通点击（切会话照常，机器不干预）；
@@ -102,9 +110,10 @@ const sameTarget = (a: SessionDragState['target'] | null, b: SessionDragState['t
 export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: SessionRowDragSpec) {
   if (e.button !== 0) return
 
-  // ⋯ 菜单钮 / 置顶切换钮 / 改名输入框 / 已打开的菜单：原生交互优先，不起拖。
+  // 行操作簇（⋯ 菜单钮，[data-row-actions]——hermes 同款豁免选择器）/
+  // 输入框 / 已打开的菜单：原生交互优先，不起拖。
   const pressTarget = e.target as HTMLElement | null
-  if (pressTarget?.closest('[data-slot="aui_thread-list-item-more"], [data-slot="aui_thread-list-item-pin-toggle"], input, textarea, [role="menu"]')) return
+  if (pressTarget?.closest('[data-row-actions], input, textarea, [role="menu"], [role="dialog"]')) return
 
   const handle: Element = e.currentTarget
   const { pointerId } = e
@@ -119,11 +128,11 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   let raf = 0
   let pending: { x: number; y: number } | null = null
 
-  // engage 快照：主页签矩形 + 非置顶行候选（拖拽中布局不重组，全程纯数学）
+  // engage 快照：主页签矩形 + 同组行候选（拖拽中布局不重组，全程纯数学）
   let mainTab: HTMLElement | null = null
   let mainRect: Rect | null = null
   let candidates: RowRect[] = []
-  let draggedIsPinned = false
+  let listGroup: SessionRowGroup | null = null
   let lastTarget: SessionDragState['target'] | null = null
 
   const setCursor = (value: string) => {
@@ -170,21 +179,25 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
         ? { left: mr.left, top: mr.top, right: mr.right, bottom: mr.bottom }
         : null
 
-    // 插入候选 = 拖拽行所在列表容器里的非置顶行（置顶组不参与排序；被拖
-    // 行自身除外——不能插到自己旁边装作移动）。
-    const pinnedSnapshot = new Set(sessionManageStore.getState().pinned)
-    draggedIsPinned = pinnedSnapshot.has(spec.sessionId)
+    // 插入候选 = 与拖拽行同组、同列表容器的其它行（被拖行自身除外——不能
+    // 插到自己旁边装作移动）。组间互不越界（hermes：每区一个 ReorderableList）；
+    // 搜索区不可排（listGroup 保持 null → 落点只剩主页签/no-drop）。
+    listGroup = spec.group === 'search' ? null : spec.group
     const listEl = handle.closest('[data-slot="aui_thread-list-items"]')
     const rowEls = listEl ? [...listEl.querySelectorAll<HTMLElement>(`[${SESSION_ROW_ATTR}]`)] : []
-    candidates = rowEls
-      .map((el): RowRect | null => {
-        const id = el.dataset.sessionRowId
-        if (!id || id === spec.sessionId || pinnedSnapshot.has(id)) return null
-        const r = el.getBoundingClientRect()
-        if (r.height === 0) return null
-        return { id, mid: r.top + r.height / 2 }
-      })
-      .filter((r): r is RowRect => r !== null)
+    candidates =
+      listGroup === null
+        ? []
+        : rowEls
+            .map((el): RowRect | null => {
+              const id = el.dataset.sessionRowId
+              if (!id || id === spec.sessionId) return null
+              if (el.dataset.sessionRowGroup !== listGroup) return null
+              const r = el.getBoundingClientRect()
+              if (r.height === 0) return null
+              return { id, mid: r.top + r.height / 2 }
+            })
+            .filter((r): r is RowRect => r !== null)
   }
 
   const resolve = (x: number, y: number) => {
@@ -195,15 +208,15 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
       return
     }
 
-    // 置顶行起拖：列表不可排（置顶组固定活跃降序），只有主页签是落点
-    if (draggedIsPinned) {
+    // 无可排组（搜索态 / 该区只有被拖行一行）：非页签区拒绝投放
+    if (listGroup === null || candidates.length === 0) {
       publish(null)
       setCursor('no-drop')
       return
     }
 
     const beforeId = candidates.find((c) => y < c.mid)?.id ?? null
-    publish({ kind: 'list', beforeId })
+    publish({ kind: 'list', group: listGroup, beforeId })
     setCursor('grabbing')
   }
 

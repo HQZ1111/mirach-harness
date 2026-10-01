@@ -1,13 +1,16 @@
 /**
- * 会话侧栏排序纯函数（置顶 + 手动顺序）。
+ * 会话侧栏排序纯函数（置顶 + 手动顺序 + 日期组内应用序）。
  *
- * hermes 对照（apps/desktop/src/app/chat/sidebar/order.ts + store/session.ts）：
- * - hermes 置顶 = 后端 sessions.pinned keep 标志 + localStorage 手挑顺序；
- *   pi 无 pin 字段 → harness 全本地化（键见 session-manage-store.ts），
- *   置顶组内按最后活跃降序展示（任务定稿，非 hermes 的手挑 pin 顺序）。
+ * hermes 对照（apps/desktop/src/app/chat/sidebar/order.ts + store/layout.ts）：
+ * - hermes 置顶 = localStorage $pinnedSessionIds **数组顺序即展示顺序**
+ *   （pinSession 追加到尾、置顶组内可拖排 reorderPinned）；pi 无 pin 字段
+ *   → harness 全本地化（键见 session-manage-store.ts）。组内不再按活跃
+ *   降序（上一轮自创，与 hermes 相悖，本轮对齐）。
  * - hermes 手动顺序折回 = mergeFreshByPosition（order.ts）：不在持久化顺序
  *   里的 id 按"相对第一个已排 id 的新近位置"折回——新会话不沉底、翻页的
  *   旧会话不跳顶。此处逐语义照抄（order 是 id→序号表，非 id 数组）。
+ * - 日期组内应用手动序 = orderRowsWithinGroups（session-date-groups.ts，
+ *   逐语义照抄）：日历桶由新近性钉死，手动顺序只决定桶内次序。
  *
  * 数据源行 = {id, lastActiveMs}（aui threadItems[].custom.lastModifiedMs，
  * runtime.tsx refreshThreads 写入；缺 0）。
@@ -22,7 +25,7 @@ export interface SessionRowMeta {
 export const recencyCompare = (a: SessionRowMeta, b: SessionRowMeta): number =>
   b.lastActiveMs - a.lastActiveMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
 
-/** 置顶键清理：只留仍存在的会话（去重保序）——会话不存在于列表时清理键。 */
+/** 置顶键清理：只留仍存在的会话（去重保序——数组序=展示序，hermes 语义）。 */
 export function prunePins(
   pinned: readonly string[],
   existingIds: readonly string[],
@@ -38,7 +41,7 @@ export function prunePins(
   return out
 }
 
-/** 置顶切换：已置顶移除；未置顶追加到尾。 */
+/** 置顶切换（hermes pinSession/unpinSession）：已置顶移除；未置顶追加到尾。 */
 export function togglePinId(pinned: readonly string[], id: string): string[] {
   return pinned.includes(id) ? pinned.filter((p) => p !== id) : [...pinned, id]
 }
@@ -114,44 +117,34 @@ export function orderMapFromIds(ids: readonly string[]): Record<string, number> 
 }
 
 /**
- * 组合展示序：置顶组（pinned ∩ rows，按最后活跃降序——组内不跟手动顺序）+
- * 非置顶组（reconcileOrder 折手动顺序）。置顶组永远在非置顶组之上（调用方
- * 按返回的两段各自渲染，pinnedIds 在前）。
+ * 把新的可见 id 顺序拼回全量序列（hermes order.ts mergeVisibleReorder
+ * 逐语义）——折叠桶里没渲染的 id 原地不动，拖拽不得毁它们的排序。
  */
-export function orderedSessionIds(
-  rows: readonly SessionRowMeta[],
-  pinned: readonly string[],
-  order: Readonly<Record<string, number>>,
-): { pinnedIds: string[]; unpinnedIds: string[] } {
-  const byId = new Map(rows.map((r) => [r.id, r]))
-  const pinnedIds = prunePins(pinned, rows.map((r) => r.id))
-    .map((id) => byId.get(id))
-    .filter((r): r is SessionRowMeta => r !== undefined)
-    .sort(recencyCompare)
-    .map((r) => r.id)
-
-  const pinnedSet = new Set(pinnedIds)
-  const unpinnedRows = rows.filter((r) => !pinnedSet.has(r.id))
-  const baseline = [...unpinnedRows].sort(recencyCompare).map((r) => r.id)
-  const unpinnedIds = reconcileOrder(baseline, order)
-
-  return { pinnedIds, unpinnedIds }
+export function mergeVisibleReorder(
+  allIds: readonly string[],
+  nextVisibleIds: readonly string[],
+): string[] {
+  if (nextVisibleIds.length === allIds.length) return [...nextVisibleIds]
+  const visible = new Set(nextVisibleIds)
+  let i = 0
+  return allIds.map((id) => (visible.has(id) ? (nextVisibleIds[i++] ?? id) : id))
 }
 
 /**
- * 拖拽落点提交：给定当前行快照 + 现有顺序，算出移动后的序号表（全量重排
- * 0..n-1，顺带把此前靠折回定位的 id 收编进表）。仅非置顶行可排（置顶组
- * 固定活跃降序）——`sessionId` 已置顶（或不在非置顶序列里）时原样返回
- * 现有表，不产生写入。
+ * 非置顶组拖拽落点提交（hermes persistSessionOrder 语义：可见序 → 全量序
+ * → 持久化）：
+ * - `allIds` = 全量非置顶展示序（reconcileOrder(新近基线, order)——含被
+ *   折叠桶藏起来的行）；
+ * - `visibleIds` = 当前渲染的会话行 id（日期组按组序展开后）；
+ * - 落点 `beforeId`（null = 尾部）先改可见序，再拼回全量序存成序号表。
+ * 折叠桶藏行不因此丢排序（mergeVisibleReorder 保位）。
  */
-export function orderMapAfterMove(
-  rows: readonly SessionRowMeta[],
-  pinned: readonly string[],
-  order: Readonly<Record<string, number>>,
+export function commitRecentMove(
+  allIds: readonly string[],
+  visibleIds: readonly string[],
   sessionId: string,
   beforeId: string | null,
 ): Record<string, number> {
-  const { unpinnedIds } = orderedSessionIds(rows, pinned, order)
-  if (!unpinnedIds.includes(sessionId)) return { ...order }
-  return orderMapFromIds(moveBefore(unpinnedIds, sessionId, beforeId))
+  const nextVisible = moveBefore(visibleIds, sessionId, beforeId)
+  return orderMapFromIds(mergeVisibleReorder(allIds, nextVisible))
 }

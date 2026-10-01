@@ -285,3 +285,29 @@
   background: var(--tab-accent-wash);
   border-color: var(--tab-text-active);
 }
+
+/* ── 会话侧栏标题 hover 跑马灯（hermes styles.css .hover-marquee 段逐字）──
+   溢出才上弦：JS（thread-list.aui.tsx armMarquee）在 pointerenter 量
+   scrollWidth 溢出量、写 --marquee-d/--marquee-t 并置 data-marquee，
+   CSS 自己测不了 overflow——短标题保持朴素省略号、绝不抖动。单向滚动：
+   行程占关键帧中段（10%→75%），两端驻留；--marquee-t 按 80px/s 等速反推。 */
+.hover-marquee[data-marquee='true'] {
+  text-overflow: clip;
+}
+
+.hover-marquee[data-marquee='true'] > .hover-marquee-inner {
+  animation: hover-marquee var(--marquee-t, 3s) linear infinite;
+  display: inline-block;
+}
+
+@keyframes hover-marquee {
+  0%,
+  10% {
+    transform: translateX(0);
+  }
+
+  75%,
+  100% {
+    transform: translateX(calc(-1 * var(--marquee-d, 0px)));
+  }
+}

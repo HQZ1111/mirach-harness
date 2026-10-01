@@ -20,8 +20,11 @@ export const PINNED_KEY = 'mirach.harness.sessions.pinned.v1'
 export const ORDER_KEY = 'mirach.harness.sessions.order.v1'
 export const GROUPS_KEY = 'mirach.harness.session-groups.v1'
 
-/** 分组 id（侧栏两组渲染：置顶组 + 最近组）。 */
+/** 分区 id（侧栏两区渲染：已置顶 + 会话）。 */
 export type SessionGroupId = 'pinned' | 'recent'
+
+/** 拖拽落点所在列表组（hermes：置顶区与会话区各自独立可排，互不越组）。 */
+export type SessionRowGroup = 'pinned' | 'recent'
 
 const safeGetItem = (key: string): string | null => {
   if (typeof localStorage === 'undefined') return null
@@ -109,24 +112,30 @@ export const parseGroups = (raw: string | null): Record<string, boolean> => {
   return out
 }
 
-/** 行拖拽的落点信号：列表插入符（beforeId = 目标行 id，null = 尾部）或主会话页签。 */
+/** 行拖拽的落点信号：列表插入符（组 + beforeId = 目标行 id，null = 该组
+ *  尾部）或主会话页签。 */
 export interface SessionDragState {
   readonly sessionId: string
   readonly target:
-    | { readonly kind: 'list'; readonly beforeId: string | null }
+    | { readonly kind: 'list'; readonly group: SessionRowGroup; readonly beforeId: string | null }
     | { readonly kind: 'main-tab' }
 }
 
 interface SessionManageState {
   pinned: readonly string[]
   order: Readonly<Record<string, number>>
-  /** 分组折叠态（组 id → 是否折叠；缺省 = 展开）。 */
+  /** 折叠态（分区键 'pinned'/'recent' + 日期分隔线桶 key → 是否折叠；
+   *  缺省 = 展开。hermes：pinsOpen/recentsOpen + $sidebarWorkspaceNodeOpen
+   *  两张表合并为一张键值表）。 */
   groupsCollapsed: Readonly<Record<string, boolean>>
   drag: SessionDragState | null
   togglePin(id: string): void
   setOrder(map: Readonly<Record<string, number>>): void
-  /** 分组折叠切换（写通 GROUPS_KEY）。 */
-  setGroupCollapsed(id: SessionGroupId, collapsed: boolean): void
+  /** 置顶区手动排序（hermes reorderPinned → setPinnedSessionOrder）：
+   *  整表覆盖 + 写通。 */
+  setPinnedOrder(ids: readonly string[]): void
+  /** 折叠切换（分区/日期桶通用；写通 GROUPS_KEY）。 */
+  setGroupCollapsed(id: string, collapsed: boolean): void
   setDrag(drag: SessionDragState | null): void
   /** 清理已消失会话的键（列表非空才清，见文件头）。 */
   prune(existingIds: readonly string[]): void
@@ -149,6 +158,11 @@ export const sessionManageStore = createStore<SessionManageState>((set, get) => 
   setOrder: (map) => {
     set({ order: map })
     safeSetItem(ORDER_KEY, JSON.stringify(map))
+  },
+  setPinnedOrder: (ids) => {
+    const next = [...new Set(ids)]
+    set({ pinned: next })
+    safeSetItem(PINNED_KEY, JSON.stringify(next))
   },
   setGroupCollapsed: (id, collapsed) => {
     const next = { ...get().groupsCollapsed, [id]: collapsed }

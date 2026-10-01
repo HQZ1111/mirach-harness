@@ -1,16 +1,17 @@
 /**
- * session-order 单测：置顶/手动顺序纯函数（hermes sidebar/order.ts 语义适
- * 配版）。覆盖：置顶清理/切换/组内活跃降序、手动顺序折回
- * （mergeFreshByPosition：新会话不沉底、旧页不跳顶）、移动落点、序号表
- * 往返、拖拽落点提交组合（orderMapAfterMove）。
+ * session-order 单测：置顶/手动顺序纯函数（hermes sidebar/order.ts +
+ * store/layout pinSession 语义适配版）。覆盖：置顶清理/切换（追加尾部）、
+ * 手动顺序折回（mergeFreshByPosition：新会话不沉底、旧页不跳顶）、移动落点、
+ * 序号表往返、可见序拼回全量序（mergeVisibleReorder）、拖拽落点提交
+ * （commitRecentMove——折叠桶藏行保位）。
  */
 import { describe, expect, it } from 'vitest'
 
 import {
+  commitRecentMove,
+  mergeVisibleReorder,
   moveBefore,
-  orderMapAfterMove,
   orderMapFromIds,
-  orderedSessionIds,
   pruneOrder,
   prunePins,
   reconcileOrder,
@@ -37,7 +38,7 @@ describe('recencyCompare', () => {
 })
 
 describe('prunePins', () => {
-  it('只留仍存在的会话，去重保序', () => {
+  it('只留仍存在的会话，去重保序（数组序=展示序，hermes pinned 语义）', () => {
     expect(prunePins(['a', 'x', 'a', 'b'], ['a', 'b', 'c'])).toEqual(['a', 'b'])
   })
 
@@ -46,7 +47,7 @@ describe('prunePins', () => {
   })
 })
 
-describe('togglePinId', () => {
+describe('togglePinId（hermes pinSession：追加尾部）', () => {
   it('未置顶 → 追加到尾', () => {
     expect(togglePinId(['a'], 'b')).toEqual(['a', 'b'])
   })
@@ -78,9 +79,7 @@ describe('reconcileOrder（hermes mergeFreshByPosition 语义）', () => {
   })
 
   it('刚加载的旧页（比已排 id 更旧）沉到尾部，不跳顶', () => {
-    // 顺序里只有 a；d 是翻页加载的旧会话
     expect(reconcileOrder(['a', 'd'], { a: 0 })).toEqual(['a', 'd'])
-    // 反向验证：若无位置规则、一律 hoist，d 会插到 a 前
   })
 
   it('重复序号按 id 稳定，重复 id 去重', () => {
@@ -112,54 +111,33 @@ describe('orderMapFromIds', () => {
   })
 })
 
-describe('orderedSessionIds', () => {
-  it('置顶组在最上（组内活跃降序），非置顶组按活跃降序', () => {
-    const out = orderedSessionIds(fourRows(), ['c', 'a'], {})
-    expect(out.pinnedIds).toEqual(['a', 'c']) // a(4000) > c(2000)
-    expect(out.unpinnedIds).toEqual(['b', 'd'])
+describe('mergeVisibleReorder（hermes order.ts 逐语义）', () => {
+  it('可见序与原长相等 → 原样替换', () => {
+    expect(mergeVisibleReorder(['a', 'b'], ['b', 'a'])).toEqual(['b', 'a'])
   })
 
-  it('置顶键含已消失会话 → 忽略', () => {
-    const out = orderedSessionIds(fourRows(), ['c', 'gone'], {})
-    expect(out.pinnedIds).toEqual(['c'])
-  })
-
-  it('非置顶组遵循手动顺序', () => {
-    const out = orderedSessionIds(fourRows(), ['a'], { d: 0, b: 1 })
-    expect(out.unpinnedIds).toEqual(['d', 'b', 'c'])
-  })
-
-  it('新会话（无顺序条目、比已排的更新）落在非置顶组顶部', () => {
-    const out = orderedSessionIds(fourRows(), [], { c: 0, d: 1 })
-    expect(out.unpinnedIds).toEqual(['a', 'b', 'c', 'd'])
+  it('折叠隐藏行保持原槽位，可见行按新序回填', () => {
+    // 全量 [a, h, b, c]（h 在折叠桶里没渲染）；可见 [a, b, c] 拖成 [b, a, c]
+    expect(mergeVisibleReorder(['a', 'h', 'b', 'c'], ['b', 'a', 'c'])).toEqual(['b', 'h', 'a', 'c'])
   })
 })
 
-describe('orderMapAfterMove（拖拽落点提交）', () => {
-  it('把行移到目标行之前并重排序号表', () => {
-    // 现状活跃序 [a,b,c,d]，把 d 拖到 a 前面
-    const map = orderMapAfterMove(fourRows(), [], {}, 'd', 'a')
+describe('commitRecentMove（拖拽落点提交：可见序→全量序→序号表）', () => {
+  it('把可见行移到目标行之前并收编全量序', () => {
+    const map = commitRecentMove(['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd'], 'd', 'a')
     expect(map).toEqual({ d: 0, a: 1, b: 2, c: 3 })
   })
 
-  it('beforeId = null → 移到尾部', () => {
-    const map = orderMapAfterMove(fourRows(), [], {}, 'a', null)
+  it('beforeId = null → 移到可见尾部', () => {
+    const map = commitRecentMove(['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd'], 'a', null)
     expect(map).toEqual({ b: 0, c: 1, d: 2, a: 3 })
   })
 
-  it('在既有手动顺序基础上继续排', () => {
-    // 已有顺序 c=0,d=1,b=2（a 折回顶部）→ 当前序列 [a,b,c,d]；b 拖到 d 后（null）
-    const map = orderMapAfterMove(fourRows(), [], { c: 0, d: 1, b: 2 }, 'b', null)
-    expect(map).toEqual({ a: 0, c: 1, d: 2, b: 3 })
-  })
-
-  it('置顶行不可排——原样返回现有表', () => {
-    const order = { b: 0 }
-    expect(orderMapAfterMove(fourRows(), ['a'], order, 'a', 'c')).toEqual(order)
-  })
-
-  it('拖到自己的位置 → 全量重排但语义不变', () => {
-    const map = orderMapAfterMove(fourRows(), [], {}, 'b', 'c')
-    expect(map).toEqual({ a: 0, b: 1, c: 2, d: 3 })
+  it('折叠桶藏行保位（可见序短于全量序）', () => {
+    // 全量 [a, h, b, c]：h 折叠未渲染；可见 [a, b, c] 把 c 拖到 a 前——
+    // 新可见序 [c, a, b] 回填可见槽位（a、b 槽 → c、a；尾部 b），h 原地：
+    // 结果 [c, h, a, b]
+    const map = commitRecentMove(['a', 'h', 'b', 'c'], ['a', 'b', 'c'], 'c', 'a')
+    expect(map).toEqual({ c: 0, h: 1, a: 2, b: 3 })
   })
 })

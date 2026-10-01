@@ -101,6 +101,12 @@ describe('sessionManageStore（zustand vanilla + localStorage 写通）', () => 
     expect(JSON.parse(localStorage.getItem(ORDER_KEY)!)).toEqual({ s1: 0, s2: 1 })
   })
 
+  it('setPinnedOrder 置顶区拖排：整表覆盖 + 写通 + 去重', () => {
+    sessionManageStore.getState().setPinnedOrder(['s2', 's1', 's2'])
+    expect(sessionManageStore.getState().pinned).toEqual(['s2', 's1'])
+    expect(JSON.parse(localStorage.getItem(PINNED_KEY)!)).toEqual(['s2', 's1'])
+  })
+
   it('prune 清掉已消失会话的两类键并写通', () => {
     sessionManageStore.setState({ pinned: ['s1', 's2'], order: { s1: 0, s3: 1 } })
     sessionManageStore.getState().prune(['s1', 's2', 's4'])
@@ -125,12 +131,12 @@ describe('sessionManageStore（zustand vanilla + localStorage 写通）', () => 
     expect(localStorage.getItem(ORDER_KEY)).toBeNull()
   })
 
-  it('setDrag / 清空：拖拽落点信号随会话更新', () => {
+  it('setDrag / 清空：拖拽落点信号随会话更新（list 目标带组：pinned/recent）', () => {
     const st = sessionManageStore.getState()
-    st.setDrag({ sessionId: 's1', target: { kind: 'list', beforeId: 's2' } })
+    st.setDrag({ sessionId: 's1', target: { kind: 'list', group: 'recent', beforeId: 's2' } })
     expect(sessionManageStore.getState().drag).toEqual({
       sessionId: 's1',
-      target: { kind: 'list', beforeId: 's2' },
+      target: { kind: 'list', group: 'recent', beforeId: 's2' },
     })
     st.setDrag({ sessionId: 's1', target: { kind: 'main-tab' } })
     expect(sessionManageStore.getState().drag?.target).toEqual({ kind: 'main-tab' })
