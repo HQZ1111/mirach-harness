@@ -21,12 +21,18 @@ export function ApprovalCards() {
     setBusyId(id)
     try {
       await invoke('pi_extension_ui_response', { id, value, cancelled })
-      await approvalBridge.getState().refresh()
     } catch (e) {
       // 错误即错误：应答失败错误可见，卡片保留可重试
       console.error('[pi] 审批应答失败', e)
     } finally {
       setBusyId(null)
+      // 成功/失败都重拉挂起列表：Rust 端 ApprovalRegistry 是唯一真相
+      // （应答落账/超时清理后残留卡自动消失——失败应答的卡也可能已被
+      // registry 清理，前端不能靠本地状态猜）
+      void approvalBridge
+        .getState()
+        .refresh()
+        .catch((err) => console.error('[pi] 审批列表刷新失败', err))
     }
   }
 

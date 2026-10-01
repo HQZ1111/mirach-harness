@@ -15,6 +15,8 @@ import { useActorRef, useSelector } from '@xstate/react'
 
 import { turnMachine, type TurnContext, type TurnMessage, type TurnPart } from './turn-actor'
 import { approvalBridge } from './approval-bridge'
+import { connectionBridge } from './connection-store'
+import { errorBridge } from './error-bridge'
 import { usageBridge, type UsageState } from './usage-bridge'
 
 const THREAD = 'main'
@@ -72,6 +74,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   useEffect(() => {
     usageBridge.getState().setUsage(usage as UsageState | null)
   }, [usage])
+  // RUN_ERROR 用户可见面（§0.3 错误即错误）：轮次机 context.error 经桥
+  // 传给 thread.aui 的错误条——机器在下一个 run 的 RUN_STARTED 归约里
+  // 清 error，错误条随之消失。桥不持真相（真相在轮次机 context）。
+  const runError = useSelector(actorRef, (s) => s.context.error)
+  useEffect(() => {
+    errorBridge.getState().setError(runError)
+  }, [runError])
 
   const [endpoint, setEndpoint] = useState<{ port: number; token: string } | null>(null)
   const endpointRef = useRef(endpoint)
@@ -226,27 +235,46 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         let url = `http://127.0.0.1:${ep.port}/ag-ui/stream?thread=${THREAD}&token=${encodeURIComponent(ep.token)}`
         try {
           const cursor = await invoke<number>('pi_stream_cursor')
+          if (cancelled) return
           url += `&lastEventId=${cursor}`
         } catch (e) {
           console.error('[pi] 流游标获取失败（保留全量重放连接）', e)
         }
+        if (cancelled) return
         es = new EventSource(url)
         es.onmessage = onMessage
-        es.onerror = () => {
-          // 浏览器自动重连（带 Last-Event-ID），静默
+        // 连接态投影（L1 可见性）：onopen 置连接、onerror 置断开并可见
+        // ——EventSource 原生自动重连（带 Last-Event-ID）保留不动，
+        // 服务端修好后重连续放；这里只持连接态，真相在 EventSource。
+        es.onopen = () => {
+          connectionBridge.getState().setConnected(true)
+        }
+        es.onerror = (e) => {
+          console.error('[agui] SSE 连接错误', e)
+          connectionBridge.getState().setConnected(false)
         }
         // 会话列表 + 当前线程 id（threadId 与 pi sessionId 同源）
         await refreshThreads()
+        if (cancelled) return
         try {
           const st = await invoke<{ sessionId: string | null }>('pi_get_state')
+          if (cancelled) return
           setCurrentThreadId(st.sessionId)
           if (st.sessionId) {
             const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
+            if (cancelled) return
             actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
           }
-        } catch {
-          // 无活跃会话：threadId 置空 = ThreadList 高亮 New Chat
-          setCurrentThreadId(null)
+        } catch (e) {
+          // 区分"正常无会话"（pi_get_state 报 no active session——首启预期
+          // 域状态：threadId 置空 = ThreadList 高亮 New Chat）与真错误
+          // （mutex 中毒/pi 内部错误）：真错误保持当前状态并 console 可见，
+          // 不伪装"无会话"（禁止兜底）。泄漏路径的 es 由 cleanup close。
+          if (String(e).includes('no active session')) {
+            setCurrentThreadId(null)
+          } else {
+            console.error('[runtime] hydrate 失败', e)
+          }
         }
         // 审批挂起列表（§4.4 挂载拉取）
         approvalBridge
@@ -270,7 +298,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ threadId: THREAD, message }),
-    }).catch((e) => console.error('[agui] POST 失败', e))
+    })
+      .then((res) => {
+        // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出
+        if (!res.ok) throw new Error(`POST /ag-ui 失败: ${res.status}`)
+      })
+      .catch((e) => console.error('[agui] POST 失败', e))
   }, [])
 
   const switchToThread = useCallback(
@@ -281,13 +314,29 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error(`[pi] 会话 ${id} 缺少 path，无法打开`)
         return
       }
-      await invoke('pi_open_session', { path })
-      const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-      actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
-      setCurrentThreadId(id)
-      await refreshThreads()
+      // 流式中切换（§4.5）：prompt 持锁跨整个 run（RUN_FINISHED/ERROR 才
+      // 释放），不先中断 open_session 会撞锁失败——先 pi_interrupt 再切；
+      // 中断失败保持当前会话（不更新本地态，禁止假装切换成功）。
+      if (actorRef.getSnapshot().matches('streaming')) {
+        try {
+          await invoke('pi_interrupt')
+          console.info('[pi] run 进行中：已中断当前 run 后切换会话（prompt 持锁跨整个 run）')
+        } catch (e) {
+          console.error('[pi] 中断当前 run 失败，取消切换会话', e)
+          return
+        }
+      }
+      try {
+        await invoke('pi_open_session', { path })
+        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
+        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        setCurrentThreadId(id)
+        await refreshThreads()
+      } catch (e) {
+        console.error(`[pi] 会话 ${id} 打开失败（保持当前会话）`, e)
+      }
     },
-    [hydratePiMessages, refreshThreads],
+    [actorRef, hydratePiMessages, refreshThreads],
   )
 
   const threadListAdapter = {
@@ -295,11 +344,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     threads,
     onSwitchToNewThread: async () => {
       // New Chat：flush 旧会话落盘 + 清 handle（不立即建空会话文件），
-      // 下一次发送按需创建全新会话
-      await invoke('pi_discard_session')
-      actorRef.send({ type: 'RESET' })
-      setCurrentThreadId(null)
-      await refreshThreads()
+      // 下一次发送按需创建全新会话；失败保持当前会话（不更新本地态）
+      try {
+        await invoke('pi_discard_session')
+        actorRef.send({ type: 'RESET' })
+        setCurrentThreadId(null)
+        await refreshThreads()
+      } catch (e) {
+        console.error('[pi] New Chat 失败（保持当前会话）', e)
+      }
     },
     onSwitchToThread: async (id: string) => {
       await switchToThread(id)
@@ -310,8 +363,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error('[pi] 仅当前活跃会话支持重命名')
         return
       }
-      await invoke('pi_rename_session', { name: newTitle })
-      await refreshThreads()
+      try {
+        await invoke('pi_rename_session', { name: newTitle })
+        await refreshThreads()
+      } catch (e) {
+        console.error('[pi] 会话重命名失败', e)
+      }
     },
     onDelete: async (id: string) => {
       const row = threadsRef.current.find((t) => t.id === id)
@@ -320,8 +377,21 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error(`[pi] 会话 ${id} 缺少 path，无法删除`)
         return
       }
-      await invoke('pi_delete_session', { path })
-      await refreshThreads()
+      try {
+        if (id === currentThreadId) {
+          // 当前活跃会话：pi 持有该会话 handle（jsonl 打开中），直接
+          // delete 会撞打开中的文件——先 discard（flush 落盘 + 清 handle
+          // + 清挂起审批）+ 清轮次态（消息清空、threadId 置 null = 高亮
+          // New Chat），再删文件。非当前会话行为不变。
+          await invoke('pi_discard_session')
+          actorRef.send({ type: 'RESET' })
+          setCurrentThreadId(null)
+        }
+        await invoke('pi_delete_session', { path })
+        await refreshThreads()
+      } catch (e) {
+        console.error(`[pi] 会话 ${id} 删除失败（保持当前状态）`, e)
+      }
     },
     onArchive: async () => {
       console.error('[pi] 会话归档未实现（pi 无 archive 概念）')
@@ -340,11 +410,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       content:
         typeof m.content === 'string'
           ? m.content
-          : m.content.map((p) =>
-              p.type === 'tool-call'
-                ? { ...p, args: p.args as never, result: p.result as never }
-                : p,
-            ),
+          : m.content.map((p) => {
+              if (p.type === 'tool-call')
+                return { ...p, args: p.args as never, result: p.result as never }
+              // thinking part 出口转 reasoning——ThreadMessageLike 的
+              // ReasoningMessagePart 要求 type:"reasoning"（Reasoning 组件
+              // 消费，§2.2 thinking 流式）；TurnPart 内部保持 thinking
+              if (p.type === 'thinking') return { type: 'reasoning' as const, text: p.text }
+              return p
+            }),
     }),
     messages,
     isRunning,

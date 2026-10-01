@@ -170,6 +170,9 @@ export function ComposerWired() {
   // 原始目录（取当前模型的 contextWindow 给用量环）
   const modelEntriesRef = useRef<PiModelEntry[]>([])
   const [currentModel, setCurrentModel] = useState<string | null>(null)
+  // 思考档位（pi ThinkingLevel：off/minimal/low/medium/high/xhigh/max；
+  // 不在 DEFAULT_EFFORT_OPTIONS 内的值 resolveEffort 落空 = 不选中）
+  const [currentEffort, setCurrentEffort] = useState<string | null>(null)
   const { usage } = useUsageBridge()
   useEffect(() => {
     let cancelled = false
@@ -190,9 +193,13 @@ export function ComposerWired() {
   }, [])
   useEffect(() => {
     let cancelled = false
-    void invoke<{ provider: string; modelId: string }>('pi_get_state')
+    void invoke<{ provider: string; modelId: string; thinkingLevel: string | null }>('pi_get_state')
       .then((st) => {
-        if (!cancelled) setCurrentModel(`${st.provider}/${st.modelId}`)
+        if (!cancelled) {
+          setCurrentModel(`${st.provider}/${st.modelId}`)
+          // 思考档位随 state 回读（pi_get_state.thinkingLevel）
+          setCurrentEffort(st.thinkingLevel ?? null)
+        }
       })
       .catch((e) => {
         // 首条消息前必然发生（无会话=预期域状态）；其余失败照常可见
@@ -215,6 +222,21 @@ export function ComposerWired() {
       .then(() => setCurrentModel(id))
       .catch((e) => console.error(`[pi] set_model ${id} 失败（保持原选择）`, e))
   }, [])
+  const onEffortChange = useCallback((level: string) => {
+    // 思考档位（§4.5 控制面，pi_set_thinking_level 参数 level）：成功才写
+    // 本地态（经 pi_get_state 回读确认），失败保持原档位且错误可见——
+    // 不乐观更新。
+    void invoke('pi_set_thinking_level', { level })
+      .then(() => invoke<{ thinkingLevel: string | null }>('pi_get_state'))
+      .then((st) => setCurrentEffort(st.thinkingLevel ?? null))
+      .catch((e) => console.error(`[pi] set_thinking_level ${level} 失败（保持原选择）`, e))
+  }, [])
+  // 当前模型的上下文窗口（用量环分母）——目录缺失或 <=0 时不渲染
+  // ContextDisplay.Bar：旧写法 ?? 0 会除零 → Infinity → clamp 100 =
+  // 红环误报（审查 #7）。
+  const currentContextWindow = currentModel
+    ? modelEntriesRef.current.find((e) => `${e.provider}/${e.id}` === currentModel)?.contextWindow
+    : undefined
 
   // ── 斜杠/@ 菜单键盘导航（↑↓ 移动高亮、Enter/Tab 确认、Esc 关闭）──
   // Input 的传入 onKeyDown 先于内部 handleKeyPress 执行（包内
@@ -222,10 +244,12 @@ export function ComposerWired() {
   // 即可拦截内部 Enter 发送 / Esc 取消运行的默认行为。
   const [slashIdx, setSlashIdx] = useState(0)
   const [mentionIdx, setMentionIdx] = useState(0)
-  // Esc 关闭记住当时 value——只有输入变化（匹配 token 改变）才重开
-  const dismissedRef = useRef<string | null>(null)
-  const slashOpen = dismissedRef.current !== value && slash.length > 0
-  const mentionOpen = dismissedRef.current !== value && mentions.length > 0
+  // Esc 关闭记住当时 value——只有输入变化（匹配 token 改变）才重开。
+  // 必须 setState：open 是 render 期派生态，纯 ref 写入不触发重渲——
+  // Esc 后菜单视觉上不关（审查 #8 实锤）。
+  const [dismissed, setDismissed] = useState<string | null>(null)
+  const slashOpen = dismissed !== value && slash.length > 0
+  const mentionOpen = dismissed !== value && mentions.length > 0
 
   useEffect(() => {
     setSlashIdx(0)
@@ -253,7 +277,7 @@ export function ComposerWired() {
       }
       if (e.key === 'Escape') {
         e.preventDefault()
-        dismissedRef.current = value
+        setDismissed(value)
         return
       }
     }
@@ -277,7 +301,7 @@ export function ComposerWired() {
       }
       if (e.key === 'Escape') {
         e.preventDefault()
-        dismissedRef.current = value
+        setDismissed(value)
       }
     }
   }
@@ -329,13 +353,14 @@ export function ComposerWired() {
               </ComposerPrimitive.AddAttachment>
               <div className="ml-auto flex items-center gap-1.5">
                 {/* 用量环（官方 ContextDisplay）：usage 与模型上下文窗口
-                    任一缺失即不渲染 = 官方语义"无数据不显示" */}
-                {usage && currentModel && (
+                    任一缺失即不渲染；窗口 <=0 同样不渲染（除零 → clamp 100
+                    红环误报，审查 #7） */}
+                {usage &&
+                  currentModel &&
+                  currentContextWindow !== undefined &&
+                  currentContextWindow > 0 && (
                   <ContextDisplay.Bar
-                    modelContextWindow={
-                      modelEntriesRef.current.find((e) => `${e.provider}/${e.id}` === currentModel)
-                        ?.contextWindow ?? 0
-                    }
+                    modelContextWindow={currentContextWindow}
                     usage={{
                       inputTokens: usage.inputTokens,
                       outputTokens: usage.outputTokens,
@@ -346,8 +371,10 @@ export function ComposerWired() {
                 )}
                 <ModelSelector
                   align="end"
+                  effort={currentEffort ?? ''}
                   models={models}
                   value={currentModel ?? undefined}
+                  onEffortChange={onEffortChange}
                   onValueChange={onModelChange}
                   size="sm"
                   variant="ghost"

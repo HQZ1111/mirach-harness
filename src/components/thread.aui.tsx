@@ -2,11 +2,9 @@
 
 import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired'
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
-import {
-  ComposerAddAttachment,
-  ComposerAttachments,
-  UserMessageAttachments,
-} from "@/components/assistant-ui/elements/attachment.aui";
+import { useConnectionBridge } from "@/components/assistant-ui/connection-store";
+import { useErrorBridge } from "@/components/assistant-ui/error-bridge";
+import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -26,9 +24,6 @@ import {
   ToolGroupTrigger,
 } from "@/components/assistant-ui/elements/tool-group.aui";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
-import { ModelSelector } from "@/components/assistant-ui/model-selector.aui";
-import { ContextDisplay } from "@/components/assistant-ui/context-display.aui";
-import type { ModelOption } from "@/components/assistant-ui/model-selector";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -52,7 +47,6 @@ import {
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
-  ArrowUpIcon,
   AudioLinesIcon,
   CheckIcon,
   ChevronLeftIcon,
@@ -64,7 +58,6 @@ import {
   PencilIcon,
   PhoneIcon,
   RefreshCwIcon,
-  SquareIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
 } from "lucide-react";
@@ -174,6 +167,39 @@ const ThreadHistorySkeleton: FC = () => (
   </div>
 );
 
+// SSE 连接态细横幅（L1 可见性，runtime.tsx onopen/onerror 经桥置位）：
+// 断开时顶部一条细横幅；重连成功（onopen）自动消失。connected: null =
+// 挂载后首连之前——不算断开（避免启动瞬间"连接已断开"误报）。
+// 样式只用 tokens.css 令牌（--stroke-soft/--text-3），无字面色值。
+const ConnectionBanner: FC = () => {
+  const { connected } = useConnectionBridge();
+  if (connected !== false) return null;
+  return (
+    <div
+      data-slot="aui_connection-banner"
+      className="border-(--stroke-soft) text-(--text-3) shrink-0 border-b px-4 py-1 text-center text-xs"
+    >
+      连接已断开，正在重连…
+    </div>
+  );
+};
+
+// RUN_ERROR 用户可见面（§0.3 错误即错误）：轮次机 error 经 error-bridge
+// 到达；下一个 run 的 RUN_STARTED 归约清 error 后自动消失。语义令牌
+// 红色调（destructive，与 MessageError 同系）。
+const RunErrorBar: FC = () => {
+  const { error } = useErrorBridge();
+  if (!error) return null;
+  return (
+    <div
+      data-slot="aui_run-error-bar"
+      className="border-destructive bg-destructive/10 text-destructive mt-1 rounded-(--composer-radius) border p-3 text-sm"
+    >
+      运行出错：{error}
+    </div>
+  );
+};
+
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
@@ -207,6 +233,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           ["--composer-padding" as string]: "8px",
         }}
       >
+        <ConnectionBanner />
         <ThreadPrimitive.Viewport asChild turnAnchor="top">
           <div
             data-slot="aui_thread-viewport"
@@ -247,6 +274,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
+            <RunErrorBar />
             <ApprovalCards />
             <ComposerWired />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
@@ -432,127 +460,6 @@ const ThreadSuggestionItem: FC = () => {
     </div>
   );
 };
-
-// mock 模型清单（官方 ModelOption 形态；efforts: true = 默认 低/中/高
-// 思考档位；pi 接入后换成真实模型表）
-const MODELS: ModelOption[] = [
-  { id: "mock-lite", name: "Mock Lite" },
-  { id: "mock-pro", name: "Mock Pro", description: "更强推理（mock）", efforts: true },
-];
-
-const Composer: FC<{ autoFocus: boolean }> = ({ autoFocus }) => {
-  return (
-    <ComposerPrimitive.Root className="aui-composer-root relative flex w-full flex-col">
-      <ComposerPrimitive.AttachmentDropzone asChild>
-        <div
-          data-slot="aui_composer-shell"
-          className="border-foreground/10 focus-within:border-foreground/25 data-[dragging=true]:border-ring flex w-full cursor-text flex-col gap-2 rounded-(--composer-radius) border bg-(--composer-bg) p-(--composer-padding) transition-[border-color] data-[dragging=true]:border-dashed data-[dragging=true]:bg-[color-mix(in_oklab,var(--color-accent)_50%,var(--color-background))]"
-        >
-          <ComposerAttachments />
-          <ComposerPrimitive.Input
-            placeholder="Send a message..."
-            className="aui-composer-input caret-primary placeholder:text-muted-foreground/60 max-h-48 min-h-10 w-full resize-none bg-transparent px-2.5 py-1 text-base leading-6 outline-none"
-            rows={1}
-            autoFocus={autoFocus}
-            enterKeyHint="send"
-            aria-label="Message input"
-          />
-          {/* 官方 Composer anatomy（elements/composer 原文）：输入框在上，
-              工具栏在下——**左侧仅附件按钮**；右侧 actions 组 = 模型触发器、
-              语音、上下文环 + 发送钮。ModelSelector 选择经 ModelContext
-              注册进 runtime；ContextDisplay.Bar 自动读 token 用量（无用量
-              不渲染=官方语义）。 */}
-          <div className="flex items-center justify-between">
-            <ComposerAddAttachment />
-            <div className="flex items-center gap-1.5">
-              <ModelSelector
-                models={MODELS}
-                variant="ghost"
-                size="sm"
-                searchable={false}
-                align="end"
-              />
-              <AuiIf condition={(s) => s.thread.capabilities.dictation}>
-                <AuiIf condition={(s) => s.composer.dictation == null}>
-                  <ComposerPrimitive.Dictate asChild>
-                    <TooltipIconButton
-                      tooltip="Voice input"
-                      side="bottom"
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="aui-composer-dictate text-muted-foreground hover:text-foreground size-7 rounded-full"
-                      aria-label="Start voice input"
-                    >
-                      <MicIcon className="aui-composer-dictate-icon size-4" />
-                    </TooltipIconButton>
-                  </ComposerPrimitive.Dictate>
-                </AuiIf>
-                <AuiIf condition={(s) => s.composer.dictation != null}>
-                  <ComposerPrimitive.StopDictation asChild>
-                    <TooltipIconButton
-                      tooltip="Stop dictation"
-                      side="bottom"
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="aui-composer-stop-dictation text-destructive size-7 rounded-full"
-                      aria-label="Stop voice input"
-                    >
-                      <SquareIcon className="aui-composer-stop-dictation-icon size-3.5 animate-pulse fill-current" />
-                    </TooltipIconButton>
-                  </ComposerPrimitive.StopDictation>
-                </AuiIf>
-              </AuiIf>
-              <ContextDisplay.Bar modelContextWindow={128000} />
-              <AuiIf
-                condition={(s) =>
-                  !s.composer.canCancel ||
-                  (s.thread.voice !== undefined &&
-                    s.composer.submission === undefined)
-                }
-              >
-                <ComposerPrimitive.Send asChild>
-                  <TooltipIconButton
-                    tooltip="Send message"
-                    side="bottom"
-                    type="button"
-                    variant="default"
-                    size="icon"
-                    className="aui-composer-send size-7 rounded-full"
-                    aria-label="Send message"
-                  >
-                    <ArrowUpIcon className="aui-composer-send-icon size-4" />
-                  </TooltipIconButton>
-                </ComposerPrimitive.Send>
-              </AuiIf>
-              <AuiIf
-                condition={(s) =>
-                  s.composer.canCancel &&
-                  (s.thread.voice === undefined ||
-                    s.composer.submission !== undefined)
-                }
-              >
-                <ComposerPrimitive.Cancel asChild>
-                  <Button
-                    type="button"
-                    variant="default"
-                    size="icon"
-                    className="aui-composer-cancel size-7 rounded-full"
-                    aria-label="Stop generating"
-                  >
-                    <SquareIcon className="aui-composer-cancel-icon size-3.5 fill-current" />
-                  </Button>
-                </ComposerPrimitive.Cancel>
-              </AuiIf>
-            </div>
-          </div>
-        </div>
-      </ComposerPrimitive.AttachmentDropzone>
-    </ComposerPrimitive.Root>
-  );
-};
-
 
 const MessageError: FC = () => {
   return (

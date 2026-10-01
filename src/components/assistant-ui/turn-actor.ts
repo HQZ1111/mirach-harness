@@ -4,8 +4,9 @@
  * 经 ExternalStore 纯渲染）。
  *
  * 铁律：纯投影（不持会话真相，真相在 pi）；lastEventId 是续放句柄；
- * run 内交错 = 按新 run 段接受（HTTP 流无连接亲和性，重放/多 run 共存
- * 是常态，§0.3）；idle 态 run 外事件透传。
+ * run 内交错 RUN_STARTED = 协议违例 fail loud、按新 run 段接受（§0.3-1，
+ * 物理上不可能——Mutex 互斥）；run 外消息类事件 drop（§0.3-5）；
+ * idle 态 run 外事件透传。
  */
 import { assign, setup } from 'xstate'
 
@@ -17,9 +18,12 @@ export interface TurnMessage {
 }
 
 /** 结构化内容部件（ThreadMessageLike 兼容形状；args 限 JSON 对象——
- * ThreadMessageLike 的 tool-call args 要求 ReadonlyJSONObject） */
+ * ThreadMessageLike 的 tool-call args 要求 ReadonlyJSONObject）。
+ * thinking part 经 runtime convertMessage 映射为 assistant-ui 的
+ * reasoning part（Reasoning 组件消费，§2.2 thinking 流式）。 */
 export type TurnPart =
   | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string }
   | {
       type: 'tool-call'
       toolCallId: string
@@ -56,14 +60,40 @@ export type TurnEvent =
   /** 打开历史会话：注入 pi 会话历史（真相在 pi，机器只收投影快照） */
   | { type: 'HYDRATE'; messages: TurnMessage[] }
 
+/** 会往消息里写内容的事件类（run 归属事件）。currentRunId === null 时送达
+ * = run 外残留/重放（RUN_ERROR 后的服务器尾流、断线重放窗口）——drop 并
+ * 告警，防止写入旧会话消息（§0.3-5）。run 外 CUSTOM（compaction /
+ * data_changed / extension_ui_request）不在此列，照常透传。 */
+const MESSAGE_WRITE_TYPES = new Set([
+  'TEXT_MESSAGE_START',
+  'TEXT_MESSAGE_CONTENT',
+  'THINKING_TEXT_MESSAGE_START',
+  'THINKING_TEXT_MESSAGE_CONTENT',
+  'THINKING_TEXT_MESSAGE_END',
+  'TOOL_CALL_START',
+  'TOOL_CALL_ARGS',
+  'TOOL_CALL_END',
+])
+
+const isMessageWriteEvent = (ev: AguiEvent): boolean =>
+  MESSAGE_WRITE_TYPES.has(ev.type) ||
+  // 工具执行维度（start/update/end 全家族）：同为 run 归属事件
+  (ev.type === 'CUSTOM' && ev.name === 'tool_execution')
+
 /** 归约单条 AG-UI 事件 → 上下文（纯函数，可单测）。 */
 export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): TurnContext {
   const next = { ...ctx, lastEventId: id }
+  if (ctx.currentRunId === null && isMessageWriteEvent(ev)) {
+    console.warn(`[turn] run 外收到消息类事件 ${ev.type}——丢弃（无 run 段可写）`)
+    return next // lastEventId 照常推进（游标必须走，§0.3-5）
+  }
   switch (ev.type) {
     case 'RUN_STARTED':
       return {
         ...next,
         currentRunId: String(ev.runId ?? ''),
+        // 新 run 开始清上一 run 的错误——错误条生命周期到下一个 run 为止
+        error: null,
         messages: [
           ...ctx.messages,
           { id: String(ev.runId ?? `run-${id}`), role: 'assistant', content: '' },
@@ -90,6 +120,62 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
       }
       return { ...next, messages }
     }
+    case 'THINKING_TEXT_MESSAGE_START': {
+      // 思考块开始（§2.2）：保证存在思考段——后续 CONTENT 追加到最后的
+      // thinking part。文本在先时把 string content 摊成 parts；空 thinking
+      // part 在渲染层被丢弃（assistant-ui 空 text 滤除），无害。
+      const messages = [...ctx.messages]
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role !== 'assistant') continue
+        const c = messages[i].content
+        if (typeof c === 'string') {
+          messages[i] = {
+            ...messages[i],
+            content: c
+              ? [{ type: 'text', text: c }, { type: 'thinking', text: '' }]
+              : [{ type: 'thinking', text: '' }],
+          }
+        } else {
+          const last = c[c.length - 1]
+          // 最后已是空 thinking part（重复 START）：幂等不新开
+          if (!(last?.type === 'thinking' && last.text === '')) {
+            messages[i] = { ...messages[i], content: [...c, { type: 'thinking', text: '' }] }
+          }
+        }
+        break
+      }
+      return { ...next, messages }
+    }
+    case 'THINKING_TEXT_MESSAGE_CONTENT': {
+      // 追加到最后的 thinking part；无思考段则新开（START 缺失时 CONTENT
+      // 自立——Rust 侧 ThinkingStart 映射补齐前仍可用）。
+      const messages = [...ctx.messages]
+      const delta = String(ev.delta ?? '')
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role !== 'assistant') continue
+        const c = messages[i].content
+        if (typeof c === 'string') {
+          messages[i] = {
+            ...messages[i],
+            content: c
+              ? [{ type: 'text', text: c }, { type: 'thinking', text: delta }]
+              : [{ type: 'thinking', text: delta }],
+          }
+        } else {
+          const parts = [...c]
+          const last = parts[parts.length - 1]
+          if (last?.type === 'thinking') parts[parts.length - 1] = { ...last, text: last.text + delta }
+          else parts.push({ type: 'thinking', text: delta })
+          messages[i] = { ...messages[i], content: parts }
+        }
+        break
+      }
+      return { ...next, messages }
+    }
+    case 'THINKING_TEXT_MESSAGE_END':
+      // 块结束：TurnPart 无状态位，流式态由渲染层 auto-status 收尾（消息
+      // 仍 running 时最后 part 即 running）——内容无关，透传游标。
+      return next
     case 'CUSTOM': {
       // 工具执行维度（§2.2）：start = push 工具调用部件（args 来自
       // 模型参数流）；end = 填结果。行内标记呈现退役，真工具 UI
@@ -175,10 +261,9 @@ export const turnMachine = setup({
     }),
     reduce: assign(({ context, event }) => {
       if (event.type !== 'AGUI_EVENT') return context
-      const next = reduceAguiEvent(context, event.event, event.id)
-      if (event.event.type === 'RUN_ERROR')
-        return { ...next, error: String(event.event.message ?? 'run error') }
-      return next
+      // RUN_ERROR 的 error 写入在 reduceAguiEvent 内（case 'RUN_ERROR'）——
+      // 早期版本在此重复 set，已并入归约器单一来源。
+      return reduceAguiEvent(context, event.event, event.id)
     }),
     reset: assign(() => ({
       messages: [],
@@ -227,17 +312,21 @@ export const turnMachine = setup({
         RESET: { actions: 'reset' },
         HYDRATE: { actions: 'hydrate' },
         AGUI_EVENT: [
-          // streaming 中另一 runId 的 RUN_STARTED：HTTP 流无连接亲和性，
-          // 断线重连重放/多 run 同缓冲都是常态（§0.3 交错语义）——接受为
-          // 新 run 段（reduce 追加新 assistant 消息），只告警不炸树。
+          // streaming 中另一 runId 的 RUN_STARTED：协议违例（§0.3-1——
+          // run 内交错在物理上不可能，AgentSessionHandle Mutex 互斥），
+          // fail loud 上报；语义按注释意图接受为新 run 段（reduce 追加
+          // 新 assistant 消息、currentRunId 换轨、phase 保持 streaming）。
           {
             guard: 'isRunStartViolation',
-            actions: ({ context, event }) => {
-              if (event.type !== 'AGUI_EVENT') return
-              console.warn(
-                `[turn] streaming 中收到新 RUN_STARTED（run=${String(event.event.runId ?? '')}，当前=${context.currentRunId}）——按交错接受`,
-              )
-            },
+            actions: [
+              ({ context, event }) => {
+                if (event.type !== 'AGUI_EVENT') return
+                console.error(
+                  `[turn] 协议违例：streaming 中收到另一 runId 的 RUN_STARTED（run=${String(event.event.runId ?? '')}，当前=${context.currentRunId}）——按新 run 段接受`,
+                )
+              },
+              'reduce',
+            ],
           },
           { guard: 'isRunEnd', target: 'idle', actions: 'reduce' },
           { actions: 'reduce' },

@@ -37,6 +37,9 @@ const getUsagePercent = (
   modelContextWindow: number,
 ): number => {
   if (!totalTokens) return 0;
+  // 窗口 <=0 时除零 → Infinity → clamp 100 = 满格红环误报。返回 0
+  // （Caller ContextDisplayBar 已把 <=0 归入不渲染集合，这里只防其他入口）
+  if (modelContextWindow <= 0) return 0;
   return Math.min((totalTokens / modelContextWindow) * 100, 100);
 };
 
