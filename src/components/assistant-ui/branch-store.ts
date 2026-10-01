@@ -62,6 +62,31 @@ export interface ComposerPrefill {
   text: string
 }
 
+/** pi_get_session_lineage：当前会话的 fork 谱系——branchedFrom = 父会话
+ * 文件路径（SessionHeader.parent_session）；线性会话 = null（不渲染会话线） */
+export interface SessionLineage {
+  branchedFrom: string | null
+}
+
+export const parseSessionLineage = (raw: unknown): SessionLineage | null => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('[branch] pi_get_session_lineage 形状非法——丢弃', raw)
+    return null
+  }
+  const b = (raw as { branchedFrom?: unknown }).branchedFrom
+  if (b !== null && typeof b !== 'string') {
+    console.error('[branch] lineage.branchedFrom 类型非法——按 null 处理', b)
+    return { branchedFrom: null }
+  }
+  return { branchedFrom: b }
+}
+
+/** UI 投递的「回到父会话」请求（runtime 执行器消费；按路径 open_session） */
+export interface OpenParentRequest {
+  seq: number
+  path: string
+}
+
 const asString = (v: unknown): string | null =>
   typeof v === 'string' ? v : null
 
@@ -163,6 +188,8 @@ interface BranchBridgeState {
   branches: SiblingBranches | null
   /** fork 点清单投影（与 thread user 消息按序对应）；[] = 无可 fork 点 */
   forkPoints: ForkPoint[]
+  /** 会话线谱系投影；branchedFrom != null = 当前会话是 fork 子会话 */
+  lineage: SessionLineage | null
   /** 刷新信号：requestRefresh 递增，BranchPickerBar 订阅后重拉 */
   refreshSeq: number
   requestRefresh: () => void
@@ -173,6 +200,9 @@ interface BranchBridgeState {
   switchRequest: SwitchRequest | null
   requestSwitch: (leafId: string) => void
   clearSwitchRequest: (seq: number) => void
+  openParentRequest: OpenParentRequest | null
+  requestOpenParent: (path: string) => void
+  clearOpenParentRequest: (seq: number) => void
   composerPrefill: ComposerPrefill | null
   setComposerPrefill: (text: string) => void
 }
@@ -180,29 +210,40 @@ interface BranchBridgeState {
 export const branchBridge = createStore<BranchBridgeState>(() => ({
   branches: null,
   forkPoints: [],
+  lineage: null,
   refreshSeq: 0,
   requestRefresh: () =>
     branchBridge.setState((s) => ({ refreshSeq: s.refreshSeq + 1 })),
   refresh: async () => {
     try {
-      const [rawBranches, rawPoints] = await Promise.all([
+      const [rawBranches, rawPoints, rawLineage] = await Promise.all([
         invoke<unknown>('pi_list_sibling_branches'),
         invoke<unknown>('pi_get_fork_points'),
+        invoke<unknown>('pi_get_session_lineage'),
       ])
       branchBridge.setState({
         branches: parseSiblingBranches(rawBranches),
         forkPoints: parseForkPoints(rawPoints),
+        lineage: parseSessionLineage(rawLineage),
       })
     } catch (e) {
       if (String(e).includes('no active session')) {
         // 首启 / New Chat / 删除活动会话后的预期域状态：无会话 = 无分支、
-        // 无 fork 点——清投影不算错误
-        branchBridge.setState({ branches: null, forkPoints: [] })
+        // 无 fork 点、无谱系——清投影不算错误
+        branchBridge.setState({
+          branches: null,
+          forkPoints: [],
+          lineage: null,
+        })
         return
       }
       // 真错误：console.error 可见 + 清投影（未知状态不冒充旧会话的数据）
       console.error('[branch] 分支数据拉取失败——清投影', e)
-      branchBridge.setState({ branches: null, forkPoints: [] })
+      branchBridge.setState({
+        branches: null,
+        forkPoints: [],
+        lineage: null,
+      })
     }
   },
   forkRequest: null,
@@ -220,6 +261,13 @@ export const branchBridge = createStore<BranchBridgeState>(() => ({
   clearSwitchRequest: (seq) =>
     branchBridge.setState((s) =>
       s.switchRequest?.seq === seq ? { switchRequest: null } : {},
+    ),
+  openParentRequest: null,
+  requestOpenParent: (path) =>
+    branchBridge.setState({ openParentRequest: { seq: nextSeq(), path } }),
+  clearOpenParentRequest: (seq) =>
+    branchBridge.setState((s) =>
+      s.openParentRequest?.seq === seq ? { openParentRequest: null } : {},
     ),
   composerPrefill: null,
   setComposerPrefill: (text) =>

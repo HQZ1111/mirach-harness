@@ -27,6 +27,7 @@ import {
   branchBridge,
   parseForkPoints,
   type ForkRequest,
+  type OpenParentRequest,
   type SwitchRequest,
 } from './branch-store'
 import { connectionBridge } from './connection-store'
@@ -527,8 +528,41 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     [actorRef, hydratePiMessages, interruptIfRunning],
   )
 
+  /** 会话线「回到父会话」执行：守卫 → pi_open_session(路径)（返回新活动
+   * 会话 id）→ 重水合 + currentThreadId + 线程列表刷新 → 分支条刷新。
+   * 失败 console.error 不动本地态。 */
+  const runOpenParent = useCallback(
+    async (req: OpenParentRequest) => {
+      if (!(await interruptIfRunning())) return
+      let sessionId: string
+      try {
+        sessionId = await invoke<string>('pi_open_session', { path: req.path })
+      } catch (e) {
+        console.error('[pi] 回到父会话失败（保持当前会话）', e)
+        return
+      }
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        console.error('[pi] open_session 返回形状非法——不采纳', sessionId)
+        return
+      }
+      try {
+        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
+        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        setCurrentThreadId(sessionId)
+        await refreshThreads()
+      } catch (e) {
+        console.error('[pi] 回到父会话后重水合失败（服务端已切换，可从侧栏手动打开）', e)
+        void refreshThreads()
+        return
+      }
+      branchBridge.getState().requestRefresh()
+    },
+    [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads],
+  )
+
   const forkRequest = useStore(branchBridge, (s) => s.forkRequest)
   const switchRequest = useStore(branchBridge, (s) => s.switchRequest)
+  const openParentRequest = useStore(branchBridge, (s) => s.openParentRequest)
   const branchBusyRef = useRef(false)
   const handledBranchSeqRef = useRef(0)
 
@@ -562,9 +596,31 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     })
   }, [switchRequest, runSwitch])
 
+  useEffect(() => {
+    if (
+      !openParentRequest ||
+      openParentRequest.seq <= handledBranchSeqRef.current
+    )
+      return
+    if (branchBusyRef.current) {
+      console.error(
+        '[pi] fork/分支操作进行中——忽略新「回到父会话」请求',
+        openParentRequest,
+      )
+      branchBridge.getState().clearOpenParentRequest(openParentRequest.seq)
+      return
+    }
+    handledBranchSeqRef.current = openParentRequest.seq
+    branchBusyRef.current = true
+    void runOpenParent(openParentRequest).finally(() => {
+      branchBusyRef.current = false
+      branchBridge.getState().clearOpenParentRequest(openParentRequest.seq)
+    })
+  }, [openParentRequest, runOpenParent])
+
   // run 收尾（streaming → idle 迁移）刷新分支数据：user 消息落盘后才成为
   // fork 点（「从此分支探索」钮可用性依赖 forkPoints 新鲜）。挂载跳过
-  // （BranchPickerBar 挂载已拉一次）。
+  // （SessionLineBar 挂载已拉一次）。
   const wasRunningRef = useRef(false)
   useEffect(() => {
     if (isRunning) {

@@ -200,11 +200,20 @@ fn pi_stream_cursor(
 fn pi_open_session(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     path: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
+    // 返回新活动会话 id（create_session_opts 的返回值）——会话线「回到父
+    // 会话」等按路径切换的调用方需要它更新 currentThreadId。
     state
         .engine
-        .open_session(&path, Some(state.ui_bridge("main")))?;
-    Ok(())
+        .open_session(&path, Some(state.ui_bridge("main")))
+}
+
+/// 当前会话的 fork 谱系（branchedFrom = 父会话文件路径；线性会话 = null）。
+#[tauri::command(async)]
+fn pi_get_session_lineage(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<Option<String>, String> {
+    state.engine.session_lineage()
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
@@ -429,6 +438,7 @@ fn main() {
             pi_discard_session,
             pi_stream_cursor,
             pi_open_session,
+            pi_get_session_lineage,
             pi_rename_session,
             pi_delete_session,
             pi_retry_edit,

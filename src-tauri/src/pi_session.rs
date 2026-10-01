@@ -310,6 +310,33 @@ impl PiEngine {
         self.create_session_opts(None, None, ui_bridge, Some(std::path::PathBuf::from(path)))
     }
 
+    /// 当前会话的 fork 谱系：SessionHeader.parent_session（serde 名
+    /// branchedFrom）——fork 子会话指向父会话文件路径；线性会话 = None。
+    /// "no active session" 是前端认得的域态（branch-store 静默清投影）。
+    pub fn session_lineage(&self) -> Result<Option<String>, String> {
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard
+                .as_ref()
+                .ok_or_else(|| "no active session".to_string())?;
+            shared.runtime.block_on(async {
+                // with_session 是 async + SDK PiResult；闭包直接返回
+                // Option<String>（R=Option<String>），map_err 一层即得
+                handle
+                    .with_session(|s| s.header.parent_session.clone())
+                    .await
+                    .map_err(|e| format!("会话谱系读取失败: {e}"))
+            })
+        })
+        // on_big_stack 自带 spawn/join 错误层（Result<T,String>）——闭包内层
+        // 也是 Result，此处拍平（工程惯例，与 retry_edit/checkpoint 同款）
+        .and_then(|inner| inner)
+    }
+
     /// 替换 handle 前对旧会话显式 flush（save_and_index = 官方 pub 通道：
     /// flush_autosave(Periodic) + 进索引）。pi 的 SDK 路径没有 Periodic
     /// 驱动、Session 无 Drop flush——不显式 flush，切换/新建时未落盘的

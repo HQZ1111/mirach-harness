@@ -1,0 +1,62 @@
+/* ============================================================
+ * ui-primitives.css — 全局原语样式（hermes 桌面端直接可抄件）
+ * 来源：hermes styles.css 的滚动条三段 CSS、tooltip 反色气泡、
+ * dialog 阴影/描边与 z 层令牌（2026-10-02 调查报告 §7）。
+ * 令牌在本文件 :root 定义（与 tokens.css 同层叠，避免并行编辑冲突；
+ * 稳定后统一迁入 tokens.css 登记）。
+ * ============================================================ */
+
+:root {
+  /* 滚动条轨道色（hermes --dt-scrollbar-thumb 的等价取值：中景文字色） */
+  --scrollbar-thumb: color-mix(in srgb, var(--text-3) 70%, transparent);
+  /* dialog 阴影（hermes --shadow-nous：四段累积阴影）与描边 */
+  --shadow-dialog:
+    0 0.125rem 0.25rem -0.125rem color-mix(in srgb, #000 7%, transparent),
+    0 0.5rem 0.75rem -0.375rem color-mix(in srgb, #000 6%, transparent),
+    0 1.25rem 1.75rem -0.875rem color-mix(in srgb, #000 6%, transparent),
+    0 2.25rem 3rem -1.75rem color-mix(in srgb, #000 0%, transparent);
+  --stroke-dialog: color-mix(in srgb, currentColor 3%, transparent);
+  /* 弹窗 z 层（settings-overlay 现用 130 = --z-modal，收敛到令牌） */
+  --z-modal-backdrop: 120;
+  --z-modal: 130;
+  --z-modal-popover: 140;
+}
+
+/* ── 滚动条（hermes 原样：平时隐形，hover 18% / 拖悬 40%）────────
+   注意（hermes 头注释）：Chromium 121+ 同时给标准 scrollbar-* 与
+   webkit 时忽略 webkit——因此这里只用 webkit 前缀。 */
+*::-webkit-scrollbar {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999rem;
+  background-clip: padding-box;
+  transition: none;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--scrollbar-thumb) 18%, transparent);
+}
+*:hover::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--scrollbar-thumb) 40%, transparent);
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* 代码块等 overlay 滚动条退路（hermes .scrollbar-overlay）：窄条、
+   悬停显形，供 overflow 容器内嵌使用 */
+.scrollbar-overlay {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-overlay:hover {
+  scrollbar-color: color-mix(in srgb, var(--scrollbar-thumb) 28%, transparent)
+    transparent;
+}

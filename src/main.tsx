@@ -14,6 +14,9 @@ import './styles/flexlayout.css'
 import './styles/panes.css'
 import './styles/editor.css'
 import './styles/overlays.css'
+// 全局原语（hermes 可抄件）：滚动条/弹窗阴影/z 层令牌——tailwind 之前，
+// 其工具类仍可覆盖
+import './styles/ui-primitives.css'
 // Tailwind v4 + assistant-ui registry 组件主题（shadcn 令牌；最后导入，
 // 组件工具类可覆盖上方体系的同面规则）
 import './styles/tailwind.css'

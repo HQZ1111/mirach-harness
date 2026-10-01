@@ -84,6 +84,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useMemo,
   type ComponentType,
   type FC,
   type PropsWithChildren,
@@ -274,35 +275,37 @@ const CompactionBanner: FC = () => {
   );
 };
 
-// 分支切换条（官方 message-branches 模板，挂消息区顶部——CompactionBanner
-// 上方）：数据 = branch store 投影（pi_list_sibling_branches，真相在 pi），
-// null（无分支/无活动会话/拉取失败）不渲染。挂载 + refreshSeq 信号时拉取
-// （runtime 的 onReload/onEdit/fork/switch_branch/会话切换/run 收尾成功后
-// requestRefresh）。variants 吃各分支 preview、index 吃 isCurrent 项、
-// onIndexChange → pi_switch_branch 请求（runtime 执行器：守卫 + 重水合）。
-const BranchPickerBar: FC = () => {
-  const branches = useStore(branchBridge, (s) => s.branches);
+// ── 会话线谱系条（会话级 fork 语义，唯一挂点=消息区顶部）────────────
+// 数据 = branch store 的 lineage 投影（pi_get_session_lineage，真相在 pi）。
+// 挂载 + refreshSeq 信号时拉取（runtime 的 onReload/onEdit/fork/switch/
+// 会话切换/run 收尾成功后 requestRefresh）。
+// 当前会话是 fork 子会话（branchedFrom 非空）时显示：谱系来源 + 回到父
+// 会话。**只做会话级**——消息级变体（retry 在同一文件内长出的兄弟分支）
+// 走助手消息 footer 的 MessageVariantPicker，两种语义不共用一个件。
+const SessionLineBar: FC = () => {
+  const lineage = useStore(branchBridge, (s) => s.lineage);
   const refreshSeq = useStore(branchBridge, (s) => s.refreshSeq);
   useEffect(() => {
     void branchBridge.getState().refresh();
   }, [refreshSeq]);
-  if (!branches || branches.branches.length === 0) return null;
-  const view = toBranchPickerView(branches);
+  const parent = lineage?.branchedFrom ?? null;
+  if (!parent) return null;
+  const parentTail = parent.split(/[\\/]/).pop() || parent;
   return (
-    <MessageBranches
-      data-slot="aui_branch-picker-bar"
-      variants={view.variants}
-      index={view.index}
-      onIndexChange={(index) => {
-        const leaf = branches.branches[index];
-        if (!leaf) {
-          console.error(`[aui] 分支选择越界（index=${index}）——忽略`);
-          return;
-        }
-        branchBridge.getState().requestSwitch(leaf.leafId);
-      }}
-      className="w-full max-w-none pt-2"
-    />
+    <div
+      data-slot="aui-session-line-bar"
+      className="mb-2 flex w-full items-center gap-2 rounded-(--composer-radius) border border-border/60 bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground"
+    >
+      <GitBranchIcon className="size-3.5 shrink-0" />
+      <span className="min-w-0 truncate">会话分支 · 分叉自「{parentTail}」</span>
+      <button
+        type="button"
+        onClick={() => branchBridge.getState().requestOpenParent(parent)}
+        className="ms-auto shrink-0 rounded-md px-2 py-0.5 hover:bg-accent hover:text-accent-foreground"
+      >
+        回到父会话
+      </button>
+    </div>
   );
 };
 
@@ -726,9 +729,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <ThreadHistorySkeleton />
           </AuiIf>
 
-          {/* 分支切换条（官方 message-branches 模板）：pi 兄弟分支——
-              fork/重试建立分支后出现；无分支不渲染 */}
-          <BranchPickerBar />
+          {/* 会话线谱系条（会话级 fork 语义）：仅当前会话是 fork 子会话时
+              渲染；消息级变体走助手消息 footer 的 MessageVariantPicker */}
+          <SessionLineBar />
 
           {/* 压缩横幅（官方 guardrail-notice 元素）：CUSTOM name=compaction
               经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
@@ -1052,7 +1055,8 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-footer"
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
       >
-        <BranchPicker />
+        <MessageTimeLabel />
+        <MessageVariantPicker />
         <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
@@ -1065,6 +1069,27 @@ const AssistantMessage: FC = () => {
 // 管道；onReload 接通后 Reload 能力即活（capabilities.reload = true）。
 // feedback 能力未接入（无 FeedbackAdapter）时隐藏反馈钮（aui-no-feedback，
 // overlays.css）——与旧版 AuiIf capabilities.feedback 门控等价。
+// 消息时间（ZCode/hermes hover 栏尾同款）：createdAt 存在才显示，只读
+const MessageTimeLabel: FC = () => {
+  const createdAt = useAuiState(
+    (s) => s.thread.messages[s.message.index]?.createdAt,
+  );
+  const label = useMemo(() => {
+    if (!(createdAt instanceof Date) || Number.isNaN(createdAt.getTime()))
+      return null;
+    return new Intl.DateTimeFormat("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(createdAt);
+  }, [createdAt]);
+  if (!label) return null;
+  return (
+    <span className="text-muted-foreground/70 mr-auto text-[0.6875rem] select-none">
+      {label}
+    </span>
+  );
+};
+
 const AssistantActionBar: FC = () => {
   const aui = useAui();
   const isCopied = useAuiState((s) => s.message.isCopied);
@@ -1170,6 +1195,53 @@ const UserFilePart: FileMessagePartComponent = (part) => (
   </div>
 );
 
+// ── 消息级变体切换（retry 语义，官方 message-branches 模板）──────────
+// 挂助手消息 footer：数据 = pi 同文件兄弟分支（pi_list_sibling_branches）。
+// 显示条件：本消息的**前置 user 消息**是分叉点（其 entryId 经 forkPoints
+// 序号映射后等于 branches.forkPointId）且分支数 > 1——retry（编辑重跑）在
+// 该 user turn 长出的各条线就是这条 assistant 回复的变体。切换 =
+// pi_switch_branch（runtime 执行器：守卫 + 重水合）。会话级 fork（新会话
+// 文件）在 SessionLineBar / 侧栏，两种语义不共用一个件。
+const MessageVariantPicker: FC = () => {
+  const userOrdinal = useAuiState((s) => {
+    let count = 0;
+    const msgs = s.thread.messages;
+    for (let i = 0; i < s.message.index && i < msgs.length; i++) {
+      if (msgs[i]?.role === "user") count++;
+    }
+    return count - 1;
+  });
+  // 选择器只取稳定引用（zustand v5 Object.is 比较——选择器里返回新对象
+  // 会无限重渲），视图在组件体计算并 memo
+  const branches = useStore(branchBridge, (s) => s.branches);
+  const forkPoints = useStore(branchBridge, (s) => s.forkPoints);
+  const entryId =
+    userOrdinal >= 0 ? forkPoints[userOrdinal]?.entryId : undefined;
+  const view = useMemo(() => {
+    if (!entryId || !branches) return null;
+    if (branches.forkPointId !== entryId || branches.branches.length < 2)
+      return null;
+    return toBranchPickerView(branches);
+  }, [entryId, branches]);
+  if (!view) return null;
+  return (
+    <MessageBranches
+      data-slot="aui-message-variant-picker"
+      variants={view.variants}
+      index={view.index}
+      onIndexChange={(index) => {
+        const leaf = branchBridge.getState().branches?.branches[index];
+        if (!leaf) {
+          console.error(`[aui] 变体选择越界（index=${index}）——忽略`);
+          return;
+        }
+        branchBridge.getState().requestSwitch(leaf.leafId);
+      }}
+      className="max-w-none"
+    />
+  );
+};
+
 const UserImagePart: ImageMessagePartComponent = (part) => (
   <div data-slot="aui_user-message-image" className="py-1">
     <Image {...part} />
@@ -1205,6 +1277,36 @@ const UserMessage: FC = () => {
 };
 
 const UserActionBar: FC = () => {
+  const aui = useAui();
+  // 复制（ZCode user hover 条=复制+编辑——补齐 Copy；copied 态 1.5s 复位，
+  // 失败 console.error 可见）
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useEffect(
+    () => () => {
+      if (copiedTimerRef.current !== undefined)
+        clearTimeout(copiedTimerRef.current);
+    },
+    [],
+  );
+  const onCopy = () => {
+    const text = aui.message.getCopyText();
+    if (!text) return;
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(true);
+        if (copiedTimerRef.current !== undefined)
+          clearTimeout(copiedTimerRef.current);
+        copiedTimerRef.current = setTimeout(() => {
+          copiedTimerRef.current = undefined;
+          setCopied(false);
+        }, 1500);
+      })
+      .catch((e) => console.error("[aui] 用户消息复制失败", e));
+  };
   // ── fork 入口（「从此分支探索」）─────────────────────────────────────
   // 需要该 user 消息的 fork 点：index 映射——thread 里第 N 条 user 消息 =
   // pi_get_fork_points() 第 N 项（同源水合+流式追加，按序一一对应；清单
@@ -1249,6 +1351,13 @@ const UserActionBar: FC = () => {
       autohide="not-last"
       className="aui-user-action-bar-root flex flex-col items-end"
     >
+      <TooltipIconButton
+        tooltip={copied ? "已复制" : "复制"}
+        className="aui-user-action-copy"
+        onClick={onCopy}
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </TooltipIconButton>
       <ActionBarPrimitive.Edit asChild>
         <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
           <PencilIcon />
