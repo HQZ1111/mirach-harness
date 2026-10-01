@@ -19,6 +19,37 @@ import {
 } from "@/components/assistant-ui/thread-scroll-store";
 import { useErrorBridge } from "@/components/assistant-ui/error-bridge";
 import { useUsageBridge } from "@/components/assistant-ui/usage-bridge";
+import { invoke } from "@tauri-apps/api/core";
+import { MessageQueue } from "@/components/assistant-ui/elements/message-queue";
+import { CostMeter } from "@/components/assistant-ui/elements/cost-meter";
+import { ReadAloud } from "@/components/assistant-ui/elements/read-aloud";
+import {
+  RegenerateMenu,
+  type RegenerateOption,
+} from "@/components/assistant-ui/elements/regenerate-menu";
+import {
+  checkpointBridge,
+  formatCheckpointTime,
+} from "@/components/assistant-ui/checkpoint-store";
+import {
+  costBridge,
+  formatUsd,
+  type CostRun,
+} from "@/components/assistant-ui/cost-bridge";
+import { sessionQueue } from "@/components/assistant-ui/session-queue-store";
+import {
+  modelCatalogStore,
+  toModelOptions,
+} from "@/components/assistant-ui/model-catalog-store";
+import {
+  SPEECH_RATES,
+  ensureSpeechSupportLogged,
+  getSpeechRate,
+  segmentSpeechWords,
+  setSpeechRate,
+  speechProgressBridge,
+  wordIndexAt,
+} from "@/components/assistant-ui/speech-adapter";
 import { EmptyState, EmptyStateComposer, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
 import { ErrorState } from "@/components/assistant-ui/elements/error-state";
 import { GuardrailNotice } from "@/components/assistant-ui/elements/guardrail-notice";
@@ -81,9 +112,11 @@ import {
   CopyIcon,
   DownloadIcon,
   GitBranchIcon,
+  HistoryIcon,
   MicIcon,
   PencilIcon,
   PhoneIcon,
+  Volume2Icon,
 } from "lucide-react";
 import {
   createContext,
@@ -402,6 +435,222 @@ const RunErrorBar: FC = () => {
       onRetry={onRetry}
       className="mt-1 w-full max-w-none"
     />
+  );
+};
+
+// ── message-queue（官方元素）：isRunning 时用户提交的新消息排队可视化 ──
+// 数据 = session-queue-store（runtime onNew 入队 / run 收尾 drain 逐条
+// 发出）。running 标签 = 当前 run 的来源消息（最后一条 user 文本）。
+// 仅 isRunning 且队列非空时渲染——队列存在本身就是"何时发出"的说明
+// （模板自带 "sends when this finishes"）。「立即发送」不做：立即发送
+// 必须先 pi_interrupt 中断当前 run（prompt 持锁跨整个 run），把中断语义
+// 藏进一个发送钮会误伤正在跑的 run——队列本就按序自动发出，语义等价，
+// 不做双入口（删除钮保留，模板 onCancel）。
+const MessageQueueWired: FC = () => {
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const queued = useStore(sessionQueue, (s) => s.items);
+  const runningText = useAuiState((s) => {
+    const msgs = s.thread.messages;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (m.role === "user") {
+        return typeof m.content === "string"
+          ? m.content
+          : m.content
+              .filter((p): p is { type: "text"; text: string } => p.type === "text")
+              .map((p) => p.text)
+              .join("");
+      }
+    }
+    return null;
+  });
+  if (!isRunning || queued.length === 0) return null;
+  return (
+    <MessageQueue
+      data-slot="aui_message-queue"
+      running={runningText?.trim() || "正在处理当前消息"}
+      queued={queued}
+      onCancel={(id) => sessionQueue.getState().remove(id)}
+      className="w-full max-w-none"
+    />
+  );
+};
+
+// ── cost-meter（官方元素）：run 成本 + 会话累计 ────────────────────────
+// 数据 = cost-bridge（runtime 在 run 收尾时经 pi_get_state 入账）。口径：
+// 会话累计 = 本进程内该会话所有 run 的 costUsd 之和（打开历史会话不回算
+// pi 落盘的历史成本——水合面里没有历史 usage，重算即编造）。仅非运行态
+// 且有数据时渲染：流式中数字是上一 run 的旧值，显示会误导；lines = 最近
+// 一次 run 的单模型明细（pi 每 run 单模型）。
+const CostMeterWired: FC = () => {
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  // 选择器只取稳定引用（zustand v5 Object.is 比较——返回新对象会无限重渲）
+  const lastRun = useStore(costBridge, (s) => s.lastRun);
+  const sessionCost = useStore(costBridge, (s) =>
+    s.activeSessionId ? (s.costBySession[s.activeSessionId] ?? 0) : 0,
+  );
+  if (isRunning || !lastRun) return null;
+  const lines: readonly CostRun[] = [lastRun];
+  return (
+    <CostMeter
+      data-slot="aui_cost-meter"
+      runCost={lastRun.costUsd !== null ? formatUsd(lastRun.costUsd) : "—"}
+      sessionCost={formatUsd(sessionCost)}
+      lines={lines.map((run) => ({
+        model: run.model,
+        inputTokens: run.inputTokens ?? 0,
+        outputTokens: run.outputTokens ?? 0,
+        cost: run.costUsd !== null ? formatUsd(run.costUsd) : "—",
+        share: 1,
+      }))}
+      className="w-full max-w-none rounded-xl p-3"
+    />
+  );
+};
+
+// ── 检查点（pi checkpoint/rewind 命令面，对话历史编辑）─────────────────
+// 轻量弹出面板（消息区顶部工具位，SessionLineBar 旁）：列出当前会话
+// checkpoints（pi_list_checkpoints：name/entryId/时间/消息数）、「打检查
+// 点」（pi_mark_checkpoint，label 留空 = pi 默认 "checkpoint"）、「回到
+// 此点」（pi_rewind——请求经 checkpoint-store 通道到 runtime 执行器：
+// 守卫 interrupt + 重水合）。回退语义（pi_rewind = apply_rewind_to_active）：
+// 活动上下文截断到该检查点，其后对话折叠为一条摘要——面板底部红字警示，
+// 诚实不悄悄删历史（会话树保留，可再次回退）。
+const CheckpointBar: FC = () => {
+  const hasMessages = useAuiState((s) => s.thread.messages.length > 0);
+  const checkpoints = useStore(checkpointBridge, (s) => s.checkpoints);
+  const currentId = useStore(checkpointBridge, (s) => s.currentId);
+  const [open, setOpen] = useState(false);
+  const [label, setLabel] = useState("");
+  const markingRef = useRef(false);
+  useEffect(() => {
+    // 每次展开拉新鲜清单（跨会话切换后不残留上一会话的投影）
+    if (open) void checkpointBridge.getState().refresh();
+  }, [open]);
+  if (!hasMessages) return null;
+
+  const onMark = async () => {
+    if (markingRef.current) return;
+    markingRef.current = true;
+    try {
+      const trimmed = label.trim();
+      // label 空/缺省 = pi 默认 "checkpoint"（上游语义，非兜底）
+      await invoke("pi_mark_checkpoint", { label: trimmed || undefined });
+      setLabel("");
+      await checkpointBridge.getState().refresh();
+    } catch (e) {
+      // 无活动会话 / 持久化失败：错误可见，面板保持现状
+      console.error("[pi] 打检查点失败", e);
+    } finally {
+      markingRef.current = false;
+    }
+  };
+
+  return (
+    <div
+      data-slot="aui-checkpoint-bar"
+      className="relative mb-2 flex w-full items-center"
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+      >
+        <HistoryIcon className="size-3.5" aria-hidden />
+        检查点
+        {checkpoints.length > 0 && (
+          <span className="font-mono text-[10px] tabular-nums">
+            {checkpoints.length}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          {/* 点击面板外关闭（透明垫层，面板 z-50 之上） */}
+          <div
+            aria-hidden
+            className="fixed inset-0 z-40"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            data-slot="aui-checkpoint-panel"
+            className="bg-popover text-popover-foreground absolute top-full left-0 z-50 mt-1 flex w-80 flex-col gap-2 rounded-xl border p-3 shadow-lg"
+          >
+            <p className="text-muted-foreground px-1 text-xs">
+              标记当前进度点，之后可回到此处。
+            </p>
+            <div className="flex items-center gap-1.5">
+              <input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void onMark();
+                }}
+                placeholder="检查点名称（可留空）"
+                className="border-border/60 h-7 min-w-0 flex-1 rounded-md border bg-transparent px-2 text-xs outline-none focus:border-foreground/30"
+              />
+              <button
+                type="button"
+                onClick={() => void onMark()}
+                className="shrink-0 rounded-md px-2 py-1 text-xs transition-colors hover:bg-accent"
+              >
+                打检查点
+              </button>
+            </div>
+            <div className="flex flex-col">
+              {checkpoints.length === 0 && (
+                <p className="text-muted-foreground px-1 py-2 text-xs">
+                  当前会话还没有检查点。
+                </p>
+              )}
+              {checkpoints.map((cp) => {
+                const current = cp.name === currentId;
+                return (
+                  <div
+                    key={`${cp.entryId ?? "no-entry"}-${cp.name}-${cp.atMs}`}
+                    className="group flex items-center gap-2 rounded-lg px-1.5 py-1.5 transition-colors hover:bg-accent/50"
+                  >
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "size-1.5 shrink-0 rounded-full",
+                        current ? "bg-blue-500" : "bg-foreground/25",
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-xs">
+                      {cp.name}
+                    </span>
+                    <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground/70">
+                      {formatCheckpointTime(cp.atMs)} · {cp.messageCount} 条消息
+                    </span>
+                    {current ? (
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        当前
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpen(false);
+                          checkpointBridge.getState().requestRewind(cp.name);
+                        }}
+                        className="text-destructive hover:bg-destructive/10 shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors"
+                      >
+                        回到此点
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-destructive/90 px-1 text-[11px] leading-relaxed">
+              回到此点会截断其后的上下文：该点之后的对话将折叠为一条摘要，不再逐条显示（会话树保留）。
+            </p>
+          </div>
+        </>
+      )}
+    </div>
   );
 };
 
@@ -778,6 +1027,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <ThreadHistorySkeleton />
           </AuiIf>
 
+          {/* 检查点工具条（pi checkpoint/rewind 命令面）：打点 / 回退面板
+              入口，消息区顶部工具位（SessionLineBar 旁） */}
+          <CheckpointBar />
+
           {/* 会话线谱系条（会话级 fork 语义）：仅当前会话是 fork 子会话时
               渲染；消息级变体走助手消息 footer 的 MessageVariantPicker */}
           <SessionLineBar />
@@ -811,6 +1064,11 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <RunErrorBar />
             <StoppedRunBanner />
             <ApprovalCards />
+            {/* 运行成本（cost-meter）与排队消息（message-queue）：composer
+                上方、ApprovalCards 之下——非运行态显示成本、运行态显示
+                排队（二者不同时渲染，消息密度最低的挂点） */}
+            <CostMeterWired />
+            <MessageQueueWired />
             <ComposerWired />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
@@ -996,6 +1254,130 @@ const MessageError: FC = () => {
   );
 };
 
+// 朗读能力门（模块级判定一次）：无语音引擎环境不渲染朗读钮（runtime 侧
+// 同门：适配器不注册 → capabilities.speech=false）
+const speechSupported = ensureSpeechSupportLogged();
+
+// ── read-aloud（官方元素）：朗读当前消息 ───────────────────────────────
+// 播放走核心管道（aui.message.speak/stopSpeaking → runtime adapters.speech
+// 的 BoundarySpeechSynthesisAdapter），进度 = speechProgressBridge 的
+// boundary charIndex → 词下标映射（segmentSpeechWords：CJK 逐字、其余
+// 整段；部分引擎不发 boundary——进度停在起点，播放本身不受影响，诚实
+// 不伪造）。elapsed = 朗读计时；duration 传 "–"（Web Speech 不暴露合成
+// 时长，不估算）。变速 = 以新 rate 重读（utterance 的 rate 在创建时固定，
+// 运行中不可变——诚实于引擎能力）。暂停不支持：Web Speech 的 Utterance
+// 接口无 pause/resume 钩子，toggle = 停止/重新开始。
+const ReadAloudPanel: FC<{ className?: string }> = ({ className }) => {
+  const aui = useAui();
+  const text = aui.message.getCopyText();
+  const words = useMemo(() => segmentSpeechWords(text ?? ""), [text]);
+  // 播放态：bridge 记录"正在读的全文"——与本消息文本一致才算在读本消息
+  // （另一消息朗读中时本面板显示未播放）
+  const playing = useStore(speechProgressBridge, (s) => s.playing && s.text === text);
+  const spokenIndex = useStore(speechProgressBridge, (s) =>
+    s.text === text ? wordIndexAt(words, s.charIndex) : 0,
+  );
+  const [rate, setRate] = useState<number>(() => getSpeechRate());
+  const [elapsedSec, setElapsedSec] = useState(0);
+  useEffect(() => {
+    if (!playing) return;
+    setElapsedSec(0);
+    const timer = window.setInterval(() => setElapsedSec((s) => s + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [playing]);
+  if (!text || words.length === 0) return null;
+  const elapsed = `${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, "0")}`;
+
+  const onToggle = () => {
+    if (playing) {
+      try {
+        aui.message.stopSpeaking();
+      } catch (e) {
+        // 竞态（朗读恰在点击前结束）：错误可见，不中断面板
+        console.error("[aui] 停止朗读失败", e);
+      }
+      return;
+    }
+    aui.message.speak();
+  };
+
+  const onRateChange = () => {
+    const idx = SPEECH_RATES.indexOf(rate);
+    const next = SPEECH_RATES[(idx + 1) % SPEECH_RATES.length] ?? SPEECH_RATES[0]!;
+    setRate(next);
+    setSpeechRate(next);
+    if (playing) {
+      // 变速重读：先停（若仍在读本消息）再以新 rate 从头合成
+      const st = speechProgressBridge.getState();
+      if (st.playing && st.text === text) {
+        try {
+          aui.message.stopSpeaking();
+        } catch (e) {
+          console.error("[aui] 变速停止朗读失败", e);
+        }
+      }
+      aui.message.speak();
+    }
+  };
+
+  return (
+    <ReadAloud
+      data-slot="aui_read-aloud"
+      words={words.map((w) => w.word)}
+      spokenIndex={Math.max(0, spokenIndex)}
+      playing={playing}
+      rate={rate}
+      elapsed={elapsed}
+      duration="–"
+      onToggle={onToggle}
+      onRateChange={onRateChange}
+      className={className}
+    />
+  );
+};
+
+// ── regenerate-menu（官方元素）：换模型重生成 ──────────────────────────
+// 模型清单 = model-catalog-store（composer-wired 的 pi_list_models 投影
+// 上移共享；目录拉取失败时展开面板重试 load）。onPick =
+// aui.message.reload({ runConfig: { custom: { modelOverride } } })——外部
+// store runtime 的 startRun 原样透传 runConfig，runtime onReload 探测该
+// 键：pi_set_model 成功 → retry_edit → 重发；set_model 失败不重发（错误
+// 可见）。只挂最后一条 assistant（ActionBar autohide="not-last"），
+// onReload 的 parentId 守卫天然满足。弹层绝对定位锚在触发钮下方（模板
+// 默认在流内展开，会把 footer 行撑高）。
+const RegenerateMenuWired: FC = () => {
+  const aui = useAui();
+  const [open, setOpen] = useState(false);
+  const entries = useStore(modelCatalogStore, (s) => s.entries);
+  const currentId = useStore(modelCatalogStore, (s) => s.currentModel);
+  const options = useMemo<readonly RegenerateOption[]>(
+    () =>
+      toModelOptions(entries).map((o) => ({
+        id: o.id,
+        label: o.name,
+        detail: o.description ?? "",
+      })),
+    [entries],
+  );
+  useEffect(() => {
+    if (open) void modelCatalogStore.getState().load();
+  }, [open]);
+  return (
+    <RegenerateMenu
+      data-slot="aui_regenerate-menu"
+      options={options}
+      open={open}
+      currentId={currentId ?? ""}
+      onOpenChange={setOpen}
+      onPick={(id) => {
+        setOpen(false);
+        aui.message.reload({ runConfig: { custom: { modelOverride: id } } });
+      }}
+      className="relative w-auto [&>*+*]:absolute [&>*+*]:left-0 [&>*+*]:top-full [&>*+*]:z-50 [&>*+*]:mt-1 [&>*+*]:w-60 [&>*+*]:shadow-lg"
+    />
+  );
+};
+
 const AssistantMessage: FC = () => {
   const {
     // 工具渲染默认 = PiToolUI 分流（bash/web_search/isError/通用；形状
@@ -1006,6 +1388,8 @@ const AssistantMessage: FC = () => {
     TaskGroup: TaskGroupComponent,
   } = useContext(ThreadComponentsContext);
   const groupBy = TaskGroupComponent ? taskAwareGroupBy : messageGroupBy;
+  // 朗读面板开合（footer 朗读钮 ↔ 消息底部 ReadAloud 面板）
+  const [readAloudOpen, setReadAloudOpen] = useState(false);
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1105,8 +1489,16 @@ const AssistantMessage: FC = () => {
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
       >
         <MessageTimeLabel />
-        <AssistantActionBar />
+        <AssistantActionBar
+          readAloudOpen={readAloudOpen}
+          onReadAloudToggle={() => setReadAloudOpen((o) => !o)}
+        />
       </div>
+
+      {/* 朗读面板（官方 read-aloud 元素）：footer 朗读钮展开，挂消息底部 */}
+      {readAloudOpen && (
+        <ReadAloudPanel className="ms-2 mt-1 w-full max-w-none rounded-xl" />
+      )}
     </MessagePrimitive.Root>
   );
 };
@@ -1138,7 +1530,10 @@ const MessageTimeLabel: FC = () => {
   );
 };
 
-const AssistantActionBar: FC = () => {
+const AssistantActionBar: FC<{
+  readAloudOpen: boolean;
+  onReadAloudToggle: () => void;
+}> = ({ readAloudOpen, onReadAloudToggle }) => {
   const aui = useAui();
   const isCopied = useAuiState((s) => s.message.isCopied);
   const feedbackEnabled = useAuiState((s) => s.thread.capabilities.feedback);
@@ -1210,6 +1605,20 @@ const AssistantActionBar: FC = () => {
         onMore={onMore}
         className={cn(!feedbackEnabled && "aui-hide-reactions")}
       />
+      {/* 换模型重生成（官方 regenerate-menu 元素）：reload 带
+          runConfig.custom.modelOverride → runtime onReload 探测后
+          pi_set_model + 重发 */}
+      <RegenerateMenuWired />
+      {/* 朗读（官方 read-aloud 元素入口）：无语音引擎环境隐藏（能力门） */}
+      {speechSupported && (
+        <TooltipIconButton
+          tooltip={readAloudOpen ? "关闭朗读" : "朗读"}
+          aria-pressed={readAloudOpen}
+          onClick={onReadAloudToggle}
+        >
+          <Volume2Icon />
+        </TooltipIconButton>
+      )}
       <ActionBarMorePrimitive.Root>
         <ActionBarMorePrimitive.Trigger asChild>
           <button

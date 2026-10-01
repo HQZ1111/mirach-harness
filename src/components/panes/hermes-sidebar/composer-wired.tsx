@@ -10,7 +10,7 @@
  * + 上传态遮罩）。斜杠/@=kit 匹配器；模型选择=pi 控制面（§4.5 IPC：
  * pi_list_models/pi_get_state/pi_set_model）。
  */
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
@@ -39,26 +39,11 @@ import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assi
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
+import {
+  modelCatalogStore,
+  toModelOptions,
+} from '@/components/assistant-ui/model-catalog-store'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
-
-/** pi 模型目录条目（pi_list_models 返回形状）。 */
-interface PiModelEntry {
-  provider: string
-  id: string
-  name: string
-  reasoning: boolean
-  contextWindow: number
-}
-
-/** pi 模型目录 → ModelSelector 选项；reasoning 模型带默认三档。 */
-function toModelOptions(entries: PiModelEntry[]): ModelOption[] {
-  return entries.map((e) => ({
-    id: `${e.provider}/${e.id}`,
-    name: e.name || e.id,
-    description: e.provider,
-    ...(e.reasoning ? { efforts: true as const } : {}),
-  }))
-}
 
 const COMMANDS = [
   { name: 'image', description: '生成一张图片', icon: ImageIcon },
@@ -174,42 +159,29 @@ export function ComposerWired() {
     setText(prefill.text)
   }, [prefill, setText])
 
-  // pi 控制面：模型目录 + 当前选中。挂载时拉目录；state 随 isRunning
-  // 变化重拉（会话按需创建后 trigger 自动从 "Select model" 点亮为真名）。
-  // 错误即错误：目录/状态拉取失败 console 可见，不假装成功（目录空 =
-  // 错误态）；首条消息前 pi_get_state 报 no active session 是预期域状态
-  // （会话按需创建），不是被吞的错误。
-  const [models, setModels] = useState<ModelOption[]>([])
-  // 原始目录（取当前模型的 contextWindow 给用量环）
-  const modelEntriesRef = useRef<PiModelEntry[]>([])
-  const [currentModel, setCurrentModel] = useState<string | null>(null)
+  // pi 控制面：模型目录 + 当前选中（model-catalog-store 共享投影——
+  // regenerate-menu「换模型重生成」同源消费）。目录挂载时拉取（store 内
+  // 带进程缓存）；state 随 isRunning 变化重拉（会话按需创建后 trigger 自动
+  // 从 "Select model" 点亮为真名）。错误即错误：目录/状态拉取失败 console
+  // 可见，不假装成功（目录空 = 错误态）；首条消息前 pi_get_state 报
+  // no active session 是预期域状态（会话按需创建），不是被吞的错误。
+  const entries = useStore(modelCatalogStore, (s) => s.entries)
+  const models = useMemo<ModelOption[]>(() => toModelOptions(entries), [entries])
+  const currentModel = useStore(modelCatalogStore, (s) => s.currentModel)
   // 思考档位（pi ThinkingLevel：off/minimal/low/medium/high/xhigh/max；
   // 不在 DEFAULT_EFFORT_OPTIONS 内的值 resolveEffort 落空 = 不选中）
   const [currentEffort, setCurrentEffort] = useState<string | null>(null)
   const { usage } = useUsageBridge()
   useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const res = await invoke<{ models: PiModelEntry[] }>('pi_list_models')
-        if (!cancelled) {
-          modelEntriesRef.current = res.models ?? []
-          setModels(toModelOptions(res.models ?? []))
-        }
-      } catch (e) {
-        console.error('[pi] 模型目录获取失败', e)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
+    void modelCatalogStore.getState().load()
   }, [])
   useEffect(() => {
     let cancelled = false
     void invoke<{ provider: string; modelId: string; thinkingLevel: string | null }>('pi_get_state')
       .then((st) => {
         if (!cancelled) {
-          setCurrentModel(`${st.provider}/${st.modelId}`)
+          // 当前选中模型写共享 store（regenerate-menu 的 currentId 同源）
+          modelCatalogStore.getState().setCurrentModel(`${st.provider}/${st.modelId}`)
           // 思考档位随 state 回读（pi_get_state.thinkingLevel）
           setCurrentEffort(st.thinkingLevel ?? null)
         }
@@ -232,7 +204,7 @@ export function ComposerWired() {
     // 错误即错误：set_model 成功才更新选中态，失败保持原值且错误可见
     // ——不乐观更新（UI 假装切换成功 = 兜底）。
     void invoke('pi_set_model', { provider, modelId })
-      .then(() => setCurrentModel(id))
+      .then(() => modelCatalogStore.getState().setCurrentModel(id))
       .catch((e) => console.error(`[pi] set_model ${id} 失败（保持原选择）`, e))
   }, [])
   const onEffortChange = useCallback((level: string) => {
@@ -248,7 +220,7 @@ export function ComposerWired() {
   // ContextDisplay.Bar：旧写法 ?? 0 会除零 → Infinity → clamp 100 =
   // 红环误报（审查 #7）。
   const currentContextWindow = currentModel
-    ? modelEntriesRef.current.find((e) => `${e.provider}/${e.id}` === currentModel)?.contextWindow
+    ? entries.find((e) => `${e.provider}/${e.id}` === currentModel)?.contextWindow
     : undefined
 
   // ── 斜杠/@ 菜单键盘导航（↑↓ 移动高亮、Enter/Tab 确认、Esc 关闭）──

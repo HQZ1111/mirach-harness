@@ -16,12 +16,13 @@ import {
   useExternalStoreRuntime,
   type AppendMessage,
   type AttachmentAdapter,
+  type SpeechSynthesisAdapter,
 } from '@assistant-ui/react'
 import { invoke } from '@tauri-apps/api/core'
 import { useActorRef, useSelector } from '@xstate/react'
 import { useStore } from 'zustand'
 
-import { turnMachine, type TurnContext, type TurnMessage, type TurnPart } from './turn-actor'
+import { turnMachine, type TurnContext, type TurnMessage, type TurnPart, type TurnUsage } from './turn-actor'
 import { approvalBridge } from './approval-bridge'
 import {
   branchBridge,
@@ -35,12 +36,27 @@ import { errorBridge } from './error-bridge'
 import { clearThreadScroll, threadScrollBridge } from './thread-scroll-store'
 import { deriveTitle, firstUserMessageText, nextTitleInLineage } from './session-title'
 import { usageBridge, type UsageState } from './usage-bridge'
+import { checkpointBridge, type RewindRequest } from './checkpoint-store'
+import { costBridge } from './cost-bridge'
+import { sessionQueue } from './session-queue-store'
+import {
+  BoundarySpeechSynthesisAdapter,
+  ensureSpeechSupportLogged,
+} from './speech-adapter'
 
 const THREAD = 'main'
 
 /** 自动命名已尝试过的会话（每会话只做一次——含失败，失败 console 可见、
  * 不静默重试；跨重启由 pi 持久的 name 字段 + 默认态判定兜住重名） */
 const autoNamedSessions = new Set<string>()
+
+/** 朗读适配器（read-aloud）：speechSynthesis 不存在的环境不注册（核心
+ * capabilities.speech=false → UI 钮隐藏），console.info 一次 */
+const speechAdapter: SpeechSynthesisAdapter | undefined =
+  ensureSpeechSupportLogged() ? new BoundarySpeechSynthesisAdapter() : undefined
+
+/** 排队消息 id 序列（同毫秒双提交不得撞 id） */
+let queuedSeq = 0
 
 /** titling.auto_title 配置门（pi Config TitlingSettings，config.rs:434-440；
  * settings.json 落盘 snake_case `auto_title`，读取侧 pi 另收 autoTitle/auto
@@ -525,6 +541,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // drop + console.error（可见，不排队装作已受理）；handledBranchSeq 防
   // StrictMode 双 effect 对同一请求重复执行。
 
+  /** 会话更换（切换 / New Chat / fork / 回父会话 / 删除当前 / 回退）成功后
+   * 清会话域桥投影：排队消息属于原会话轨迹（clear）、检查点投影与
+   * currentId 同属会话（resetProjection）、成本显示切到新会话（lastRun
+   * 清；累计按 sessionId 键隔离保留）。 */
+  const resetSessionScopedBridges = useCallback((sessionId: string | null) => {
+    sessionQueue.getState().clear()
+    checkpointBridge.getState().resetProjection()
+    costBridge.getState().resetSession(sessionId)
+  }, [])
+
   /** fork 执行（「从此分支探索」）：守卫 → fork 点 index 映射 →
    * pi_fork_session → 采纳新会话（HYDRATE 重水合——switchToThread 同款
    * 通道，messages/currentRunId/error/usage/compaction/interrupted 随
@@ -583,6 +609,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(forked.sessionId)
         await refreshThreads()
+        resetSessionScopedBridges(forked.sessionId)
       } catch (e) {
         console.error('[pi] fork 后重水合失败（新会话未采纳，可从侧栏手动打开）', e)
         void refreshThreads()
@@ -594,7 +621,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 分支条刷新（新会话的分支态）
       branchBridge.getState().requestRefresh()
     },
-    [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads],
+      [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
   )
 
   /** 分支切换执行：守卫 → pi_switch_branch（服务端切叶）→ 重拉
@@ -651,6 +678,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(sessionId)
         await refreshThreads()
+        resetSessionScopedBridges(sessionId)
         // 滚动位置恢复请求（回到父会话 = 打开既有历史会话，与
         // switchToThread 同语义）
         threadScrollBridge.getState().requestRestore(sessionId)
@@ -661,7 +689,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       branchBridge.getState().requestRefresh()
     },
-    [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads],
+    [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
   )
 
   const forkRequest = useStore(branchBridge, (s) => s.forkRequest)
@@ -722,10 +750,113 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     })
   }, [openParentRequest, runOpenParent])
 
-  // run 收尾（streaming → idle 迁移）刷新分支数据：user 消息落盘后才成为
-  // fork 点（「从此分支探索」钮可用性依赖 forkPoints 新鲜）。挂载跳过
-  // （SessionLineBar 挂载已拉一次）。
+  // ── checkpoint 回退执行器（checkpoint-store 请求通道，branch 同款）──
+  /** 回退执行：守卫（照抄 switchToThread——prompt 持锁跨整个 run）→
+   * pi_rewind（checkpointId = 检查点**名称**，pi find_checkpoint 的匹配
+   * 键——不是 entryId）→ 重拉 pi_get_messages HYDRATE 重水合（活动上下文
+   * 已截断到检查点，其后 span 折叠为一条摘要——重水合后的投影即回退后的
+   * 真相）→ currentId 标记 + 检查点清单/分支点刷新。任一步失败
+   * console.error 不动本地态。 */
+  const runRewind = useCallback(
+    async (req: RewindRequest) => {
+      if (!(await interruptIfRunning())) return
+      try {
+        await invoke('pi_rewind', { checkpointId: req.name })
+      } catch (e) {
+        console.error(`[pi] 回退到检查点「${req.name}」失败（保持当前上下文）`, e)
+        return
+      }
+      try {
+        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
+        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+      } catch (e) {
+        console.error('[pi] 回退后重水合失败（服务端已截断，可重开检查点面板查看）', e)
+        return
+      }
+      checkpointBridge.setState({ currentId: req.name })
+      void checkpointBridge.getState().refresh()
+      branchBridge.getState().requestRefresh()
+    },
+    [actorRef, hydratePiMessages, interruptIfRunning],
+  )
+
+  const rewindRequest = useStore(checkpointBridge, (s) => s.rewindRequest)
+  const handledRewindSeqRef = useRef(0)
+  const rewindBusyRef = useRef(false)
+
+  useEffect(() => {
+    if (!rewindRequest || rewindRequest.seq <= handledRewindSeqRef.current) return
+    if (rewindBusyRef.current) {
+      console.error('[pi] 回退进行中——忽略新回退请求', rewindRequest)
+      checkpointBridge.getState().clearRewindRequest(rewindRequest.seq)
+      return
+    }
+    handledRewindSeqRef.current = rewindRequest.seq
+    rewindBusyRef.current = true
+    void runRewind(rewindRequest).finally(() => {
+      rewindBusyRef.current = false
+      checkpointBridge.getState().clearRewindRequest(rewindRequest.seq)
+    })
+  }, [rewindRequest, runRewind])
+
+  // ── run 收尾（streaming → idle 迁移，RUN_FINISHED 与 RUN_ERROR 都走
+  // 此迁移）三件事 ─────────────────────────────────────────────────────
+  // ① 分支数据刷新：user 消息落盘后才成为 fork 点（「从此分支探索」钮
+  //    可用性依赖 forkPoints 新鲜）。挂载跳过（SessionLineBar 挂载已拉）。
+  // ② 队列 drain（message-queue）：按序发出下一条排队消息——出队即
+  //    USER_SUBMIT 乐观进投影 + postRun；本 run 收尾后只发一条，发完等
+  //    下一次收尾（one-at-a-time）。用户取消（pi_interrupt）同样算收尾
+  //    ——排队意图仍然兑现（队列面板全程可见可删）。
+  // ③ 成本入账（cost-meter）：pi_get_state 是 sessionId 的权威源（首条
+  //    消息创建的会话 currentThreadId 可能仍为 null），把本 run 的
+  //    costUsd 累进该会话的进程内账本（历史会话不回算）。
   const wasRunningRef = useRef(false)
+  const usageRef = useRef<TurnUsage | null>(null)
+  usageRef.current = usage
+
+  /** 队列 drain：endpoint 未就绪时保留队列（出队即丢 = 兜底，禁止） */
+  const drainQueue = useCallback(() => {
+    if (!endpointRef.current) {
+      console.error('[queue] endpoint 未就绪——排队消息保留，待下次 run 收尾再发')
+      return
+    }
+    const next = sessionQueue.getState().takeFirst()
+    if (!next) return
+    actorRef.send({
+      type: 'USER_SUBMIT',
+      text: next.text,
+      messageId: `user-q-${Date.now()}`,
+      ...(next.imageDataUrls && next.imageDataUrls.length > 0
+        ? { images: next.imageDataUrls }
+        : {}),
+    })
+    postRun(next.text, next.images)
+    void refreshThreads()
+  }, [actorRef, postRun, refreshThreads])
+
+  /** 成本入账：失败 console.error 可见，本 run 不入账（不估算） */
+  const recordRunCost = useCallback(() => {
+    const u = usageRef.current
+    void (async () => {
+      try {
+        const st = await invoke<{
+          sessionId: string | null
+          provider: string
+          modelId: string
+        }>('pi_get_state')
+        costBridge.getState().recordRun({
+          sessionId: st.sessionId,
+          model: `${st.provider}/${st.modelId}`,
+          costUsd: u?.costUsd,
+          inputTokens: u?.inputTokens,
+          outputTokens: u?.outputTokens,
+        })
+      } catch (e) {
+        console.error('[cost] run 收尾成本入账失败（本 run 不入账）', e)
+      }
+    })()
+  }, [])
+
   useEffect(() => {
     if (isRunning) {
       wasRunningRef.current = true
@@ -734,7 +865,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     if (!wasRunningRef.current) return
     wasRunningRef.current = false
     branchBridge.getState().requestRefresh()
-  }, [isRunning])
+    drainQueue()
+    recordRunCost()
+  }, [isRunning, drainQueue, recordRunCost])
 
   // onEdit（§数据面契约 pi_retry_edit）：准备最后一个可重试 user turn 的
   // 兄弟分支，重发 = 之后一次普通 POST。成功后把编辑文本经 USER_SUBMIT
@@ -855,6 +988,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(id)
         await refreshThreads()
+        resetSessionScopedBridges(id)
         // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
         // 位置恢复阅读位
         threadScrollBridge.getState().requestRestore(id)
@@ -864,7 +998,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error(`[pi] 会话 ${id} 打开失败（保持当前会话）`, e)
       }
     },
-    [actorRef, hydratePiMessages, refreshThreads],
+    [actorRef, hydratePiMessages, refreshThreads, resetSessionScopedBridges],
   )
 
   const threadListAdapter = {
@@ -878,6 +1012,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actorRef.send({ type: 'RESET' })
         setCurrentThreadId(null)
         await refreshThreads()
+        resetSessionScopedBridges(null)
         // 无活动会话——分支条/fork 点投影清空（refresh 命中 no active
         // session 域状态，静默清投影）
         branchBridge.getState().requestRefresh()
@@ -917,6 +1052,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           await invoke('pi_discard_session')
           actorRef.send({ type: 'RESET' })
           setCurrentThreadId(null)
+          resetSessionScopedBridges(null)
           // 无活动会话——分支条/fork 点投影清空（同 New Chat 语义）
           branchBridge.getState().requestRefresh()
         }
@@ -942,6 +1078,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // send 产出 content [{type:'image', image: dataURL}]，onNew 据此
       // 组 POST images 与乐观消息 image part
       attachments: imageAttachmentAdapter,
+      // 朗读（read-aloud 元素）：带 boundary 进度的 Web Speech 适配器——
+      // 无语音引擎环境为 undefined（capabilities.speech=false，UI 钮隐藏）
+      ...(speechAdapter ? { speech: speechAdapter } : {}),
     },
     // 压缩横幅 / 中断态投影（机器 context 的 JSON 快照）
     state: { compaction, interrupted },
@@ -995,6 +1134,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       // 错误即错误：endpoint 未就绪直接抛错——消息不装作已发送
       if (!endpointRef.current) throw new Error('[agui] endpoint 未就绪，消息未发送')
+      // run 进行中 → 入队（message-queue 语义，对应 pi steering/follow_up
+      // 的 one-at-a-time 排队模式）：pi prompt 持锁跨整个 run，立即 POST
+      // 只会撞锁。排队消息不进轮次投影（乐观 user 消息在出队发送时才
+      // 出现）——队列项本身在 MessageQueue 面板可见、可删；run 收尾后由
+      // drainQueue 按序发出。
+      if (actorRef.getSnapshot().matches('streaming')) {
+        sessionQueue.getState().enqueue({
+          id: `queued-${++queuedSeq}`,
+          text,
+          ...(images.length > 0 ? { images, imageDataUrls } : {}),
+        })
+        return
+      }
       actorRef.send({
         type: 'USER_SUBMIT',
         text,
