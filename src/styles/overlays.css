@@ -221,6 +221,54 @@
 
 .set-select:focus { border-color: var(--fl-accent); }
 
+/* 结构化字段行（压缩/重试段）：等宽键名列 + 控件列 */
+.set-field {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.set-field-label {
+  color: var(--text-2);
+  flex: 0 0 11rem;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.set-field-control {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.set-field-control > .set-select { width: 100%; }
+
+.set-field-note {
+  color: var(--text-4);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 数字输入（框形对齐 set-select；宽度吃满控件列） */
+.set-input {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  box-sizing: border-box;
+  color: var(--text);
+  font-size: 12px;
+  height: 28px;
+  min-width: 0;
+  outline: none;
+  padding: 0 8px;
+  width: 100%;
+}
+
+.set-input:focus { border-color: var(--fl-accent); }
+
 /* 提供方凭据行：组上下分隔线（.zone-rail-group 同系令牌） */
 .set-rows {
   border-bottom: 1px solid var(--stroke-soft);

@@ -1,6 +1,11 @@
 /**
- * 全局设置浮层（pi-integration.md §7-7 设置页接线，MVP 四段：模型 /
- * 提供方凭据 / 高级·原始配置 / 关于）。
+ * 全局设置浮层（pi-integration.md §7-7 设置页接线，分段：模型 /
+ * 提供方凭据 / 压缩·compaction / 重试·retry / 高级·原始配置 / 关于）。
+ * 结构化段只收录 pi Config 实锤字段——键名/类型/默认值逐项核对 vendor
+ * pi_agent_rust/src/config.rs（见各段注释的行号）；Config 没有的配置面
+ * （system_prompt / append_system_prompt 是 CLI/SDK 参数非 settings.json
+ * 字段；工具开关的真实机制是 tools.loadMode 自由映射）不造 UI，留原始
+ * JSON 段。
  *
  * 配置真相 = pi 自己的配置文件（§5）：settings.json / models.json 经
  * pi_get_settings / pi_set_models_config 管理——**nested 对象整体替换
@@ -15,7 +20,7 @@
  * z 130（overlays.css .set-overlay）才盖得住。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { XIcon } from 'lucide-react'
@@ -89,6 +94,264 @@ function readDefaultModel(doc: SettingsDoc): { provider: string; modelId: string
   return null
 }
 
+// ── 结构化段（压缩/重试）共用原语 ─────────────────────────────────────
+//
+// 键名实锤（vendor pi_agent_rust/src/config.rs）：Config 无 rename_all，
+// serde 序列化写盘 = 字段名的 snake_case（reserve_tokens 等，config.rs:
+// 359-371/380-404），camelCase 只是读取别名（#[serde(alias)]）。因此写
+// 文档一律用 canonical snake_case；文档里已有别名形式则原地更新（与上方
+// DEFAULT_PROVIDER_KEYS 同策略，避免同字段双形式并存——serde 对同名两键
+// 取文档序靠后者，行为含混）。未设置的键 = pi 内置默认（Config 全字段
+// Option，JSON null 与缺键同为 None）。
+
+const U32_MAX = 4294967295
+/** u64 字段在 JS 侧以安全整数封顶（超过即失去整数精度）。 */
+const SAFE_U64_MAX = 9007199254740991
+
+/** 压缩段键组（config.rs:359-371 CompactionSettings + 顶层
+    compaction_mode，config.rs:231-234——该键无 camelCase 别名，只认
+    snake_case）。 */
+const K_ENABLED = ['enabled'] as const
+const K_RESERVE_TOKENS = ['reserve_tokens', 'reserveTokens'] as const
+const K_KEEP_RECENT_TOKENS = ['keep_recent_tokens', 'keepRecentTokens'] as const
+const K_MODE = ['mode'] as const
+const K_COMPACTION_MODE = ['compaction_mode'] as const
+
+/** 重试段键组（config.rs:380-404 RetrySettings）。 */
+const K_MAX_RETRIES = ['max_retries', 'maxRetries'] as const
+const K_BASE_DELAY_MS = ['base_delay_ms', 'baseDelayMs'] as const
+const K_MAX_DELAY_MS = ['max_delay_ms', 'maxDelayMs'] as const
+const K_FAILOVER_COOLDOWN_SECS = [
+  'failover_cooldown_secs',
+  'failoverCooldownSecs',
+  'cooldownSecs',
+] as const
+const K_MAX_FAILOVERS_PER_TURN = ['max_failovers_per_turn', 'maxFailoversPerTurn'] as const
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+/** 字段读取结果：unset = 缺键/null（pi 默认生效）；ok = 文档里的原始值。 */
+type FieldRead = { state: 'unset' } | { state: 'ok'; raw: unknown }
+
+/** 读一个结构化字段（loc = 嵌套段名，null = 顶层键）。 */
+function readField(
+  doc: SettingsDoc,
+  loc: 'compaction' | 'retry' | null,
+  keys: readonly string[],
+): FieldRead {
+  const rec =
+    loc === null ? doc : isPlainObject(doc[loc]) ? (doc[loc] as SettingsDoc) : undefined
+  if (rec === undefined) return { state: 'unset' }
+  const key = keys.find((k) => k in rec)
+  if (key === undefined) return { state: 'unset' }
+  const raw = rec[key]
+  if (raw === null) return { state: 'unset' }
+  return { state: 'ok', raw }
+}
+
+/** 按 [canonical, ...别名] 写/删一个键（value === undefined = 删键回默认）。 */
+function applyFieldToRecord(
+  rec: SettingsDoc,
+  keys: readonly string[],
+  value: unknown | undefined,
+): void {
+  const key = keys.find((k) => k in rec) ?? keys[0]
+  if (value === undefined) delete rec[key]
+  else rec[key] = value
+}
+
+/** 控件视图：unset（显示默认占位）/ set（文档值）/ invalid（文档里该键
+    类型不符——pi 反序列化会拒绝整份文档，如实显示不兜底）。 */
+type FieldView<T> =
+  | { kind: 'unset' }
+  | { kind: 'set'; value: T }
+  | { kind: 'invalid'; raw: unknown }
+
+function boolView(read: FieldRead): FieldView<boolean> {
+  if (read.state === 'unset') return { kind: 'unset' }
+  if (typeof read.raw === 'boolean') return { kind: 'set', value: read.raw }
+  return { kind: 'invalid', raw: read.raw }
+}
+
+function numView(read: FieldRead): FieldView<number> {
+  if (read.state === 'unset') return { kind: 'unset' }
+  if (typeof read.raw === 'number' && Number.isInteger(read.raw)) {
+    return { kind: 'set', value: read.raw }
+  }
+  return { kind: 'invalid', raw: read.raw }
+}
+
+function enumView(read: FieldRead, allowed: readonly string[]): FieldView<string> {
+  if (read.state === 'unset') return { kind: 'unset' }
+  if (typeof read.raw === 'string' && allowed.includes(read.raw)) {
+    return { kind: 'set', value: read.raw }
+  }
+  return { kind: 'invalid', raw: read.raw }
+}
+
+/** 串行写入队列的一笔改动（见 SettingsOverlay 内 drainWrites）。 */
+interface StructuredWriteJob {
+  ui: 'compaction' | 'retry'
+  loc: 'compaction' | 'retry' | null
+  keys: readonly string[]
+  value: unknown | undefined
+  savedMsg: string
+  done: () => void
+}
+
+/** 在 base 上施加一笔结构化键改动（不改 base）。段存在但不是 object →
+    err（pi 侧校验也会拒绝，这里给出可读消息）；否则返回新文档。 */
+function applyStructuredMutation(
+  base: SettingsDoc,
+  loc: 'compaction' | 'retry' | null,
+  keys: readonly string[],
+  value: unknown | undefined,
+): { ok: SettingsDoc } | { err: string } {
+  const doc: SettingsDoc = { ...base }
+  if (loc === null) {
+    applyFieldToRecord(doc, keys, value)
+    return { ok: doc }
+  }
+  const existing = doc[loc]
+  if (value === undefined && existing === undefined) {
+    return { ok: doc } // 段不存在 = 全默认，无可删（幂等写）
+  }
+  if (existing !== undefined && !isPlainObject(existing)) {
+    return { err: `${loc} 段不是 JSON object——先在「高级 · 原始配置」修正后再改此设置` }
+  }
+  const obj: SettingsDoc = isPlainObject(existing) ? { ...existing } : {}
+  applyFieldToRecord(obj, keys, value)
+  if (Object.keys(obj).length === 0) delete doc[loc]
+  else doc[loc] = obj
+  return { ok: doc }
+}
+
+/** 结构化字段行：等宽键名 + 控件列（控件下可带说明/错误）。 */
+function SetField({ name, note, children }: { name: string; note?: string; children: ReactNode }) {
+  return (
+    <div className="set-field">
+      <span className="set-field-label">{name}</span>
+      <div className="set-field-control">
+        {children}
+        {note !== undefined && <span className="set-field-note">{note}</span>}
+      </div>
+    </div>
+  )
+}
+
+/** 类型不符的当前值——pi 会拒绝整份文档，如实显示（禁止兜底）。 */
+function SetInvalidNote({ raw, expect }: { raw: unknown; expect: string }) {
+  return (
+    <div className="set-err">
+      当前值 {JSON.stringify(raw)} 不是{expect}——pi 会拒绝该文档；请先在「高级 · 原始配置」修正。
+    </div>
+  )
+}
+
+/** 三态布尔：未设置（删键，pi 默认生效）/ 启用 / 禁用。 */
+function SetBoolField({ read, unsetLabel, onWrite }: {
+  read: FieldRead
+  unsetLabel: string
+  onWrite: (value: boolean | undefined) => Promise<void>
+}) {
+  const view = boolView(read)
+  return (
+    <>
+      <select
+        className="set-select"
+        onChange={(e) => {
+          const v = e.target.value
+          void onWrite(v === '' ? undefined : v === 'true')
+        }}
+        value={view.kind === 'set' ? (view.value ? 'true' : 'false') : ''}
+      >
+        <option value="">{unsetLabel}</option>
+        <option value="true">启用</option>
+        <option value="false">禁用</option>
+      </select>
+      {view.kind === 'invalid' && <SetInvalidNote expect="布尔值" raw={view.raw} />}
+    </>
+  )
+}
+
+/** 非负整数输入：草稿态本地保存（受控输入每击写盘 + IPC 回写会吃字），
+    落盘成功或失败后回显文档值。空文本 = 删键回默认；越界/非整数 = 不写
+    入，错误可见。 */
+function SetNumField({ read, max, placeholder, onWrite, onReject }: {
+  read: FieldRead
+  max: number
+  placeholder: string
+  onWrite: (value: number | undefined) => Promise<void>
+  onReject: (message: string) => void
+}) {
+  const view = numView(read)
+  const committed = view.kind === 'set' ? String(view.value) : ''
+  const [draft, setDraft] = useState<string | null>(null)
+  return (
+    <>
+      <input
+        className="set-input"
+        max={max}
+        min={0}
+        onChange={(e) => {
+          const text = e.target.value
+          setDraft(text)
+          if (text.trim() === '') {
+            void onWrite(undefined).then(() => setDraft(null))
+            return
+          }
+          const n = Number(text)
+          if (!Number.isInteger(n) || n < 0 || n > max) {
+            onReject(`「${text}」须为 0–${max} 的整数，未写入`)
+            return
+          }
+          void onWrite(n).then(() => setDraft(null))
+        }}
+        placeholder={placeholder}
+        step={1}
+        type="number"
+        value={draft ?? committed}
+      />
+      {view.kind === 'invalid' && <SetInvalidNote expect="整数" raw={view.raw} />}
+    </>
+  )
+}
+
+/** 枚举选择：未设置（删键回默认）/ 已知取值。 */
+function SetEnumField({ read, options, unsetLabel, onWrite }: {
+  read: FieldRead
+  options: { label: string; value: string }[]
+  unsetLabel: string
+  onWrite: (value: string | undefined) => Promise<void>
+}) {
+  const view = enumView(
+    read,
+    options.map((o) => o.value),
+  )
+  return (
+    <>
+      <select
+        className="set-select"
+        onChange={(e) => {
+          const v = e.target.value
+          void onWrite(v === '' ? undefined : v)
+        }}
+        value={view.kind === 'set' ? view.value : ''}
+      >
+        <option value="">{unsetLabel}</option>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {view.kind === 'invalid' && <SetInvalidNote expect="已知枚举值" raw={view.raw} />}
+    </>
+  )
+}
+
 export function SettingsOverlay({ onClose }: { onClose: () => void }) {
   // Esc 关闭（escape-layers overlay 层=40）：拖拽层（50）在拖拽中更高，
   // Esc 只中止拖拽不关浮层；编辑模式（20）更低，浮层开着时 Esc 不退编辑模式。
@@ -123,6 +386,159 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
   const [settingsSaved, setSettingsSaved] = useState<string | null>(null)
   const [modelsConfigSaved, setModelsConfigSaved] = useState<string | null>(null)
   const [modelSaved, setModelSaved] = useState<string | null>(null)
+  const [compactionSaved, setCompactionSaved] = useState<string | null>(null)
+  const [compactionError, setCompactionError] = useState<string | null>(null)
+  const [retrySaved, setRetrySaved] = useState<string | null>(null)
+  const [retryError, setRetryError] = useState<string | null>(null)
+  // 结构化段写入队列（见 drainWrites）：settingsTextRef = 渲染期同步的
+  // 最新已提交文本；writesRef.committed = 最后一笔成功落盘的完整文档。
+  const settingsTextRef = useRef<string | null>(null)
+  settingsTextRef.current = settingsText
+  const writesRef = useRef<{
+    queue: StructuredWriteJob[]
+    committed: SettingsDoc | null
+    running: boolean
+  }>({ queue: [], committed: null, running: false })
+
+  /** 结构化段写入泵：每次改动 = 一笔完整文档写盘。快速连续改动（数字
+      输入逐键、连点下拉）逐笔入队，每笔都基于「上一笔成功落盘的文档」
+      重新施加自己的键改动——Tauri async 命令不保证落盘顺序，直接并发
+      invoke 会互相覆盖（丢失更新）。失败路径（原始文档解析失败 / 高级段
+      有未保存手改 / 段形状不符 / invoke Err）一律段内错误条可见，不静默。 */
+  const drainWrites = useCallback(() => {
+    const w = writesRef.current
+    if (w.running || w.queue.length === 0) return
+    w.running = true
+
+    const failJob = (job: StructuredWriteJob, msg: string) => {
+      if (job.ui === 'retry') {
+        setRetrySaved(null)
+        setRetryError(msg)
+      } else {
+        setCompactionSaved(null)
+        setCompactionError(msg)
+      }
+    }
+
+    const step = (): void => {
+      const cur = writesRef.current
+      const job = cur.queue[0]
+      if (job === undefined) {
+        cur.running = false
+        return
+      }
+      // 基准文档：首笔 = 当前 settings 文本（保留高级段未保存的手改）；
+      // 后续 = 上一笔成功落盘的文档。原始文本与落盘文档内容不一致
+      // （高级段有未保存手改）→ 拒绝并可见报错，不得静默覆盖用户编辑。
+      let base: SettingsDoc
+      const parsed = parseJsonDoc(settingsTextRef.current ?? '', 'settings')
+      if ('error' in parsed) {
+        failJob(
+          job,
+          `settings 文档解析失败，未写入——先在「高级 · 原始配置」修正 JSON：${parsed.error}`,
+        )
+        cur.queue.shift()
+        job.done()
+        void Promise.resolve().then(step)
+        return
+      }
+      if (cur.committed === null) {
+        base = parsed.doc
+      } else if (JSON.stringify(parsed.doc) !== JSON.stringify(cur.committed)) {
+        failJob(job, '「高级 · 原始配置」有未保存的手动编辑——先保存或还原该段，再改此设置')
+        cur.queue.shift()
+        job.done()
+        void Promise.resolve().then(step)
+        return
+      } else {
+        base = { ...cur.committed }
+      }
+      const applied = applyStructuredMutation(base, job.loc, job.keys, job.value)
+      if ('err' in applied) {
+        failJob(job, applied.err)
+        cur.queue.shift()
+        job.done()
+        void Promise.resolve().then(step)
+        return
+      }
+      void invoke('pi_set_settings', { value: applied.ok })
+        .then(() => {
+          writesRef.current.committed = applied.ok
+          setSettingsText(JSON.stringify(applied.ok, null, 2))
+          setSettingsMissing(false)
+          setSettingsError(null)
+          // 文档被整体替换——其它段的“已保存”徽标按陈旧处理
+          setSettingsSaved(null)
+          setModelSaved(null)
+          setCompactionSaved(null)
+          setRetrySaved(null)
+          if (job.ui === 'retry') {
+            setRetrySaved(job.savedMsg)
+            setRetryError(null)
+          } else {
+            setCompactionSaved(job.savedMsg)
+            setCompactionError(null)
+          }
+        })
+        .catch((e: unknown) => {
+          console.error('[pi] settings.json 写入失败（结构化段）', e)
+          failJob(job, String(e))
+        })
+        .finally(() => {
+          writesRef.current.queue.shift()
+          job.done()
+          void Promise.resolve().then(step)
+        })
+    }
+    step()
+  }, [])
+
+  /** 入队一笔结构化写入。promise 永不 reject——失败已经段内错误条上屏，
+      resolve（成功或失败）供控件复位草稿态。 */
+  const enqueueStructuredWrite = useCallback(
+    (
+      ui: 'compaction' | 'retry',
+      loc: 'compaction' | 'retry' | null,
+      keys: readonly string[],
+      value: unknown | undefined,
+      savedMsg: string,
+    ): Promise<void> =>
+      new Promise<void>((resolve) => {
+        writesRef.current.queue.push({ ui, loc, keys, value, savedMsg, done: resolve })
+        drainWrites()
+      }),
+    [drainWrites],
+  )
+
+  const writeCompactionKey = useCallback(
+    (keys: readonly string[], value: unknown | undefined): Promise<void> =>
+      enqueueStructuredWrite('compaction', 'compaction', keys, value, '已写入 settings.json'),
+    [enqueueStructuredWrite],
+  )
+
+  const writeRetryKey = useCallback(
+    (keys: readonly string[], value: unknown | undefined): Promise<void> =>
+      enqueueStructuredWrite('retry', 'retry', keys, value, '已写入 settings.json'),
+    [enqueueStructuredWrite],
+  )
+
+  /** compaction_mode 是顶层键（config.rs:231-234，无别名，只认 snake_case），
+      反馈落在压缩段。 */
+  const writeCompactionMode = useCallback(
+    (value: unknown | undefined): Promise<void> =>
+      enqueueStructuredWrite('compaction', null, K_COMPACTION_MODE, value, '已写入 settings.json'),
+    [enqueueStructuredWrite],
+  )
+
+  const rejectNum = useCallback((ui: 'compaction' | 'retry', msg: string) => {
+    if (ui === 'retry') {
+      setRetrySaved(null)
+      setRetryError(msg)
+    } else {
+      setCompactionSaved(null)
+      setCompactionError(msg)
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -207,10 +623,13 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
       doc[existingKey(doc, DEFAULT_MODEL_KEYS)] = modelId
       void invoke('pi_set_settings', { value: doc })
         .then(() => {
+          writesRef.current.committed = doc
           setSettingsText(JSON.stringify(doc, null, 2))
           setSettingsMissing(false)
           setSettingsError(null)
           setModelSaved('默认模型已写入 settings.json（pi 创建新会话时读取）')
+          setCompactionSaved(null)
+          setRetrySaved(null)
         })
         .catch((e) => {
           console.error('[pi] 默认模型写入失败', e)
@@ -230,6 +649,7 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
     }
     void invoke('pi_set_settings', { value: settingsParsed.doc })
       .then(() => {
+        writesRef.current.committed = settingsParsed.doc
         setSettingsError(null)
         setSettingsSaved('已保存到 settings.json')
       })
@@ -389,6 +809,184 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
             )}
           </section>
 
+          {/* ── 压缩：compaction 结构化段（vendor config.rs:359-371
+              CompactionSettings + 顶层 compaction_mode，config.rs:231-234/
+              1085-1089；枚举值见 compaction.rs 的 serde 表示）——开关/
+              数字/枚举，逐笔组装完整文档整体写回 ── */}
+          <section className="set-section">
+            <span className="set-label">压缩 · Compaction</span>
+            <p className="set-hint">
+              上下文逼近模型上限时 pi 自动压缩历史。改动写入 settings.json 的{' '}
+              <span className="set-code">compaction</span> 对象与顶层{' '}
+              <span className="set-code">compaction_mode</span>；未设置的键 = pi
+              内置默认（enabled 启用、reserve_tokens 16384、
+              keep_recent_tokens 20000、mode text、compaction_mode summary）。
+            </p>
+            {settingsMissing && (
+              <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
+            )}
+            {compactionError !== null && <div className="set-err">{compactionError}</div>}
+            {settingsText === null ? (
+              settingsError === null ? (
+                <span className="set-file-missing">加载中…</span>
+              ) : (
+                <div className="set-err">{settingsError}</div>
+              )
+            ) : settingsParsed !== null && !('error' in settingsParsed) ? (
+              <>
+                <SetField name="enabled">
+                  <SetBoolField
+                    onWrite={(v) => writeCompactionKey(K_ENABLED, v)}
+                    read={readField(settingsParsed.doc, 'compaction', K_ENABLED)}
+                    unsetLabel="未设置（默认：启用）"
+                  />
+                </SetField>
+                <SetField name="reserve_tokens" note="压缩前预留的空间（tokens）">
+                  <SetNumField
+                    max={U32_MAX}
+                    onReject={(msg) => rejectNum('compaction', msg)}
+                    onWrite={(v) => writeCompactionKey(K_RESERVE_TOKENS, v)}
+                    placeholder="默认 16384"
+                    read={readField(settingsParsed.doc, 'compaction', K_RESERVE_TOKENS)}
+                  />
+                </SetField>
+                <SetField name="keep_recent_tokens" note="压缩时保留的近期对话（tokens）">
+                  <SetNumField
+                    max={U32_MAX}
+                    onReject={(msg) => rejectNum('compaction', msg)}
+                    onWrite={(v) => writeCompactionKey(K_KEEP_RECENT_TOKENS, v)}
+                    placeholder="默认 20000"
+                    read={readField(settingsParsed.doc, 'compaction', K_KEEP_RECENT_TOKENS)}
+                  />
+                </SetField>
+                <SetField name="mode" note="压缩输出的渲染方式">
+                  <SetEnumField
+                    onWrite={(v) => writeCompactionKey(K_MODE, v)}
+                    options={[
+                      { value: 'text', label: 'text（纯文本摘要）' },
+                      { value: 'snapcompact', label: 'snapcompact（紧凑快照）' },
+                    ]}
+                    read={readField(settingsParsed.doc, 'compaction', K_MODE)}
+                    unsetLabel="未设置（默认：text）"
+                  />
+                </SetField>
+                <SetField
+                  name="compaction_mode"
+                  note="自动压缩策略（顶层键，非 compaction 对象内）：summary = LLM 摘要；shake-first = 先无 LLM 收缩、仍超阈值才摘要；aggressive = 摘要且减半保留窗"
+                >
+                  <SetEnumField
+                    onWrite={writeCompactionMode}
+                    options={[
+                      { value: 'summary', label: 'summary（LLM 摘要）' },
+                      { value: 'shake-first', label: 'shake-first（先收缩）' },
+                      { value: 'aggressive', label: 'aggressive（减半保留窗）' },
+                    ]}
+                    read={readField(settingsParsed.doc, null, K_COMPACTION_MODE)}
+                    unsetLabel="未设置（默认：summary）"
+                  />
+                </SetField>
+              </>
+            ) : (
+              settingsParseError !== null && (
+                <div className="set-err">
+                  settings 文档解析失败——修正「高级 · 原始配置」里的 JSON 后才能使用此段：
+                  {settingsParseError}
+                </div>
+              )
+            )}
+            {compactionSaved !== null && <span className="set-saved">{compactionSaved}</span>}
+          </section>
+
+          {/* ── 重试：retry 结构化段（vendor config.rs:380-404 RetrySettings；
+              默认值取自 config.rs 访问器 997-1011/1112-1132）── */}
+          <section className="set-section">
+            <span className="set-label">重试 · Retry</span>
+            <p className="set-hint">
+              提供方请求瞬时失败（429/配额/过载）的自动重试。改动写入 settings.json
+              的 <span className="set-code">retry</span> 对象；未设置的键 = pi
+              内置默认（enabled 启用、max_retries 3、base_delay_ms 2000、
+              max_delay_ms 60000）。fallback_chains（跨模型故障转移链）等富结构
+              用「高级 · 原始配置」编辑。
+            </p>
+            {settingsMissing && (
+              <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
+            )}
+            {retryError !== null && <div className="set-err">{retryError}</div>}
+            {settingsText === null ? (
+              settingsError === null ? (
+                <span className="set-file-missing">加载中…</span>
+              ) : (
+                <div className="set-err">{settingsError}</div>
+              )
+            ) : settingsParsed !== null && !('error' in settingsParsed) ? (
+              <>
+                <SetField name="enabled">
+                  <SetBoolField
+                    onWrite={(v) => writeRetryKey(K_ENABLED, v)}
+                    read={readField(settingsParsed.doc, 'retry', K_ENABLED)}
+                    unsetLabel="未设置（默认：启用）"
+                  />
+                </SetField>
+                <SetField name="max_retries" note="重试次数上限">
+                  <SetNumField
+                    max={U32_MAX}
+                    onReject={(msg) => rejectNum('retry', msg)}
+                    onWrite={(v) => writeRetryKey(K_MAX_RETRIES, v)}
+                    placeholder="默认 3"
+                    read={readField(settingsParsed.doc, 'retry', K_MAX_RETRIES)}
+                  />
+                </SetField>
+                <SetField name="base_delay_ms" note="退避基数（毫秒）">
+                  <SetNumField
+                    max={U32_MAX}
+                    onReject={(msg) => rejectNum('retry', msg)}
+                    onWrite={(v) => writeRetryKey(K_BASE_DELAY_MS, v)}
+                    placeholder="默认 2000"
+                    read={readField(settingsParsed.doc, 'retry', K_BASE_DELAY_MS)}
+                  />
+                </SetField>
+                <SetField name="max_delay_ms" note="退避上限（毫秒）">
+                  <SetNumField
+                    max={U32_MAX}
+                    onReject={(msg) => rejectNum('retry', msg)}
+                    onWrite={(v) => writeRetryKey(K_MAX_DELAY_MS, v)}
+                    placeholder="默认 60000"
+                    read={readField(settingsParsed.doc, 'retry', K_MAX_DELAY_MS)}
+                  />
+                </SetField>
+                <SetField name="failover_cooldown_secs" note="故障转移后回切主模型前的冷却秒数">
+                  <SetNumField
+                    max={SAFE_U64_MAX}
+                    onReject={(msg) => rejectNum('retry', msg)}
+                    onWrite={(v) => writeRetryKey(K_FAILOVER_COOLDOWN_SECS, v)}
+                    placeholder="默认 300"
+                    read={readField(settingsParsed.doc, 'retry', K_FAILOVER_COOLDOWN_SECS)}
+                  />
+                </SetField>
+                <SetField
+                  name="max_failovers_per_turn"
+                  note="单轮最多故障转移次数（pi 运行期按 8 封顶）"
+                >
+                  <SetNumField
+                    max={U32_MAX}
+                    onReject={(msg) => rejectNum('retry', msg)}
+                    onWrite={(v) => writeRetryKey(K_MAX_FAILOVERS_PER_TURN, v)}
+                    placeholder="默认 8"
+                    read={readField(settingsParsed.doc, 'retry', K_MAX_FAILOVERS_PER_TURN)}
+                  />
+                </SetField>
+              </>
+            ) : (
+              settingsParseError !== null && (
+                <div className="set-err">
+                  settings 文档解析失败——修正「高级 · 原始配置」里的 JSON 后才能使用此段：
+                  {settingsParseError}
+                </div>
+              )
+            )}
+            {retrySaved !== null && <span className="set-saved">{retrySaved}</span>}
+          </section>
+
           {/* ── 高级：原始配置（settings.json / models.json 整体替换）── */}
           <section className="set-section">
             <span className="set-label">高级 · 原始配置</span>
@@ -412,6 +1010,10 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
                     setSettingsText(e.target.value)
                     setSettingsSaved(null)
                     setModelSaved(null)
+                    setCompactionSaved(null)
+                    setCompactionError(null)
+                    setRetrySaved(null)
+                    setRetryError(null)
                   }}
                   spellCheck={false}
                   value={settingsText}
