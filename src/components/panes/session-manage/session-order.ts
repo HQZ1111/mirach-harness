@@ -161,3 +161,29 @@ export function commitRecentMove(
   const nextVisible = moveBefore(visibleIds, sessionId, beforeId)
   return orderMapFromIds(mergeVisibleReorder(allIds, nextVisible))
 }
+
+/** arrayMove 结果的落点反解（dnd-kit reorderable-list 只回全量新序，提交
+ *  通道要 (sessionId, beforeId)）：首个差异下标 i——
+ *  - `nextIds[i + 1] === ids[i]` ⇒ 被拖项来自右侧（左移，moved = nextIds[i]）；
+ *  - 否则 ids 唯一 ⇒ 被拖项 = ids[i]（右移，窗口整体左移一位）。
+ *  相邻交换两种读法同解（moveBefore 落位结果一致），歧义无害。
+ *  无位移（等长且处处相等）或形状异常返回 null（调用方拒绝提交——
+ *  禁止兜底：宁可不动，不猜一个可能错的落点）。 */
+export function diffArrayMove(
+  ids: readonly string[],
+  nextIds: readonly string[],
+): { movedId: string; beforeId: string | null } | null {
+  if (ids.length !== nextIds.length || new Set(ids).size !== ids.length) return null
+  const at = ids.findIndex((id, index) => nextIds[index] !== id)
+  if (at < 0) return null
+  const movedId =
+    nextIds.length > at + 1 && nextIds[at + 1] === ids[at]
+      ? nextIds[at]!
+      : ids[at]!
+  const pos = nextIds.indexOf(movedId)
+  if (pos < 0) return null
+  return {
+    movedId,
+    beforeId: pos + 1 < nextIds.length ? nextIds[pos + 1]! : null,
+  }
+}

@@ -21,7 +21,7 @@ const silenceErrors = () => vi.spyOn(console, 'error').mockImplementation(() => 
 
 const resetStore = () => {
   localStorage.clear()
-  sessionManageStore.setState({ pinned: [], order: {}, groupsCollapsed: {}, drag: null })
+  sessionManageStore.setState({ pinned: [], order: {}, groupsCollapsed: {} })
 }
 
 describe('parsePinned / parseOrder（严格解析）', () => {
@@ -131,18 +131,6 @@ describe('sessionManageStore（zustand vanilla + localStorage 写通）', () => 
     expect(localStorage.getItem(ORDER_KEY)).toBeNull()
   })
 
-  it('setDrag / 清空：拖拽落点信号随会话更新（list 目标带组：pinned/recent）', () => {
-    const st = sessionManageStore.getState()
-    st.setDrag({ sessionId: 's1', target: { kind: 'list', group: 'recent', beforeId: 's2' } })
-    expect(sessionManageStore.getState().drag).toEqual({
-      sessionId: 's1',
-      target: { kind: 'list', group: 'recent', beforeId: 's2' },
-    })
-    st.setDrag({ sessionId: 's1', target: { kind: 'main-tab' } })
-    expect(sessionManageStore.getState().drag?.target).toEqual({ kind: 'main-tab' })
-    st.setDrag(null)
-    expect(sessionManageStore.getState().drag).toBeNull()
-  })
 })
 
 describe('分组折叠（groupsCollapsed + GROUPS_KEY 写通）', () => {

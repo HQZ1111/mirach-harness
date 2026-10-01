@@ -41,7 +41,7 @@ const resetStores = () => {
     manual: false,
     density: SIDEBAR_DEFAULT_DENSITY,
   })
-  sessionManageStore.setState({ pinned: [], order: {}, groupsCollapsed: {}, drag: null })
+  sessionManageStore.setState({ pinned: [], order: {}, groupsCollapsed: {} })
 }
 
 // ── 严格解析 ─────────────────────────────────────────────────────────────

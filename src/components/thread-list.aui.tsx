@@ -48,7 +48,6 @@ import {
 import {
   createContext,
   forwardRef,
-  Fragment,
   useContext,
   useEffect,
   useMemo,
@@ -62,6 +61,8 @@ import {
 import { ContextMenu as ContextMenuPrimitive, DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 import { useStore } from "zustand";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { branchBridge } from "@/components/assistant-ui/branch-store";
 import {
@@ -74,6 +75,7 @@ import {
 } from "@/components/panes/session-manage/session-actions";
 import { DeleteSessionDialog, RenameSessionDialog } from "@/components/panes/session-manage/session-dialogs";
 import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
+import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
 import { exportSessionHtml } from "@/components/panes/session-manage/session-export";
 import {
@@ -89,6 +91,7 @@ import {
 } from "@/components/panes/session-manage/session-display";
 import {
   commitRecentMove,
+  diffArrayMove,
   moveBefore,
   type SessionRowMeta,
 } from "@/components/panes/session-manage/session-order";
@@ -129,6 +132,8 @@ import {
 // ── 行拖拽提交的上下文（分区 → 组 → 提交通道）─────────────────────────────
 
 interface SessionListCtxValue {
+  /** 该行所在列表组（置顶/会话/搜索——dnd-kit 让位轮后仅存渲染语义；
+   *  拖拽机器不再消费它，搜索段无 bindings 即不可排）。 */
   group: SessionRowGroup | "search";
   /** 该行的展示元数据（SessionRowMeta 投影——figures/未读/归档/导出从
    *  这里读，行组件不再各自订阅 threadItems）。 */
@@ -146,13 +151,20 @@ export const ThreadList: FC = () => {
   // 密度（侧栏选项钮）：data-density 是行几何令牌（--tl-row-min-h 等，
   // panes.css）的载体，行规则只引用变量。
   const density = useSidebarView((s) => s.density);
+  // dnd-kit 传感器（hermes sidebar/index.tsx:506-509 逐值）：PointerSensor
+  // 距离阈值 6px（阈值内松开 = 普通点击，切会话/置顶手势照常）+
+  // KeyboardSensor（把手聚焦后空格拿起、方向键移动——坐标用 sortable 键盘序）。
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
 
   return (
     <ThreadListRoot className="flex h-full min-h-0 flex-col bg-(--surface)" data-density={density}>
       <div className="shrink-0 px-2 pb-1 pt-1">
         <ThreadListSearch aria-label="搜索会话" onValueChange={setSearch} value={search} />
       </div>
-      <ThreadListItems className="min-h-0 flex-1 overflow-y-auto pb-2" searchQuery={search} />
+      <ThreadListItems className="min-h-0 flex-1 overflow-y-auto pb-2" dndSensors={dndSensors} searchQuery={search} />
     </ThreadListRoot>
   );
 };
@@ -222,8 +234,11 @@ export const ThreadListRoot: FC<
 };
 
 export const ThreadListItems: FC<
-  ComponentPropsWithoutRef<"div"> & { searchQuery?: string }
-> = ({ className, searchQuery = "", ...props }) => {
+  ComponentPropsWithoutRef<"div"> & {
+    searchQuery?: string;
+    dndSensors?: ReturnType<typeof useSensors>;
+  }
+> = ({ className, dndSensors, searchQuery = "", ...props }) => {
   return (
     <div
       className={cn("flex flex-col gap-px", className)}
@@ -234,7 +249,7 @@ export const ThreadListItems: FC<
         <ThreadListSkeleton />
       </AuiIf>
       <AuiIf condition={(s) => !s.threads.isLoading}>
-        <ThreadListSections searchQuery={searchQuery} />
+        <ThreadListSections dndSensors={dndSensors} searchQuery={searchQuery} />
       </AuiIf>
     </div>
   );
@@ -939,18 +954,24 @@ const PinnedEmptyState: FC = () => (
   </div>
 );
 
-/** 拖拽插入符（本区机制：目标组/槽位由 session-drag 落点信号驱动）。 */
-const DropCaret: FC = () => (
-  <div
-    aria-hidden
-    className="bg-(--fl-accent) mx-2 h-0.5 shrink-0 rounded-full"
-    data-slot="aui_session-drop-caret"
-  />
-);
+type SortableRowBindings = ReturnType<typeof useSortableBindings>;
 
-const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
+/** 行级 dnd-kit 绑定（useSortable 必须在 SortableContext 子树内按行调用——
+ *  hermes 的形态是 SortableSidebarSessionRow 包装行组件（sessions-section
+ *  .tsx:651-653），本处因 assistant-ui 的 ItemByIndex 注入行而无从传 props，
+ *  用等价的 Provider 桥把 bindings 送进 ThreadListItem）。 */
+const SortableRowContext = createContext<SortableRowBindings | null>(null);
+
+const SortableRowBridge: FC<{ id: string; children: ReactNode }> = ({ children, id }) => {
+  const bindings = useSortableBindings(id);
+  return <SortableRowContext.Provider value={bindings}>{children}</SortableRowContext.Provider>;
+};
+
+const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<typeof useSensors> }> = ({
+  dndSensors,
+  searchQuery,
+}) => {
   const { mode, threadIds, metas, display, search } = useThreadDisplay(searchQuery);
-  const drag = useSessionManage((s) => s.drag);
   const groupsCollapsed = useSessionManage((s) => s.groupsCollapsed);
   const collapsedPinned = useSessionManage((s) => s.groupsCollapsed.pinned === true);
   const collapsedRecent = useSessionManage((s) => s.groupsCollapsed.recent === true);
@@ -976,9 +997,11 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
     void sessionUsageStore.getState().ensure(rows);
   }, [metas, rowMeta]);
 
-  // 拖拽落点提交通道（置顶区拖 = pinned 数组重排 hermes reorderPinned；
-  // 会话区拖 = 可见序改后拼回全量序——折叠桶藏行不丢排序；会话区拖拽
-  // 同时声明手动序 = hermes「dragging IS how you pick manual」）。
+  // 拖拽落点提交通道（dnd-kit ReorderableList 的 onReorder 全量新序经
+  // diffArrayMove 反解出 (sessionId, beforeId) 后走这里——置顶区 = pinned
+  // 数组重排 hermes reorderPinned；会话区 = 可见序改后拼回全量序（折叠桶
+  // 藏行不丢排序；会话区拖拽同时声明手动序 = hermes「drag IS how you pick
+  // manual」）。跨面投放（主会话页签）走 session-drag.ts 的 pointer 机器。
   const ctxValue = useMemo<SessionListCtxValue>(
     () => ({
       group: mode === "search" ? "search" : "recent",
@@ -1029,18 +1052,28 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
   const foldCollapsed =
     dividerKeys.length > 0 && dividerKeys.every((key) => groupsCollapsed[key] === true);
 
-  const renderRow = (id: string, group: SessionRowGroup | "search", key: string) => (
-    <SessionListContext.Provider
-      children={
-        <ThreadListPrimitive.ItemByIndex
-          index={indexOfId.get(id) ?? 0}
-          components={{ ThreadListItem }}
-        />
-      }
-      key={key}
-      value={{ ...ctxValue, group, meta: metasById.get(id) }}
-    />
-  );
+  // ReorderableList 只回全量新序（hermes 原语签名），提交通道要 (id,
+  // beforeId)——diffArrayMove 反解；无位移/形状异常不动作（禁止兜底）。
+  const commitReorder = (group: SessionRowGroup, ids: string[], nextIds: string[]) => {
+    const moved = diffArrayMove(ids, nextIds);
+    if (!moved) return;
+    ctxValue.commitListMove(moved.movedId, group, moved.beforeId);
+  };
+
+  const renderRow = (id: string, group: SessionRowGroup | "search", key: string) => {
+    const row = (
+      <ThreadListPrimitive.ItemByIndex index={indexOfId.get(id) ?? 0} components={{ ThreadListItem }} />
+    );
+    // 搜索段不挂 sortable（hermes 搜索结果段不接 ReorderableList）——
+    // 无 SortableRowBridge ⇒ ThreadListItem 无 bindings ⇒ 跨面拖照常、
+    // 列表内不排。
+    const body = group === "search" ? row : <SortableRowBridge id={id}>{row}</SortableRowBridge>;
+    return (
+      <SessionListContext.Provider key={key} value={{ ...ctxValue, group, meta: metasById.get(id) }}>
+        {body}
+      </SessionListContext.Provider>
+    );
+  };
 
   const query = searchQuery.trim();
 
@@ -1064,16 +1097,20 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
   }
 
   const { pinnedIds, rows } = display;
-  const dragList = drag?.target.kind === "list" ? drag.target : null;
   const sessionRows = rows.filter(
     (r): r is Extract<SessionListRow, { kind: "session" }> => r.kind === "session",
   );
-  const pinnedCaret = dragList?.group === "pinned" ? dragList.beforeId : undefined;
-  const recentCaret = dragList?.group === "recent" ? dragList.beforeId : undefined;
+  // dnd-kit 只见渲染序（hermes sessions-section.tsx:438 实锤注释：sortable
+  // 集合从 rows 派生而非从数据派生——喂未渲染的序会让落点对着用户没看的
+  // 列表算 index，把行放进错误的槽）。分隔线行不是条目，但照 hermes 留在
+  // SortableContext 的 children 里（dividers 不 transform，行在其间换位）。
+  const sortablePinnedIds = pinnedIds;
+  const sortableSessionIds = sessionRows.map((r) => r.id);
 
   return (
     <SessionListContext.Provider value={ctxValue}>
-      {/* 已置顶区（恒在；空态教 ⇧+点击；组内拖排 = pinned 数组序） */}
+      {/* 已置顶区（恒在；空态教 ⇧+点击；组内拖排 = pinned 数组序——
+          hermes：置顶区一个 ReorderableList，与会话区互不越组） */}
       <SectionHeader
         collapsed={collapsedPinned}
         headerKey="pinned"
@@ -1081,15 +1118,13 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
       />
       {!collapsedPinned &&
         (pinnedIds.length > 0 ? (
-          <>
-            {pinnedIds.map((id) => (
-              <Fragment key={id}>
-                {pinnedCaret === id && <DropCaret key={`pc-${id}`} />}
-                {renderRow(id, "pinned", `p-${id}`)}
-              </Fragment>
-            ))}
-            {pinnedCaret === null && <DropCaret key="pc-end" />}
-          </>
+          <ReorderableList
+            ids={sortablePinnedIds}
+            onReorder={(next) => commitReorder("pinned", sortablePinnedIds, next)}
+            sensors={dndSensors}
+          >
+            {pinnedIds.map((id) => renderRow(id, "pinned", `p-${id}`))}
+          </ReorderableList>
         ) : (
           <PinnedEmptyState />
         ))}
@@ -1114,24 +1149,24 @@ const ThreadListSections: FC<{ searchQuery: string }> = ({ searchQuery }) => {
             暂无会话
           </div>
         ) : (
-          rows.map((row) =>
-            row.kind === "divider" ? (
-              row.variant === "project" ? (
-                <WorkspaceDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+          <ReorderableList
+            ids={sortableSessionIds}
+            onReorder={(next) => commitReorder("recent", sortableSessionIds, next)}
+            sensors={dndSensors}
+          >
+            {rows.map((row) =>
+              row.kind === "divider" ? (
+                row.variant === "project" ? (
+                  <WorkspaceDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+                ) : (
+                  <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+                )
               ) : (
-                <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
-              )
-            ) : (
-              <Fragment key={`s-${row.id}`}>
-                {recentCaret === row.id && <DropCaret key={`rc-${row.id}`} />}
-                {renderRow(row.id, "recent", `r-${row.id}`)}
-              </Fragment>
-            ),
-          )
+                renderRow(row.id, "recent", `r-${row.id}`)
+              ),
+            )}
+          </ReorderableList>
         ))}
-      {!collapsedRecent && recentCaret === null && rows.length > 0 && (
-        <DropCaret key="rc-end" />
-      )}
     </SessionListContext.Provider>
   );
 };
@@ -1247,7 +1282,8 @@ export const ThreadListItem: FC = () => {
   // 文件；非活动行/无落盘 user 消息 → 该项禁用）。
   const forkPoints = useStore(branchBridge, (s) => s.forkPoints);
   const ctx = useContext(SessionListContext);
-  const group: SessionRowGroup | "search" = ctx?.group ?? "recent";
+  // dnd-kit 行绑定（SortableRowBridge 提供；搜索段 = null ⇒ 不可排、跨面照拖）。
+  const sortable = useContext(SortableRowContext);
   // 行展示元数据（ThreadListSections 经 context 下发）——figures/时间戳/
   // 未读水位/导出路径从这里读，行组件不各自订阅 threadItems。
   const meta = ctx?.meta;
@@ -1414,14 +1450,21 @@ export const ThreadListItem: FC = () => {
     <ContextMenuPrimitive.Root>
       <ContextMenuPrimitive.Trigger asChild>
         <ThreadListItemPrimitive.Root
+          ref={sortable?.ref}
           className={cn(
             "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-(--tl-row-min-h,1.625rem) grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md pr-2 transition-colors focus-visible:outline-none",
+            // 拖起态逐字 hermes session-row.tsx:369——lifted 行盖过下层
+            // （z-10 + 不透明侧栏表面，「translucency let the rows below
+            // bleed through」的解法）+ grabbing 光标；压暗 0.45 由跨面
+            // pointer 机器 engage 时内联施加（session-drag.ts 实锤值）。
+            // hover:bg 也要同底色：拖起时指针必然悬在本行，基础的
+            // hover:bg-(--hover-wash)（半透明）会压过 bg-(--surface) 让下层
+            // 行渗出来（实测 computed bg rgba(0,0,0,.07)）——tailwind-merge
+            // 取后者，dragging 期间 hover 也不透。
+            sortable?.dragging && "z-10 cursor-grabbing bg-(--surface) hover:bg-(--surface)",
           )}
-          data-session-row-group={group}
           data-slot="aui_thread-list-item"
-          // 行标记（session-drag 的快照/候选识别按它找行；与 SESSION_ROW_ATTR
-          // 常量同串，改一处必须改另一处）
-          data-session-row-id={threadId}
+          style={sortable?.style}
           onClickCapture={(e) => {
             // 修饰键手势解析（hermes resolveSessionRowClick）：⇧ = 置顶；
             // ⌥+⇧ = 归档（客户端归档——重审计 #6 落地）；纯点击 = 恢复会话
@@ -1448,12 +1491,19 @@ export const ThreadListItem: FC = () => {
           }}
           onPointerDown={(e) => {
             if (!ctx) return;
+            // 双机器并行（hermes session-row.tsx:374-395 实锤）：同一
+            // pointerdown 同时起「跨面 pointer 会话」与「dnd-kit 列表排序」，
+            // 各管各的区域、互不仲裁——侧栏上只有排序有目标（pointer 机器
+            // 拒绝区），主会话页签上只有 pointer 机器有目标。释放落在谁的
+            // 合法区就谁提交。把手/⋯ 动作簇自带监听，行壳不重复起拖
+            // （hermes :385 同款豁免选择器）。
+            if ((e.target as HTMLElement).closest("[data-reorder-handle], [data-row-actions]")) return;
             startSessionRowDrag(e, {
               sessionId: threadId,
-              group,
-              onCommitListMove: (beforeId) => ctx.commitListMove(threadId, group as SessionRowGroup, beforeId),
+              title: title ?? "New Chat",
               onCommitMainTab: () => ctx.commitMainTab(threadId),
             });
+            sortable?.dragHandleProps.onPointerDown?.(e);
           }}
         >
           <ThreadListItemPrimitive.Trigger
@@ -1463,11 +1513,23 @@ export const ThreadListItem: FC = () => {
             {/* lead：状态圆点，hover 与拖拽把手互换（hermes SidebarRowGrab）。
                 未读 = 成功绿实心（hermes --ui-success，DOT_VARIANTS.unread）；
                 归档行 = lead 位换归档字形（hermes：archived has no live
-                status to paint——archive glyph takes the dot's slot）。 */}
+                status to paint——archive glyph takes the dot's slot）。
+                sortable 行 = 把手（hermes chrome.tsx:324-364 SidebarRowGrab：
+                完整 dragHandleProps——role/tabIndex+键盘/指针激活器只归把手，
+                容器带键盘激活器会让 ⋯ 钮一聚焦就空格起拖、rename 对话框吞
+                空格 #83617；行壳只转发 onPointerDown）。data-reorder-handle
+                是行壳 onPointerDown 的豁免选择器。 */}
             <span
-              aria-hidden
-              className="relative grid size-3.5 shrink-0 place-items-center overflow-hidden"
+              {...(sortable?.dragHandleProps ?? {})}
+              aria-hidden={sortable ? undefined : true}
+              aria-label={sortable ? `拖动排序 ${title ?? "New Chat"}` : undefined}
+              className={cn(
+                "relative grid size-3.5 shrink-0 place-items-center overflow-hidden",
+                sortable && "group/handle cursor-grab touch-none active:cursor-grabbing",
+              )}
+              data-reorder-handle={sortable ? "" : undefined}
               data-slot="aui_thread-list-item-lead"
+              onClick={sortable ? (e) => e.stopPropagation() : undefined}
             >
               {isArchived ? (
                 <ArchiveIcon className="text-(--text-4) size-3 transition-opacity group-hover/row:opacity-0" />

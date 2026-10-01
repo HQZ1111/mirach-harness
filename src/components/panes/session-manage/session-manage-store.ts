@@ -1,6 +1,9 @@
 /**
- * 会话侧栏管理 store（置顶 + 手动顺序 + 行拖拽信号）。zustand vanilla
+ * 会话侧栏管理 store（置顶 + 手动顺序）。zustand vanilla
  * （createStore + useStore 订阅，照抄 branch-store / connection-store 模式）。
+ * 行拖拽信号字段已随 dnd-kit 让位轮删除——列表内提交走 thread-list 的
+ * 提交通道（commitRecentMove/moveBefore/claimManual），跨面高亮归
+ * session-drag.ts 的直写样式。
  *
  * 持久化（任务定稿键）：
  * - mirach.harness.sessions.pinned.v1 = sessionId 数组（置顶组）
@@ -112,15 +115,6 @@ export const parseGroups = (raw: string | null): Record<string, boolean> => {
   return out
 }
 
-/** 行拖拽的落点信号：列表插入符（组 + beforeId = 目标行 id，null = 该组
- *  尾部）或主会话页签。 */
-export interface SessionDragState {
-  readonly sessionId: string
-  readonly target:
-    | { readonly kind: 'list'; readonly group: SessionRowGroup; readonly beforeId: string | null }
-    | { readonly kind: 'main-tab' }
-}
-
 interface SessionManageState {
   pinned: readonly string[]
   order: Readonly<Record<string, number>>
@@ -128,7 +122,6 @@ interface SessionManageState {
    *  缺省 = 展开。hermes：pinsOpen/recentsOpen + $sidebarWorkspaceNodeOpen
    *  两张表合并为一张键值表）。 */
   groupsCollapsed: Readonly<Record<string, boolean>>
-  drag: SessionDragState | null
   togglePin(id: string): void
   setOrder(map: Readonly<Record<string, number>>): void
   /** 置顶区手动排序（hermes reorderPinned → setPinnedSessionOrder）：
@@ -136,7 +129,6 @@ interface SessionManageState {
   setPinnedOrder(ids: readonly string[]): void
   /** 折叠切换（分区/日期桶通用；写通 GROUPS_KEY）。 */
   setGroupCollapsed(id: string, collapsed: boolean): void
-  setDrag(drag: SessionDragState | null): void
   /** 清理已消失会话的键（列表非空才清，见文件头）。 */
   prune(existingIds: readonly string[]): void
 }
@@ -149,7 +141,6 @@ export const sessionManageStore = createStore<SessionManageState>((set, get) => 
   pinned: loadPinned(),
   order: loadOrder(),
   groupsCollapsed: loadGroups(),
-  drag: null,
   togglePin: (id) => {
     const next = togglePinId(get().pinned, id)
     set({ pinned: next })
@@ -169,7 +160,6 @@ export const sessionManageStore = createStore<SessionManageState>((set, get) => 
     set({ groupsCollapsed: next })
     safeSetItem(GROUPS_KEY, JSON.stringify(next))
   },
-  setDrag: (drag) => set({ drag }),
   prune: (existingIds) => {
     if (existingIds.length === 0) return
     const s = get()

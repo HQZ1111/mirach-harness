@@ -3,12 +3,14 @@
  * store/layout pinSession 语义适配版）。覆盖：置顶清理/切换（追加尾部）、
  * 手动顺序折回（mergeFreshByPosition：新会话不沉底、旧页不跳顶）、移动落点、
  * 序号表往返、可见序拼回全量序（mergeVisibleReorder）、拖拽落点提交
- * （commitRecentMove——折叠桶藏行保位）。
+ * （commitRecentMove——折叠桶藏行保位）、dnd-kit 全量新序的落点反解
+ * （diffArrayMove——穷举往返性质 + commitRecentMove 串通）。
  */
 import { describe, expect, it } from 'vitest'
 
 import {
   commitRecentMove,
+  diffArrayMove,
   mergeVisibleReorder,
   moveBefore,
   orderMapFromIds,
@@ -119,6 +121,80 @@ describe('mergeVisibleReorder（hermes order.ts 逐语义）', () => {
   it('折叠隐藏行保持原槽位，可见行按新序回填', () => {
     // 全量 [a, h, b, c]（h 在折叠桶里没渲染）；可见 [a, b, c] 拖成 [b, a, c]
     expect(mergeVisibleReorder(['a', 'h', 'b', 'c'], ['b', 'a', 'c'])).toEqual(['b', 'h', 'a', 'c'])
+  })
+})
+
+/** 测试本地 arrayMove（= @dnd-kit/sortable 的实现，不跨包耦合）：
+ *  dnd-kit onDragEnd 的产出形就是这个。 */
+const dndArrayMove = <T>(array: readonly T[], from: number, to: number): T[] => {
+  const copy = [...array]
+  const len = copy.length
+  const fromClamped = from < 0 ? Math.max(len + from, 0) : Math.min(from, len - 1)
+  const toClamped = to < 0 ? Math.max(len + to, 0) : Math.min(to, len - 1)
+  const [item] = copy.splice(fromClamped, 1)
+  copy.splice(toClamped, 0, item as T)
+  return copy
+}
+
+describe('diffArrayMove（dnd-kit 全量新序 → 提交通道落点反解）', () => {
+  it('右移（被拖项落在更右槽）：moved = ids[首差]，beforeId = 新序后继', () => {
+    expect(diffArrayMove(['a', 'b', 'c', 'd'], ['b', 'c', 'a', 'd'])).toEqual({
+      movedId: 'a',
+      beforeId: 'd',
+    })
+  })
+
+  it('左移（被拖项来自右侧）：moved = next[首差]，beforeId = 新序后继', () => {
+    expect(diffArrayMove(['a', 'b', 'c', 'd'], ['a', 'd', 'b', 'c'])).toEqual({
+      movedId: 'd',
+      beforeId: 'b',
+    })
+  })
+
+  it('移到尾部 → beforeId = null；移到头部 → beforeId = 原首项', () => {
+    expect(diffArrayMove(['a', 'b', 'c'], ['b', 'c', 'a'])).toEqual({ movedId: 'a', beforeId: null })
+    expect(diffArrayMove(['a', 'b', 'c'], ['c', 'a', 'b'])).toEqual({ movedId: 'c', beforeId: 'a' })
+  })
+
+  it('相邻交换两种读法同解（结果序一致）', () => {
+    const got = diffArrayMove(['a', 'b', 'c'], ['a', 'c', 'b'])
+    expect(got).not.toBeNull()
+    expect(moveBefore(['a', 'b', 'c'], got!.movedId, got!.beforeId)).toEqual(['a', 'c', 'b'])
+  })
+
+  it('无位移 / 形状异常 → null（拒绝提交，禁止兜底猜落点）', () => {
+    expect(diffArrayMove(['a', 'b'], ['a', 'b'])).toBeNull()
+    expect(diffArrayMove(['a', 'b'], ['a', 'c', 'b'])).toBeNull()
+    expect(diffArrayMove(['a', 'a'], ['a', 'a'])).toBeNull()
+  })
+
+  it('穷举往返性质：任意 from/to 的 arrayMove 结果反解回 moveBefore 必还原新序', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e']
+    for (let from = 0; from < ids.length; from++) {
+      for (let to = 0; to < ids.length; to++) {
+        const next = dndArrayMove(ids, from, to)
+        if (from === to) {
+          expect(diffArrayMove(ids, next)).toBeNull()
+          continue
+        }
+        const got = diffArrayMove(ids, next)
+        expect(got, `from=${from} to=${to}`).not.toBeNull()
+        expect(moveBefore(ids, got!.movedId, got!.beforeId), `from=${from} to=${to}`).toEqual(next)
+      }
+    }
+  })
+
+  it('与 commitRecentMove 串通：折叠桶藏行保位（dnd-kit 提交全链）', () => {
+    const all = ['a', 'h', 'b', 'c']
+    const visible = ['a', 'b', 'c']
+    const next = dndArrayMove(visible, 0, 2)
+    const got = diffArrayMove(visible, next)!
+    expect(commitRecentMove(all, visible, got.movedId, got.beforeId)).toEqual({
+      b: 0,
+      h: 1,
+      c: 2,
+      a: 3,
+    })
   })
 })
 

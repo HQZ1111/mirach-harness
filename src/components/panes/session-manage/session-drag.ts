@@ -1,57 +1,47 @@
 /**
- * 会话行拖拽会话（侧栏手动排序 + 投放主会话页签切换）。
+ * 会话行跨面拖拽（投放主会话页签切换）——列表内让位排序已交 dnd-kit
+ * （reorderable-list.tsx 照抄 hermes），本机器只负责「出侧栏」那一半。
+ *
+ * 双机器并行照抄 hermes（session-row.tsx:374-395 实锤）：同一 pointerdown
+ * 起 dnd-kit 排序 + 本 pointer 会话，各管各的区域、互不仲裁——侧栏上只有
+ * 排序有目标（本机器拒绝），主区页签上只有本机器有目标（列表已松手）。
+ * 释放落点是谁的合法区，就谁提交。
  *
  * 机器照抄 layout/drag-session.ts 的 startDragSession（4px 阈值 / rAF 合帧 /
  * pointer capture / Esc 顶层逃生层 / engaged 后吞合成 click），独立实现——
- * startDragSession 的提示通道耦合 layout-store 的 DropHint（窗格投放形状，
- * DropOverlay 消费），侧栏插入符形状不同，不复用以免污染窗格 overlay。
+ * startDragSession 的提示通道耦合窗格 DropHint，不复用以免污染窗格 overlay。
  *
- * 视觉（DragOverlay 观感，不引 dnd-kit）：engage 起整行克隆浮层跟手
- * （session-drag-ghost.ts：尺寸/内容=原行快照、抓取点跟光标），原行隐藏
- * 占位防跳动——hermes dnd-kit 语义「原行消失、整行随光标、落点让位」
- * （落点指示=本机制的插入符，落下提交即让位）。
+ * 拖起视觉（hermes session-drag.ts:120 实锤）：engage 起源行内联
+ * opacity 0.45（「picked up」反馈）+ label chip ghost 跟手
+ * （lib/drag-ghost.ts，opacity 0.6）；行自身 z-10/不透明底/cursor-grabbing
+ * 由 dnd-kit isDragging 类负责（thread-list 行上）。
  *
  * 命中面（engage 时快照，拖拽中纯数学——无 elementsFromPoint）：
  * - 主会话页签：#flexlayout-tabbutton-<PRIMARY_PANE.main>（id 方案见
  *   flex-layout.tsx；拉伸头栏与普通页签按钮同 id 方案，都算命中面）→
  *   内嵌 accent 描边高亮 + 松手切换主线程（onCommitMainTab）；
- * - 侧栏列表插入符：候选 = 非置顶行（置顶组固定活跃降序，不参与排序；
- *   置顶行起拖只允许投主页签），被拖行自身除外 → beforeId（null = 尾部）；
- * - 其余（标题栏/分隔条/窗格内容）= 拒绝区（no-drop，松手不提交）。
+ * - 其余（侧栏列表——那里 dnd-kit 在排、标题栏/分隔条/窗格内容）= 拒绝区
+ *   （no-drop，松手不提交）。
  */
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
 import { PRIMARY_PANE } from '@/components/layout/pane-registry'
-import type { DragGhost } from '@/lib/drag-ghost'
+import { createDragGhost, type DragGhost } from '@/lib/drag-ghost'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
-
-import { sessionManageStore, type SessionDragState, type SessionRowGroup } from './session-manage-store'
-import { createRowDragGhost } from './session-drag-ghost'
 
 const DRAG_THRESHOLD_PX = 4
 const TAB_BUTTON_ID = 'flexlayout-tabbutton-'
 
-/** 行元素标记（ThreadListItem 的 Root 上挂，快照/候选识别用） */
-export const SESSION_ROW_ATTR = 'data-session-row-id'
-/** 行所在列表组（'pinned' | 'recent' | 'search'）——拖拽落点按组匹配：
- *  置顶区与会话区各自独立可排、互不越组（hermes 每区一个 ReorderableList）；
- *  搜索区不可排（hermes 搜索结果段不接 sortable）。 */
-export const SESSION_ROW_GROUP_ATTR = 'data-session-row-group'
+/** 拖起源行的压暗值（hermes session-drag.ts:120 `source?.style.setProperty
+ *  ('opacity', '0.45')` 逐字实锤——用户点名「拖出来的透明度不对」即此值）。 */
+const SOURCE_DIM_OPACITY = '0.45'
 
 export interface SessionRowDragSpec {
   sessionId: string
-  /** 被拖行所在组（落点候选只收同组行） */
-  group: SessionRowGroup | 'search'
-  /** 松手在列表插入符上（beforeId = 目标行 id，null = 该组尾部） */
-  onCommitListMove(beforeId: string | null): void
+  /** chip ghost 标签（hermes sessionLabel(payload) = 会话标题） */
+  title: string
   /** 松手在主会话页签上（切换主线程到该会话） */
   onCommitMainTab(): void
-}
-
-interface RowRect {
-  id: string
-  /** 行垂直中点（插入判定：y < mid = 插到它前面） */
-  mid: number
 }
 
 interface Rect {
@@ -98,26 +88,25 @@ function suppressDragClick(committed: boolean) {
   }
 }
 
-const sameTarget = (a: SessionDragState['target'] | null, b: SessionDragState['target'] | null): boolean =>
-  a === b ||
-  (a !== null &&
-    b !== null &&
-    a.kind === b.kind &&
-    (a.kind !== 'list' ||
-      b.kind !== 'list' ||
-      (a.beforeId === b.beforeId && a.group === b.group)))
-
 /**
- * 起一次会话行拖拽。阈值内松开 = 普通点击（切会话照常，机器不干预）；
- * 越阈值后落点与提交全由本会话接管，Esc 随时中止。
+ * 起一次会话行跨面拖拽。阈值内松开 = 普通点击（切会话照常，机器不干预）；
+ * 越阈值后落点与提交全由本会话接管，Esc 随时中止（dnd-kit 一侧的排序拖
+ * 由 PointerSensor 原生 Esc 取消——core AbstractPointerSensor.handleKeydown，
+ * 两边同一次按键各自回到静止态）。列表内排序不在这里——dnd-kit。
  */
 export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: SessionRowDragSpec) {
   if (e.button !== 0) return
 
-  // 行操作簇（⋯ 菜单钮，[data-row-actions]——hermes 同款豁免选择器）/
-  // 输入框 / 已打开的菜单：原生交互优先，不起拖。
+  // 把手（[data-reorder-handle]，自带 dnd-kit 完整监听）与行操作簇
+  // （⋯ 菜单钮 [data-row-actions]）/输入框/已打开的菜单：原生交互优先，
+  // 行壳不重复起拖（hermes session-row.tsx:385 同款豁免选择器）。
   const pressTarget = e.target as HTMLElement | null
-  if (pressTarget?.closest('[data-row-actions], input, textarea, [role="menu"], [role="dialog"]')) return
+  if (
+    pressTarget?.closest(
+      '[data-reorder-handle], [data-row-actions], input, textarea, [role="menu"], [role="dialog"]',
+    )
+  )
+    return
 
   const handle = e.currentTarget as HTMLElement
   const { pointerId } = e
@@ -128,17 +117,17 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   let engaged = false
   let releaseEscapeLayer: (() => void) | null = null
   let ghost: DragGhost | null = null
+  // 源行内联 opacity 的恢复快照（hermes restoreOpacity 语义：还原到原行
+  // 自身样式，不是硬写 ''）
   let restoreRowOpacity = ''
   let cursor: string | null = null
   let raf = 0
   let pending: { x: number; y: number } | null = null
 
-  // engage 快照：主页签矩形 + 同组行候选（拖拽中布局不重组，全程纯数学）
+  // engage 快照：主页签矩形（拖拽中布局不重组，全程纯数学）
   let mainTab: HTMLElement | null = null
   let mainRect: Rect | null = null
-  let candidates: RowRect[] = []
-  let listGroup: SessionRowGroup | null = null
-  let lastTarget: SessionDragState['target'] | null = null
+  let lastMainTab = false
 
   const setCursor = (value: string) => {
     if (cursor !== value) {
@@ -153,14 +142,15 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     else mainTab.style.removeProperty('box-shadow')
   }
 
-  const publish = (target: SessionDragState['target'] | null) => {
-    if (sameTarget(lastTarget, target)) return
-    if (lastTarget?.kind === 'main-tab') applyMainHighlight(false)
-    lastTarget = target
-    if (target?.kind === 'main-tab') applyMainHighlight(true)
-    sessionManageStore
-      .getState()
-      .setDrag(target === null ? null : { sessionId: spec.sessionId, target })
+  const publish = (overMainTab: boolean) => {
+    // 拒绝区（hermes resolveMove 返回 null 的等价面）：no-drop 光标，松手
+    // 什么都不提交——侧栏列表区正被 dnd-kit 排序占用，这里同样归拒绝区。
+    // 光标每帧对齐（setCursor 自带值变守卫；hermes startDragSession
+    // processMove 同款——hint 恒定时也要保证 engage→grabbing 起手值不丢）。
+    setCursor(overMainTab ? 'grabbing' : 'no-drop')
+    if (lastMainTab === overMainTab) return
+    lastMainTab = overMainTab
+    applyMainHighlight(overMainTab)
   }
 
   const engage = () => {
@@ -175,11 +165,12 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     setCursor('grabbing')
     document.body.style.userSelect = 'none'
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
-    // 整行克隆浮层跟手（DragOverlay 观感），原行隐藏占位防跳动——内联
-    // opacity 压过行类，恢复在 finish（commit/abort 同一条清场路径）。
+    // label chip 跟手（hermes ghost: { label: sessionLabel(payload) }）
+    ghost = createDragGhost(spec.title)
+    // 源行压暗 0.45 = 「picked up」反馈（hermes session-drag.ts:120 逐字；
+    // dnd-kit 一侧的行自身类负责 z-10/不透明底/cursor-grabbing）
     restoreRowOpacity = handle.style.opacity
-    handle.style.opacity = '0'
-    ghost = createRowDragGhost(handle, sx, sy)
+    handle.style.setProperty('opacity', SOURCE_DIM_OPACITY)
 
     mainTab = mainTabButton()
     const mr = mainTab?.getBoundingClientRect()
@@ -187,46 +178,10 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
       mr && mr.width > 0 && mr.height > 0
         ? { left: mr.left, top: mr.top, right: mr.right, bottom: mr.bottom }
         : null
-
-    // 插入候选 = 与拖拽行同组、同列表容器的其它行（被拖行自身除外——不能
-    // 插到自己旁边装作移动）。组间互不越界（hermes：每区一个 ReorderableList）；
-    // 搜索区不可排（listGroup 保持 null → 落点只剩主页签/no-drop）。
-    listGroup = spec.group === 'search' ? null : spec.group
-    const listEl = handle.closest('[data-slot="aui_thread-list-items"]')
-    const rowEls = listEl ? [...listEl.querySelectorAll<HTMLElement>(`[${SESSION_ROW_ATTR}]`)] : []
-    candidates =
-      listGroup === null
-        ? []
-        : rowEls
-            .map((el): RowRect | null => {
-              const id = el.dataset.sessionRowId
-              if (!id || id === spec.sessionId) return null
-              if (el.dataset.sessionRowGroup !== listGroup) return null
-              const r = el.getBoundingClientRect()
-              if (r.height === 0) return null
-              return { id, mid: r.top + r.height / 2 }
-            })
-            .filter((r): r is RowRect => r !== null)
   }
 
   const resolve = (x: number, y: number) => {
-    // 主会话页签优先（页签在布局里，与侧栏列表不相交，顺序无歧义）
-    if (mainRect && rectContains(mainRect, x, y)) {
-      publish({ kind: 'main-tab' })
-      setCursor('grabbing')
-      return
-    }
-
-    // 无可排组（搜索态 / 该区只有被拖行一行）：非页签区拒绝投放
-    if (listGroup === null || candidates.length === 0) {
-      publish(null)
-      setCursor('no-drop')
-      return
-    }
-
-    const beforeId = candidates.find((c) => y < c.mid)?.id ?? null
-    publish({ kind: 'list', group: listGroup, beforeId })
-    setCursor('grabbing')
+    publish(mainRect !== null && rectContains(mainRect, x, y))
   }
 
   const processMove = (x: number, y: number) => {
@@ -287,24 +242,23 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     if (engaged) {
       suppressDragClick(commit)
       applyMainHighlight(false)
-      sessionManageStore.getState().setDrag(null)
 
-      if (commit) {
-        if (lastTarget?.kind === 'list') spec.onCommitListMove(lastTarget.beforeId)
-        else if (lastTarget?.kind === 'main-tab') spec.onCommitMainTab()
-      }
+      if (commit && lastMainTab) spec.onCommitMainTab()
     }
   }
 
   const onUp = () => finish(true)
   const onCancel = () => finish(false)
 
-  // Esc = 拖拽独占的"不要了"：目标指示消失、什么都不提交（顶层逃生层，
-  // 低于它的编辑模式/浮层不再同时响应同一次 Esc）。
+  // Esc = 拖拽独占的"不要了"：高亮消失、什么都不提交（顶层逃生层，
+  // 低于它且守契约的编辑模式/浮层不再同时响应同一次 Esc）。
+  // 不 stopPropagation：dnd-kit PointerSensor 的 Esc 取消挂在 document 冒泡段
+  // （core AbstractPointerSensor.attach → documentListeners.add(Keydown)），
+  // 捕获段阻断会连排序侧的取消一起杀死——实测（CDP）捕获段 stop 时松手仍
+  // 提交换位，即此。排序侧的中止交给 dnd-kit 自己（onDragCancel 复原位）。
   const onKey = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape') {
       ev.preventDefault()
-      ev.stopPropagation()
       finish(false)
     }
   }
