@@ -1,11 +1,15 @@
 /**
  * 文件预览页签（右侧栏标签，不占文件树）：flexlayout factory 特例渲染，
  * 内容从节点 config.filePath 现读 fs_read_data_url（≤16MB）。
- * 图片直显；html 沙箱 iframe 渲染成网页；文本 pre；二进制提示。
+ * 图片直显；html 沙箱 iframe 渲染成网页；代码/文本文件按扩展名分流——
+ * 在语言映射表内走 CodePreview（Shiki 高亮 + 行号，超预算诚实降级纯文本），
+ * 未知扩展名纯文本 pre（不猜语言）；二进制提示；读失败错误可见。
  */
 import { useEffect, useState } from 'react'
 import type { TabNode } from 'flexlayout-react'
 
+import { CodePreview } from '@/components/preview/code-preview'
+import { shikiLanguageForFilename } from '@/components/preview/code-language'
 import { fsReadDataUrl } from '@/lib/fs'
 import { cn } from '@/lib/utils'
 
@@ -17,8 +21,9 @@ export function HermesPreviewPane({ node }: { node: TabNode }) {
   const filePath = cfg?.filePath ?? ''
   const name = filePath.split('/').pop() ?? filePath
   const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
+  const language = shikiLanguageForFilename(filePath)
   const [state, setState] = useState<
-    { kind: 'loading' } | { kind: 'text'; text: string } | { kind: 'image'; url: string } | { kind: 'html'; html: string } | { kind: 'binary' }
+    { kind: 'loading' } | { kind: 'text'; text: string } | { kind: 'image'; url: string } | { kind: 'html'; html: string } | { kind: 'binary' } | { kind: 'error'; message: string }
   >({ kind: 'loading' })
 
   useEffect(() => {
@@ -41,8 +46,11 @@ export function HermesPreviewPane({ node }: { node: TabNode }) {
           if (text.includes('\u0000')) setState({ kind: 'binary' })
           else setState({ kind: 'text', text })
         }
-      } catch {
-        if (!dead) setState({ kind: 'binary' })
+      } catch (error) {
+        // 禁止兜底：读失败 ≠ 二进制，错误原文可见（此前误标成"二进制文件"）。
+        const message = error instanceof Error ? error.message : String(error)
+        console.error('文件预览读取失败', filePath, error)
+        if (!dead) setState({ kind: 'error', message })
       }
     })()
     return () => {
@@ -68,10 +76,14 @@ export function HermesPreviewPane({ node }: { node: TabNode }) {
             title={name}
           />
         )}
-        {state.kind === 'text' && (
+        {state.kind === 'text' && language !== '' && <CodePreview language={language} text={state.text} />}
+        {state.kind === 'text' && language === '' && (
           <pre className="p-3 font-mono text-[0.75rem] leading-5 whitespace-pre-wrap break-all text-(--text-2)">
             {state.text}
           </pre>
+        )}
+        {state.kind === 'error' && (
+          <div className="p-3 text-xs text-destructive">文件读取失败：{state.message}</div>
         )}
         {state.kind === 'binary' && (
           <div className="p-3 text-xs text-(--text-4)">二进制文件，不支持预览</div>

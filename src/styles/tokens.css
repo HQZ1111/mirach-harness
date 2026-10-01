@@ -121,6 +121,22 @@
      引导线颜色用 tailwind.css 的 --color-border（两工程同在）。 */
   --filetree-row-font-size: 14px;             /* 行文字/标题字号（ZCode text-ui-base） */
 
+  /* ── 代码预览（code-preview.tsx，Shiki 高亮 + 行号槽；2026-10-01） ──
+     行号槽与代码行共用 --code-line-h 固定行高（逐行对齐锚；JS 侧
+     code-preview.tsx 的 LINE_PX 常量必须与它一致，hermes SOURCE_LINE_PX=20
+     同构）。 */
+  --code-font-size: 12px;                     /* 等宽代码字号（hermes 0.7rem 系） */
+  --code-line-h: 20px;                        /* 固定行高 */
+  --code-gutter-w: 36px;                      /* 行号槽宽（hermes w-9） */
+  --code-gutter-pad-r: 8px;                   /* 行号右距（hermes pr-2） */
+  --code-pad-x: 12px;                         /* 代码区左右内边距（hermes 0.625rem 系） */
+  --code-pad-y: 10px;                         /* 代码区上下内边距 */
+  --code-radius: 8px;                         /* 代码卡圆角（ZCode 代码卡观感） */
+  --code-bg: #f6f7f9;                         /* 代码卡底色（衬托白底的浅灰卡） */
+  --code-border: var(--stroke-soft);          /* 代码卡描边 */
+  --code-note-size: 12px;                     /* 超预算提示行字号 */
+  --code-btn-radius: 4px;                     /* 复制钮圆角 */
+
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被
      .flexlayout__layout 上的定义静默压掉） ────────────────────── */

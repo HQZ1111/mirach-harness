@@ -37,3 +37,90 @@
   height: 100%;
   overflow: hidden;
 }
+
+/* ── 代码预览（code-preview.tsx；Shiki 高亮 + 行号槽，
+     hermes styles.css 的 .preview-source-code 规则同构） ── */
+
+.cp-budget-note {
+  border-bottom: 1px solid var(--stroke-soft);
+  color: var(--text-3);
+  flex: none;
+  font-size: var(--code-note-size);
+  padding: var(--code-pad-y) var(--code-pad-x);
+}
+
+.cp-card {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: var(--code-radius);
+  flex: 1 1 0;
+  margin: var(--code-pad-y) var(--code-pad-x) var(--code-pad-x);
+  min-height: 0;
+  position: relative;
+}
+
+.cp-scroll {
+  height: 100%;
+  overflow: auto;
+}
+
+.cp-grid {
+  font-size: var(--code-font-size);
+  padding: var(--code-pad-y) var(--code-pad-x);
+}
+
+/* 行号槽：与代码行共用固定行高（对齐锚） */
+.cp-gutter {
+  color: var(--text-4);
+  min-width: var(--code-gutter-w);
+  padding-right: var(--code-gutter-pad-r);
+  text-align: right;
+  user-select: none;
+}
+
+.cp-ln {
+  font-variant-numeric: tabular-nums;
+  height: var(--code-line-h);
+  line-height: var(--code-line-h);
+}
+
+/* Shiki 产出（rs-root > pre.shiki > code > .line）：剥主题内联底色
+   （内联样式需 !important，hermes 同款）、每行钉进固定行盒——code 上的
+   display:grid 吸掉行间 \n 文本节点，行不双倍行距，与行号槽逐行对齐。 */
+.cp-shiki pre {
+  background: transparent !important;
+  margin: 0;
+  overflow: visible;
+  padding: 0;
+}
+
+.cp-shiki pre code {
+  display: grid;
+  min-width: max-content;
+}
+
+.cp-shiki pre code .line {
+  display: block;
+  height: var(--code-line-h);
+  line-height: var(--code-line-h);
+  white-space: pre;
+}
+
+.cp-shiki pre code .line:empty::before {
+  content: '\00a0';
+}
+
+/* 纯文本分块（超预算回退 / 语法包加载中的 Suspense fallback 共用）：
+   行高与高亮产物一致，换色不换布局。 */
+.cp-plain {
+  background: transparent;
+  margin: 0;
+  padding: 0;
+}
+
+.cp-plain code {
+  display: block;
+  line-height: var(--code-line-h);
+  min-width: max-content;
+  white-space: pre;
+}
