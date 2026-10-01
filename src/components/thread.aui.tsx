@@ -734,10 +734,6 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
               经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
           <CompactionBanner />
 
-          {/* 运行状态行（官方 thinking-indicator 元素）：正文未到时显示
-              "正在思考/正在使用 <tool>" + 耗时，正文流出即消失 */}
-          <ThreadThinkingIndicator />
-
           <div
             data-slot="aui_message-group"
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
@@ -756,6 +752,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
+            {/* 运行状态行（官方 thinking-indicator 元素）：思考前/思考中
+                （正文未到时）显示"正在思考/正在使用 <tool>" + 耗时——
+                放 composer 上方（用户视线处），正文流出即消失 */}
+            <ThreadThinkingIndicator />
             <RunErrorBar />
             <StoppedRunBanner />
             <ApprovalCards />
