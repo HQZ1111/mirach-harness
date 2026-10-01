@@ -4,11 +4,15 @@
  * fullReset）由引擎（FlexLayoutShell）以 props 注入。
  * 工具面照抄 hermes titlebar-controls.tsx：左栏/右栏 positional toggles +
  * flip 互换 + LayoutGlyph 布局编辑器。窗格的显隐/新建走各 zone 的「+」
- * （v2.1：标题栏窗格菜单移除）。
+ * （v2.1：标题栏窗格菜单移除）。齿轮钮开/关全局设置浮层（§7-7；
+ * SettingsOverlay portal 到 body——标题栏是 z-50 stacking context，
+ * 浮层不能渲染在本组件树内）。
  */
 
-import { ArrowLeftRight, LayoutTemplate, PanelLeft, PanelRight } from 'lucide-react'
+import { useState } from 'react'
+import { ArrowLeftRight, LayoutTemplate, PanelLeft, PanelRight, Settings } from 'lucide-react'
 
+import { SettingsOverlay } from '@/app/overlays/settings-overlay'
 import { useLayoutStore, toggleEditMode } from '@/store/layout-store'
 import { WindowControls } from './window-controls'
 
@@ -24,6 +28,8 @@ export function Titlebar({
   onFullReset: () => void
 }) {
   const editMode = useLayoutStore(s => s.editMode)
+  // 设置浮层开/关（本地 state 即可——hermes 无此物，§7-7 设置页入口）
+  const [settingsOpen, setSettingsOpen] = useState(false)
   return (
     <div className="app-titlebar">
       {/* 顶部拖拽带（tb-drag-strip）已由 flex-layout 的 titlebar-drag-band
@@ -68,6 +74,18 @@ export function Titlebar({
       >
         <LayoutTemplate size={15} strokeWidth={1.8} />
       </button>
+      {/* 设置（§7-7 设置页入口）：齿轮钮，点击开/关设置浮层（本地 state） */}
+      <button
+        className="tb-tool"
+        title="设置"
+        onClick={() => setSettingsOpen((v) => !v)}
+        type="button"
+      >
+        <Settings size={15} strokeWidth={1.8} />
+      </button>
+      {/* portal 到 body 的设置浮层（.set-overlay z 130）——渲染在 titlebar
+          组件树内会被 z-50 stacking context 压到 veil 之下 */}
+      {settingsOpen && <SettingsOverlay onClose={() => setSettingsOpen(false)} />}
       <WindowControls />
     </div>
   )
