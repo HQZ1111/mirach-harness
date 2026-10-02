@@ -2622,6 +2622,30 @@ value 限制）。406 用例。
   程序化序列有自己的 pinAfterLayout 机制，中途量测会写中间态。教训：
   **"旧渲染"是好是坏取决于问题**——对量测折叠高度是坑，对"关闭前状态
   快照"恰是唯一正确时刻。
+- **十四轮（e38ce7d，用户"没有任何变化"+指示参考 hermes）**：十三轮
+  的"自愈"被证伪——**程序化 CDP doAction 用裸对象 `{type,data}`，缺
+  `isAdjusting()` 方法，flexlayout Layout 的 onAfterAction 包装层调用
+  它抛 TypeError → 我的 onModelChange 整个没跑 → 程序化路径"350 保持"
+  是"什么都没跑"的假象**。真实鼠标点 ✕ 复现：左 350→**420**（顶满
+  max）。真凶（临时探针 dbg-sync/dbg-pin 数据流实锤）：①同步量测 ✓
+  （mem={350,746,700} 正确写入）；②定时器 applyRootWeights ✓（写
+  left 19.47=350——px[right]=420 是 files 塌缩后独占 VERT 列被自身
+  max=420 钳列，sync stackedFirst"堆叠第一个保留列限制"语义，几何
+  必然）；③**absorbSurplus 同帧串跑在 applyRootWeights 之后，非主栏
+  base 用 measured（此刻渲染还是 stale 的 420），px[left]=420 且
+  权重差 23.39 vs 19.47 > 0.05 过不了跳过阈值 → 把刚钉的 350 权重
+  覆盖回 420**。修复：absorbSurplus 非主栏 base=**mem**（与
+  applyRootWeights 同源，fallback measured；mem 由 measureRootPx 在
+  拖拽/resize/boot 维护、结构动作由同步量测维护）——hermes 声明式
+  "关列别列不动"的权重制等价物。单测 ③④ 补"量测已跑"记忆前置 +
+  beforeEach 重置 rootPxMem 防泄漏。CDP 真实点击终验：左 **350 保持**
+  ✓、主 1026 吃富余 ✓、右 420（files max 几何必然=hermes"列随
+  files 变窄"）。**教训**：①**CDP 程序化 doAction 必须用真工厂**
+  （Actions.deleteTab(id)）或真实鼠标——裸对象会在 flexlayout 内部
+  包装层炸掉且静默（异常只在 consoleAPICalled 里看得到）；②同帧
+  串跑的"钉回→兜底"两函数必须**同源取值**（都 mem 或都 measured），
+  混用=后写覆盖先写；③"验证通过"要找到生效机制的老教训在此升级：
+  **异常中断链路后"结果恰好正确"≠修复生效**。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
