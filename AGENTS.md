@@ -2407,6 +2407,32 @@ value 限制）。406 用例。
   一致；切换状态栏/切换标签/命令面板/设置全真生效；行/树/输入框/
   页签四不变面核对无混入。439 用例。
 
+### 侧栏重审计+机器人页+顶栏圆点（2026-10-02 深夜，多代理+宿主缝合）
+- **重审计落地**（用户质疑"不适用"潦草成立）：行右侧时间（SessionMeta
+  lastModifiedMs/timestamp 本来就有）、按工作区分组+选工作区建会话
+  （pi working_directory 透传+目录对话框）、created 排序、rowMeta
+  时间·词元数·成本（stats 懒拉单飞）、未读（last-seen 水位+全部已读）、
+  客户端归档、导出。真正不可行仅：live 状态桶/PR/多 profile/词元排序键。
+- **顶栏四钮改圆点**（用户定稿）：15px 四色（关闭 DC6E6E/最大化
+  CBDC6E/最小化 6E97DC/侧栏 6EDCA2）、上缘 25/右缘 50/间距 20 全令牌
+  （--win-dot-*）；侧栏圆点在窗口圆点组**最前**（最小化左边）；原
+  PanelRight 工具钮删除；双挂载坑（Titlebar 内两处 <WindowControls>）。
+- **右键三层严格化**：pane 分支删除——hermes 实锤 ZoneMenu 只包页签
+  条/竖轨/编辑遮罩（816 在 editMode 分支内），body 右键归 app 菜单；
+  ZoneMenu 砍自创四向分栏/最大化/重命名（hermes i18n zones 零命中）；
+  host/rename 死管道清。
+- **机器人页**：BotsPane/BotsDialog/bots-store（bot=SessionOptions 参数
+  包：system_prompt+model+cwd，本地 JSON 存）+ pi_create_bot_session
+  （create_session_opts 参数化：working_directory/model/system_prompt）
+  + pi_resources（skills/prompts/extensions/packages 只读列举）+ 入口条
+  （五项，无对等物弹诚实提示）。
+- **模型目录 hook**：useModelCatalog 加重载（零参=全状态/带选择器=T）。
+- 门禁：tsc 0 / vitest **457**（37 文件）/ cargo test **40**。
+- **教训**：①并行代理死在限额墙后，工作树是半成品交汇——接手前先
+  git status 全量枚举+跑门禁拿断面，再逐文件缝合；②"照抄"任务的
+  派单书必须附参考源码的**确切 file:line**（否则代理找不到 pi 位置/
+  漏抄系统层——app-context-menu 719 行系统就是派单书漏了出处才没抄）。
+
 ## 对标轮续（2026-10-02 深夜：终端/composer/代码高亮/预览）
 
 用户四条 UI 反馈 + 官方三页文档对照。测试 221→275（TS）+ 40（Rust）。
