@@ -2595,6 +2595,18 @@ value 限制）。406 用例。
   必须显式钉回而非信赖旧权重**；②CDP 量实际渲染宽前用 `m.toJson()
   .layout.children`（不是 `j.children`）拿到模型 children；visitNodes
   实测在本会话因 model setup 时机不返回 TabNode——以 toJson 为准。
+- **十二轮（c351240，用户 2026-10-03）**：对话标签双行块**改 leading 形式**
+  ——用户："项目名和会话名往左边放，参考左栏会话列表中 logo 放的形式；
+  标签怎么没有了"。改动：①`onRenderTab` 删 region='main' 的 content
+  替换（原 tab 名恢复——十轮把 content 换成 chip 导致原生标签消失）；
+  ②主区**单签拉伸头栏**（原生 strip 隐藏场景）`renderValues.leading`
+  追加 `<ChatTabLabel />`（与 fl-tab-sep 共存：fragment 包裹）；多页签
+  条不注入（页签名即会话名已够）。③CSS 改 static + align-self:stretch
+  + justify-content:center（拉伸头栏 align-items:flex-end 沉底布局下
+  chip 不被压扁、垂直居中）；max-width 40vw 防超长路径撑爆。CDP 实测：
+  chip x=369-586 贴 tab 左缘（359+10）、content "主会话" x=600 恢复、
+  pos=static ✓。教训：**替换 content 会吃掉原生标签**——跟标签共存的
+  装饰一律走 leading（hermes/RailLogoLeading 同款位置语义）。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
