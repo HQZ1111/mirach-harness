@@ -986,7 +986,7 @@ const SectionHeader: FC<{
       {/* 组头（用户定稿 2026-10-02 二轮）：15px 品牌色加粗——已置顶/会话/
           状态三种组头同形制（tokens --side-group-size）；工作区头独立 18px
           （--side-workspace-size）。 */}
-      <span className="text-(--fl-accent) text-(length:--side-group-size) font-bold">{label}</span>
+      <span className="text-(--fl-accent) text-(length:--side-group-size) font-normal">{label}</span>
       {collapsible && (
         <ChevronDownIcon
           aria-hidden
@@ -1000,7 +1000,7 @@ const SectionHeader: FC<{
   );
   return (
     <div
-      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-(--tl-head-pt,1.5rem)"
+      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-[var(--tl-head-pt,1.5rem)]"
       data-slot="aui_thread-list-section-header"
     >
       {collapsible ? (
@@ -1032,7 +1032,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-div-pt,0.75rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-[var(--tl-div-pt,0.5rem)] select-none"
       data-slot="aui_thread-list-date-divider"
     >
       <button
@@ -1070,7 +1070,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-ws-pt,1.5rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-[var(--tl-ws-pt,1.5rem)] select-none"
       data-slot="aui_thread-list-workspace-divider"
     >
       <button
@@ -1112,7 +1112,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey,
   const bucket = bucketKey.slice("s:".length) as SessionStatusBucket;
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-div-pt,0.75rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-[var(--tl-div-pt,0.5rem)] select-none"
       data-slot="aui_thread-list-status-divider"
     >
       <button
@@ -1665,7 +1665,7 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Root
           ref={sortable?.ref}
           className={cn(
-            "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-(--tl-row-min-h,1.625rem) grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-(--tl-row-pad-y,0.25rem) pr-2 transition-colors focus-visible:outline-none",
+            "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-[var(--tl-row-min-h,1.625rem)] grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-[var(--tl-row-pad-y,0.25rem)] pr-2 transition-colors focus-visible:outline-none",
             // 拖起态逐字 hermes session-row.tsx:369——lifted 行盖过下层
             // （z-10 + 不透明侧栏表面，「translucency let the rows below
             // bleed through」的解法）+ grabbing 光标；压暗 0.45 由跨面
