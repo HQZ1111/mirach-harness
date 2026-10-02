@@ -1,7 +1,8 @@
 /**
- * 无边框窗的窗口控制钮（Windows 形制：最小化/最大化还原/关闭）。
- * 从 flex-layout.tsx 拆出（hermes 无此物——无边框窗标配）。
- * 最大化态跟随窗口：isMaximated + onResized 在无边框窗上同样触发。
+ * 无边框窗的窗口控制圆点（用户定稿 2026-10-02：四钮改 20px 圆点——
+ * 关闭 DC6E6E / 最大化 CBDC6E / 最小化 6E97DC / 隐藏右栏 6EDCA2；
+ * 上缘 25、右缘 50 避开圆角、间距 20——全部令牌见 tokens.css 的
+ * --win-dot-* 块）。最大化态跟随窗口：isMaximized + onResized。
  * 纯浏览器直开（inTauri=false）渲染 null。
  */
 
@@ -9,7 +10,13 @@ import { useEffect, useState } from 'react'
 
 import { appWindow, inTauri } from '@/lib/tauri-window'
 
-export function WindowControls() {
+export function WindowControls({
+  onToggleSidebar,
+  sidebarCollapsed,
+}: {
+  onToggleSidebar?: () => void
+  sidebarCollapsed?: boolean
+}) {
   const [maximized, setMaximized] = useState(false)
   useEffect(() => {
     const win = appWindow
@@ -36,50 +43,42 @@ export function WindowControls() {
   }, [])
   if (!inTauri) return null
   return (
-    <>
-      <span className="tb-divider" />
-      <div className="win-controls">
+    <div className="win-dot-controls">
+      {/* 侧栏圆点：窗口圆点组内最前（最小化左边，同排同间距——用户定稿） */}
+      {onToggleSidebar && (
         <button
-          aria-label="最小化"
-          className="win-btn"
-          onClick={() => void appWindow?.minimize()}
-          title="最小化"
+          aria-label={sidebarCollapsed ? '打开右栏' : '隐藏右栏'}
+          className="win-dot"
+          data-dot-role="sidebar"
+          onClick={onToggleSidebar}
+          title={sidebarCollapsed ? '打开右栏' : '隐藏右栏'}
           type="button"
-        >
-          <svg aria-hidden fill="none" height="12" stroke="currentColor" strokeWidth="1.2" viewBox="0 0 12 12" width="12">
-            <path d="M1.5 6h9" />
-          </svg>
-        </button>
-        <button
-          aria-label={maximized ? '向下还原' : '最大化'}
-          className="win-btn"
-          onClick={() => void appWindow?.toggleMaximize()}
-          title={maximized ? '向下还原' : '最大化'}
-          type="button"
-        >
-          {maximized ? (
-            <svg aria-hidden fill="none" height="12" stroke="currentColor" strokeWidth="1.2" viewBox="0 0 12 12" width="12">
-              <rect height="7" width="7" x="1.5" y="3.5" />
-              <path d="M3.5 3.5v-2h7v7h-2" />
-            </svg>
-          ) : (
-            <svg aria-hidden fill="none" height="12" stroke="currentColor" strokeWidth="1.2" viewBox="0 0 12 12" width="12">
-              <rect height="8" width="8" x="2" y="2" />
-            </svg>
-          )}
-        </button>
-        <button
-          aria-label="关闭"
-          className="win-btn win-btn-close"
-          onClick={() => void appWindow?.close()}
-          title="关闭"
-          type="button"
-        >
-          <svg aria-hidden fill="none" height="12" stroke="currentColor" strokeWidth="1.2" viewBox="0 0 12 12" width="12">
-            <path d="M2 2l8 8M10 2l-8 8" />
-          </svg>
-        </button>
-      </div>
-    </>
+        />
+      )}
+      <button
+        aria-label="最小化"
+        className="win-dot"
+        data-dot-role="minimize"
+        onClick={() => void appWindow?.minimize()}
+        title="最小化"
+        type="button"
+      />
+      <button
+        aria-label={maximized ? '向下还原' : '最大化'}
+        className="win-dot"
+        data-dot-role="maximize"
+        onClick={() => void appWindow?.toggleMaximize()}
+        title={maximized ? '向下还原' : '最大化'}
+        type="button"
+      />
+      <button
+        aria-label="关闭"
+        className="win-dot"
+        data-dot-role="close"
+        onClick={() => void appWindow?.close()}
+        title="关闭"
+        type="button"
+      />
+    </div>
   )
 }

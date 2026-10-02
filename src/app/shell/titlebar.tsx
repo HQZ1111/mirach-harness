@@ -10,7 +10,7 @@
  */
 
 import { useState } from 'react'
-import { ArrowLeftRight, LayoutTemplate, PanelLeft, PanelRight, Settings } from 'lucide-react'
+import { ArrowLeftRight, LayoutTemplate, PanelLeft, Settings } from 'lucide-react'
 
 import { SettingsOverlay } from '@/app/overlays/settings-overlay'
 import { useLayoutStore, toggleEditMode } from '@/store/layout-store'
@@ -49,15 +49,12 @@ export function Titlebar({
       <button className="tb-tool" onClick={onMirror} title="左右互换 (Ctrl+\)" type="button">
         <ArrowLeftRight size={14} strokeWidth={1.8} />
       </button>
-      <button
-        className={`tb-tool${sideCollapsed.right ? ' tb-tool-off' : ''}`}
-        title={sideCollapsed.right ? '显示右栏' : '隐藏右栏'}
-        onClick={() => onToggleSide('right')}
-        type="button"
-      >
-        <PanelRight size={15} strokeWidth={1.8} />
-      </button>
-      <span className="tb-divider" />
+      {/* 圆点第四颗（隐藏/打开右栏，用户定稿 2026-10-02）——工具面原
+          PanelRight 钮删除（与圆点重复）；title 随收起态翻转 */}
+      <WindowControls
+        onToggleSidebar={() => onToggleSide('right')}
+        sidebarCollapsed={sideCollapsed.right}
+      />
       {/* hermes：LayoutGlyph 布局编辑器——点击开编辑模式（画布 veil +
           Layouts 卡片），mod+点击 = 全重置 */}
       <button
@@ -86,7 +83,6 @@ export function Titlebar({
       {/* portal 到 body 的设置浮层（.set-overlay z 130）——渲染在 titlebar
           组件树内会被 z-50 stacking context 压到 veil 之下 */}
       {settingsOpen && <SettingsOverlay onClose={() => setSettingsOpen(false)} />}
-      <WindowControls />
     </div>
   )
 }

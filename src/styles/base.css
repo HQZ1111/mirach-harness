@@ -83,31 +83,37 @@ body.in-browser { background: var(--surface); }
 
 .app-titlebar-btn:hover { background: rgba(0, 0, 0, 0.08); color: var(--text); }
 
-/* ── 自绘窗口控制钮（hermes 无此物——无边框窗标配） ── */
-.win-controls {
+/* ── 自绘窗口控制圆点（用户定稿 2026-10-02：四钮改 20px 圆点） ──
+   位置：绝对定位右上，距上缘 --win-dot-top(25)、右缘 --win-dot-right(50
+   避开 50px 圆角)；间距 --win-dot-gap(20)。色值 --win-dot-{close,maximize,
+   minimize,sidebar}（用户指定字面值）。悬停轻微放大反馈。 */
+.win-dot-controls {
   align-items: center;
   display: flex;
-  gap: 2px;
-  margin-left: 4px;
+  gap: var(--win-dot-gap);
+  position: absolute;
+  right: var(--win-dot-right);
+  top: var(--win-dot-top);
 }
 
-.win-btn {
-  align-items: center;
-  background: transparent;
+.win-dot {
+  background: var(--dot-color, var(--text-3));
   border: none;
-  border-radius: 6px;
-  color: var(--text-2);
+  border-radius: 50%;
   cursor: pointer;
-  display: flex;
-  height: 24px;
-  justify-content: center;
+  flex: none;
+  height: var(--win-dot-size);
   padding: 0;
-  width: 28px;
+  transition: transform 120ms ease;
+  width: var(--win-dot-size);
 }
 
-.win-btn:hover { background: var(--hover-wash); color: var(--text); }
-
-.win-btn-close:hover { background: #c42b1c; color: #fff; }
+.win-dot:hover { transform: scale(1.15); }
+.win-dot:active { transform: scale(0.92); }
+.win-dot[data-dot-role='close'] { --dot-color: var(--win-dot-close); }
+.win-dot[data-dot-role='maximize'] { --dot-color: var(--win-dot-maximize); }
+.win-dot[data-dot-role='minimize'] { --dot-color: var(--win-dot-minimize); }
+.win-dot[data-dot-role='sidebar'] { --dot-color: var(--win-dot-sidebar); }
 
 /* ── 标题栏工具钮（hermes TitlebarToolButton：icon ghost，opacity 表态） ── */
 .tb-tool {

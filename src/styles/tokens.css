@@ -206,3 +206,16 @@
   --flexlayout-color-border-tab-unselected: var(--tab-text);
   --flexlayout-color-border-tab-unselected-background: transparent;
 }
+
+/* ── 顶栏窗口圆点（用户定稿 2026-10-02：四钮改圆点，色值为用户指定字面值） ── */
+:root {
+  --win-dot-size: 15px;                       /* 圆点直径 */
+  --win-dot-gap: 20px;                        /* 圆点间距 */
+  --win-dot-top: 25px;                        /* 圆点行距窗上边缘 */
+  --win-dot-right: 50px;                      /* 距窗右边缘（避开 50px 圆角） */
+  --win-dot-left: 35px;                       /* 侧栏圆点距左边缘 */
+  --win-dot-close: #DC6E6E;                   /* 关闭 */
+  --win-dot-maximize: #CBDC6E;                /* 最大化 */
+  --win-dot-minimize: #6E97DC;                /* 最小化 */
+  --win-dot-sidebar: #6EDCA2;                 /* 隐藏/打开右栏 */
+}
