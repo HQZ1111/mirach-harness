@@ -10,9 +10,13 @@
  * harness 分工（与 hermes 的结构差异，仅一处）：capture 监听与三面裁定
  * （editable 原生 / owned 行树 Radix / pane 窗格菜单）留在 main.tsx——
  * 工程已有该层（context-menu-scope.ts，单测在案）；本文件持有 store +
- * 一份菜单 + 动作。scope='app' 分支调 openAppContextMenu(x,y)，本组件
+ * 一份菜单 + 动作。scope='app' 分支按落点分派：.flexlayout__tabset 内
+ * （页签 body 之外）→ pane-context-menu 的 ZoneMenu（openZoneContextMenuAt，
+ * hermes 的 strip 面）；其余落点调 openAppContextMenu(x,y)，本组件
  * 消费 store 渲染菜单（cursor 位置、受控 DropdownMenu 形态照抄 hermes：
  * 点击点上的零尺寸 fixed 锚 span + open 常开 + onOpenChange(false) 关闭）。
+ * 「切换标签」按 hermes toggleTargetZoneTabStrip 作用于单一目标分栏（资格
+ * 阶梯见 toggleTargetTabStrip）。
  *
  * hermes domSections/guestSections/terminalSections 三段在本工程的裁剪：
  * - guest 段：无 webview guest（预览 webview 未建）——整段不适用；
@@ -41,7 +45,7 @@
  *   的 requestActiveUpdate 无对应物（Tauri 无 updater 配置）→ 裁掉；
  *   第三段整段为空 → 不渲染该段与其分隔线。
  */
-import { Actions, TabSetNode, type Model } from 'flexlayout-react'
+import { Actions, TabNode, TabSetNode, type Model } from 'flexlayout-react'
 import { DropdownMenu as DropdownMenuPrimitive } from 'radix-ui'
 import { useEffect, useState, type FC } from 'react'
 import { createPortal } from 'react-dom'
@@ -51,6 +55,7 @@ import { SettingsOverlay } from '@/app/overlays/settings-overlay'
 import { toggleStatusbarVisible } from '@/app/shell/statusbar'
 import { CommandPalette, type PaletteCommand } from '@/components/assistant-ui/elements/command-palette'
 
+import { zoneTabsetFromDom } from './pane-context-menu'
 import { zoneConfigOf } from './pane-registry'
 
 // ── store（hermes store.ts 的 $contextMenu 同构：单份菜单，两个菜单永不
@@ -181,8 +186,9 @@ export const buildShellMenuSections = (): readonly AppMenuSection[] => [
     {
       // t.keybinds.actions['view.toggleTabStrip'] → hermes
       // toggleTargetZoneTabStrip（"the pointer-only way back to a hidden
-      // tab strip"）。hermes 作用于单一目标 zone；本工程 flexlayout 的
-      // enableTabStrip 是窗格级 → app 级 = 切换全部非轨分栏（runShellAction）
+      // tab strip"）。hermes 作用于单一目标 zone；本工程同构：右键点所在
+      // 分栏（资格阶梯见 toggleTargetTabStrip——点→活动分栏→主区分栏），
+      // runShellAction('shell-tabstrip')
       icon: 'layout-menubar',
       id: 'shell-tabstrip',
       label: '切换标签',
@@ -198,11 +204,14 @@ export const buildShellMenuSections = (): readonly AppMenuSection[] => [
   ],
 ]
 
-// ── 「切换标签」的纯规划（hermes toggleTargetZoneTabStrip 的 app 级等价物）
-//    hermes："Toggle against what is ON SCREEN"——任一目标分栏可见 → 全部
-//    隐藏；全部不可见 → 全部显示。轨（20px 导航轨，zoneConfigOf.track）与
-//    竖轨形态大栏（该栏存在轨；其分栏标签条由竖轨模式统管——constraints-sync
-//    wantStrip=!rail / 窗格菜单 stripLocked 同语义）不在切换面。 ───────────
+// ── 「切换标签」的纯规划（hermes toggleTargetZoneTabStrip 同构：作用于
+//    **右键点所在的单一目标分栏**，非全窗格——hermes tabTargetGroup 资格
+//    阶梯 hovered→active→main 的落点在 resolveStripTarget）。"Toggle
+//    against what is ON SCREEN"——目标可见 → 隐藏；不可见 → 显示（strip
+//    已隐藏的分栏，这是指针唯一的找回途径）。轨（20px 导航轨，
+//    zoneConfigOf.track）与竖轨形态大栏（该栏存在轨；其分栏标签条由竖轨
+//    模式统管——constraints-sync wantStrip=!rail / 窗格菜单 stripLocked
+//    同语义）不在切换面。 ─────────────────────────────────────────────────
 
 export interface TabStripSetSnapshot {
   id: string
@@ -216,12 +225,15 @@ export interface TabStripPatch {
   enableTabStrip: boolean
 }
 
-export const planTabStripToggle = (sets: readonly TabStripSetSnapshot[]): readonly TabStripPatch[] => {
+export const planTabStripToggle = (
+  targetId: string,
+  sets: readonly TabStripSetSnapshot[],
+): readonly TabStripPatch[] => {
+  const target = sets.find((s) => s.id === targetId)
+  if (!target || target.track) return []
   const railRegions = new Set(sets.filter((s) => s.track && s.region).map((s) => s.region as string))
-  const targets = sets.filter((s) => !s.track && !(s.region !== undefined && railRegions.has(s.region)))
-  if (targets.length === 0) return []
-  const next = targets.some((s) => s.stripVisible) ? false : true
-  return targets.filter((s) => s.stripVisible !== next).map((s) => ({ id: s.id, enableTabStrip: next }))
+  if (target.region !== undefined && railRegions.has(target.region)) return []
+  return [{ id: target.id, enableTabStrip: !target.stripVisible }]
 }
 
 /** 活动布局模型（flex-layout.tsx 的调试句柄，模型替换/卸载时随 React
@@ -251,13 +263,19 @@ const triggerNewChat = (): void => {
   trigger.click()
 }
 
-/** 切换标签：app 级 = 切换全部非轨分栏的标签条（纯规划 planTabStripToggle
- *  喂活动模型快照；updateNodeAttributes 随模型 JSON 持久化——下一次结构
- *  动作的 syncTabsetConstraints 会按 region 规则重铸，与窗格菜单的
- *  隐藏/显示标签同一生命周期）。无可切换分栏 = 错误可见。 */
-const toggleAllTabStrips = (): void => {
-  const model = activeLayoutModel()
-  if (!model) return
+/** 切换标签：作用于右键点所在分栏（hermes toggleTargetZoneTabStrip——
+ *  "the pointer-only way back to a hidden tab strip: right-clicking the
+ *  shell reaches this menu from anywhere, including a zone that has no
+ *  chrome left"）。目标分栏按 hermes tabTargetGroup 资格阶梯定位：
+ *  ①右键点所在 tabset（elementsFromPoint 沿命中栈找——app 菜单锚在右键点，
+ *  菜单面会盖住该点，栈里越过菜单层找页面落点）；②活动分栏
+ *  （getActiveTabset，hermes $activeTreeGroup）；③主区所在分栏（hermes
+ *  findGroupOfPane(tree,'workspace')）。快照在点击时刻现读（hermes "Toggle
+ *  against what is ON SCREEN"）；updateNodeAttributes 随模型 JSON 持久化
+ *  ——下一次结构动作的 syncTabsetConstraints 会按 region 规则重铸，与
+ *  窗格菜单的隐藏/显示标签同一生命周期。无目标 / 目标在切换面外（轨/
+ *  竖轨形态）= 错误可见（规矩 12）。 */
+const snapshotTabStripSets = (model: Model): TabStripSetSnapshot[] => {
   const sets: TabStripSetSnapshot[] = []
   model.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
@@ -269,7 +287,50 @@ const toggleAllTabStrips = (): void => {
       region: cfg?.region,
     })
   })
-  for (const patch of planTabStripToggle(sets)) {
+  return sets
+}
+
+const stripTargetFromPoint = (x: number, y: number): TabSetNode | undefined => {
+  for (const el of document.elementsFromPoint(x, y)) {
+    const setEl = el instanceof Element ? el.closest('.flexlayout__tabset') : null
+    if (!setEl) continue
+    const set = zoneTabsetFromDom(setEl)
+    // 停车轨不在切换面（与 planTabStripToggle 的 track 排除同语义），继续
+    // 沿命中栈找页面落点。
+    if (set && !zoneConfigOf(set)?.track) return set
+  }
+  return undefined
+}
+
+/** 资格阶梯回退梯级（hermes tabTargetGroup：active → workspace 主区）。
+ *  右键点在分栏外（标题栏/状态栏/分隔条——app 菜单的常驻开面）时 hover 梯
+ *  级必空，落到这两级。纯模型运算（node 单测在案）。 */
+export const stripTargetFallback = (model: Model): TabSetNode | undefined => {
+  const active = model.getActiveTabset()
+  if (active) return active
+  const ws = model.getNodeById('workspace')
+  if (ws instanceof TabNode) {
+    const parent = ws.getParent()
+    if (parent instanceof TabSetNode) return parent
+  }
+  return undefined
+}
+
+const toggleTargetTabStrip = (): void => {
+  const model = activeLayoutModel()
+  if (!model) return
+  const point = appContextMenuStore.getState().open
+  const target = (point ? stripTargetFromPoint(point.x, point.y) : undefined) ?? stripTargetFallback(model)
+  if (!target) {
+    console.error('[app-context-menu] 切换标签：无可定位的目标分栏')
+    return
+  }
+  const patches = planTabStripToggle(target.getId(), snapshotTabStripSets(model))
+  if (patches.length === 0) {
+    console.error('[app-context-menu] 切换标签：目标分栏不在切换面（轨/竖轨形态）', target.getId())
+    return
+  }
+  for (const patch of patches) {
     model.doAction(Actions.updateNodeAttributes(patch.id, { enableTabStrip: patch.enableTabStrip }))
   }
 }
@@ -286,7 +347,7 @@ export const runShellAction = (id: string): void => {
       toggleStatusbarVisible()
       return
     case 'shell-tabstrip':
-      toggleAllTabStrips()
+      toggleTargetTabStrip()
       return
     case 'shell-settings':
       openSettingsOverlay()

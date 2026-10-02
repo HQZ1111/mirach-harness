@@ -24,7 +24,7 @@ import { appWindow, inTauri } from '@/lib/tauri-window'
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
-import { PaneZoneMenu, type PaneMenuHost } from './pane-context-menu'
+import { PaneZoneMenu } from './pane-context-menu'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
 import { ZoneEditor } from './zone-editor'
@@ -350,6 +350,24 @@ export function FlexLayoutShell() {
   const adoptModel = useCallback((next: Model) => {
     modelRef.current = next
     setModel(next)
+  }, [])
+
+  // workspace 页签名跟随当前会话（hermes：页签名即会话名，"1 #2" 同款；
+  // 无名/无会话回「主会话」）。runtime 在 refreshThreads 末尾经 CustomEvent
+  // 播报（跨层最小耦合：layout 不 import assistant-ui）。
+  useEffect(() => {
+    const onTitle = (e: Event) => {
+      const detail = (e as CustomEvent<{ title?: string | null }>).detail
+      const m = modelRef.current
+      const node = m?.getNodeById('workspace')
+      if (!(node instanceof TabNode)) return
+      const name = (typeof detail?.title === 'string' && detail.title.length > 0 ? detail.title : '主会话')
+      if (node.getName() !== name) {
+        m!.doAction(Actions.updateNodeAttributes('workspace', { name }))
+      }
+    }
+    window.addEventListener('mirach:workspace-title', onTitle)
+    return () => window.removeEventListener('mirach:workspace-title', onTitle)
   }, [])
 
   // 折叠/隐藏后的配重重钉（hermes 声明式固定轨 / ZCode expandedSize 的
@@ -1507,21 +1525,8 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
   // **竖轨形态的 logo**：logo 是 sessions 窗格的附属物（§6），平时住在
   // 会话分栏横向条的 leading 里；竖轨形态横向条被 sync 隐藏 → 工厂在
   // 内容顶部补同一条 logo 带（横向形态条内 leading 仍在，不会双 logo）。
-  // Layout API 引用（页签内联改名 editTabName 走它）——声明在工厂之前：
-  // 工厂的 paneMenuHost 闭包引用它（useCallback 只建一次，捕获首渲染
-  // 绑定；ref 对象跨渲染稳定，动作时刻读 .current 永远是活 Layout）。
+  // Layout API 引用（双击内联改名等 ILayoutApi 通道；ref 对象跨渲染稳定）。
   const layoutRef = useRef<ILayoutApi>(null)
-  // 窗格右键菜单 host（页签内联改名 = ILayoutApi.editTabName）
-  const paneMenuHost: PaneMenuHost = {
-    editTabName: (id: string) => {
-      const api = layoutRef.current
-      if (!api) {
-        console.error('[flex-layout] editTabName unavailable (layout not mounted)', id)
-        return
-      }
-      api.editTabName(id)
-    },
-  }
 
   const factory = useCallback(
     (node: TabNode) => {
@@ -1557,7 +1562,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
           : content
       // 窗格空白区右键 → 分栏操作菜单（hermes ZoneMenu 的 body 落点；页签
       // 面已有 showPopupMenu 页签菜单）。菜单项打开时刻现读 model。
-      return <PaneZoneMenu host={paneMenuHost} node={node}>{surface}</PaneZoneMenu>
+      return <PaneZoneMenu node={node}>{surface}</PaneZoneMenu>
     },
     [],
   )
@@ -1614,6 +1619,11 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
     (node: TabNode | TabSetNode | BorderNode | TabGroupNode, event: React.MouseEvent) => {
       event.preventDefault()
       if (!(node instanceof TabNode)) return
+      // 拉伸头栏（单页签 zone 的 header，flexlayout 给它 tab_button_stretch
+      // 元素 + TabNode 派发）右键 = 分栏级 ZoneMenu（裁定层 store 路由）——
+      // 这里只压 WebView2 菜单不弹页签弹层，两菜单不叠开（hermes strip 面
+      // 同归 ZoneMenu；页签弹层留给多页签条的真实页签按钮）。
+      if (event.target instanceof Element && event.target.closest('.flexlayout__tab_button_stretch')) return
       const ptype = paneTypeOf(node.getId())
       const pdef = ptype ? PANE_TYPES[ptype] : undefined
       const closeable = pdef ? !pdef.primary : true

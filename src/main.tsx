@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 
 import { App } from './app'
 import { AppContextMenu, openAppContextMenu } from './components/layout/app-context-menu'
+import { ZoneContextMenuHost, openZoneContextMenuAt } from './components/layout/pane-context-menu'
 import { inTauri } from './lib/tauri-window'
 import { resolveContextMenuScope } from './components/panes/session-manage/context-menu-scope'
 // HarmonyOS Sans SC webfont（用户定稿：全局字体）——切片 woff2 + CSS
@@ -42,26 +43,41 @@ if (!inTauri) document.body.classList.add('in-browser')
 //   Trigger 的 handler 自己 preventDefault + 开分栏操作菜单。这里抢跑
 //   preventDefault 会让 composeEventHandlers 跳过开启分支（窗格右键又变
 //   回"压无菜单"）。
-// - app（其余一切）→ preventDefault 压掉 WebView2 默认菜单 + 开 app 菜单
-//   （hermes app-context-menu 体系的 shellSections：bare right-click on
-//   app chrome = 窗口动词，components/layout/app-context-menu.tsx）。
-//   flexlayout 自管面例外：页签/分栏条（.flexlayout__tabset——含其页签条，
-//   CDP 实测 tabbar_outer 盖住栏顶整段）/边框轨（.flexlayout__border）/
-//   flexlayout 页签弹层（.flexlayout__popup_menu_container）的右键由
-//   flexlayout onTabContextMenu 接管（TabNode=弹层菜单，TabSetNode/Border
-//   Node=仅压菜单）——hermes 里这些面同样归树渲染器自己的 zone 菜单管。
-//   **不能按 .flexlayout-host 整体豁免**：宿主是无边框窗的全窗绝对层
-//   （标题栏是 pointer-events 穿透的浮片），按宿主豁免 = app 菜单在除
-//   状态栏外全窗失效（CDP 实测）。窗格 body 右键在 pane 分支已早退，到
-//   不了这里；其余布局面（分隔条/编辑器画布/veil）= bare right-click，
-//   hermes 同语义（落点无自有菜单 → shell 菜单）。
+// - app（其余一切）→ preventDefault 压掉 WebView2 默认菜单，再按落点分派
+//   （hermes app-context-menu 体系：落点收集 → 组菜单）：
+//   · .flexlayout__tabset 内（页签 body 之外 = 页签条/拉伸头栏/logo 带/条上
+//     空白——hermes ZoneMenu 的 strip 面，tree-group.tsx 486）→ 弹该分栏的
+//     ZoneMenu（openZoneContextMenuAt，与页签 body 表面同一份项清单——
+//     components/layout/pane-context-menu.tsx store 路由）。页签按钮例外：
+//     flexlayout 自管页签菜单（钉住/重命名…）照旧。
+//   · 其余（标题栏/状态栏/分隔条/宿主空白）→ app 菜单（shellSections：
+//     bare right-click on app chrome = 窗口动词，components/layout/
+//     app-context-menu.tsx）。
+//   flexlayout 自管面例外：边框轨（.flexlayout__border）/flexlayout 页签
+//   弹层（.flexlayout__popup_menu_container）的右键由 flexlayout
+//   onTabContextMenu 接管（TabNode=弹层菜单，TabSetNode/BorderNode=仅压
+//   菜单）——hermes 里这些面同样归树渲染器自己的 zone 菜单管。**不能按
+//   .flexlayout-host 整体豁免**：宿主是无边框窗的全窗绝对层（标题栏是
+//   pointer-events 穿透的浮片），按宿主豁免 = app 菜单在除状态栏外全窗
+//   失效（CDP 实测）。窗格 body 右键在 pane 分支已早退，到不了这里；其余
+//   布局面（分隔条/编辑器画布/veil）= bare right-click，hermes 同语义
+//   （落点无自有菜单 → shell 菜单）。
 window.addEventListener(
   'contextmenu',
   (event) => {
     if (!(event.target instanceof Element)) return
     if (resolveContextMenuScope(event.target) !== 'app') return
     event.preventDefault()
-    if (event.target.closest('.flexlayout__tabset, .flexlayout__border, .flexlayout__popup_menu_container')) return
+    if (event.target.closest('.flexlayout__border, .flexlayout__popup_menu_container')) return
+    const setEl = event.target.closest('.flexlayout__tabset')
+    if (setEl) {
+      // 页签按钮右键 = flexlayout 自管页签菜单（showPopupMenu，页签粒度
+      // 动作）——不拦不弹 ZoneMenu；拉伸头栏（tab_button_stretch）不带基础
+      // tab_button 类，落这里 = 分栏级 ZoneMenu（hermes 同）。
+      if (event.target.closest('.flexlayout__tab_button')) return
+      openZoneContextMenuAt(event.clientX, event.clientY, setEl)
+      return
+    }
     openAppContextMenu(event.clientX, event.clientY)
   },
   true,
@@ -71,7 +87,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />
     {/* app 右键菜单 + 命令面板/设置浮层最小开关（app 根挂载，树外——
-        详情见 app-context-menu.tsx 文件头） */}
+        详情见 app-context-menu.tsx 文件头）；ZoneContextMenuHost = tabset
+        chrome 落点的 store 路由 ZoneMenu（pane-context-menu.tsx 文件头） */}
     <AppContextMenu />
+    <ZoneContextMenuHost />
   </StrictMode>
 )

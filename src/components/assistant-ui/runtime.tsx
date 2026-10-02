@@ -215,6 +215,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         })),
         currentThreadIdRef.current,
       )
+      // workspace 页签名跟随当前会话（用户问"主会话是哪个会话"——hermes
+      // 页签名即会话名）。经 CustomEvent 通知 flex-layout 改 node name
+      // （跨层最小耦合：layout 不 import assistant-ui）。
+      const active = currentThreadIdRef.current
+      const title = active ? rows.find((r) => r.id === active)?.title : undefined
+      window.dispatchEvent(
+        new CustomEvent('mirach:workspace-title', { detail: { title: title ?? null } }),
+      )
     } catch (e) {
       console.error('[pi] 会话列表读取失败', e)
     }

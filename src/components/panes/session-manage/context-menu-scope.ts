@@ -10,8 +10,8 @@
  *   （hermes 语义：可编辑区由原生编辑面接管；harness 无桥接编辑命令，
  *   原生菜单就是正确的编辑面）；
  * - owned：自带 Radix ContextMenu 的面（会话行 thread-list.aui.tsx 的
- *   data-session-row-id / 文件树行 WorkspaceFileTreeRowView 的
- *   role="treeitem"）——监听器必须早退且不得 preventDefault：Radix
+ *   aui_thread-list-item-trigger 触发行 / 文件树行 WorkspaceFileTreeRowView
+ *   的 role="treeitem"）——监听器必须早退且不得 preventDefault：Radix
  *   ContextMenuTrigger 的开启分支走 composeEventHandlers 的
  *   defaultPrevented 检查，事件带着 defaultPrevented=true 到达时它会跳过
  *   开启（只压掉原生菜单、我们的 SessionContextMenu 反而不弹）。Radix
@@ -40,8 +40,12 @@ export interface ContextMenuScopeTarget {
  *  contenteditable="false" 的嵌套孤岛正确为 false），不走选择器。 */
 export const CONTEXT_MENU_EDITABLE_SELECTOR = 'input, textarea'
 
-/** 自带 Radix ContextMenu 的面（见文件头；新增右键自管面在此登记）。 */
-export const CONTEXT_MENU_OWNER_SELECTOR = '[data-session-row-id], [role="treeitem"]'
+/** 自带 Radix ContextMenu 的面（见文件头；新增右键自管面在此登记）：
+ *  会话行 = assistant-ui thread-list 行触发器（thread-list.aui.tsx
+ *  ContextMenuPrimitive.Trigger asChild 包行；2026-10-02 dnd-kit 化后行上
+ *  已无 data-session-row-id，实测全仓 0 处生产者——登记现役 slot）；
+ *  文件树行 = WorkspaceFileTreeRowView 的 role="treeitem"。 */
+export const CONTEXT_MENU_OWNER_SELECTOR = '[data-slot="aui_thread-list-item-trigger"], [role="treeitem"]'
 
 /** flexlayout 窗格内容区（.flexlayout__tab 是页签 body 的包装 div，见
  *  CSSClassNames FLEXLAYOUT__TAB）——窗格层自管分栏操作菜单的面。 */
