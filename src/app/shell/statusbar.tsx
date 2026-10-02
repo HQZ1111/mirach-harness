@@ -3,12 +3,13 @@
  * 由真实数据驱动（hermes app/shell/statusbar* 的 harness 对应位）。
  *
  * 整条可见性（hermes store/statusbar-prefs.ts 的 $statusbarVisible +
- * toggleStatusbarVisible 对应位，VS Code workbench.statusBar.visible 语义：
- * 隐藏 = 整条卸载，回程只能是 app 右键菜单的「切换状态栏」，同 hermes
- * 「the way back is the view.toggleStatusbar keybind, never the bar
- * itself」）。持久化 mirach.harness.statusbar.v1（工程命名），值
- * 'true'/'false'——sidebar-view parseShowArchived 同款严格解析：缺失 =
- * 默认可见，非法形状 console.error 回默认不冒充旧数据。
+ * toggleStatusbarVisible 对应位）。**隐藏 = 只藏内容、容器保留**（用户
+ * 定稿：20px 占位不变，布局不跳动——VS Code 语义是整条卸载，此处有意
+ * 偏离）。回程只能是 app 右键菜单的「切换状态栏」，同 hermes「the way
+ * back is the view.toggleStatusbar keybind, never the bar itself」。
+ * 持久化 mirach.harness.statusbar.v1（工程命名），值 'true'/'false'——
+ * sidebar-view parseShowArchived 同款严格解析：缺失 = 默认可见，非法
+ * 形状 console.error 回默认不冒充旧数据。
  */
 import { createStore, useStore } from 'zustand'
 
@@ -56,13 +57,17 @@ export const toggleStatusbarVisible = (): void => statusbarPrefs.getState().togg
 
 export function StatusBar() {
   const visible = useStore(statusbarPrefs, (s) => s.visible)
-  if (!visible) return null
+  // 隐藏 = 容器保留（20px 占位，布局不跳），仅内容不渲染（用户定稿）
   return (
-    <div className="app-statusbar">
-      <span className="statusbar-pill">default ▾</span>
-      <span className="statusbar-pill">⏳ 网关 检查中</span>
-      <span className="statusbar-spacer" />
-      <span className="statusbar-pill">⚡ 智能</span>
+    <div className="app-statusbar" data-visible={visible ? "true" : "false"}>
+      {visible && (
+        <>
+          <span className="statusbar-pill">default ▾</span>
+          <span className="statusbar-pill">⏳ 网关 检查中</span>
+          <span className="statusbar-spacer" />
+          <span className="statusbar-pill">⚡ 智能</span>
+        </>
+      )}
     </div>
   )
 }
