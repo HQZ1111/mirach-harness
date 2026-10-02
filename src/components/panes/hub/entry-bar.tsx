@@ -133,7 +133,7 @@ export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
             title={item.label}
             type="button"
           >
-            <Icon aria-hidden className="hub-entry-icon" size={20} />
+            <Icon aria-hidden className="hub-entry-icon" />
             <span className="hub-entry-label">{item.label}</span>
             {/* 快捷键标注（hermes 仅新建会话带 KbdGroup 标注：1603-1609）；
                 harness 无 keybinds 系统——静态 Ctrl+N 注释注明（见文件头） */}

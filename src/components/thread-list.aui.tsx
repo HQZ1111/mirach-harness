@@ -983,8 +983,9 @@ const SectionHeader: FC<{
 }> = ({ headerKey, label, collapsed, collapsible = true, action }) => {
   const body = (
     <>
-      {/* 组头（用户定稿 2026-10-02）：20px 品牌色——已置顶/会话/项目/状态
-          四种分组头同形制（tokens --side-group-size）。 */}
+      {/* 组头（用户定稿 2026-10-02 二轮）：15px 品牌色加粗——已置顶/会话/
+          状态三种组头同形制（tokens --side-group-size）；工作区头独立 18px
+          （--side-workspace-size）。 */}
       <span className="text-(--fl-accent) text-(length:--side-group-size) font-bold">{label}</span>
       {collapsible && (
         <ChevronDownIcon
@@ -1084,7 +1085,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
           aria-hidden
           className="text-(--fl-accent) size-4 shrink-0"
         />
-        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-group-size) font-bold">{label}</span>
+        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
           className={cn(
@@ -1663,7 +1664,7 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Root
           ref={sortable?.ref}
           className={cn(
-            "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-(--tl-row-min-h,1.625rem) grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md pr-2 transition-colors focus-visible:outline-none",
+            "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-(--tl-row-min-h,1.625rem) grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-(--tl-row-pad-y,0.25rem) pr-2 transition-colors focus-visible:outline-none",
             // 拖起态逐字 hermes session-row.tsx:369——lifted 行盖过下层
             // （z-10 + 不透明侧栏表面，「translucency let the rows below
             // bleed through」的解法）+ grabbing 光标；压暗 0.45 由跨面

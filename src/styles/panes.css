@@ -320,11 +320,13 @@
 [data-density='comfortable'] {
   --tl-row-min-h: 1.625rem;
   --tl-div-pt: 0.5rem;
+  --tl-row-pad-y: 0.25rem;                    /* 会话行纵向内距（行与行间距，用户定稿加大） */
 }
 
 [data-density='compact'] {
   --tl-row-min-h: 1.25rem;
   --tl-div-pt: 0.25rem;
+  --tl-row-pad-y: 0.125rem;
 }
 
 /* ── hub：左栏入口条（panes/hub/entry-bar.tsx，2026-10-02）──
@@ -380,6 +382,8 @@
 
 .hub-entry-icon {
   flex: none;
+  width: var(--hub-row-icon);
+  height: var(--hub-row-icon);
   opacity: var(--hub-icon-dim);
 }
 
