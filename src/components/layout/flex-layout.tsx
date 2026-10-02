@@ -468,16 +468,16 @@ export function FlexLayoutShell() {
       }
       if (allowRevert) {
         // 结构动作（DELETE_TAB / MOVE_NODE / AddNode）：**不**跑 measureRootPx
-        // ——记忆中的 rootPxMem 还是用户上次声明值或初始默认 350/700/746，
-        // 一旦被 stale 的 23% 权重写 413 就再也回不去 350（实测本会话
-        // 2026-10-02 用户场景：关闭右栏 terminal 后左栏从 350→413，
-        // absSurplus 用 measured[413] 而非 mem[350]，applyRootWeights 不
-        // 在走这条管道里所以钉不重）。此处显式把在场非主栏按记忆 px 钉回、
-        // 再把差额交给主栏——和 hide/show 同款 pinAfterLayout 语义。
+        // ——记忆中的 rootPxMem 已由 onModelChange 在动作**同步时刻**记录
+        // （彼时 getRect 还是动作前布局 = 用户想要的状态）；此处再量测读到
+        // 的已是 stale 权重的渲染（左栏被顶大的那一帧），会污染记忆使
+        // 下一次钉回错值。此处显式把在场非主栏按记忆 px 钉回、再把差额
+        // 交给主栏——和 hide/show 同款 pinAfterLayout 语义。
         syncTabsetConstraints(m)
         applyRootWeights(m)
+      } else {
+        measureRootPx(m)
       }
-      measureRootPx(m)
       syncTabsetConstraints(m)
       absorbSurplus(m)
       // 挤压级联②：合并后仍装不下 → 隐藏左右栏（撤成 overlay 抽屉）
@@ -495,6 +495,13 @@ export function FlexLayoutShell() {
         action?.type === Actions.DELETE_TAB ||
         action?.type === 'FlexLayout_AddNode'
       ) {
+        // 关闭分栏（DELETE_TAB）：同步时刻 getRect 仍是**动作前**布局
+        //（flexlayout 重排在 React commit，AGENTS 记载的"onModelChange
+        // 时 DOM 是旧渲染"在此恰是正确值）——此刻量测写入的正是用户
+        // 关闭前看到的各列宽（想要的状态），90ms 定时器 applyRootWeights
+        // 据此钉回 → 关闭不漂移；且覆盖任何历史污染（stale 权重写进
+        // rootPxMem/localStorage 的 413），关闭一次即自愈为"保持不变"。
+        if (action?.type === Actions.DELETE_TAB) measureRootPx(m)
         scheduleRebalance(action?.type !== Actions.ADJUST_WEIGHTS)
       }
       if (migratingRef.current) return
