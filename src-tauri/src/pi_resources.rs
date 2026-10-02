@@ -94,7 +94,6 @@ pub fn pi_list_resources() -> Result<serde_json::Value, String> {
             })
             .collect();
         let prompt_rows: Vec<serde_json::Value> = prompts
-            .templates
             .iter()
             .map(|t| {
                 serde_json::json!({
