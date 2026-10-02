@@ -41,6 +41,7 @@ import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-fil
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
+import { ChatTabLabel } from './chat-tab-label'
 
 // ── 窗格组件注册表（按**类型**分发；多实例共用同一组件） ─────────────────────
 
@@ -1362,13 +1363,22 @@ export function FlexLayoutShell() {
       if (tabs.length > 1 && tabs.indexOf(node) > 0) {
         renderValues.leading = <span aria-hidden className="fl-tab-sep" />
       }
+      // 对话标签双行块（用户定稿 2026-10-02 十轮）：主区（workspace/session
+      // 两类 pane）替换 tab content——上工作区 25/bold #303030、下会话名
+      // 15/regular #5A5A5A，占右半宽最多 50%（flexlayout.css .chat-tab-label
+      // 绝对定位 left:50%）；trailing 关闭钮/回家钮走原生位置不挡文本。
+      const ptype0 = paneTypeOf(node.getId())
+      const pdef0 = ptype0 ? PANE_TYPES[ptype0] : undefined
+      if (pdef0?.region === 'main') {
+        renderValues.content = <ChatTabLabel />
+      }
       // 拉伸头栏（单页签分栏）**不渲染原生 trailing 关闭钮**（flexlayout 缺
       // 口，实测 hasTrailing=false）——可关页签在这里注入 ✕（真关闭）；
       // 多页签条走原生 trailing（显隐统一 hover）
       const stretched = set.getChildren().length === 1 && set.isEnableSingleTabStretch()
       if (!stretched) return
-      const ptype = paneTypeOf(node.getId())
-      const pdef = ptype ? PANE_TYPES[ptype] : undefined
+      const ptype = ptype0
+      const pdef = pdef0
       const cfg = zoneConfigOf(set)
       if (pdef?.primary) {
         // 一级窗格：离家 → 回家钮（点击回到家乡大栏）；在家 → 不渲染（不可关）

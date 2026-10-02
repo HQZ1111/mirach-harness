@@ -41,6 +41,7 @@ import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
 import { sessionUnreadStore } from '@/components/panes/session-manage/session-unread'
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
+import { chatTabLabelStore } from '@/components/layout/chat-tab-label-store'
 import {
   BoundarySpeechSynthesisAdapter,
   ensureSpeechSupportLogged,
@@ -183,6 +184,26 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // 确认已读），ref 保证回调里拿到最新值（closure 陈旧是已踩过的坑）。
   const currentThreadIdRef = useRef<string | null>(null)
   currentThreadIdRef.current = currentThreadId
+
+  // ── 对话标签双行块同步（用户定稿 2026-10-02 十轮）──
+  // 当前活跃 thread 变更 / threads 列表更新（rename / cwd 等）→ 推到
+  // chatTabLabelStore；flex-layout onRenderTab 拉伸头栏 region='main'
+  // 把 tab content 渲染为 <ChatTabLabel />（工作区 25/bold/#303030 +
+   // 会话名 15/regular/#5A5A5A）。读取 store 在 useExternalStoreRuntime
+   // render 外（chat-tab-label.tsx 不在这里 import——跨层最小耦合）。
+  const currentMeta = currentThreadId
+    ? threads.find((r) => r.id === currentThreadId)
+    : undefined
+  useEffect(() => {
+    chatTabLabelStore.setState({
+      threadId: currentThreadId,
+      title: currentMeta?.title ?? '',
+      cwd:
+        typeof (currentMeta?.custom as { cwd?: unknown } | undefined)?.cwd === 'string'
+          ? ((currentMeta?.custom as { cwd?: string }).cwd as string)
+          : null,
+    })
+  }, [currentThreadId, currentMeta?.title, currentMeta?.custom])
 
   const refreshThreads = useCallback(async () => {
     try {

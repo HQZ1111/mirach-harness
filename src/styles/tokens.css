@@ -239,6 +239,10 @@
   --side-group-size: 15px;                    /* 组头字号（已置顶/会话/状态，品牌色加粗；二轮定稿 15px） */
   --side-workspace-size: 16px;                /* 工作区头字号（六轮定稿：与入口条同字号） */
   --side-text: #4C4C4C;                       /* 侧栏正文色（工作区头/会话行/入口条共用，五轮定稿 4C4C4C） */
+  --chat-tab-workspace-size: 25px;            /* 对话标签工作区字号（用户定稿十轮） */
+  --chat-tab-workspace-color: #303030;        /* 对话标签工作区颜色（用户定稿十轮） */
+  --chat-tab-session-size: 15px;              /* 对话标签会话名字号（用户定稿十轮） */
+  --chat-tab-session-color: #5A5A5A;          /* 对话标签会话名颜色（用户定稿十轮） */
   --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
   --hub-card-radius: 6px;                     /* 卡/行圆角（hermes rounded-md） */
