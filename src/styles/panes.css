@@ -327,10 +327,10 @@
 
 [data-density='compact'] {
   --tl-row-min-h: 1.25rem;
-  --tl-div-pt: 0.375rem;                      /* 紧凑档也加大，避免组头与行间剧压。组头/工作区组间距同档缩。 */
-  --tl-row-pad-y: 0.25rem;                    /* 行间紧凑档 = 舒适档同样 py 4px（缩小失去意义，紧凑模式行内紧就行） */
-  --tl-head-pt: 1rem;                         /* 组头上距紧凑：16 档（舒适档 24px），密度压缩不影档 */
-  --tl-ws-pt: 1.25rem;                        /* 工作区分隔行紧凑 20px（舒适 24px） */
+  --tl-div-pt: 0.375rem;                      /* 紧凑档：组头/工作区组间距均 8px（用户定稿九轮：会话与工作区之间显太大） */
+  --tl-row-pad-y: 0.25rem;                    /* 行间紧凑档 = 4px（同舒适档） */
+  --tl-head-pt: 0.5rem;                       /* 组头上距紧凑 8px（舒适 24px，九轮回调） */
+  --tl-ws-pt: 0.5rem;                         /* 工作区分隔行紧凑 8px（舒适 24px） */
 }
 
 /* ── hub：左栏入口条（panes/hub/entry-bar.tsx，2026-10-02）──
