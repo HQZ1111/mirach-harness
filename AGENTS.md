@@ -2510,3 +2510,31 @@ value 限制）。406 用例。
 - 调试代理配额耗尽死于报告前——实现已完整落树（flex-layout/rebalance
   518 行），宿主接手验证收尾；**教训：长任务代理的验收标准要在派单时
   写成"可独立核验的量测序列"，中途死掉时宿主能直接跑序列判定完成度**。
+
+## 侧栏排版轮（2026-10-02 深夜：字号/间距三轮，ff2ddd9→a7d4f79→bca411f）
+
+左栏字号与间距的用户定稿三轮迭代，全部令牌化（tokens.css 单一取值处）：
+
+- **一轮（ff2ddd9）**：初版把 20px 文字/组头/间距全量上调（入口行高 44/
+  图标 20/条距 10/行距 4、组头 20px）——方向大体对但粒度错（见二轮）。
+- **二轮（a7d4f79）**：①入口条 18px（行高 32/图标 18/条内距 6/行距 1
+  全缩回 hermes 几何）+②组头 15px 品牌色加粗（`--side-group-size`
+  20→15）+③工作区头 18px（`--side-workspace-size` 新令牌）+④**会话行
+  纵距** `--tl-row-pad-y`（comfortable 4px/compact 2px，行元素 py 接线，
+  panes.css 密度块随行）——**间距的准确语义是"会话行与会话行之间"**，
+  初版误解为入口条/组头间距全数上调后回调归位。
+- **三轮（bca411f）**：①**入口条图标列删除**（Item.Icon 字段/五个
+  lucide import/`.hub-entry-icon` 规则/`--hub-row-icon`/
+  `--hub-icon-dim` 令牌全链清——删前 Select-String 全量核实消费链
+  唯一）；②组头间距令牌化 `--tl-head-pt`（6→12px，pt-1.5 静态值退役，
+  compact 密度减半）；③工作区与工作区间距 `--tl-ws-pt`（8→16px，
+  WorkspaceDividerRow 独立 pt；组头走 head-pt 不再共用 div-pt）；
+  ④工作区头颜色 **#4C4C4C**（`--side-workspace-color`，folder 字形+
+  组名同改——中性灰与品牌色组头/日期桶区分）。
+- 门禁：tsc 0 / vitest 462（38 文件）三轮全绿。
+- **教训**：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
+  加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
+  批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
+  （`src\styles\*.css`）会漏匹配——删共享令牌前用 PowerShell
+  Select-String 全量重查真实消费链；③PowerShell 正则改写 tokens.css
+  后同文件 Edit 会报 modified-since-read——先 Read 再 Edit。
