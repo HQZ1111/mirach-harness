@@ -75,8 +75,7 @@ export function TabOverflowButton({ tabsetId }: { tabsetId: string }): ReactElem
           onPointerDown={(e) => e.stopPropagation()}
           type="button"
         >
-          <ChevronDownIcon size={12} />
-          <span>{tabs.length}</span>
+          <ChevronDownIcon size={14} />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

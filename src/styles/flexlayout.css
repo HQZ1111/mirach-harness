@@ -476,20 +476,19 @@
   cursor: pointer !important;
   display: inline-flex !important;
   font-size: 11px !important;
-  gap: 3px !important;
   height: var(--zone-btn-size) !important;
   justify-content: center !important;
   left: 4px !important;
   margin: 0 !important;
-  min-width: 36px !important;
+  min-width: var(--zone-btn-size) !important;
   opacity: 0.6;
-  padding: 0 6px !important;
+  padding: 0 !important;
   pointer-events: auto !important;
   position: absolute !important;
   top: 50% !important;
   transform: translateY(-50%);
   transition: opacity 120ms;
-  width: auto !important;
+  width: var(--zone-btn-size) !important;
   z-index: 2;
 }
 .flexlayout-host .flexlayout__tab_button:hover ~ .tab-overflow-btn,
