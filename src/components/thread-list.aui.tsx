@@ -1063,8 +1063,8 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
 /**
  * 工作区分隔线（分组=按项目；hermes grouping='project' 的组头——项目树
  * 节点在此简化为 cwd 组头：folder 字形 + 组名（pathLeaf）+ 折叠 caret；
- * 颜色 #4C4C4C 中性灰（--side-workspace-color，三轮定稿：与品牌色组头
- * 区分）；折叠语义与日期桶相同：组头保留、其下行隐藏，键 = `w:<cwd>`）。
+ * 颜色 4C4C4C（--side-text 侧栏正文色，五轮定稿：与品牌色组头区分）；
+ * 折叠语义与日期桶相同：组头保留、其下行隐藏，键 = `w:<cwd>`）。
  */
 const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
@@ -1084,9 +1084,9 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
       >
         <FolderIcon
           aria-hidden
-          className="text-(--side-workspace-color) size-4 shrink-0"
+          className="text-(--side-text) size-4 shrink-0"
         />
-        <span className="text-(--side-workspace-color) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
+        <span className="text-(--side-text) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
           className={cn(
@@ -1764,7 +1764,7 @@ export const ThreadListItem: FC = () => {
             {isUnread && !isRunning && <span className="sr-only">已完成 — 未读</span>}
             <span className="min-w-0 flex-1 self-center">
               <span
-                className="hover-marquee text-(--text-2) group-hover/row:text-(--text) block truncate text-(length:--side-row-size) leading-[1.45] font-normal"
+                className="hover-marquee text-(--side-text) group-hover/row:text-(--text) block truncate text-(length:--side-row-size) leading-[1.45] font-normal"
                 data-slot="aui_thread-list-item-title"
                 onPointerEnter={armMarquee}
                 onPointerLeave={disarmMarquee}
