@@ -466,6 +466,17 @@ export function FlexLayoutShell() {
         updateNarrowViewport(m)
         return
       }
+      if (allowRevert) {
+        // 结构动作（DELETE_TAB / MOVE_NODE / AddNode）：**不**跑 measureRootPx
+        // ——记忆中的 rootPxMem 还是用户上次声明值或初始默认 350/700/746，
+        // 一旦被 stale 的 23% 权重写 413 就再也回不去 350（实测本会话
+        // 2026-10-02 用户场景：关闭右栏 terminal 后左栏从 350→413，
+        // absSurplus 用 measured[413] 而非 mem[350]，applyRootWeights 不
+        // 在走这条管道里所以钉不重）。此处显式把在场非主栏按记忆 px 钉回、
+        // 再把差额交给主栏——和 hide/show 同款 pinAfterLayout 语义。
+        syncTabsetConstraints(m)
+        applyRootWeights(m)
+      }
       measureRootPx(m)
       syncTabsetConstraints(m)
       absorbSurplus(m)
