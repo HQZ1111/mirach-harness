@@ -2537,6 +2537,28 @@ value 限制）。406 用例。
   重命名 **`--side-text`**（会话行标题/入口条/工作区头三处共用，
   hover 加深保留）；④入口条文字 15px（行高 32→28 回 hermes h-7
   几何）；⑤工作区头 15px（与组头同字号，灰/品牌色区分）。
+- **六轮（18ef7cd）**：①组头间距再加大（`--tl-head-pt` 16→24px，五
+  轮的 12→16 视觉不可辨——四批把 fallback 0.75rem 同步 1.5rem 保取值
+  一致）；②入口条 16px（`--hub-row-font`）；③工作区头 16px
+  （`--side-workspace-size`）。
+- **七轮（5a6d66f）+ 八轮（b2fd9af，CDP 实锤 root cause）**：①六处间距
+  类从 `pt-(--var,fallback)` 括号简写切到 `pt-[var(--var,fallback)]` 方括
+  号——Tailwind v4 **括号简写带逗号兜底不生成 CSS**，所有行 px（间距
+  令牌此前四轮调到 24px 全部静默失效为零）；②**真凶是侧栏密度 = compact**
+  ——CDP 9223 脚本 reload 后实测：`[data-density='compact']` 块覆盖
+  `--tl-head-pt: 0.375rem / --tl-ws-pt: 0.5rem / --tl-row-pad-y: 0.125rem
+  / --tl-div-pt: 0.25rem`，用户看的是 6/8/2px 而非令牌值——间距"调多少
+  遍都没变"是 density 属性在作怪。修复：compact 块全部提一档
+  （head-pt 6→16 / ws-pt 8→20 / row-pad-y 2→4 / div-pt 4→6，保留档差
+  与舒适档比例）。③实测 compact：组头 pt 15px（舒适 24px）/ wsDivider
+  18.75（24）/ item 3.75（4）；字号组头 15/16px 工作区头 fs 15px
+  继承（实际 span 16px，探针取外层 div）/ 行标题 #4C4C4C / 入口条
+  #4C4C4C 全部生效。**教训**：①以后改间距/字号**必须先量 computed
+  值**确认令牌链路实际命中——grep 产物 CSS 是假阴性（minified `\[`/`\(`/
+  `\,` 转义）；CDP 9 计 9 evaluate 23 用 9 是唯一金标准；②带逗号 fallback
+  的 `(--var,fallback)` 写法**不要用**，方括号 `var(--var,fallback)` 唯
+  一稳妥；③**密度档 silent override 令牌**——调令牌前先确认 density 值，
+  否则 token 改 100 遍用户眼里还是上次的旧值。
 - 门禁：tsc 0 / vitest 462（38 文件）四批全绿。
 - **教训**：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
