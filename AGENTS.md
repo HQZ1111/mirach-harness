@@ -2380,6 +2380,33 @@ value 限制）。406 用例。
   一级已在家→关闭禁用、副本→关闭=回家（tidy 收空栏）、composer
   输入框→本菜单不弹（editable 放行）。425 用例。
 
+### app-context-menu 系统整抄（59bdced，hermes 719 行系统移植）
+- **架构**（app-context-menu.tsx 头注释有全文）：全应用一个右键体系 =
+  一份 capture 监听 + 一个 $contextMenu store（受控 DropdownMenu：光标
+  零尺寸 fixed 锚 span + open 常开 + onOpenChange(false) 关）+ 行/树等
+  Radix 自管面早退；**dom 段为空回退 shellSections**（bare right-click
+  on app chrome = 窗口动词：新建会话/新建窗口条件行/命令面板/──切换
+  状态栏/Profile Rail 条件行/切换标签/设置/──更新 Hermes）。
+- **Tauri 裁剪清单**（逐项注释在案）：新建窗口（单窗格架构，L5 再启）、
+  Profile Rail（无对应物）、更新 Hermes（无 updater，段3 整段消失）、
+  editable/link/image 段（原生编辑菜单已由三面裁定承担，Electron
+  editFlags 无对应物）。
+- **切换标签 = app 级等价**：hermes 作用于单一 zone（"the pointer-only
+  way back to a hidden tab strip"）——宿主等价 = 切换全部非轨分栏
+  （planTabStripToggle 纯规划：轨+竖轨形态不在切换面，"toggle against
+  what is ON SCREEN"），经 __flModel + updateNodeAttributes 施加。
+- **状态栏可见性**：hermes statusbar-prefs 对应位（statusbar.tsx
+  store + mirach.harness.statusbar.v1 持久化，隐藏=整条卸载）。
+- **命令面板**：官方模板 command-palette.tsx 此前无 consume——最小
+  接线（store+挂载，命令=菜单真实动作面）。
+- **坑**：不能按 .flexlayout-host 整体豁免 flexlayout 自管面——宿主是
+  无边框窗全窗绝对层（标题栏 pointer-events 穿透浮片盖住栏顶），按宿主
+  豁免=app 菜单全窗失效；窄豁免用 `.flexlayout__tabset, .flexlayout__
+  border, .flexlayout__popup_menu_container`。
+- CDP 实测：状态栏/标题栏/分隔条右键 → 5 项菜单与 hermes 截图逐项
+  一致；切换状态栏/切换标签/命令面板/设置全真生效；行/树/输入框/
+  页签四不变面核对无混入。439 用例。
+
 ## 对标轮续（2026-10-02 深夜：终端/composer/代码高亮/预览）
 
 用户四条 UI 反馈 + 官方三页文档对照。测试 221→275（TS）+ 40（Rust）。
