@@ -8,17 +8,34 @@
  * transform 跟指针 Y），isDragging 行 z-10 + 不透明底 + cursor-grabbing
  * （session-row.tsx:369），压暗 0.45 由跨面 pointer 机器统一施加
  * （session-drag.ts:120 实锤值）；其他行 transition 实时让位。
+ *
+ * 边缘自动滚 = 自制版（用户定稿 2026-10-02："限制滑到最底部和最顶部结束"）：
+ * dnd-kit 内建 autoScroll 在可溢出列表有补偿环 bug（#1042 类——拖拽 transform
+ * 随滚动增长 scrollHeight → 无限滚），故 autoScroll={false} + 拖拽中指针近
+ * 容器上/下缘 48px 时按帧 scrollBy ±step——scrollTop 被浏览器钳在真实边界，
+ * **到顶/到底自动停**，反馈环在源头不存在。容器 = 带
+ * data-sortable-scroll-container 标记的最近祖先（ThreadListItems）。
  */
+import { useEffect, useRef } from 'react'
 import type { useSensors } from '@dnd-kit/core'
-import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core'
+import { closestCenter, DndContext, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core'
 import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import type * as React from 'react'
 
-// Sidebar reordering is a strictly vertical list. The dragged item's transform
-// is rendered Y-only in useSortableBindings (no x, no scale); this just stops
-// dnd-kit's auto-scroll from dragging the rail — or the window — sideways when
-// the pointer nears an edge, killing the horizontal "drag to valhalla".
-const reorderAutoScroll = { threshold: { x: 0, y: 0.2 } }
+const EDGE_ZONE = 48
+const EDGE_STEP = 8
+
+/** 指针纵向位置 → 本帧滚动步长（0=不在边缘带；负=向上）。纯函数可单测。 */
+export function edgeScrollStep(
+  pointerY: number,
+  rect: { top: number; bottom: number },
+  edgeZone = EDGE_ZONE,
+  step = EDGE_STEP,
+): number {
+  if (pointerY < rect.top + edgeZone) return -step
+  if (pointerY > rect.bottom - edgeZone) return step
+  return 0
+}
 
 // One self-contained, nesting-safe reorderable list. It owns its DndContext, so a
 // drag only ever collides with THIS list's own items — drop it at any depth (repos,
@@ -37,7 +54,51 @@ export function ReorderableList({
   onReorder: (ids: string[]) => void
   sensors?: ReturnType<typeof useSensors>
 }) {
+  // ── 自制边缘滚（autoScroll=false 的替代，用户定稿：到顶/到底自动停）──
+  const scrollElRef = useRef<HTMLElement | null>(null)
+  const pointerYRef = useRef(0)
+  const rafRef = useRef(0)
+  const draggingRef = useRef(false)
+
+  const onPointerMoveTracked = (e: PointerEvent) => {
+    pointerYRef.current = e.clientY
+  }
+
+  const edgeFrame = () => {
+    const el = scrollElRef.current
+    if (!el || !draggingRef.current) return
+    const rect = el.getBoundingClientRect()
+    const step = edgeScrollStep(pointerYRef.current, rect)
+    if (step !== 0) el.scrollTop += step
+    rafRef.current = requestAnimationFrame(edgeFrame)
+  }
+
+  const startEdgeScroll = (event: DragStartEvent) => {
+    draggingRef.current = true
+    const target = (event.activatorEvent as PointerEvent | undefined)?.target
+    if (target instanceof Element) {
+      scrollElRef.current = target.closest(
+        '[data-sortable-scroll-container]',
+      ) as HTMLElement | null
+    }
+    window.addEventListener('pointermove', onPointerMoveTracked)
+    rafRef.current = requestAnimationFrame(edgeFrame)
+  }
+
+  const stopEdgeScroll = () => {
+    draggingRef.current = false
+    window.removeEventListener('pointermove', onPointerMoveTracked)
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = 0
+    scrollElRef.current = null
+  }
+
+  const handleDragStart = (event: DragStartEvent) => {
+    startEdgeScroll(event)
+  }
+
   const handleDragEnd = ({ activatorEvent, active, over }: DragEndEvent) => {
+    stopEdgeScroll()
     // dnd-kit only restores focus for keyboard drags; after a pointer drop the
     // browser leaves :focus on the grab handle, which keeps a focus-within
     // grabber/affordance reveal stuck "on". Drop that focus so the row returns
@@ -58,11 +119,17 @@ export function ReorderableList({
     }
   }
 
+  const handleDragCancel = () => {
+    stopEdgeScroll()
+  }
+
   return (
     <DndContext
-      autoScroll={reorderAutoScroll}
+      autoScroll={false}
       collisionDetection={closestCenter}
+      onDragCancel={handleDragCancel}
       onDragEnd={handleDragEnd}
+      onDragStart={handleDragStart}
       sensors={sensors}
     >
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>

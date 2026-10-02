@@ -170,7 +170,16 @@ export const ThreadList: FC = () => {
       </div>
       {/* 左右边距 20px（用户定稿）：容器 px-3 + 行 px-2 合成文字线 20 ——
           hermes SidebarContent px-2.5 的同款分层 */}
-      <ThreadListItems className="min-h-0 flex-1 overflow-y-auto px-3 pb-2" dndSensors={dndSensors} searchQuery={search} />
+      {/* 左右边距 20px（用户定稿）：容器 px-3 + 行 px-2 合成文字线 20 ——
+          hermes SidebarContent px-2.5 的同款分层。data-sortable-scroll-
+          container = 边缘自动滚的容器标记（拖拽中指针近上/下缘按帧滚动，
+          浏览器钳在真实边界——到顶/到底自动停）。 */}
+      <ThreadListItems
+        className="min-h-0 flex-1 overflow-y-auto px-3 pb-2"
+        data-sortable-scroll-container=""
+        dndSensors={dndSensors}
+        searchQuery={search}
+      />
     </ThreadListRoot>
   );
 };
