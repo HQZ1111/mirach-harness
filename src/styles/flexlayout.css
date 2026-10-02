@@ -461,31 +461,24 @@
 /* ── 左栏标签条：logo/文字迁入条内（onRenderTabSet leading），不再需要
    margin 让位（宿主层浮层方案已退役，见 overlays.css 注释） ── */
 
-/* ── 对话标签双行 chip（onRenderTab 拉伸头栏 region=main 替换 tab content）。
-   tab_button（拉伸/普通都走 .flexlayout__tab_button_stretch / 基础类）的
-   content 槽位被 .chat-tab-label 占据满屏后，关闭钮/ⓗome 钮走 trailing 不动。
-   chat-tab-label 是绝对定位（不参与 flex flow）—— 浮动右半区，原本 slot 默认
-   name 文本被覆盖（chip 就是 tab 文本了）。pointer-events:none 文本只读不挡
-   close 钮的点击。**选择器特异性提到 (0,3,0)**——`.flexlayout__tab_button_content`
-   内部用同样的派生定位，所以原始派生选择器 `.flexlayout-host .chat-tab-label`
-   被 flexlayout 内部 child 规则盖住，CDP 实测 computed position 落到 static；
-   加 `.flexlayout__tab_button(_extends_, ..._stretch)` 双选择器后特异性覆盖。*/
+/* ── 对话标签双行 chip（onRenderTab leading 注入，用户定稿 2026-10-03
+   十一轮：参考左栏 logo 的 leading 形式放页签最左；原 tab 名 content
+   恢复显示——十轮的 content 替换方案废弃）。拉伸头栏 tab_button_stretch
+   是 align-items:flex-end 沉底布局，chip 用 align-self:stretch + 内部
+   justify-content:center 垂直居中（不被沉底压扁）；字号/颜色引 tokens。 */
   .flexlayout__tab_button .chat-tab-label,
   .flexlayout__tab_button_stretch .chat-tab-label {
   pointer-events: none;
-  position: absolute;
-  right: 0;
-  top: 50%;
-  width: 50%;
-  max-width: 50%;
-  transform: translateY(-50%);
-  padding-right: 36px;
+  align-self: stretch;
   display: flex;
   flex-direction: column;
+  justify-content: center;
   align-items: flex-start;
   gap: 0;
   text-align: left;
   overflow: hidden;
+  flex: none;
+  margin-right: 10px;
 }
 
   .flexlayout__tab_button .chat-tab-label__workspace,
@@ -497,7 +490,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
+  max-width: 40vw;
 }
 
   .flexlayout__tab_button .chat-tab-label__session,
@@ -509,6 +502,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
+  max-width: 40vw;
   margin-top: 1px;
 }

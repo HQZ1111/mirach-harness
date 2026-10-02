@@ -1374,19 +1374,25 @@ export function FlexLayoutShell() {
       if (tabs.length > 1 && tabs.indexOf(node) > 0) {
         renderValues.leading = <span aria-hidden className="fl-tab-sep" />
       }
-      // 对话标签双行块（用户定稿 2026-10-02 十轮）：主区（workspace/session
-      // 两类 pane）替换 tab content——上工作区 25/bold #303030、下会话名
-      // 15/regular #5A5A5A，占右半宽最多 50%（flexlayout.css .chat-tab-label
-      // 绝对定位 left:50%）；trailing 关闭钮/回家钮走原生位置不挡文本。
+      // 对话标签双行块（用户定稿 2026-10-03 十一轮）：**leading 形式**（参考
+      // 左栏会话 logo 的注入位置）——主区单签拉伸头栏（原生 strip 隐藏）时
+      // 把双行块放页签 leading（最左），原 tab 名 content 恢复显示；多页签
+      // 条（strip 可见）不注入，页签名即会话名已够。
       const ptype0 = paneTypeOf(node.getId())
       const pdef0 = ptype0 ? PANE_TYPES[ptype0] : undefined
-      if (pdef0?.region === 'main') {
-        renderValues.content = <ChatTabLabel />
+      const stretched0 = set.getChildren().length === 1 && set.isEnableSingleTabStretch()
+      if (stretched0 && pdef0?.region === 'main') {
+        renderValues.leading = (
+          <>
+            {renderValues.leading}
+            <ChatTabLabel />
+          </>
+        )
       }
       // 拉伸头栏（单页签分栏）**不渲染原生 trailing 关闭钮**（flexlayout 缺
       // 口，实测 hasTrailing=false）——可关页签在这里注入 ✕（真关闭）；
       // 多页签条走原生 trailing（显隐统一 hover）
-      const stretched = set.getChildren().length === 1 && set.isEnableSingleTabStretch()
+      const stretched = stretched0
       if (!stretched) return
       const ptype = ptype0
       const pdef = pdef0
