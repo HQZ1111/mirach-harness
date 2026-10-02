@@ -1000,7 +1000,7 @@ const SectionHeader: FC<{
   );
   return (
     <div
-      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-(--tl-head-pt,0.75rem)"
+      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-(--tl-head-pt,1.5rem)"
       data-slot="aui_thread-list-section-header"
     >
       {collapsible ? (
@@ -1070,7 +1070,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-ws-pt,1rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-ws-pt,1.5rem) select-none"
       data-slot="aui_thread-list-workspace-divider"
     >
       <button

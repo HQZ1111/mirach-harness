@@ -227,7 +227,7 @@
    引用上方全局色板，本块只收几何与强度。 */
 :root {
   --hub-row-h: 28px;                          /* 入口行高（hermes h-7；15px 文字回归原几何） */
-  --hub-row-font: 15px;                       /* 行文字（用户定稿 2026-10-02 五轮 15px） */
+  --hub-row-font: 16px;                       /* 行文字（用户定稿 2026-10-02 六轮 16px） */
   --hub-row-weight: 500;                      /* hermes font-medium */
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
@@ -237,7 +237,7 @@
   --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
   --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */
   --side-group-size: 15px;                    /* 组头字号（已置顶/会话/状态，品牌色加粗；二轮定稿 15px） */
-  --side-workspace-size: 15px;                /* 工作区头字号（五轮定稿：与组头同字号，灰/品牌色区分） */
+  --side-workspace-size: 16px;                /* 工作区头字号（六轮定稿：与入口条同字号） */
   --side-text: #4C4C4C;                       /* 侧栏正文色（工作区头/会话行/入口条共用，五轮定稿 4C4C4C） */
   --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
