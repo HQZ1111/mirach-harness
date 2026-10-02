@@ -24,6 +24,7 @@ import { appWindow, inTauri } from '@/lib/tauri-window'
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
+import { PaneZoneMenu, type PaneMenuHost } from './pane-context-menu'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
 import { ZoneEditor } from './zone-editor'
@@ -1506,6 +1507,22 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
   // **竖轨形态的 logo**：logo 是 sessions 窗格的附属物（§6），平时住在
   // 会话分栏横向条的 leading 里；竖轨形态横向条被 sync 隐藏 → 工厂在
   // 内容顶部补同一条 logo 带（横向形态条内 leading 仍在，不会双 logo）。
+  // Layout API 引用（页签内联改名 editTabName 走它）——声明在工厂之前：
+  // 工厂的 paneMenuHost 闭包引用它（useCallback 只建一次，捕获首渲染
+  // 绑定；ref 对象跨渲染稳定，动作时刻读 .current 永远是活 Layout）。
+  const layoutRef = useRef<ILayoutApi>(null)
+  // 窗格右键菜单 host（页签内联改名 = ILayoutApi.editTabName）
+  const paneMenuHost: PaneMenuHost = {
+    editTabName: (id: string) => {
+      const api = layoutRef.current
+      if (!api) {
+        console.error('[flex-layout] editTabName unavailable (layout not mounted)', id)
+        return
+      }
+      api.editTabName(id)
+    },
+  }
+
   const factory = useCallback(
     (node: TabNode) => {
       const componentName = node.getComponent() ?? ''
@@ -1527,19 +1544,20 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         content = <div className="pane-placeholder"><p>未知窗格: {componentName}</p></div>
       }
       const parent = node.getParent()
-      if (
+      const surface =
         parent instanceof TabSetNode &&
         !parent.isEnableTabStrip() &&
         parent.getChildren().some((c) => c.getId() === 'sessions')
-      ) {
-        return (
-          <div className="rail-pane-railform">
-            <RailLogoLeading />
-            <div className="rail-pane-railform-body">{content}</div>
-          </div>
-        )
-      }
-      return content
+          ? (
+              <div className="rail-pane-railform">
+                <RailLogoLeading />
+                <div className="rail-pane-railform-body">{content}</div>
+              </div>
+            )
+          : content
+      // 窗格空白区右键 → 分栏操作菜单（hermes ZoneMenu 的 body 落点；页签
+      // 面已有 showPopupMenu 页签菜单）。菜单项打开时刻现读 model。
+      return <PaneZoneMenu host={paneMenuHost} node={node}>{surface}</PaneZoneMenu>
     },
     [],
   )
@@ -1675,8 +1693,6 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
     },
     [model, persist],
   )
-
-  const layoutRef = useRef<ILayoutApi>(null)
 
   // 键位（hermes：⌘\ 镜像翻转；⌘⇧\ 布局编辑模式；mod = ctrl|meta）。
   // Escape 退出编辑模式/编辑器——hermes edit-mode.tsx "owns Escape-to-exit"。

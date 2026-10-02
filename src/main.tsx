@@ -35,6 +35,12 @@ if (!inTauri) document.body.classList.add('in-browser')
 // - app（其余一切）→ preventDefault 压掉 WebView2 默认菜单。mock seam
 //   时代的冒泡段全局 preventDefault 随 mock 一起删除后，非行区域右键
 //   弹 WebView2 菜单（2026-10-01 用户实测 + CDP 实证），此处恢复。
+// - pane（flexlayout 窗格 body，.flexlayout__tab）→ 同 owned 早退不
+//   preventDefault：窗格容器自挂 Radix ContextMenu（components/layout/
+//   pane-context-menu.tsx 工厂层 .pane-zone-menu-surface 面铺满 body），
+//   Trigger 的 handler 自己 preventDefault + 开分栏操作菜单。这里抢跑
+//   preventDefault 会让 composeEventHandlers 跳过开启分支（窗格右键又变
+//   回"压无菜单"）。
 window.addEventListener(
   'contextmenu',
   (event) => {

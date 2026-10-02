@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CONTEXT_MENU_EDITABLE_SELECTOR,
   CONTEXT_MENU_OWNER_SELECTOR,
+  CONTEXT_MENU_PANE_SELECTOR,
   resolveContextMenuScope,
   type ContextMenuScopeTarget,
 } from './context-menu-scope'
@@ -15,6 +16,12 @@ import {
 /** 桩元素：matchedSelector 命中时 closest 返回自身（祖先命中同形）。 */
 const stubEl = (matchedSelector: string | null, isContentEditable = false): ContextMenuScopeTarget => ({
   closest: (selectors: string) => (matchedSelector !== null && selectors === matchedSelector ? stubEl(matchedSelector, isContentEditable) : null),
+  isContentEditable,
+})
+
+/** 多选择器桩（pane 内容同时命中 pane 与更具体面的场景）。 */
+const stubElMatching = (matched: string[], isContentEditable = false): ContextMenuScopeTarget => ({
+  closest: (selectors: string) => (matched.includes(selectors) ? stubElMatching(matched, isContentEditable) : null),
   isContentEditable,
 })
 
@@ -41,5 +48,21 @@ describe('resolveContextMenuScope', () => {
 
   it('editable wins over owned (a field inside an owned surface stays native)', () => {
     expect(resolveContextMenuScope(stubEl(CONTEXT_MENU_EDITABLE_SELECTOR, false))).toBe('editable')
+  })
+
+  it('flexlayout pane bodies get the self-managed pane scope', () => {
+    expect(resolveContextMenuScope(stubEl(CONTEXT_MENU_PANE_SELECTOR))).toBe('pane')
+  })
+
+  it('editable wins over pane (composer input inside a pane stays native)', () => {
+    expect(
+      resolveContextMenuScope(stubElMatching([CONTEXT_MENU_EDITABLE_SELECTOR, CONTEXT_MENU_PANE_SELECTOR])),
+    ).toBe('editable')
+  })
+
+  it('owned wins over pane (a row inside a pane keeps its own Radix menu)', () => {
+    expect(
+      resolveContextMenuScope(stubElMatching([CONTEXT_MENU_OWNER_SELECTOR, CONTEXT_MENU_PANE_SELECTOR])),
+    ).toBe('owned')
   })
 })
