@@ -2579,6 +2579,22 @@ value 限制）。406 用例。
   双选择器后实测 pos=absolute。新文件 `chat-tab-label-store.ts`
   （runtime 单向 import，layout 不 import assistant-ui——跨层最小耦合）
   + `chat-tab-label.tsx`（useStore 订阅）。
+- **十一轮（7f3be93，CDP 实锤）**：**关闭右栏 window 后左栏漂移修复**
+  ——用户实测 2026-10-02："左栏默认 350，右栏并行两栏关掉其中一个，左
+  变宽"。**真因——结构路径 scheduleRebalance 跑了 measureRootPx**：
+  flexlayout 权重保留旧 23%/60%/17% 比例，删 terminal tab → 右栏
+  350→308 → 等比缩到左栏实测 413 → measureRootPx 把 413 写入
+  `rootPxMem.left` 永久污染；后续 absorbSurplus 用 measured[413]
+  而不是 mem[350]，applyRootWeights 又不在这条管道里，钉不回去。
+  **修复**：scheduleRebalance 结构路径（DELETE_TAB/MOVE_NODE/AddNode）
+  不跑 measureRootPx（保留默认 350/700），改跑 `syncTabsetConstraints
+  + applyRootWeights` 钉回记忆 px，与 hide/show 同款 pinAfterLayout
+  语义。CDP 验证：Ctrl+click 布局编辑器重置 → 左 350/主 746/右 700
+  → doAction FlexLayout_DeleteTab terminal → 左仍 350 ✓（修复前 413）。
+  教训：①stale 权重 + measureRootPx 会把测量值烙进记忆——**结构动作
+  必须显式钉回而非信赖旧权重**；②CDP 量实际渲染宽前用 `m.toJson()
+  .layout.children`（不是 `j.children`）拿到模型 children；visitNodes
+  实测在本会话因 model setup 时机不返回 TabNode——以 toJson 为准。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
