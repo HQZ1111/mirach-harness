@@ -1,9 +1,9 @@
 /**
  * 左栏「上方入口条」——hermes app/chat/sidebar/index.tsx 的 SIDEBAR_NAV
  * 照抄（:201-237 五项定义 + :1516-1610 行渲染）。hermes 逐项出处：
- * - 顺序/图标/快捷键键：SIDEBAR_NAV（sidebar/index.tsx:201-237）——
- *   robot（新建会话）/ symbol-misc（技能与工具）/ comment（消息平台）/
- *   files（产物）/ watch（定时任务）；
+ * - 顺序/快捷键键：SIDEBAR_NAV（sidebar/index.tsx:201-237）——新建会话/
+ *   技能与工具/消息平台/产物/定时任务（图标列已删：用户定稿 2026-10-02
+ *   三轮，入口条仅文字）；
  * - 行视觉：SidebarMenuButton（:1530-1545）——h-7、0.8125rem medium、
  *   图标 72%（:1590）、未激活 hover 洗底；快捷键标注 = KbdGroup
  *   ml-auto opacity-55（:1603-1609，仅新建会话有标注——hermes 同款）；
@@ -25,14 +25,7 @@
  */
 
 import { useState } from 'react'
-import {
-  BotIcon,
-  BriefcaseIcon,
-  MessageCircleIcon,
-  PuzzleIcon,
-  TimerIcon,
-  XIcon,
-} from 'lucide-react'
+import { XIcon } from 'lucide-react'
 
 import { openResourcesDialog } from './pi-resources-dialog'
 
@@ -47,7 +40,6 @@ interface EntryItem {
   id: string
   label: string
   kbd?: string[]
-  Icon: typeof BotIcon
   available: boolean
   act: (cb: EntryBarCallbacks) => void
 }
@@ -59,7 +51,6 @@ const ITEMS: EntryItem[] = [
     id: 'new-session',
     label: '新建会话',
     kbd: ['Ctrl', 'N'],
-    Icon: BotIcon,
     available: true,
     // hermes new-session 行（:1554-1556 $newChatProfile.set(null) + 导航）；
     // harness = assistant-ui switchToNewThread（pi_discard_session 语义）
@@ -68,7 +59,6 @@ const ITEMS: EntryItem[] = [
   {
     id: 'capabilities',
     label: '技能与工具',
-    Icon: PuzzleIcon,
     available: true,
     // pi 对等：skills/prompts 目录 + extensions/packages 配置（只读管理）
     // ——pi_list_resources（pi_resources.rs；loader = pi 原生
@@ -78,7 +68,6 @@ const ITEMS: EntryItem[] = [
   {
     id: 'messaging',
     label: '消息平台',
-    Icon: MessageCircleIcon,
     // hermes = messaging 平台面（Telegram/Slack/Discord，zh.ts:2171）；pi
     // 无消息平台桥（vendor 源码无 connector 实体）——诚实提示
     available: false,
@@ -87,7 +76,6 @@ const ITEMS: EntryItem[] = [
   {
     id: 'artifacts',
     label: '产物',
-    Icon: BriefcaseIcon,
     // hermes = 制品浏览页；pi 的产物=后台 job 的 artifact 文件（jobs.rs:5-6
     // rolling artifact file），无独立制品实体——诚实提示
     available: false,
@@ -96,8 +84,6 @@ const ITEMS: EntryItem[] = [
   {
     id: 'cron',
     label: '定时任务',
-    // hermes 图标 = watch（lucide WatchIcon 在本版本缺）——Timer 语义同
-    Icon: TimerIcon,
     // hermes = cron jobs 面（CRON_ROUTE）；pi 无 cron（vendor 源码无 cron
     // 模块，定时= jobs 后台任务非调度器）——诚实提示
     available: false,
@@ -113,7 +99,6 @@ export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
   return (
     <div className="hub-entry-bar">
       {ITEMS.map((item) => {
-        const { Icon } = item
         return (
           <button
             aria-label={item.label}
@@ -133,7 +118,7 @@ export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
             title={item.label}
             type="button"
           >
-            <Icon aria-hidden className="hub-entry-icon" />
+            {/* 图标列已删（用户定稿 2026-10-02 三轮：入口条仅文字） */}
             <span className="hub-entry-label">{item.label}</span>
             {/* 快捷键标注（hermes 仅新建会话带 KbdGroup 标注：1603-1609）；
                 harness 无 keybinds 系统——静态 Ctrl+N 注释注明（见文件头） */}

@@ -1000,7 +1000,7 @@ const SectionHeader: FC<{
   );
   return (
     <div
-      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-1.5"
+      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-(--tl-head-pt,0.75rem)"
       data-slot="aui_thread-list-section-header"
     >
       {collapsible ? (
@@ -1063,13 +1063,14 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
 /**
  * 工作区分隔线（分组=按项目；hermes grouping='project' 的组头——项目树
  * 节点在此简化为 cwd 组头：folder 字形 + 组名（pathLeaf）+ 折叠 caret；
- * 折叠语义与日期桶相同：组头保留、其下行隐藏，键 = `w:<cwd>`）。
+ * 颜色 #4C4C4C 中性灰（--side-workspace-color，三轮定稿：与品牌色组头
+ * 区分）；折叠语义与日期桶相同：组头保留、其下行隐藏，键 = `w:<cwd>`）。
  */
 const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-div-pt,0.75rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-ws-pt,1rem) select-none"
       data-slot="aui_thread-list-workspace-divider"
     >
       <button
@@ -1083,9 +1084,9 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
       >
         <FolderIcon
           aria-hidden
-          className="text-(--fl-accent) size-4 shrink-0"
+          className="text-(--side-workspace-color) size-4 shrink-0"
         />
-        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
+        <span className="text-(--side-workspace-color) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
           className={cn(

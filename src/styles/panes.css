@@ -321,12 +321,16 @@
   --tl-row-min-h: 1.625rem;
   --tl-div-pt: 0.5rem;
   --tl-row-pad-y: 0.25rem;                    /* 会话行纵向内距（行与行间距，用户定稿加大） */
+  --tl-head-pt: 0.75rem;                      /* 组头上距（组头与组头间距，三轮定稿） */
+  --tl-ws-pt: 1rem;                           /* 工作区分隔行上距（工作区与工作区间距，三轮定稿） */
 }
 
 [data-density='compact'] {
   --tl-row-min-h: 1.25rem;
   --tl-div-pt: 0.25rem;
   --tl-row-pad-y: 0.125rem;
+  --tl-head-pt: 0.375rem;
+  --tl-ws-pt: 0.5rem;
 }
 
 /* ── hub：左栏入口条（panes/hub/entry-bar.tsx，2026-10-02）──
@@ -380,14 +384,7 @@
   color: var(--text);
 }
 
-.hub-entry-icon {
-  flex: none;
-  width: var(--hub-row-icon);
-  height: var(--hub-row-icon);
-  opacity: var(--hub-icon-dim);
-}
-
-/* 文案占满中段，快捷键标注 ml-auto 推到行尾（hermes KbdGroup ml-auto） */
+/* 文案占满中段（图标列已删）；快捷键标注 ml-auto 推到行尾（KbdGroup ml-auto） */
 .hub-entry-label {
   flex: 1 1 auto;
   min-width: 0;

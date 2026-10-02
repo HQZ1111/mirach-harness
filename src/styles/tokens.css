@@ -229,17 +229,16 @@
   --hub-row-h: 32px;                          /* 入口行高（18px 文字 + 呼吸；二轮 44→32 缩回） */
   --hub-row-font: 18px;                       /* 行文字（用户定稿 2026-10-02 二轮 18px） */
   --hub-row-weight: 500;                      /* hermes font-medium */
-  --hub-row-icon: 18px;                       /* 图标（hermes size-4） */
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
   --hub-row-radius: 6px;                      /* hermes rounded-md */
   --hub-bar-pad-y: 6px;                      /* 入口条上下内边距 */
   --hub-bar-gap: 1px;                         /* 行间距（hermes gap-px；二轮缩回） */
-  --hub-icon-dim: 0.72;                       /* 图标强度（hermes 72%） */
   --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
   --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */
   --side-group-size: 15px;                    /* 组头字号（已置顶/会话/状态，品牌色加粗；二轮定稿 15px） */
   --side-workspace-size: 18px;                /* 工作区头字号（项目组头，二轮定稿） */
+  --side-workspace-color: #4C4C4C;            /* 工作区头颜色（三轮定稿：中性灰，与品牌色组头区分） */
   --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
   --hub-card-radius: 6px;                     /* 卡/行圆角（hermes rounded-md） */
