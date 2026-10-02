@@ -461,6 +461,113 @@
 /* ── 左栏标签条：logo/文字迁入条内（onRenderTabSet leading），不再需要
    margin 让位（宿主层浮层方案已退役，见 overlays.css 注释） ── */
 
+/* ── 多签溢出下拉按钮 + popover（ZCode 形制：用户 2026-10-03，leading
+   "标签前面"放计数按钮，点击弹全 tab 列表） ──
+   父级 .flexlayout__tabset_leading 是 absolute 撑满全宽 +
+   pointer-events:none——按钮必须自绝对定位 + 显式尺寸 + 重新开启点击
+   才不会塌成 icon 宽 12px 且点击被吞。 */
+.flexlayout-host .tab-overflow-btn {
+  align-items: center !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: var(--zone-btn-radius) !important;
+  box-sizing: border-box !important;
+  color: var(--tab-text);
+  cursor: pointer !important;
+  display: inline-flex !important;
+  font-size: 11px !important;
+  gap: 3px !important;
+  height: var(--zone-btn-size) !important;
+  justify-content: center !important;
+  left: 4px !important;
+  margin: 0 !important;
+  min-width: 36px !important;
+  opacity: 0.6;
+  padding: 0 6px !important;
+  pointer-events: auto !important;
+  position: absolute !important;
+  top: 50% !important;
+  transform: translateY(-50%);
+  transition: opacity 120ms;
+  width: auto !important;
+  z-index: 2;
+}
+.flexlayout-host .flexlayout__tab_button:hover ~ .tab-overflow-btn,
+.flexlayout-host .flexlayout__tabset:hover .tab-overflow-btn,
+.flexlayout-host .tab-overflow-btn:hover,
+.flexlayout-host .tab-overflow-btn[data-state='open'] {
+  opacity: 1;
+}
+.flexlayout-host .tab-overflow-btn:hover,
+.flexlayout-host .tab-overflow-btn[data-state='open'] {
+  background: var(--tab-hover-bg);
+  color: var(--tab-text-active);
+}
+
+/* popover 内容：竖列，max-height 滚动 */
+.flexlayout-host .tab-overflow-menu {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  max-height: 360px;
+  min-width: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  z-index: 60;
+}
+.flexlayout-host .tab-overflow-item {
+  align-items: center;
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  justify-content: space-between;
+  outline: none;
+  padding: 6px 10px;
+}
+.flexlayout-host .tab-overflow-item[data-highlighted] {
+  background: var(--hover-wash);
+}
+.flexlayout-host .tab-overflow-item.active {
+  background: color-mix(in srgb, var(--fl-accent) 8%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+.flexlayout-host .tab-overflow-item .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flexlayout-host .tab-overflow-item .close-btn {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  color: var(--text-3);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  height: 18px;
+  justify-content: center;
+  opacity: 0;
+  padding: 0;
+  transition: opacity 120ms;
+  width: 18px;
+}
+.flexlayout-host .tab-overflow-item:hover .close-btn,
+.flexlayout-host .tab-overflow-item[data-highlighted] .close-btn {
+  opacity: 1;
+}
+.flexlayout-host .tab-overflow-item .close-btn:hover {
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  color: var(--text);
+}
+
 /* ── 对话标签双行 chip（onRenderTab leading 注入，用户定稿 2026-10-03
    十一轮：参考左栏 logo 的 leading 形式放页签最左；原 tab 名 content
    恢复显示——十轮的 content 替换方案废弃）。拉伸头栏 tab_button_stretch

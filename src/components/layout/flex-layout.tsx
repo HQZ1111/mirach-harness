@@ -25,6 +25,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
+import { TabOverflowButton } from './tab-overflow-button'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
 import { ZoneEditor } from './zone-editor'
 
@@ -1092,6 +1093,19 @@ export function FlexLayoutShell() {
       if (node.getChildren().some((c) => c.getId() === 'sessions')) {
         renderValues.leading = <RailLogoLeading />
       }
+      // 多签页签条溢出下拉（ZCode 形制：用户 2026-10-03）——标签前
+      // 面（leading）放计数按钮，点击 popover 列出全部 tab 跳转/关闭。
+      // 单签不显示（拉伸头栏/单窗格 zone 无溢出需求）；轨（折叠栏）不显示。
+      const childTabs = node.getChildren().filter((c) => c instanceof TabNode)
+      if (childTabs.length >= 2 && !cfg.track) {
+        const existingLeading = renderValues.leading
+        renderValues.leading = (
+          <>
+            {existingLeading}
+            <TabOverflowButton tabsetId={node.getId()} />
+          </>
+        )
+      }
       const isPrimaryZone = node.getChildren().some(
         (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
       )
@@ -1466,7 +1480,7 @@ export function FlexLayoutShell() {
       // 统一族（fl-home-btn 回家钮 / fl-stretch-close 拉伸头栏注入 ✕ 都是
       // 它的子集）——拉伸头栏的关闭钮此前不在白名单，被拖拽接管
       // preventDefault 吞掉 click 成了死钮（2026-10-01 审查 P1-1）。
-      if (target.closest('.flexlayout__tab_button_trailing, .flexlayout__border_button_trailing, .fl-close-btn, input, textarea')) return
+      if (target.closest('.flexlayout__tab_button_trailing, .flexlayout__border_button_trailing, .fl-close-btn, .tab-overflow-btn, input, textarea')) return
       const btn = target.closest(`[id^="${TAB_BUTTON_ID}"]`) as HTMLElement | null
       if (!btn) return
       const tabId = btn.id.slice(TAB_BUTTON_ID.length)
