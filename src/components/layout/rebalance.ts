@@ -187,13 +187,21 @@ export const absorbSurplus = (m: Model) => {
   })
   if (!boundsOk) return
   const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
-  // 目标 px：轨=20 固定；主栏=-1（吸收者标记）；其余列钳进聚合约束
+  // 目标 px：轨=20 固定；主栏=-1（吸收者标记）；其余列钳进聚合约束。
+  // **base 用记忆 px 而非 measured**（2026-10-03 实锤）：结构动作后本函数
+  // 与 applyRootWeights 同帧串跑，此刻渲染还是 stale 权重的旧帧（关 review
+  // 后左栏 measured=420）——用 measured 会把 applyRootWeights 刚按记忆钉
+  // 下去的权重（350）立刻覆盖回 stale 值（420），左栏跟着关列漂移的整条
+  // 修复链失效。记忆 px 与 applyRootWeights 同源：拖拽/resize/boot 由
+  // measureRootPx 维护，结构动作由 onModelChange 同步量测维护。
   const px = kids.map((k, i) => {
     const c = regionCfgOfNode(k)
     if (c?.track) return TRACK_W
     if (c?.region === 'main' && !c.track) return -1
     const b = widthBounds(k, k instanceof RowNode)
-    return Math.min(Math.max(measured[i], b.min), b.max)
+    const memW = c ? rootPxMem[c.region] : undefined
+    const base = typeof memW === 'number' && memW > 40 ? memW : measured[i]
+    return Math.min(Math.max(base, b.min), b.max)
   })
   let rest = avail - px.reduce((s, v) => s + Math.max(v, 0), 0)
   // 吸收者：主栏分栏按当前权重比例分吃 rest（各不低于实际生效 min——

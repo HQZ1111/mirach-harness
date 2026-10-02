@@ -21,6 +21,7 @@ import {
   absorbSurplus,
   applyRootWeights,
   fitWindowWidth,
+  rootPxMem,
   updateNarrowViewport,
 } from './rebalance'
 import { useLayoutStore } from '@/store/layout-store'
@@ -66,6 +67,12 @@ beforeEach(() => {
   tauri.inTauri = false
   tauri.setSize.mockReset()
   useLayoutStore.setState({ narrowViewport: false })
+  // absorbSurplus 的非主栏 base 读记忆 px（与 applyRootWeights 同源，
+  // 2026-10-03）——重置模块态防用例间泄漏；需要"量测已跑"前置的用例
+  // 显式覆写（模拟 measureRootPx 已把渲染真值写入记忆）。
+  rootPxMem.left = 350
+  rootPxMem.main = 746
+  rootPxMem.right = 700
 })
 
 // ── 假节点（只覆盖被测函数实际读取的方法） ────────────────────────────────────
@@ -194,6 +201,9 @@ describe('absorbSurplus（§9 富余兜底：吸收者唯一、根行 Σ=可用�
     const right = fakeTabset('right', { region: 'right', minW: 240, maxW: 420, measured: 240, weight: 100 })
     const root = fakeRow('root', [left, main, right])
     const { m, actions } = fakeModel(root)
+    // 缩让后的渲染真值已入记忆（measureRootPx 前置）——base=mem=240
+    rootPxMem.left = 240
+    rootPxMem.right = 240
     absorbSurplus(m)
     // avail = 798；左右钳回 min 240，剩余 318 全部归主栏（< 其 min 395——
     // 240 底线不让，亏空只能归吸收者）
@@ -225,6 +235,8 @@ describe('absorbSurplus（§9 富余兜底：吸收者唯一、根行 Σ=可用�
     const col = fakeRow('col', [band, terminal], 1100) // 右列 VERT 行，实测 1100 > 聚合 max
     const root = fakeRow('root', [left, main, col])
     const { m, actions } = fakeModel(root)
+    // 超宽渲染已入记忆（measureRootPx 前置）——base=mem=1100 → 钳回聚合 max
+    rootPxMem.right = 1100
     absorbSurplus(m)
     // 右列聚合 max = 420+420+1 缝 = 841（VERT 行 MIN 跨轴，终端柔性不约束列宽）
     expect(actions).toHaveLength(3)
