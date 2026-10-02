@@ -24,7 +24,6 @@ import { appWindow, inTauri } from '@/lib/tauri-window'
 import { LogicalSize } from '@tauri-apps/api/dpi'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
-import { PaneZoneMenu } from './pane-context-menu'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
 import { ZoneEditor } from './zone-editor'
@@ -1560,9 +1559,11 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
               </div>
             )
           : content
-      // 窗格空白区右键 → 分栏操作菜单（hermes ZoneMenu 的 body 落点；页签
-      // 面已有 showPopupMenu 页签菜单）。菜单项打开时刻现读 model。
-      return <PaneZoneMenu node={node}>{surface}</PaneZoneMenu>
+      // 普通模式 body 右键 = app 菜单（hermes 实锤：ZoneMenu 只包页签条/
+      // 竖轨/编辑遮罩三处，body 在常态不包——tree-group.tsx 816 的包裹在
+      // `editMode &&` 分支里）。页签条/竖轨 chrome 由 main.tsx 裁定层路由
+      // （closest('.flexlayout__tabset') → openZoneContextMenuAt）。
+      return surface
     },
     [],
   )

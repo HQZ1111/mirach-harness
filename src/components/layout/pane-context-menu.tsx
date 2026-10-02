@@ -292,41 +292,6 @@ const ZoneMenuBody: FC<{ model: Model; tabId: string }> = ({ model, tabId }) => 
  * 命中测试，WebView2 菜单会从缝里漏出）。Radix Trigger 自带：开启时
  * preventDefault（压 WebView2 菜单）+ 虚拟锚定到点击坐标。
  */
-export const PaneZoneMenu: FC<{ node: TabNode; children: ReactNode }> = ({ node, children }) => {
-  const tabId = node.getId()
-  const model = node.getModel()
-  return (
-    <ContextMenuPrimitive.Root>
-      <ContextMenuPrimitive.Trigger asChild>
-        <div
-          className="pane-zone-menu-surface"
-          onContextMenuCapture={(e) => {
-            // 原生右键落在 pane 内编辑面（composer textarea 等）→ 放行原生
-            // 编辑菜单：捕获段 stopPropagation（**不 preventDefault**——那
-            // 会连原生菜单一起压掉）拦住本元素冒泡段的 Radix 开启。
-            // owned 面无需处理（行 Trigger 先 preventDefault，
-            // composeEventHandlers 的 defaultPrevented 检查自动跳过本菜单）。
-            if (!(e.target instanceof Element)) return
-            if (resolveContextMenuScope(e.target) === 'editable') e.stopPropagation()
-          }}
-          style={{ display: 'block', height: '100%', width: '100%' }}
-        >
-          {children}
-        </div>
-      </ContextMenuPrimitive.Trigger>
-      <ContextMenuPrimitive.Portal>
-        <ContextMenuPrimitive.Content
-          aria-label="分栏操作"
-          className={MENU_CONTENT_CLASS}
-          data-slot="fl-pane-zone-context"
-        >
-          <ZoneMenuBody model={model} tabId={tabId} />
-        </ContextMenuPrimitive.Content>
-      </ContextMenuPrimitive.Portal>
-    </ContextMenuPrimitive.Root>
-  )
-}
-
 // ── 裁定层 store 路由（tabset chrome 落点 → 同一份 ZoneMenu） ────────────────
 // 页签条/拉伸头栏/logo 带/条上空白不在页签 body 表面（Radix Trigger 够不到，
 // hermes 里这些面同归 ZoneMenu——tree-group 486 的 strip 包裹）。main.tsx 的

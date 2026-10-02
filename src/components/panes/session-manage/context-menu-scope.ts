@@ -17,14 +17,11 @@
  *   开启（只压掉原生菜单、我们的 SessionContextMenu 反而不弹）。Radix
  *   自己的 handler 会打开菜单并 preventDefault 压原生菜单（CDP 实测：
  *   行右键 defaultPrevented=true、菜单 5 项）。
- * - pane：flexlayout 窗格内容区（.flexlayout__tab 内、非 editable 非
- *   owned）——同样**早退不 preventDefault**：窗格容器自管分栏操作菜单
- *   （components/layout/pane-context-menu.tsx 的 contextmenu 监听自己
- *   preventDefault + 弹菜单，与行/树同款"自管面"模式）。这里抢跑
- *   preventDefault 不会挡住自管监听（它照样弹），但语义上 pane 与
- *   owned 同类：右键面归窗格层管辖，全局层只放行。
- * - app：其余一切——preventDefault 压掉 WebView2 菜单（无自定义菜单的
- *   区域也保持"右键不弹系统菜单"的桌面应用观感）。
+ * - app：其余一切——preventDefault 压掉 WebView2 菜单，再按落点分派
+ *   （flexlayout tabset chrome → ZoneMenu；其余 → 窗口动词菜单）。
+ *   **窗格 body（.flexlayout__tab）= app**：hermes 实锤 ZoneMenu 只包
+ *   页签条/竖轨/编辑遮罩三处（tree-group.tsx 486/550/816，816 在
+ *   `editMode &&` 分支里），普通模式 body 右键归 app 菜单。
  *
  * 结构化入参（closest/isContentEditable/tagName）而非 Element，node 环境
  * 单测无需 DOM（context-menu-scope.test.ts）。
@@ -47,16 +44,11 @@ export const CONTEXT_MENU_EDITABLE_SELECTOR = 'input, textarea'
  *  文件树行 = WorkspaceFileTreeRowView 的 role="treeitem"。 */
 export const CONTEXT_MENU_OWNER_SELECTOR = '[data-slot="aui_thread-list-item-trigger"], [role="treeitem"]'
 
-/** flexlayout 窗格内容区（.flexlayout__tab 是页签 body 的包装 div，见
- *  CSSClassNames FLEXLAYOUT__TAB）——窗格层自管分栏操作菜单的面。 */
-export const CONTEXT_MENU_PANE_SELECTOR = '.flexlayout__tab'
-
-export type ContextMenuScope = 'editable' | 'owned' | 'pane' | 'app'
+export type ContextMenuScope = 'editable' | 'owned' | 'app'
 
 export function resolveContextMenuScope(target: ContextMenuScopeTarget | null): ContextMenuScope {
   if (!target) return 'app'
   if (target.isContentEditable || target.closest(CONTEXT_MENU_EDITABLE_SELECTOR)) return 'editable'
   if (target.closest(CONTEXT_MENU_OWNER_SELECTOR)) return 'owned'
-  if (target.closest(CONTEXT_MENU_PANE_SELECTOR)) return 'pane'
   return 'app'
 }
