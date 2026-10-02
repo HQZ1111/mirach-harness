@@ -983,7 +983,9 @@ const SectionHeader: FC<{
 }> = ({ headerKey, label, collapsed, collapsible = true, action }) => {
   const body = (
     <>
-      <span className="text-(--text-2) text-xs font-medium">{label}</span>
+      {/* 组头（用户定稿 2026-10-02）：20px 品牌色——已置顶/会话/项目/状态
+          四种分组头同形制（tokens --side-group-size）。 */}
+      <span className="text-(--fl-accent) text-(length:--side-group-size) font-bold">{label}</span>
       {collapsible && (
         <ChevronDownIcon
           aria-hidden
@@ -1029,7 +1031,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-0.5 pt-(--tl-div-pt,0.5rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-div-pt,0.75rem) select-none"
       data-slot="aui_thread-list-date-divider"
     >
       <button
@@ -1066,7 +1068,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-0.5 pt-(--tl-div-pt,0.5rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-div-pt,0.75rem) select-none"
       data-slot="aui_thread-list-workspace-divider"
     >
       <button
@@ -1080,9 +1082,9 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
       >
         <FolderIcon
           aria-hidden
-          className="text-(--text-4) size-3 shrink-0"
+          className="text-(--fl-accent) size-4 shrink-0"
         />
-        <span className="text-(--text-2) min-w-0 truncate text-xs font-medium">{label}</span>
+        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-group-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
           className={cn(
@@ -1108,7 +1110,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey,
   const bucket = bucketKey.slice("s:".length) as SessionStatusBucket;
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-0.5 pt-(--tl-div-pt,0.5rem) select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-(--tl-div-pt,0.75rem) select-none"
       data-slot="aui_thread-list-status-divider"
     >
       <button
@@ -1121,7 +1123,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey,
         type="button"
       >
         <span aria-hidden className={STATUS_DOT_CLASS[bucket]} />
-        <span className="text-(--text-2) min-w-0 truncate text-xs font-medium">{label}</span>
+        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-group-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
           className={cn(
@@ -1760,7 +1762,7 @@ export const ThreadListItem: FC = () => {
             {isUnread && !isRunning && <span className="sr-only">已完成 — 未读</span>}
             <span className="min-w-0 flex-1 self-center">
               <span
-                className="hover-marquee text-(--text-2) group-hover/row:text-(--text) block truncate text-[0.8125rem] leading-[1.35] font-normal"
+                className="hover-marquee text-(--text-2) group-hover/row:text-(--text) block truncate text-(length:--side-row-size) leading-[1.45] font-normal"
                 data-slot="aui_thread-list-item-title"
                 onPointerEnter={armMarquee}
                 onPointerLeave={disarmMarquee}

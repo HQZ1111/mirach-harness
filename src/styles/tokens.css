@@ -226,18 +226,20 @@
    bot 卡 lead 头像方块（bot-row.tsx:258-265 BotFace size=34）。颜色一律
    引用上方全局色板，本块只收几何与强度。 */
 :root {
-  --hub-row-h: 28px;                          /* 入口行高（hermes h-7） */
-  --hub-row-font: 13px;                       /* 行文字（hermes 0.8125rem） */
+  --hub-row-h: 44px;                          /* 入口行高（20px 文字 + 呼吸） */
+  --hub-row-font: 20px;                       /* 行文字（用户定稿 2026-10-02） */
   --hub-row-weight: 500;                      /* hermes font-medium */
   --hub-row-icon: 16px;                       /* 图标（hermes size-4） */
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
   --hub-row-radius: 6px;                      /* hermes rounded-md */
-  --hub-bar-pad-y: 6px;                       /* 入口条上下内边距 */
-  --hub-bar-gap: 1px;                         /* 行间距（hermes SidebarMenu gap-px） */
+  --hub-bar-pad-y: 10px;                      /* 入口条上下内边距 */
+  --hub-bar-gap: 4px;                         /* 行间距（用户定稿：上下间距加大） */
   --hub-icon-dim: 0.72;                       /* 图标强度（hermes 72%） */
   --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
   --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */
+  --side-group-size: 20px;                    /* 组头字号（已置顶/会话/项目/状态，用户定稿） */
+  --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
   --hub-card-radius: 6px;                     /* 卡/行圆角（hermes rounded-md） */
   --hub-card-gap: 2px;                        /* 卡内行距（hermes name/details 两行） */
