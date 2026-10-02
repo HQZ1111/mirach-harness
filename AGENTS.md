@@ -2607,6 +2607,21 @@ value 限制）。406 用例。
   chip x=369-586 贴 tab 左缘（359+10）、content "主会话" x=600 恢复、
   pos=static ✓。教训：**替换 content 会吃掉原生标签**——跟标签共存的
   装饰一律走 leading（hermes/RailLogoLeading 同款位置语义）。
+- **十三轮（163c2c6，用户 2026-10-03 复现"默认布局直接关检查页左栏
+  变大"）**：十一轮修复的**自愈补丁**。CDP 实测新代码下"重置默认→关
+  review→左 350 保持"✓——用户仍见变大的根因是**遗留污染态**：旧 bug
+  时代 stale 权重已写进 rootPxMem（模块态，HMR 不重置）与 localStorage
+  布局权重，新代码 applyRootWeights"忠实"钉 413。补丁两处：①
+  onModelChange 在 DELETE_TAB **同步时刻** measureRootPx——此刻 getRect
+  仍是动作前布局（flexlayout 重排在 React commit，AGENTS"onModelChange
+  时 DOM 是旧渲染"在此恰是正确值），记录的 = 用户关闭前看到的各列宽
+  （想要的状态）→ 定时器钉回它 → **关闭一次即自愈为"保持不变"**（覆
+  盖任何历史污染）；②定时器结构路径跳过 measureRootPx（applyRootWeights
+  钉回后立即量测读到 stale 渲染会再污染 mem，影响下一次钉回目标）。
+  非 DELETE_TAB 的结构动作（MOVE_NODE/AddNode）不同步量测——migrating/
+  程序化序列有自己的 pinAfterLayout 机制，中途量测会写中间态。教训：
+  **"旧渲染"是好是坏取决于问题**——对量测折叠高度是坑，对"关闭前状态
+  快照"恰是唯一正确时刻。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
