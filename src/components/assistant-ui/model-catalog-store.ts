@@ -65,4 +65,8 @@ export const modelCatalogStore = createStore<ModelCatalogState>((set, get) => ({
   setCurrentModel: (model) => set({ currentModel: model }),
 }))
 
-export const useModelCatalog = () => useStore(modelCatalogStore)
+export function useModelCatalog(): ModelCatalogState
+export function useModelCatalog<T>(selector: (s: ModelCatalogState) => T): T
+export function useModelCatalog(selector?: (s: ModelCatalogState) => unknown): unknown {
+  return useStore(modelCatalogStore, selector ?? ((s) => s))
+}

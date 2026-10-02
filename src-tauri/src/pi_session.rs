@@ -209,6 +209,9 @@ impl PiEngine {
     /// working_directory = 会话工作区（SessionOptions.working_directory，
     /// sdk.rs:311——header.cwd 与项目本地配置加载都从它推导，前端
     /// 「选择工作区」入口经 pi_new_session 到此）。
+    /// system_prompt = 会话系统提示（SessionOptions.system_prompt，
+    /// sdk.rs:308——机器人预设的 pi 侧承载，pi_create_bot_session 传入；
+    /// None 时 SessionOptions::default 同形，上游无缺省注入）。
     /// ui_bridge：扩展 UI 请求桥（§4.4 审批/问题卡）——None 时保持上游
     /// fail-closed（能力提示直接 deny）。
     /// 返回 "provider/model" 标识（仅供日志；消费方经 pi_get_state 结构化获取）。
@@ -216,6 +219,7 @@ impl PiEngine {
         &self,
         provider: Option<String>,
         model: Option<String>,
+        system_prompt: Option<String>,
         ui_bridge: Option<UiBridgeHandle>,
         session_path: Option<std::path::PathBuf>,
         working_directory: Option<std::path::PathBuf>,
@@ -227,6 +231,8 @@ impl PiEngine {
         let options = SessionOptions {
             provider,
             model,
+            // 机器人预设的系统提示（sdk.rs:308 SessionOptions.system_prompt）
+            system_prompt,
             // 会话持久化（对话真相在 pi，§5）；session_path 打开历史会话时
             // 上游自动装填该文件。
             // 【2026-10-01 修复记录】此前 no_session:false 实测"flush 永败
@@ -278,7 +284,7 @@ impl PiEngine {
         model: Option<String>,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        self.create_session_opts(provider, model, ui_bridge, None, None)
+        self.create_session_opts(provider, model, None, ui_bridge, None, None)
     }
 
     /// 在指定工作区新建（空）会话（前端「选择工作区」入口）：working_directory
@@ -291,7 +297,38 @@ impl PiEngine {
         cwd: &str,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        self.create_session_opts(None, None, ui_bridge, None, Some(std::path::PathBuf::from(cwd)))
+        self.create_session_opts(
+            None,
+            None,
+            None,
+            ui_bridge,
+            None,
+            Some(std::path::PathBuf::from(cwd)),
+        )
+    }
+
+    /// 机器人预设会话（左栏「机器人」窗格启动钮）：system_prompt + model +
+    /// working_directory 一次性给足（SessionOptions.system_prompt sdk.rs:308 /
+    /// model :305 / working_directory :311）。workspace_trusted = 选了工作区
+    /// 即信任（new_session_with_cwd 同款语义）。调用方（pi_create_bot_session）
+    /// 随后以 bot 名重命名该会话（rename_session 只作用当前会话——刚建即当前）。
+    /// 返回 "provider/model"。
+    pub fn create_bot_session(
+        &self,
+        provider: Option<String>,
+        model: Option<String>,
+        system_prompt: Option<String>,
+        cwd: Option<String>,
+        ui_bridge: Option<UiBridgeHandle>,
+    ) -> Result<String, String> {
+        self.create_session_opts(
+            provider,
+            model,
+            system_prompt,
+            ui_bridge,
+            None,
+            cwd.map(std::path::PathBuf::from),
+        )
     }
 
     /// 确保有活跃会话：已有则原样复用（多轮对话上下文保持），
@@ -331,7 +368,14 @@ impl PiEngine {
         path: &str,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        self.create_session_opts(None, None, ui_bridge, Some(std::path::PathBuf::from(path)), None)
+        self.create_session_opts(
+            None,
+            None,
+            None,
+            ui_bridge,
+            Some(std::path::PathBuf::from(path)),
+            None,
+        )
     }
 
     /// 当前会话的 fork 谱系：SessionHeader.parent_session（serde 名

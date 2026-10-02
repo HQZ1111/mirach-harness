@@ -36,10 +36,11 @@ export type SessionListRow =
       readonly key: string
       readonly label: string
       /** 'date'（默认）= 日历桶分隔线；'project' = 工作区分组头（按
-       *  SessionMeta.cwd，session-display 的 groupEntriesByWorkspace 产出）
-       *  ——渲染形制不同（日期线小体量大字距 caption vs 组头），折叠语义
-       *  相同：分隔线保留、其下行隐藏。 */
-      readonly variant?: 'date' | 'project'
+       *  SessionMeta.cwd，session-display 的 groupEntriesByWorkspace 产出）；
+       *  'status' = 状态桶组头（session-display 的 groupEntriesByStatus 产出，
+       *  label = 状态中文名）——形制由渲染层区分，折叠语义相同：分隔线
+       *  保留、其下行隐藏。 */
+      readonly variant?: 'date' | 'project' | 'status'
     }
 
 // ── lib/time.ts：日历桶（逐语义） ─────────────────────────────────────────

@@ -12,30 +12,25 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import {
-  AlignJustifyIcon,
-  ArrowDownAZIcon,
+  ActivityIcon,
   ArchiveIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ClipboardIcon,
-  CircleDotIcon,
   ClockIcon,
-  CreditCardIcon,
   DownloadIcon,
   FolderIcon,
-  FolderOpenIcon,
   GitForkIcon,
   GitPullRequestIcon,
+  HashIcon,
   InboxIcon,
   GripVerticalIcon,
-  HashIcon,
   ListFilterIcon,
-  ListIcon,
-  ListOrderedIcon,
   MailIcon,
   MailOpenIcon,
   MoreVerticalIcon,
+  NetworkIcon,
   PencilIcon,
   UserIcon,
   PinIcon,
@@ -60,11 +55,11 @@ import {
 } from "react";
 import { ContextMenu as ContextMenuPrimitive, DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 import { useStore } from "zustand";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { branchBridge } from "@/components/assistant-ui/branch-store";
+import { approvalBridge } from "@/components/assistant-ui/approval-bridge";
 import {
   sessionArchiveStore,
   useSessionArchive,
@@ -109,24 +104,33 @@ import {
   useSessionUnread,
 } from "@/components/panes/session-manage/session-unread";
 import { sessionUsageStore, useSessionUsage } from "@/components/panes/session-manage/session-usage";
-import { sessionWorkspaceStore } from "@/components/panes/session-manage/session-workspace";
+import {
+  sessionStatusBucket,
+  STATUS_BUCKET_LABELS,
+  STATUS_DOT_CLASS,
+  type SessionStatusBucket,
+} from "@/components/panes/session-manage/session-status";
 import {
   effectiveOrdering,
+  filterByStatus,
   isSidebarViewCustomized,
   sidebarViewStore,
   useSidebarView,
   type SidebarGroupingMode,
   type SidebarRowMeta,
+  type SidebarSortKey,
 } from "@/components/panes/session-manage/sidebar-view";
 
 /**
  * 会话侧栏（左栏会话列表）——hermes app/chat/sidebar 一链到底对齐版：
- * 行布局/hover 钮/⋯ 菜单/右键上下文菜单/分组结构（已置顶 + 会话 + 日期
+ * 行布局/hover 钮/⋯ 菜单/右键上下文菜单/分组结构（已置顶 + 会话 + 分组
  * 分隔线 + 桶折叠）/搜索（结果段）/新建入口（段头 hover ＋）/段头侧栏
- * 选项钮（hermes SidebarFilterMenu：分组/排序/密度 + 全部收起/展开 +
- * 重置为默认；sidebar-view.ts 持选项状态）/激活态/⇧+点击置顶/重命名与
- * 删除确认弹层。菜单项清单与顺序 = session-actions.ts 的纯投影（⋯ 与
- * 右键同源，hermes actions-menu 体系）；文案逐字取 hermes zh catalog。
+ * 选项钮（hermes SidebarFilterMenu 的用户截图 1-14 项逐行对齐：分组/排序/
+ * 显示/收件箱样式/配置档案栏 + 筛选组（状态/拉取请求/配置档案/全部配置
+ * 档案/已归档）+ 全部折叠/全部标记为已读；sidebar-view.ts 持选项状态，
+ * session-status.ts 持五桶判定）/激活态/⇧+点击置顶/重命名与删除确认弹层。
+ * 菜单项清单与顺序 = session-actions.ts 的纯投影（⋯ 与右键同源，hermes
+ * actions-menu 体系）；文案逐字取 hermes zh catalog。
  */
 
 // ── 行拖拽提交的上下文（分区 → 组 → 提交通道）─────────────────────────────
@@ -161,10 +165,12 @@ export const ThreadList: FC = () => {
 
   return (
     <ThreadListRoot className="flex h-full min-h-0 flex-col bg-(--surface)" data-density={density}>
-      <div className="shrink-0 px-2 pb-1 pt-1">
+      <div className="shrink-0 px-3 pb-1 pt-1">
         <ThreadListSearch aria-label="搜索会话" onValueChange={setSearch} value={search} />
       </div>
-      <ThreadListItems className="min-h-0 flex-1 overflow-y-auto pb-2" dndSensors={dndSensors} searchQuery={search} />
+      {/* 左右边距 20px（用户定稿）：容器 px-3 + 行 px-2 合成文字线 20 ——
+          hermes SidebarContent px-2.5 的同款分层 */}
+      <ThreadListItems className="min-h-0 flex-1 overflow-y-auto px-3 pb-2" dndSensors={dndSensors} searchQuery={search} />
     </ThreadListRoot>
   );
 };
@@ -304,30 +310,94 @@ const useThreadDisplay = (searchQuery: string) => {
   // 归档过滤（hermes $sidebarShowArchived 关 = 归档行整个不渲染；开 =
   // 归位显示，行 lead 换归档字形）。搜索同样只搜未归档面。
   const metas = useMemo(
-    () =>
-      showArchived
-        ? allMetas
-        : allMetas.filter((m) => !archived.includes(m.id)),
+    () => (showArchived ? allMetas : allMetas.filter((m) => !archived.includes(m.id))),
     [allMetas, archived, showArchived],
+  );
+
+  // 状态桶判定（session-status.ts：needs-input > working > unread > draft >
+  // idle，hermes claim 链同序）——状态筛选/分组/排序共用同一份。pi 前端
+  // 全可判定：needsInput = 审批卡挂起（approvalBridge 为真相——Rust
+  // ApprovalRegistry 的前端缓存，pi 的 extension 请求只发生在当前活跃
+  // 会话 → 挂在 mainThreadId）；working = runtime isRunning + mainThreadId。
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const mainThreadId = useAuiState((s) => s.threads.mainThreadId);
+  const pendingApprovals = useStore(approvalBridge, (s) => s.pending);
+  const seen = useSessionUnread((s) => s.seen);
+  const markers = useSessionUnread((s) => s.markers);
+  const runningThreadId = isRunning ? mainThreadId : null;
+  const needsInputThreadId = pendingApprovals.length > 0 ? mainThreadId : null;
+
+  const statusBuckets = useMemo(() => {
+    const map = new Map<string, SessionStatusBucket>();
+    for (const m of metas) {
+      map.set(
+        m.id,
+        sessionStatusBucket({
+          needsInput: m.id === needsInputThreadId,
+          running: m.id === runningThreadId,
+          unread: isRowUnread({ id: m.id, messageCount: m.messageCount ?? 0 }, seen, markers),
+          draft: !m.messageCount,
+        }),
+      );
+    }
+    return map;
+  }, [metas, needsInputThreadId, runningThreadId, seen, markers]);
+
+  // 状态筛选（hermes Filters>Status：五桶多选，空 = 不过滤）。
+  const statusFilter = useSidebarView((s) => s.statusFilter);
+  const filteredMetas = useMemo(
+    () =>
+      filterByStatus(metas, statusFilter, (m) => {
+        const bucket = statusBuckets.get(m.id);
+        if (bucket === undefined) {
+          throw new Error(`[thread-list] 行缺状态桶（${m.id}）——statusBuckets 必须覆盖全部行`);
+        }
+        return bucket;
+      }),
+    [metas, statusFilter, statusBuckets],
+  );
+
+  // 用量缓存订阅（tokens 排序键的辅助面 + 行尾 figures 的数据源共用——
+  // 同一份 session-usage 缓存，不重复拉取）。
+  const usageRows = useSessionUsage((s) => s.rows);
+
+  // 排序辅助面（rankIdsByOrdering 的 aux）：status 五桶 + tokens 词元总数
+  // （session-usage 缓存的 totalTokens，未缓存的行缺键——rankIdsByOrdering
+  // 按 0 沉底，拉取到达后排序自然上浮）。
+  const aux = useMemo(
+    () => ({
+      statusBuckets,
+      tokenTotals: (() => {
+        const map = new Map<string, number>();
+        for (const m of filteredMetas) {
+          if (typeof m.path === "string") {
+            const row = usageRows[m.path];
+            if (row) map.set(m.id, row.totalTokens);
+          }
+        }
+        return map;
+      })(),
+    }),
+    [statusBuckets, filteredMetas, usageRows],
   );
 
   return useMemo(() => {
     if (query) {
       const byId = new Map(threadItems.map((item) => [item.id, item] as const));
-      const matched = metas.filter((m) =>
+      const matched = filteredMetas.filter((m) =>
         matchesTitleSearch(byId.get(m.id)?.title ?? "", query),
       );
-      return { mode: "search" as const, threadIds, metas, search: buildSessionSearch(matched) };
+      return { mode: "search" as const, threadIds, metas: filteredMetas, search: buildSessionSearch(matched) };
     }
     return {
       mode: "groups" as const,
       threadIds,
-      metas,
-      display: buildSessionDisplay(metas, pinned, order, collapsed, {
-        view: { grouping, ordering },
+      metas: filteredMetas,
+      display: buildSessionDisplay(filteredMetas, pinned, order, collapsed, {
+        view: { grouping, ordering, aux },
       }),
     };
-  }, [query, threadIds, threadItems, metas, pinned, order, collapsed, grouping, ordering]);
+  }, [query, threadIds, threadItems, filteredMetas, pinned, order, collapsed, grouping, ordering, aux]);
 };
 
 // ── 侧栏选项钮（hermes SidebarFilterMenu 对齐：段头 + 右侧的常驻视图
@@ -345,6 +415,13 @@ const VIEW_MENU_ITEM_BASE =
 
 const VIEW_OPTION_GLYPH = "text-(--text-3) size-3.5 shrink-0";
 
+/** 禁用但带 title 说明的行（Show 子菜单 PR/配置档案）：不用
+ *  VIEW_MENU_ITEM_BASE——其 data-[disabled]:pointer-events-none 会让
+ *  native title 无法触发（说明文字必须可 hover）；观感（opacity-50）与
+ *  非交互（cursor-default）固定，onSelect 由 Radix 对 disabled 项短路。 */
+const VIEW_DISABLED_HINT_ITEM =
+  "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none opacity-50 cursor-default";
+
 /** 排序/分组选项行（图标 + 文案；hermes OptionGlyph 的 lucide 等价物）。 */
 const ViewOptionRow: FC<{ icon: FC<{ className?: string }>; label: string }> = ({ icon: Icon, label }) => (
   <>
@@ -352,6 +429,17 @@ const ViewOptionRow: FC<{ icon: FC<{ className?: string }>; label: string }> = (
     <span>{label}</span>
   </>
 );
+
+/** hermes STATUS_FILTERS（filter-menu.tsx:114-120 的五桶多选）：色点 =
+ *  STATUS_DOT_CLASS（session-status.ts），文案 = 用户截图（需要输入●橙 /
+ *  运行中●蓝 / 未读●绿 / 草稿○ / 空闲○）。 */
+const STATUS_FILTER_OPTIONS: readonly SessionStatusBucket[] = [
+  "needs-input",
+  "working",
+  "unread",
+  "draft",
+  "idle",
+];
 
 /** 选中指示槽：未选中也要占位（指示器卸载时行内文字不横移）。 */
 const ViewIndicatorSlot: FC<{ children: ReactNode }> = ({ children }) => (
@@ -366,15 +454,16 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   const ordering = useSidebarView(effectiveOrdering);
   const rowMeta = useSidebarView((s) => s.rowMeta);
   const showArchived = useSidebarView((s) => s.showArchived);
-  const density = useSidebarView((s) => s.density);
-  const showAll = useSidebarView((s) => s.showAll);
   const inboxStyle = useSidebarView((s) => s.inboxStyle);
   const projectFilter = useSidebarView((s) => s.projectFilter);
+  // 状态筛选（hermes $sidebarStatusFilter 同构：五桶多选，空 = 不过滤）。
+  const statusFilter = useSidebarView((s) => s.statusFilter);
   const customized = useSidebarView(isSidebarViewCustomized);
   // 「全部标记为已读」的可用面：当前渲染的行里有未读（hermes：disabled 当
   // unreadIds 空——markAllSessionsRead 清 transient 面，这里 ack 可见面）。
   const metas = useThreadVisibleMetas();
-  // 项目过滤子菜单的候选 = 全量 metas 的 distinct cwd（Home 桶=空串）
+  // 项目过滤子菜单的候选 = 全量 metas 的 distinct cwd（Home 桶=空串）；
+  // hermes 同款条件（filter-menu.tsx:388）：多于一个候选才出子菜单。
   const allMetasForProjects = useSessionRowMetas();
   const projectChoices = useMemo(() => {
     const set = new Set<string>();
@@ -390,19 +479,6 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   const onCollapseAll = () => {
     const st = sessionManageStore.getState();
     for (const key of dividerKeys) st.setGroupCollapsed(key, !foldCollapsed);
-  };
-
-  // 「选择工作区新建会话」：目录对话框 → sessionWorkspaceStore 请求桥 →
-  // runtime 执行 pi_new_session（working_directory 透传）。取消选择不发
-  // 请求；失败在 runtime 的执行器 console.error。
-  const onPickWorkspace = async () => {
-    try {
-      const dir = await openDialog({ directory: true });
-      if (!dir || typeof dir !== "string") return;
-      sessionWorkspaceStore.getState().requestCreate(dir);
-    } catch (e) {
-      console.error("[session] 工作区选择失败（Tauri 对话框不可用？）", e);
-    }
   };
 
   return (
@@ -428,14 +504,15 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           data-slot="aui_thread-list-view-menu-content"
           sideOffset={6}
         >
-          {/* 分组（hermes Grouping 子菜单：触发行显示当前值 + chevron-right；
-              选项 = 数据面支持的 date/project/none 三档——project 按
-              SessionMeta.cwd 分组，pi 无项目实体的直投影） */}
+          {/* 1. 分组 ▸（触发行显示当前值 + chevron-right；子菜单四项 =
+              用户截图：更新时间✓/项目/状态/网关与配置——无「平铺」）。
+              网关与配置（hermes grouping='profile' 的菜单标签）pi 单配置
+              档案无语义 → disabled radio 不发。 */}
           <DropdownMenuPrimitive.Sub>
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
               <span>分组</span>
               <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-                {grouping === "date" ? "按日期" : grouping === "project" ? "按项目" : "平铺"}
+                {grouping === "date" ? "更新时间" : grouping === "project" ? "项目" : "状态"}
                 <ChevronRightIcon className="size-3" />
               </span>
             </DropdownMenuPrimitive.SubTrigger>
@@ -459,7 +536,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                       <span aria-hidden className="bg-current size-1.5 rounded-full" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ClockIcon} label="按日期" />
+                  <ViewOptionRow icon={ClockIcon} label="更新时间" />
                 </DropdownMenuPrimitive.RadioItem>
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
@@ -471,27 +548,39 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                       <span aria-hidden className="bg-current size-1.5 rounded-full" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <ViewOptionRow icon={FolderIcon} label="按项目" />
+                  <ViewOptionRow icon={FolderIcon} label="项目" />
                 </DropdownMenuPrimitive.RadioItem>
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
                   onSelect={keepViewMenuOpen}
-                  value="none"
+                  value="status"
                 >
                   <ViewIndicatorSlot>
                     <DropdownMenuPrimitive.ItemIndicator>
                       <span aria-hidden className="bg-current size-1.5 rounded-full" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ListIcon} label="平铺" />
+                  <ViewOptionRow icon={ActivityIcon} label="状态" />
+                </DropdownMenuPrimitive.RadioItem>
+                <DropdownMenuPrimitive.RadioItem
+                  className={VIEW_DISABLED_HINT_ITEM}
+                  disabled
+                  title="pi 单配置档案，无可分组的网关与配置"
+                  value="gateway"
+                >
+                  <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
+                  <ViewOptionRow icon={UserIcon} label="网关与配置" />
                 </DropdownMenuPrimitive.RadioItem>
               </DropdownMenuPrimitive.RadioGroup>
             </DropdownMenuPrimitive.SubContent>
           </DropdownMenuPrimitive.Sub>
 
-          {/* 排序（hermes Ordering 子菜单：updated/created/…——created 用
-              pi header.timestamp；Manual 项仅在拖拽声明后出现——它是当前态
-              的展示位，选任意排序键 = 退出并清掉手动序） */}
+          {/* 2. 排序 ▸（子菜单四项 = 用户截图：更新时间✓/创建时间/状态/
+              词元数——无「标题字母序」无「手动」：hermes 拖拽排序不经此
+              菜单，拖拽声明 manual 时 radio 无命中项不高亮，选任意排序键
+              = 退出手动并清掉保存的手动序）。status 键 = 五桶 rank 升序
+              （needs-input > working > unread > draft > idle）；tokens 键 =
+              session-usage 懒拉（未拉到按 0 沉底）。 */}
           <DropdownMenuPrimitive.Sub>
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
               <span>排序</span>
@@ -501,12 +590,11 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               sideOffset={6}
             >
               <DropdownMenuPrimitive.RadioGroup
-                onValueChange={(value) => {
-                  if (value === "manual") return;
+                onValueChange={(value) =>
                   sidebarViewStore
                     .getState()
-                    .setOrdering(value as "title" | "updated" | "created");
-                }}
+                    .setOrdering(value as SidebarSortKey)
+                }
                 value={ordering}
               >
                 <DropdownMenuPrimitive.RadioItem
@@ -519,7 +607,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                       <span aria-hidden className="bg-current size-1.5 rounded-full" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ClockIcon} label="最近活动" />
+                  <ViewOptionRow icon={ClockIcon} label="更新时间" />
                 </DropdownMenuPrimitive.RadioItem>
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
@@ -537,36 +625,34 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
                   onSelect={keepViewMenuOpen}
-                  value="title"
+                  value="status"
                 >
                   <ViewIndicatorSlot>
                     <DropdownMenuPrimitive.ItemIndicator>
                       <span aria-hidden className="bg-current size-1.5 rounded-full" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ArrowDownAZIcon} label="标题字母序" />
+                  <ViewOptionRow icon={ActivityIcon} label="状态" />
                 </DropdownMenuPrimitive.RadioItem>
-                {ordering === "manual" && (
-                  <DropdownMenuPrimitive.RadioItem
-                    className={VIEW_MENU_ITEM_BASE}
-                    onSelect={keepViewMenuOpen}
-                    value="manual"
-                  >
-                    <ViewIndicatorSlot>
-                      <DropdownMenuPrimitive.ItemIndicator>
-                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                      </DropdownMenuPrimitive.ItemIndicator>
-                    </ViewIndicatorSlot>
-                    <ViewOptionRow icon={ListOrderedIcon} label="手动" />
-                  </DropdownMenuPrimitive.RadioItem>
-                )}
+                <DropdownMenuPrimitive.RadioItem
+                  className={VIEW_MENU_ITEM_BASE}
+                  onSelect={keepViewMenuOpen}
+                  value="tokens"
+                >
+                  <ViewIndicatorSlot>
+                    <DropdownMenuPrimitive.ItemIndicator>
+                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                    </DropdownMenuPrimitive.ItemIndicator>
+                  </ViewIndicatorSlot>
+                  <ViewOptionRow icon={HashIcon} label="词元数" />
+                </DropdownMenuPrimitive.RadioItem>
               </DropdownMenuPrimitive.RadioGroup>
             </DropdownMenuPrimitive.SubContent>
           </DropdownMenuPrimitive.Sub>
 
-          {/* 显示（hermes Show 子菜单：rowMeta 多选——数据面支持
-              updated（行龄）/tokens/cost（pi stats 每文件聚合，懒拉）；
-              preview 是卡片行专属、pr/profile 无数据 → 不设） */}
+          {/* 3. 显示 ▸（子菜单 = 用户截图：更新时间/词元数 + PR/配置档案
+              disabled——无「成本」无「紧凑行高」。PR = pi 未集成 gh、配置
+              档案 = pi 单配置档案：disabled + title 说明，不许假可点。） */}
           <DropdownMenuPrimitive.Sub>
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
               <span>显示</span>
@@ -577,9 +663,8 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             >
               {(
                 [
-                  { id: "updated", label: "时间", icon: ClockIcon },
-                  { id: "tokens", label: "Tokens", icon: HashIcon },
-                  { id: "cost", label: "成本", icon: CreditCardIcon },
+                  { id: "updated", label: "更新时间", icon: ClockIcon },
+                  { id: "tokens", label: "词元数", icon: HashIcon },
                 ] as const satisfies readonly { id: SidebarRowMeta; label: string; icon: FC<{ className?: string }> }[]
               ).map((option) => (
                 <DropdownMenuPrimitive.CheckboxItem
@@ -599,40 +684,35 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                   <ViewOptionRow icon={option.icon} label={option.label} />
                 </DropdownMenuPrimitive.CheckboxItem>
               ))}
-              {/* 紧凑行高（工程扩展旋钮，hermes Show 子菜单形制内收纳） */}
+              {/* PR/配置档案（hermes ROW_META 的 pr/profile 两项，图标
+                  git-pull-request/account → lucide GitPullRequest/User）：
+                  专用 class 固定 disabled 观感（不用 VIEW_MENU_ITEM_BASE 的
+                  data-[disabled]:pointer-events-none——native title 需要
+                  hover，说明文字必须可触发）；onSelect 由 Radix 对 disabled
+                  项短路，不假可点。 */}
               <DropdownMenuPrimitive.CheckboxItem
-                checked={density === "compact"}
-                className={VIEW_MENU_ITEM_BASE}
-                onCheckedChange={(checked) =>
-                  sidebarViewStore.getState().setDensity(checked ? "compact" : "comfortable")
-                }
-                onSelect={keepViewMenuOpen}
+                checked={false}
+                className={VIEW_DISABLED_HINT_ITEM}
+                disabled
+                title="pi 未集成 gh，PR 数据不可用"
               >
-                <ViewIndicatorSlot>
-                  <DropdownMenuPrimitive.ItemIndicator>
-                    <CheckIcon className="size-3" />
-                  </DropdownMenuPrimitive.ItemIndicator>
-                </ViewIndicatorSlot>
-                <ViewOptionRow icon={AlignJustifyIcon} label="紧凑行高" />
+                <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
+                <ViewOptionRow icon={GitPullRequestIcon} label="PR" />
+              </DropdownMenuPrimitive.CheckboxItem>
+              <DropdownMenuPrimitive.CheckboxItem
+                checked={false}
+                className={VIEW_DISABLED_HINT_ITEM}
+                disabled
+                title="pi 单配置档案，无可展示项"
+              >
+                <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
+                <ViewOptionRow icon={UserIcon} label="配置档案" />
               </DropdownMenuPrimitive.CheckboxItem>
             </DropdownMenuPrimitive.SubContent>
           </DropdownMenuPrimitive.Sub>
 
-          {/* hermes 主区两行：显示所有会话（filters 旁路）+ Inbox style
-              （卡片行形态）——checkbox 行形制（图标+标签+指示位）。 */}
-          <DropdownMenuPrimitive.CheckboxItem
-            checked={showAll}
-            className={VIEW_MENU_ITEM_BASE}
-            onCheckedChange={(checked) => sidebarViewStore.getState().setShowAll(Boolean(checked))}
-            onSelect={keepViewMenuOpen}
-          >
-            <ViewIndicatorSlot>
-              <DropdownMenuPrimitive.ItemIndicator>
-                <CheckIcon className="size-3" />
-              </DropdownMenuPrimitive.ItemIndicator>
-            </ViewIndicatorSlot>
-            <ViewOptionRow icon={ListIcon} label="显示所有会话" />
-          </DropdownMenuPrimitive.CheckboxItem>
+          {/* 4. 收件箱样式（hermes「Inbox style」：卡片行形态开关——中文
+              措辞按用户截图）。 */}
           <DropdownMenuPrimitive.CheckboxItem
             checked={inboxStyle}
             className={VIEW_MENU_ITEM_BASE}
@@ -644,111 +724,177 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 <CheckIcon className="size-3" />
               </DropdownMenuPrimitive.ItemIndicator>
             </ViewIndicatorSlot>
-            <ViewOptionRow icon={InboxIcon} label="Inbox style" />
+            <ViewOptionRow icon={InboxIcon} label="收件箱样式" />
           </DropdownMenuPrimitive.CheckboxItem>
 
-          {/* ── 筛选组（hermes「Filters」label 组：Status/PR/Profile/Project
-              /Archived/Reset to defaults）。pi 无状态桶/gh/多配置档——
-              状态/PR/Profile 三项渲染但禁用（hermes 对无 gh 环境同样隐藏
-              PR 子菜单，禁用是数据面诚实）。项目=pi cwd 过滤；已归档=
-              showArchived；重置=resetView（hermes 置组尾）。 */}
+          {/* 5. 配置档案栏（hermes $profileRailVisible：侧栏左缘的 profile
+              rail）——pi 单配置档案无 rail 数据面 → disabled（诚实）。 */}
+          <DropdownMenuPrimitive.CheckboxItem
+            checked={false}
+            className={VIEW_DISABLED_HINT_ITEM}
+            disabled
+            title="pi 单配置档案，无配置档案栏"
+          >
+            <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
+            <ViewOptionRow icon={NetworkIcon} label="配置档案栏" />
+          </DropdownMenuPrimitive.CheckboxItem>
+
+          {/* 6. ── 筛选（hermes「Filters」label 组：Status/PR/Profile/
+              AllProfiles/Archived；分组区与筛选区之间的分隔线。 */}
+          <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
           <DropdownMenuPrimitive.Label className="text-(--text-3) px-2 pt-1.5 pb-1 text-[11px]">
             筛选
           </DropdownMenuPrimitive.Label>
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-              <ViewOptionRow icon={CircleDotIcon} label="状态" />
-              <ChevronRightIcon className="ml-auto size-3" />
-            </DropdownMenuPrimitive.SubTrigger>
-          </DropdownMenuPrimitive.Sub>
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-              <ViewOptionRow icon={GitPullRequestIcon} label="Pull request" />
-              <ChevronRightIcon className="ml-auto size-3" />
-            </DropdownMenuPrimitive.SubTrigger>
-          </DropdownMenuPrimitive.Sub>
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-              <ViewOptionRow icon={UserIcon} label="Profile" />
-              <ChevronRightIcon className="ml-auto size-3" />
-            </DropdownMenuPrimitive.SubTrigger>
-          </DropdownMenuPrimitive.Sub>
+          {/* 7. 状态 ▸（子菜单 = 用户截图五桶 checkbox 多选：需要输入●橙 /
+              运行中●蓝 / 未读●绿 / 草稿○ / 空闲○——色点 =
+              STATUS_DOT_CLASS，文案 = STATUS_BUCKET_LABELS。筛选 =
+              只显示命中桶的行，空选 = 不过滤；pi 前端全可判定。） */}
           <DropdownMenuPrimitive.Sub>
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-              <ViewOptionRow icon={FolderIcon} label="项目" />
-              <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-                {projectFilter ? workspaceGroupLabel(projectFilter) : "全部"}
-                <ChevronRightIcon className="size-3" />
-              </span>
+              <ViewOptionRow icon={ActivityIcon} label="状态" />
+              <ChevronRightIcon className="text-(--text-3) ml-auto size-3" />
             </DropdownMenuPrimitive.SubTrigger>
             <DropdownMenuPrimitive.SubContent
               className={VIEW_MENU_CONTENT_CLASS}
               sideOffset={6}
             >
-              <DropdownMenuPrimitive.RadioGroup
-                onValueChange={(value) =>
-                  sidebarViewStore
-                    .getState()
-                    .setProjectFilter(
-                      value === "__all__"
-                        ? null
-                        : value === "__home__"
-                          ? ""
-                          : value,
-                    )
-                }
-                value={
-                  projectFilter === null
-                    ? "__all__"
-                    : projectFilter === ""
-                      ? "__home__"
-                      : projectFilter
-                }
-              >
-                <DropdownMenuPrimitive.RadioItem
+              {STATUS_FILTER_OPTIONS.map((bucket) => (
+                <DropdownMenuPrimitive.CheckboxItem
+                  checked={statusFilter.includes(bucket)}
                   className={VIEW_MENU_ITEM_BASE}
+                  key={bucket}
+                  onCheckedChange={() =>
+                    sidebarViewStore.getState().toggleStatusBucket(bucket)
+                  }
                   onSelect={keepViewMenuOpen}
-                  value="__all__"
                 >
                   <ViewIndicatorSlot>
                     <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                      <CheckIcon className="size-3" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <span>全部</span>
-                </DropdownMenuPrimitive.RadioItem>
-                {projectFilter !== null && projectFilter !== "" && !projectChoices.includes(projectFilter) && (
-                  <DropdownMenuPrimitive.RadioItem
-                    className={VIEW_MENU_ITEM_BASE}
-                    onSelect={keepViewMenuOpen}
-                    value={projectFilter}
-                  >
-                    <ViewIndicatorSlot>
-                      <DropdownMenuPrimitive.ItemIndicator>
-                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                      </DropdownMenuPrimitive.ItemIndicator>
-                    </ViewIndicatorSlot>
-                    <span className="truncate">{workspaceGroupLabel(projectFilter)}</span>
-                  </DropdownMenuPrimitive.RadioItem>
-                )}
-                {projectChoices.map((cwd) => (
-                  <DropdownMenuPrimitive.RadioItem
-                    className={VIEW_MENU_ITEM_BASE}
-                    key={cwd || "__home__"}
-                    onSelect={keepViewMenuOpen}
-                    value={cwd || "__home__"}
-                  >
-                    <ViewIndicatorSlot>
-                      <DropdownMenuPrimitive.ItemIndicator>
-                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                      </DropdownMenuPrimitive.ItemIndicator>
-                    </ViewIndicatorSlot>
-                    <span className="truncate">{workspaceGroupLabel(cwd)}</span>
-                  </DropdownMenuPrimitive.RadioItem>
-                ))}
-              </DropdownMenuPrimitive.RadioGroup>
+                  {/* 色点在指示位之外（hermes OptionGlyph：glyph 在行首、
+                      选中指示在其左——checkbox 的 ✓ 槽与色点并存）。 */}
+                  <span aria-hidden className={STATUS_DOT_CLASS[bucket]} />
+                  <span>{STATUS_BUCKET_LABELS[bucket]}</span>
+                </DropdownMenuPrimitive.CheckboxItem>
+              ))}
             </DropdownMenuPrimitive.SubContent>
           </DropdownMenuPrimitive.Sub>
+          {/* 8. 拉取请求 ▸（子菜单：打开/草稿/已合并/已关闭/无 PR）——
+              pi 无 gh → 整个 SubTrigger disabled（诚实：无数据面）。 */}
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+              <ViewOptionRow icon={GitPullRequestIcon} label="拉取请求" />
+              <ChevronRightIcon className="text-(--text-3) ml-auto size-3" />
+            </DropdownMenuPrimitive.SubTrigger>
+          </DropdownMenuPrimitive.Sub>
+          {/* 9. 配置档案 ▸（子菜单：新建配置档案/导入配置档案…，hermes
+              t.profiles 文案）——pi 单配置档案无 profiles 桥面 → disabled。
+              10. 全部配置档案 checkbox：pi 单配置档案恒 ✓（诚实——所有
+              profile 就是这一个，永远全显示，不可取消）。 */}
+          <DropdownMenuPrimitive.Sub>
+            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+              <ViewOptionRow icon={UserIcon} label="配置档案" />
+              <ChevronRightIcon className="text-(--text-3) ml-auto size-3" />
+            </DropdownMenuPrimitive.SubTrigger>
+          </DropdownMenuPrimitive.Sub>
+          <DropdownMenuPrimitive.CheckboxItem
+            checked
+            className={VIEW_DISABLED_HINT_ITEM}
+            disabled
+            title="pi 单配置档案——始终显示全部"
+          >
+            <ViewIndicatorSlot>
+              <DropdownMenuPrimitive.ItemIndicator>
+                <CheckIcon className="size-3" />
+              </DropdownMenuPrimitive.ItemIndicator>
+            </ViewIndicatorSlot>
+            <span>全部配置档案</span>
+          </DropdownMenuPrimitive.CheckboxItem>
+          {/* 项目过滤（hermes Filters>Project 子菜单的条件形态：
+              filter-menu.tsx:388 只在多于一个候选时出现——用户截图只有一个
+              工作区所以没有这项；harness 候选 = distinct cwd（Home 桶=
+              空串），condition 同构）。 */}
+          {projectChoices.length > 1 && (
+            <DropdownMenuPrimitive.Sub>
+              <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
+                <ViewOptionRow icon={FolderIcon} label="项目" />
+                <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
+                  {projectFilter ? workspaceGroupLabel(projectFilter) : "全部"}
+                  <ChevronRightIcon className="size-3" />
+                </span>
+              </DropdownMenuPrimitive.SubTrigger>
+              <DropdownMenuPrimitive.SubContent
+                className={VIEW_MENU_CONTENT_CLASS}
+                sideOffset={6}
+              >
+                <DropdownMenuPrimitive.RadioGroup
+                  onValueChange={(value) =>
+                    sidebarViewStore
+                      .getState()
+                      .setProjectFilter(
+                        value === "__all__"
+                          ? null
+                          : value === "__home__"
+                            ? ""
+                            : value,
+                      )
+                  }
+                  value={
+                    projectFilter === null
+                      ? "__all__"
+                      : projectFilter === ""
+                        ? "__home__"
+                        : projectFilter
+                  }
+                >
+                  <DropdownMenuPrimitive.RadioItem
+                    className={VIEW_MENU_ITEM_BASE}
+                    onSelect={keepViewMenuOpen}
+                    value="__all__"
+                  >
+                    <ViewIndicatorSlot>
+                      <DropdownMenuPrimitive.ItemIndicator>
+                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                      </DropdownMenuPrimitive.ItemIndicator>
+                    </ViewIndicatorSlot>
+                    <span>全部</span>
+                  </DropdownMenuPrimitive.RadioItem>
+                  {projectFilter !== null && projectFilter !== "" && !projectChoices.includes(projectFilter) && (
+                    <DropdownMenuPrimitive.RadioItem
+                      className={VIEW_MENU_ITEM_BASE}
+                      onSelect={keepViewMenuOpen}
+                      value={projectFilter}
+                    >
+                      <ViewIndicatorSlot>
+                        <DropdownMenuPrimitive.ItemIndicator>
+                          <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                        </DropdownMenuPrimitive.ItemIndicator>
+                      </ViewIndicatorSlot>
+                      <span className="truncate">{workspaceGroupLabel(projectFilter)}</span>
+                    </DropdownMenuPrimitive.RadioItem>
+                  )}
+                  {projectChoices.map((cwd) => (
+                    <DropdownMenuPrimitive.RadioItem
+                      className={VIEW_MENU_ITEM_BASE}
+                      key={cwd || "__home__"}
+                      onSelect={keepViewMenuOpen}
+                      value={cwd || "__home__"}
+                    >
+                      <ViewIndicatorSlot>
+                        <DropdownMenuPrimitive.ItemIndicator>
+                          <span aria-hidden className="bg-current size-1.5 rounded-full" />
+                        </DropdownMenuPrimitive.ItemIndicator>
+                      </ViewIndicatorSlot>
+                      <span className="truncate">{workspaceGroupLabel(cwd)}</span>
+                    </DropdownMenuPrimitive.RadioItem>
+                  ))}
+                </DropdownMenuPrimitive.RadioGroup>
+              </DropdownMenuPrimitive.SubContent>
+            </DropdownMenuPrimitive.Sub>
+          )}
+          {/* 11. 已归档（hermes $sidebarShowArchived）。 */}
           <DropdownMenuPrimitive.CheckboxItem
             checked={showArchived}
             className={VIEW_MENU_ITEM_BASE}
@@ -762,22 +908,25 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             </ViewIndicatorSlot>
             <ViewOptionRow icon={ArchiveIcon} label="已归档" />
           </DropdownMenuPrimitive.CheckboxItem>
-          <DropdownMenuPrimitive.Item
-            className={VIEW_MENU_ITEM_BASE}
-            disabled={!customized}
-            onSelect={() => sidebarViewStore.getState().resetView()}
-          >
-            <RotateCcwIcon className={VIEW_OPTION_GLYPH} />
-            <span>重置为默认</span>
-          </DropdownMenuPrimitive.Item>
+          {/* hermes「Reset to defaults」（filter-menu.tsx:430 的条件形态：
+              viewCustomized 才出现——用户截图是出厂态所以没有）。一并复原
+              分组与排序，这是唯一的回程（hermes 注释同语义）。 */}
+          {customized && (
+            <DropdownMenuPrimitive.Item
+              className={VIEW_MENU_ITEM_BASE}
+              onSelect={() => sidebarViewStore.getState().resetView()}
+            >
+              <RotateCcwIcon className={VIEW_OPTION_GLYPH} />
+              <span>重置为默认</span>
+            </DropdownMenuPrimitive.Item>
+          )}
 
+          {/* 12. ──（分隔线）13. 全部折叠 14. 全部标记为已读 */}
           <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
 
-          {/* hermes 底部动作组：Collapse all（标签随态翻转）+ Mark all as
-              read（无未读禁用）。 */}
           {dividerKeys.length > 0 && (
             <DropdownMenuPrimitive.Item className={VIEW_MENU_ITEM_BASE} onSelect={onCollapseAll}>
-              {foldCollapsed ? "全部展开" : "全部收起"}
+              {foldCollapsed ? "全部展开" : "全部折叠"}
             </DropdownMenuPrimitive.Item>
           )}
           <DropdownMenuPrimitive.Item
@@ -791,11 +940,6 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           >
             全部标记为已读
           </DropdownMenuPrimitive.Item>
-          {/* pi 特有入口（hermes 项目树的新建等价）：选工作区建会话 */}
-          <DropdownMenuPrimitive.Item className={VIEW_MENU_ITEM_BASE} onSelect={() => void onPickWorkspace()}>
-            <FolderOpenIcon className={VIEW_OPTION_GLYPH} />
-            <span>选择工作区…</span>
-          </DropdownMenuPrimitive.Item>
         </DropdownMenuPrimitive.Content>
       </DropdownMenuPrimitive.Portal>
     </DropdownMenuPrimitive.Root>
@@ -804,20 +948,19 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
 
 /** 当前渲染面（归档/项目过滤后）的行 metas——Mark all as read 的 ack 面与
  *  未读计数共用。与 ThreadListSections 的 metas 消费同源。
- *  showAll（hermes「显示所有会话」）旁路归档与项目过滤；projectFilter=
- *  pi cwd 直投影过滤（hermes Filters>Project 的等价物）。 */
+ *  projectFilter = pi cwd 直投影过滤（hermes Filters>Project 的等价物）；
+ *  状态筛选不在此处（useThreadDisplay 的桶管线已滤——ack 面跟着可视面走）。 */
 function useThreadVisibleMetas(): SessionRowMeta[] {
   const allMetas = useSessionRowMetas();
   const archived = useSessionArchive((s) => s.archived);
   const showArchived = useSidebarView((s) => s.showArchived);
-  const showAll = useSidebarView((s) => s.showAll);
   const projectFilter = useSidebarView((s) => s.projectFilter);
   return useMemo(() => {
     let rows = allMetas;
-    if (!showAll && !showArchived) rows = rows.filter((m) => !archived.includes(m.id));
-    if (!showAll && projectFilter) rows = rows.filter((m) => (m.cwd ?? "") === projectFilter);
+    if (!showArchived) rows = rows.filter((m) => !archived.includes(m.id));
+    if (projectFilter) rows = rows.filter((m) => (m.cwd ?? "") === projectFilter);
     return rows;
-  }, [allMetas, archived, showArchived, showAll, projectFilter]);
+  }, [allMetas, archived, showArchived, projectFilter]);
 }
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
@@ -944,6 +1087,45 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
   );
 };
 
+/**
+ * 状态桶分隔线（分组=状态；hermes grouping='status' 的组头——色点 +
+ * 状态中文名（STATUS_BUCKET_LABELS，组序 = 状态 rank：需要输入最前、
+ * 空闲殿后）；折叠语义与日期桶相同：组头保留、其下行隐藏，键 =
+ * `s:<bucket>`）。
+ */
+const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
+  const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
+  // key = `s:<bucket>`（session-display groupEntriesByStatus 的约定）。
+  const bucket = bucketKey.slice("s:".length) as SessionStatusBucket;
+  return (
+    <div
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-0.5 pt-(--tl-div-pt,0.5rem) select-none"
+      data-slot="aui_thread-list-status-divider"
+    >
+      <button
+        aria-expanded={!collapsed}
+        className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left"
+        onClick={() =>
+          sessionManageStore.getState().setGroupCollapsed(bucketKey, !collapsed)
+        }
+        title={collapsed ? "展开" : "收起"}
+        type="button"
+      >
+        <span aria-hidden className={STATUS_DOT_CLASS[bucket]} />
+        <span className="text-(--text-2) min-w-0 truncate text-xs font-medium">{label}</span>
+        <ChevronDownIcon
+          aria-hidden
+          className={cn(
+            "text-(--text-3) size-3 shrink-0 opacity-0 transition group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100",
+            collapsed && "-rotate-90",
+          )}
+        />
+        <span aria-hidden className="bg-(--stroke-soft) h-px min-w-4 flex-1" />
+      </button>
+    </div>
+  );
+};
+
 /** 已置顶空态（hermes SidebarPinnedEmptyState 照抄——置顶手势的常驻教学位）。 */
 const PinnedEmptyState: FC = () => (
   <div className="text-(--text-3) flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-xs">
@@ -975,6 +1157,9 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   const groupsCollapsed = useSessionManage((s) => s.groupsCollapsed);
   const collapsedPinned = useSessionManage((s) => s.groupsCollapsed.pinned === true);
   const collapsedRecent = useSessionManage((s) => s.groupsCollapsed.recent === true);
+  // 状态筛选值（空态文案分面：筛选激活且无命中 → hermes noFilterMatches
+  // 「没有会话符合这些筛选条件」zh.ts:2900 逐字）。
+  const statusFilter = useSidebarView((s) => s.statusFilter);
   const aui = useAui();
 
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
@@ -985,17 +1170,19 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     sessionUnreadStore.getState().prune(threadIds);
   }, [threadIds]);
 
-  // rowMeta 开了 Tokens/成本 → 拉取可见行的用量（缺/过期才发 IPC，缓存键
-  // 带 messageCount；rowMeta 未开不发——懒计算，任务定稿）。
+  // rowMeta 开了 词元数 / 排序切了 词元数 → 拉取可见行的用量（缺/过期才发
+  // IPC，缓存键带 messageCount；都没开不发——懒计算）。拉取到达后 tokens
+  // 排序自然上浮（rankIdsByOrdering 的 tokenTotals 缺键按 0 沉底）。
   const rowMeta = useSidebarView((s) => s.rowMeta);
+  const orderingKnob = useSidebarView((s) => s.ordering);
   useEffect(() => {
-    if (!rowMeta.includes("tokens") && !rowMeta.includes("cost")) return;
+    if (!rowMeta.includes("tokens") && orderingKnob !== "tokens") return;
     const rows = metas
       .filter((m) => typeof m.path === "string" && typeof m.messageCount === "number")
       .map((m) => ({ path: m.path!, messageCount: m.messageCount! }));
     if (rows.length === 0) return;
     void sessionUsageStore.getState().ensure(rows);
-  }, [metas, rowMeta]);
+  }, [metas, rowMeta, orderingKnob]);
 
   // 拖拽落点提交通道（dnd-kit ReorderableList 的 onReorder 全量新序经
   // diffArrayMove 反解出 (sessionId, beforeId) 后走这里——置顶区 = pinned
@@ -1145,9 +1332,20 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
       />
       {!collapsedRecent &&
         (sessionRows.length === 0 && rows.length === 0 ? (
-          <div className="text-(--text-3) grid min-h-16 place-items-center rounded-lg px-2 text-center text-xs">
-            暂无会话
-          </div>
+          statusFilter.length > 0 ? (
+            // 状态筛选激活导致的空（hermes noFilterMatches 空态——zh
+            // 「没有会话符合这些筛选条件」逐字）。
+            <div
+              className="text-(--text-3) grid min-h-16 place-items-center rounded-lg px-2 text-center text-xs"
+              data-slot="aui_thread-list-empty-filtered"
+            >
+              没有会话符合这些筛选条件
+            </div>
+          ) : (
+            <div className="text-(--text-3) grid min-h-16 place-items-center rounded-lg px-2 text-center text-xs">
+              暂无会话
+            </div>
+          )
         ) : (
           <ReorderableList
             ids={sortableSessionIds}
@@ -1158,6 +1356,8 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
               row.kind === "divider" ? (
                 row.variant === "project" ? (
                   <WorkspaceDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+                ) : row.variant === "status" ? (
+                  <StatusDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
                 ) : (
                   <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
                 )
@@ -1381,7 +1581,7 @@ export const ThreadListItem: FC = () => {
   const absoluteAge =
     tsMs > 0 ? formatMessageTimestamp(new Date(tsMs), THREAD_TIME_LABELS) : "";
   const figures = buildSessionFigures(
-    rowMetaFlags.filter((m): m is "cost" | "tokens" => m !== "updated"),
+    rowMetaFlags.filter((m): m is "tokens" => m === "tokens"),
     usage,
   );
   const figParts = figures ? figures.split(" · ") : [];

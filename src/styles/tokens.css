@@ -219,3 +219,27 @@
   --win-dot-minimize: #6E97DC;                /* 最小化 */
   --win-dot-sidebar: #6EDCA2;                 /* 隐藏/打开右栏 */
 }
+
+/* ── hub：左栏入口条 + 机器人花名册（panes/hub/*，2026-10-02）──
+   数值出处 = hermes：入口行 SidebarMenuButton（sidebar/index.tsx:1530-1545
+   h-7 / 0.8125rem / font-medium / px-2 / gap-2 / rounded-md / 图标 72%）；
+   bot 卡 lead 头像方块（bot-row.tsx:258-265 BotFace size=34）。颜色一律
+   引用上方全局色板，本块只收几何与强度。 */
+:root {
+  --hub-row-h: 28px;                          /* 入口行高（hermes h-7） */
+  --hub-row-font: 13px;                       /* 行文字（hermes 0.8125rem） */
+  --hub-row-weight: 500;                      /* hermes font-medium */
+  --hub-row-icon: 16px;                       /* 图标（hermes size-4） */
+  --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
+  --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
+  --hub-row-radius: 6px;                      /* hermes rounded-md */
+  --hub-bar-pad-y: 6px;                       /* 入口条上下内边距 */
+  --hub-bar-gap: 1px;                         /* 行间距（hermes SidebarMenu gap-px） */
+  --hub-icon-dim: 0.72;                       /* 图标强度（hermes 72%） */
+  --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
+  --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */
+  --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
+  --hub-card-radius: 6px;                     /* 卡/行圆角（hermes rounded-md） */
+  --hub-card-gap: 2px;                        /* 卡内行距（hermes name/details 两行） */
+  --hub-section-label-size: 11px;             /* 段头字号（hermes 0.6875rem 系） */
+}

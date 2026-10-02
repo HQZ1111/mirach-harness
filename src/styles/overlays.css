@@ -175,6 +175,13 @@
   color: var(--text);
 }
 
+/* 头栏动作簇（刷新 + 关闭，pi-resources-dialog / BotsDialog 共用） */
+.set-header-actions {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
 /* 左导航（节列表）：图标 + 名称；选中态 accent 底/边（铁律：全部走令牌） */
 .set-nav {
   background: color-mix(in srgb, var(--hover-wash) 40%, transparent);
@@ -394,6 +401,17 @@
 }
 
 .set-row-env-off { color: var(--text-4); }
+
+/* 行描述（skill/prompt 的 description，整行占满第三行——截断省略，
+   title 悬停看全文） */
+.set-row-desc {
+  color: var(--text-2);
+  flex-basis: 100%;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* 错误条（错误即错误：红色调，destructive 既有令牌） */
 .set-err {

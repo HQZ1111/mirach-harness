@@ -326,3 +326,247 @@
   --tl-row-min-h: 1.25rem;
   --tl-div-pt: 0.25rem;
 }
+
+/* ── hub：左栏入口条（panes/hub/entry-bar.tsx，2026-10-02）──
+   hermes sidebar/index.tsx SIDEBAR_NAV 行照抄（:1516-1610）：图标 72% +
+   文案 + 快捷键标注；行高/字号/悬停引用 tokens.css 的 --hub-* 令牌。
+   入口条常驻（hermes SidebarGroup 顶部结构 ：1513-1515 同位），
+   会话列表在其下滚动。 */
+
+/* 会话窗格改纵排：入口条在上（flex:none），列表体吃剩余高度 */
+.assistant-sessions-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.hub-entry-body {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.hub-entry-bar {
+  border-bottom: 1px solid var(--stroke-soft);
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--hub-bar-gap);
+  padding: var(--hub-bar-pad-y) var(--hub-row-pad-x);
+}
+
+.hub-entry-row {
+  align-items: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--hub-row-radius);
+  color: var(--text-2);
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: var(--hub-row-font);
+  font-weight: var(--hub-row-weight);
+  gap: var(--hub-row-gap);
+  height: var(--hub-row-h);
+  padding: 0 var(--hub-row-pad-x);
+  text-align: left;
+  width: 100%;
+}
+
+.hub-entry-row:hover {
+  background: var(--hover-wash);
+  color: var(--text);
+}
+
+.hub-entry-icon {
+  flex: none;
+  opacity: var(--hub-icon-dim);
+}
+
+/* 文案占满中段，快捷键标注 ml-auto 推到行尾（hermes KbdGroup ml-auto） */
+.hub-entry-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-kbd {
+  border: 1px solid var(--stroke);
+  border-radius: 4px;
+  color: var(--text-3);
+  flex: none;
+  font-family: inherit;
+  font-size: var(--hub-kbd-font);
+  line-height: 1;
+  margin-left: auto;
+  opacity: var(--hub-kbd-opacity);
+  padding: 2px 5px;
+}
+
+/* 入口条诚实提示条（消息平台/产物/定时任务——pi 无对等物的入口）：
+   可关闭的非阻断条，不装假跳转 */
+.hub-entry-notice {
+  align-items: flex-start;
+  background: color-mix(in srgb, var(--brand) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand) 30%, transparent);
+  border-radius: var(--hub-row-radius);
+  color: var(--text-2);
+  display: flex;
+  font-size: var(--hub-kbd-font);
+  gap: 4px;
+  line-height: 1.5;
+  padding: 5px 6px;
+}
+
+.hub-entry-notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hub-entry-notice-close {
+  background: none;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  flex: none;
+  padding: 1px;
+}
+
+.hub-entry-notice-close:hover {
+  color: var(--text);
+}
+
+/* ── 机器人花名册（bots-pane.tsx + elements/BotsDialog，2026-10-02）──
+   hermes plugins/hermes-bots 的 roster 卡片形制：lead 头像方块 34 +
+   名称行（0.8125rem medium）+ 细节行（model · 工作区，quaternary）；
+   行悬停洗底。 */
+.hub-bot-rows {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--hub-bar-gap);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--hub-bar-pad-y) var(--hub-row-pad-x);
+}
+
+.hub-section-label {
+  color: var(--text-4);
+  flex: none;
+  font-size: var(--hub-section-label-size);
+  font-weight: var(--hub-row-weight);
+  letter-spacing: 0.08em;
+  padding: 2px 2px 4px;
+  text-transform: uppercase;
+}
+
+.hub-bot-row {
+  align-items: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--hub-card-radius);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--hub-row-gap);
+  min-width: 0;
+  padding: 6px var(--hub-row-pad-x);
+  text-align: left;
+  transition: background-color 100ms ease-out;
+}
+
+.hub-bot-row:hover {
+  background: var(--hover-wash);
+}
+
+/* 行容器：行钮（吃剩余）+ 行操作簇（hover 显形）——hermes TAIL_HIDES
+   机制的同构（thread-list.aui data-row-actions 同款分工） */
+.hub-bot-item {
+  align-items: center;
+  display: flex;
+  gap: 2px;
+}
+
+.hub-bot-avatar {
+  align-items: center;
+  background: var(--tab-accent-wash);
+  border-radius: var(--hub-row-radius);
+  color: var(--brand);
+  display: flex;
+  flex: none;
+  font-size: var(--body-size);
+  font-weight: var(--hub-row-weight);
+  height: var(--hub-avatar-size);
+  justify-content: center;
+  width: var(--hub-avatar-size);
+}
+
+.hub-bot-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--hub-card-gap);
+  min-width: 0;
+}
+
+.hub-bot-name {
+  font-size: var(--hub-row-font);
+  font-weight: var(--hub-row-weight);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-bot-detail {
+  color: var(--text-4);
+  font-size: var(--hub-kbd-font);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-bot-actions {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.hub-bot-btn {
+  align-items: center;
+  background: none;
+  border: none;
+  border-radius: var(--hub-row-radius);
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  height: var(--hub-row-h);
+  justify-content: center;
+  padding: 0;
+  width: var(--hub-row-h);
+}
+
+.hub-bot-btn:hover {
+  background: var(--hover-wash);
+  color: var(--text);
+}
+
+/* 两步删除确认态：危险色文字（tailwind --destructive 既有令牌） */
+.hub-bot-btn.hub-danger {
+  color: var(--destructive);
+}
+
+/* 面板脚注（目录说明/诊断等长文） */
+.hub-foot {
+  border-top: 1px solid var(--stroke-soft);
+  color: var(--text-4);
+  flex: none;
+  font-size: var(--hub-kbd-font);
+  line-height: 1.6;
+  padding: 6px var(--hub-row-pad-x);
+}

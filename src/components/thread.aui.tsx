@@ -1,6 +1,7 @@
 "use client";
 
-import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired'
+import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired';
+import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
 import {
   branchBridge,
@@ -330,15 +331,36 @@ const SessionLineBar: FC = () => {
     void branchBridge.getState().refresh();
   }, [refreshSeq]);
   const parent = lineage?.branchedFrom ?? null;
+  // 父会话名反查（任务 3）：lineage 只暴露 jsonl 路径（pi_get_session_
+  // lineage 裸 Option<String>），显示名 = pi_list_sessions 按 path 匹配
+  // name（hermes 分支行名称语义：branchStem「└─ 」挂在父会话**显示名**
+  // 下，session-branch-tree.ts:97-106——文件名不是面向用户的名字）。
+  // lazy 查一次（模块级缓存防重复 IPC）；无匹配 → 回退文件名尾段
+  // （lookupLineageParentName 返回 null，任务定稿）。
+  const [parentName, setParentName] = useState<string | null>(null);
+  useEffect(() => {
+    if (!parent) {
+      setParentName(null);
+      return;
+    }
+    let alive = true;
+    void lookupLineageParentName(parent).then((name) => {
+      if (alive) setParentName(name);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [parent]);
   if (!parent) return null;
   const parentTail = parent.split(/[\\/]/).pop() || parent;
+  const displayName = parentName ?? parentTail;
   return (
     <div
       data-slot="aui-session-line-bar"
       className="mb-2 flex w-full items-center gap-2 rounded-(--composer-radius) border border-border/60 bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground"
     >
       <GitBranchIcon className="size-3.5 shrink-0" />
-      <span className="min-w-0 truncate">会话分支 · 分叉自「{parentTail}」</span>
+      <span className="min-w-0 truncate">会话分支 · 分叉自「{displayName}」</span>
       <button
         type="button"
         onClick={() => branchBridge.getState().requestOpenParent(parent)}

@@ -17,6 +17,10 @@ mod agui;
 // auth 三个配置文件的读改命令——配置真相 = pi 自己的配置文件（§5）
 mod pi_settings;
 
+// pi 资源面 IPC（左栏入口条「技能与工具」）：skills/prompts/extensions/
+// packages 只读列举——走 pi 自己的 loader（pi_resources.rs 模块头有出处）
+mod pi_resources;
+
 // 终端 PTY 桥（terminal.rs 模块头有事件通道裁定）：终端是系统设施不是
 // Agent 数据——输出/退出走 Tauri Event，控制走 IPC invoke
 mod terminal;
@@ -118,6 +122,31 @@ fn pi_get_messages(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
     state.engine.messages()
+}
+
+/// 机器人预设会话（左栏「机器人」窗格启动钮）：system_prompt + model +
+/// working_directory 一次性透传 SessionOptions（pi_session.rs
+/// create_bot_session）。创建成功后以 bot 名重命名该会话（rename_session
+/// 只作用当前会话——刚建即当前，侧栏行名即机器人名）。返回 pi_get_state
+/// 快照（sessionId 供前端直接采纳）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_create_bot_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    name: String,
+    system_prompt: Option<String>,
+    provider: Option<String>,
+    model_id: Option<String>,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    state.engine.create_bot_session(
+        provider,
+        model_id,
+        system_prompt,
+        cwd,
+        Some(state.ui_bridge("main")),
+    )?;
+    state.engine.rename_session(&name)?;
+    state.engine.state()
 }
 
 // 参数命名显式 camelCase（Tauri v2 默认即此，写明防签名漂移——前端
@@ -480,6 +509,7 @@ fn main() {
             pi_list_sessions,
             pi_discard_session,
             pi_new_session,
+            pi_create_bot_session,
             pi_sessions_usage,
             pi_export_session_html,
             pi_stream_cursor,
@@ -500,6 +530,7 @@ fn main() {
             pi_settings::pi_get_models_config,
             pi_settings::pi_set_models_config,
             pi_settings::pi_auth_status,
+            pi_resources::pi_list_resources,
             fs::fs_list,
             fs::fs_git_root,
             fs::fs_read_data_url,
