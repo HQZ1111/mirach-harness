@@ -2363,6 +2363,23 @@ value 限制）。406 用例。
 交互对齐不许简化（拖拽 DragOverlay 让位、右键全区域接管——简化版被
 打回，dnd-kit 照抄版在排）。
 
+### 空白区右键分栏菜单（de4f978，hermes ZoneMenu 实锤）
+- **hermes 真相**：zone 菜单在 `pane-shell/tree/renderer/tree-group.tsx`
+  的 ZoneMenu（不在 contrib/layout——旧引用路径不存在）；**现役 hermes
+  zone 菜单没有四向分栏/最大化项**（"Split actions" 是 246 行残留注释，
+  i18n 无 split 键）——项清单：重新加载/关闭·关闭其他·关闭右侧·全部
+  关闭/隐藏显示标签/最小化还原（主区不给最小化）。四向分栏是任务指定
+  的新增动作面（addNode DockLocation），其余照抄。
+- 一级窗格「关闭」不隐藏、保留可见仅"已在家"禁用（=回家规则）；
+  重新加载无占位可载不装假（规矩 12）。
+- 裁定层：context-menu-scope 只加 `pane` 分支（editable>owned>pane>app
+  优先级），main.tsx 零改动（非 app 天然放行，Radix Trigger 自管）。
+- **菜单项打开时刻现读 model**（hermes "resolved when the menu OPENS"
+  契约）——禁用态随实时结构变（副本可关/原籍禁用）。
+- CDP 七步实测：右分栏真分裂（746→395+367 无留白，rebalance 生效）、
+  一级已在家→关闭禁用、副本→关闭=回家（tidy 收空栏）、composer
+  输入框→本菜单不弹（editable 放行）。425 用例。
+
 ## 对标轮续（2026-10-02 深夜：终端/composer/代码高亮/预览）
 
 用户四条 UI 反馈 + 官方三页文档对照。测试 221→275（TS）+ 40（Rust）。
