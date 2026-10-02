@@ -2560,7 +2560,26 @@ value 限制）。406 用例。
   一稳妥；③**密度档 silent override 令牌**——调令牌前先确认 density 值，
   否则 token 改 100 遍用户眼里还是上次的旧值。
 - 门禁：tsc 0 / vitest 462（38 文件）四批全绿。
-- **教训**：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
+- **九轮（c09c7be）**：紧凑档回调过头修复——`--tl-head-pt` 16→8 /
+  `--tl-ws-pt` 20→8（八轮同步抬档过头，会话↔工作区 pb-1+gap+ws-pt
+  实测 ~24px 视觉夸张→紧凑 13px / 舒适 29px 保持）；tsc 0 / 462。
+- **十轮（9a13e91）**：对话标签双行块（用户定稿）——`onRenderTab` 在
+  `region='main'`（workspace/session 两 pane）替换 tab content 为
+  `<ChatTabLabel />`：上工作区 25px/bold/#303030（cwd pathLeaf via
+  `workspaceGroupLabel`）+ 下会话名 15px/regular/#5A5A5A（thread.title
+  from threadListAdapter）；真实接线（runtime useEffect 把
+  `currentThreadId`+`currentMeta.title`+`currentMeta.custom.cwd` 推到
+  `chatTabLabelStore`，vanilla zustand）。位置：tab 右半最多 50% 宽
+  （CDP 实测 rect x=699 w=373 在 tabRect [336..1067] 中线 701.5 右
+  侧，pos=absolute/pointer-events:none 不挡 trailing ✕/home 钮）。
+  **坑——CSS 特异性 (0,2,0) 不够**：初版 `.flexlayout-host
+  .chat-tab-label` 时 CDP 实测 `position: static`（flexlayout 内部
+  `.flexlayout__tab_button_content` 的 child 选择器覆盖）。修复：选择
+  器提到 (0,3,0) `.flexlayout__tab_button(_stretch) .chat-tab-label`
+  双选择器后实测 pos=absolute。新文件 `chat-tab-label-store.ts`
+  （runtime 单向 import，layout 不 import assistant-ui——跨层最小耦合）
+  + `chat-tab-label.tsx`（useStore 订阅）。
+- 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
   （`src\styles\*.css`）会漏匹配——删共享令牌前用 PowerShell
