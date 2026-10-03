@@ -86,7 +86,9 @@ export function MainTint({ model }: { model: Model }) {
  *  进入 layout 层）。 */
 export function ChatLabelOverlay({ model }: { model: Model }) {
   const rect = useTabsetRect(model, ['workspace'])
-  if (!rect) return null
+  // 主区折叠成竖轨（宽 < 100）时双行块无空间承载——隐藏（与左栏竖轨
+  // 的 railform logo 同语义：形态不承载时不硬塞）。
+  if (!rect || rect.width < 100) return null
   return (
     <div
       className="chat-tab-label-anchor"
