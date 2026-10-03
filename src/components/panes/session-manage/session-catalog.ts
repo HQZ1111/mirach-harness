@@ -22,15 +22,15 @@
  * 消费方 hook：useSessionManage/useSessionArchive/useSessionUnread（三个
  * 别名都指向本 store 的对应切片——原三 store 的调用点只改 import 路径）。
  */
+import { invoke } from '@tauri-apps/api/core'
+import { inTauri } from '@/lib/tauri-window'
 import { createStore, useStore } from 'zustand'
 
 import { pruneOrder, prunePins, togglePinId } from './session-order'
 
 // ── 持久化键 ──────────────────────────────────────────────────────────────
 
-/** 统一持久化键（管理维度全量）。 */
-export const SESSION_STORE_KEY = 'mirach.harness.sessions.v1'
-// 旧键（一次性迁移来源，保留不删——回滚安全）
+/** 旧 localStorage 键（迁移源——真相已上移 Rust 层 session-meta.json）。 */
 const LEGACY_PINNED_KEY = 'mirach.harness.sessions.pinned.v1'
 const LEGACY_ORDER_KEY = 'mirach.harness.sessions.order.v1'
 const LEGACY_GROUPS_KEY = 'mirach.harness.session-groups.v1'
@@ -205,55 +205,76 @@ interface PersistedSessions {
   groupsCollapsed: Record<string, boolean>
 }
 
-const loadPersisted = (): PersistedSessions => {
-  const raw = safeGetItem(SESSION_STORE_KEY)
-  if (raw !== null) {
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch (e) {
-      console.error('[session-catalog] 统一持久化 JSON 解析失败——尝试旧键迁移', e)
-      parsed = null
-    }
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      const o = parsed as Partial<PersistedSessions>
-      return {
-        pinned: Array.isArray(o.pinned) ? (o.pinned as string[]) : [],
-        manualOrder: typeof o.manualOrder === 'object' && o.manualOrder !== null ? (o.manualOrder as Record<string, number>) : {},
-        archived: Array.isArray(o.archived) ? (o.archived as string[]) : [],
-        seen: typeof o.seen === 'object' && o.seen !== null ? (o.seen as Record<string, number>) : {},
-        markers: Array.isArray(o.markers) ? (o.markers as string[]) : [],
-        groupsCollapsed:
-          typeof o.groupsCollapsed === 'object' && o.groupsCollapsed !== null
-            ? (o.groupsCollapsed as Record<string, boolean>)
-            : {},
-      }
-    }
+/** 旧 localStorage 键 → 统一形状合成（hydrate 迁移源；**只读不回写**）。 */
+const loadLegacyLocal = (): PersistedSessions => ({
+  pinned: parseStringArray(safeGetItem(LEGACY_PINNED_KEY), '旧 pinned'),
+  manualOrder: parseNumberRecord(safeGetItem(LEGACY_ORDER_KEY), '旧 order'),
+  archived: parseStringArray(safeGetItem(LEGACY_ARCHIVED_KEY), '旧 archived'),
+  seen: parseNumberRecord(safeGetItem(LEGACY_SEEN_KEY), '旧 seenCounts'),
+  markers: parseStringArray(safeGetItem(LEGACY_MARKERS_KEY), '旧 unreadMarkers'),
+  groupsCollapsed: parseBooleanRecord(safeGetItem(LEGACY_GROUPS_KEY), '旧 session-groups'),
+})
+
+const hasData = (p: PersistedSessions): boolean =>
+  p.pinned.length > 0 ||
+  p.archived.length > 0 ||
+  p.markers.length > 0 ||
+  Object.keys(p.manualOrder).length > 0 ||
+  Object.keys(p.seen).length > 0 ||
+  Object.keys(p.groupsCollapsed).length > 0
+
+/** 生产级持久化 = **Rust 层 session-meta.json**（app_data_dir，原子写——
+ *  hermes 后端 session 索引模式的宿主实现）。写穿防抖 250ms（catalog
+ *  动作高频时合并）；Tauri 不可用（纯浏览器/vitest）时静默跳过——目录
+ *  水合失败则保持空态，错误经 invoke 的 reject 路径可见（铁律 12）。 */
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+
+const persistNow = (s: SessionCatalogState): void => {
+  const store = {
+    pinned: [...s.pinned],
+    manualOrder: { ...s.manualOrder },
+    archived: [...s.archived],
+    seen: { ...s.seen },
+    markers: [...s.markers],
+    groupsCollapsed: { ...s.groupsCollapsed },
   }
-  // 一次性迁移：旧五键 → 合成（新键已存在时不迁移）
-  const legacy: PersistedSessions = {
-    pinned: parseStringArray(safeGetItem(LEGACY_PINNED_KEY), '旧 pinned'),
-    manualOrder: parseNumberRecord(safeGetItem(LEGACY_ORDER_KEY), '旧 order'),
-    archived: parseStringArray(safeGetItem(LEGACY_ARCHIVED_KEY), '旧 archived'),
-    seen: parseNumberRecord(safeGetItem(LEGACY_SEEN_KEY), '旧 seenCounts'),
-    markers: parseStringArray(safeGetItem(LEGACY_MARKERS_KEY), '旧 unreadMarkers'),
-    groupsCollapsed: parseBooleanRecord(safeGetItem(LEGACY_GROUPS_KEY), '旧 session-groups'),
-  }
-  const hasLegacy =
-    legacy.pinned.length > 0 ||
-    legacy.archived.length > 0 ||
-    legacy.markers.length > 0 ||
-    Object.keys(legacy.manualOrder).length > 0 ||
-    Object.keys(legacy.seen).length > 0 ||
-    Object.keys(legacy.groupsCollapsed).length > 0
-  if (hasLegacy) {
-    safeSetItem(SESSION_STORE_KEY, JSON.stringify(legacy))
-  }
-  return legacy
+  void invoke('session_meta_set', { store }).catch((e) =>
+    console.error('[session-catalog] session-meta.json 写穿失败', e),
+  )
 }
 
-const persist = (s: PersistedSessions): void => {
-  safeSetItem(SESSION_STORE_KEY, JSON.stringify(s))
+const persist = (s: SessionCatalogState): void => {
+  if (!inTauri) return
+  if (persistTimer) clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    persistNow(s)
+  }, 250)
+}
+
+/** 启动水合（runtime 挂载 effect 调用一次）：Rust store → 管理维度。
+ *  **迁移链**：Rust 文件为空（首启）且旧 localStorage 有数据 → 以旧数据
+ *  灌入并写穿 Rust（旧键此后只读，不删除——回滚安全）。 */
+export async function hydrateSessionMeta(): Promise<void> {
+  if (!inTauri) return
+  const remote = await invoke<Partial<PersistedSessions>>('session_meta_get')
+  const remoteStore: PersistedSessions = {
+    pinned: remote.pinned ?? [],
+    manualOrder: remote.manualOrder ?? {},
+    archived: remote.archived ?? [],
+    seen: remote.seen ?? {},
+    markers: remote.markers ?? [],
+    groupsCollapsed: remote.groupsCollapsed ?? {},
+  }
+  if (hasData(remoteStore)) {
+    sessionCatalog.setState(remoteStore)
+    return
+  }
+  const legacy = loadLegacyLocal()
+  if (hasData(legacy)) {
+    sessionCatalog.setState(legacy)
+    persistNow(sessionCatalog.getState())
+  }
 }
 
 // ── 未读判定（session-unread.ts isRowUnread 原样迁入） ────────────────────
@@ -270,19 +291,20 @@ export function isRowUnread(
 
 // ── store ────────────────────────────────────────────────────────────────
 
-const persisted0 = loadPersisted()
+// 管理维度初值 = 空态（真相在 Rust session-meta.json，runtime 挂载时
+// hydrateSessionMeta() 水合；localStorage 只作迁移源）。
 
 export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
   entries: {},
   piOrder: [],
   activeId: null,
   pendingCwd: null,
-  pinned: persisted0.pinned,
-  manualOrder: persisted0.manualOrder,
-  archived: persisted0.archived,
-  seen: persisted0.seen,
-  markers: persisted0.markers,
-  groupsCollapsed: persisted0.groupsCollapsed,
+  pinned: [],
+  manualOrder: {},
+  archived: [],
+  seen: {},
+  markers: [],
+  groupsCollapsed: {},
 
   ingest: (rows, activeId) => {
     const prev = get().entries

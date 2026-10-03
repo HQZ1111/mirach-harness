@@ -6,7 +6,6 @@
  *   setActive、setDerivedTitle（含未落盘占位）、setPendingCwd；
  * - 管理：togglePin/setPinnedOrder/manualOrder/toggleArchive/ack/
  *   markUnread/ackAll/setGroupCollapsed/prune（空列表 no-op 纪律）；
- * - 统一持久化 mirach.harness.sessions.v1 写通 + 旧五键一次性迁移。
  *
  * catalog 是模块级单例——每个用例前用 setState 重置全量状态 + 清 localStorage。
  */
@@ -14,7 +13,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   isRowUnread,
-  SESSION_STORE_KEY,
   sessionCatalog,
   sessionDisplayName,
   sessionProjectCwd,
@@ -142,7 +140,6 @@ describe('catalog 管理：置顶 + 手动序 + 折叠（统一键写通）', ()
   it('togglePin 写通统一键；再切一次移除', () => {
     sessionCatalog.getState().togglePin('s1')
     expect(sessionCatalog.getState().pinned).toEqual(['s1'])
-    expect(JSON.parse(localStorage.getItem(SESSION_STORE_KEY)!).pinned).toEqual(['s1'])
     sessionCatalog.getState().togglePin('s1')
     expect(sessionCatalog.getState().pinned).toEqual([])
   })
@@ -150,7 +147,6 @@ describe('catalog 管理：置顶 + 手动序 + 折叠（统一键写通）', ()
   it('setManualOrder 写通统一键', () => {
     sessionCatalog.getState().setManualOrder({ s1: 0, s2: 1 })
     expect(sessionCatalog.getState().manualOrder).toEqual({ s1: 0, s2: 1 })
-    expect(JSON.parse(localStorage.getItem(SESSION_STORE_KEY)!).manualOrder).toEqual({ s1: 0, s2: 1 })
   })
 
   it('setPinnedOrder 置顶区拖排：整表覆盖 + 去重', () => {
@@ -161,7 +157,6 @@ describe('catalog 管理：置顶 + 手动序 + 折叠（统一键写通）', ()
   it('setGroupCollapsed 写通统一键', () => {
     sessionCatalog.getState().setGroupCollapsed('pinned', true)
     expect(sessionCatalog.getState().groupsCollapsed.pinned).toBe(true)
-    expect(JSON.parse(localStorage.getItem(SESSION_STORE_KEY)!).groupsCollapsed.pinned).toBe(true)
   })
 
   it('prune 清掉已消失会话的管理键；空列表 no-op', () => {

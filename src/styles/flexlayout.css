@@ -24,12 +24,15 @@
   height: var(--logo-strip-h);
   min-height: var(--logo-strip-h);
   align-items: flex-end; /* 页签行沉到条底，上部留给 logo/文字（用户定稿） */
+  /* 页签行离条底 15px——**所有栏统一**（用户 2026-10-03：主区/左右栏一致；
+     strip 内 stretch 头栏不再私有底距）。 */
+  padding-bottom: var(--strip-pad-bottom);
   border-bottom: none;   /* 条底 1px 灰线（flexlayout 默认）去掉——页签纯文字化 */
 }
 
 .flexlayout-host .flexlayout__tabset_tabbar_inner,
 .flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
-  height: var(--logo-strip-h);
+  height: calc(var(--logo-strip-h) - var(--strip-pad-bottom));
   align-items: flex-end;
 }
 .flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
@@ -55,6 +58,11 @@
 }
 .flexlayout-host .fl-strip-low .flexlayout__tab_button_stretch {
   align-items: flex-end; /* 低条同样沉底（旧 center=标签悬条中，视觉跑顶） */
+  padding-bottom: 0;
+}
+/* 低条（36px 紧凑条）不参与 15px 统一底距——紧凑语义，15px 在 36px 内
+   比例失衡；15px 只约束顶带 100px 的条（左/中/右所有栏的顶带条）。 */
+.flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_outer {
   padding-bottom: 0;
 }
 .flexlayout-host .fl-strip-low .rail-logo-leading {
@@ -178,11 +186,10 @@
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
-  /* 页签行离头栏底边 18px（用户 2026-10-03 定稿；双行块会话名与此对齐）——
-     旧值 0 的"标签上跳"问题已由 chat-tab-label absolute 化消除；
-     页签文字**从中线开始往右排**（用户十轮定稿：双行块占左半、标签右移
-     ——左半让位给 ChatLabelOverlay，避免页签文字与双行块会话名重叠） */
-  padding: 0 var(--tab-pad-x) 18px 50%;
+  /* 页签行底距由 tabbar_outer 统一管（--strip-pad-bottom 15px，所有栏
+     一致）；页签文字**从中线开始往右排**（用户十轮定稿：双行块占左半、
+     标签右移——左半让位给 ChatLabelOverlay，避免页签文字与双行块重叠） */
+  padding: 0 var(--tab-pad-x) 0 50%;
   position: relative; /* 双行块绝对定位参照 */
   text-transform: uppercase;
 }
@@ -645,7 +652,8 @@
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-start;
-  padding: var(--logo-leading-pad) var(--tab-pad-x) 18px;
+  padding: calc(var(--logo-leading-pad) + var(--logo-glyph-drop)) var(--tab-pad-x)
+    calc(var(--strip-pad-bottom) - 1px);
   text-align: left;
   overflow: hidden;
 }

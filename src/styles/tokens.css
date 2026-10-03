@@ -72,6 +72,8 @@
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */
   --logo-strip-h: 100px;                      /* 页签条总高（顶带分栏） */
+  --strip-pad-bottom: 7px;                    /* 页签行离条底边距（视觉 10px：字形底隙 3px 补偿后；用户定稿 15→下移 5px；所有栏统一） */
+  --logo-glyph-drop: 8px;                     /* MIRACH 50px 行盒内字形下沉量（双行块项目名顶对齐字形补偿） */
   --logo-leading-gap: 12px;                   /* logo 带内 logo 与文字的间距 */
   --logo-leading-pad: 20px;                   /* logo 带上/左内边距（文字与 logo 同一左线 20） */
   --strip-low-height: 36px;                   /* 上下分栏的非顶部分栏条高

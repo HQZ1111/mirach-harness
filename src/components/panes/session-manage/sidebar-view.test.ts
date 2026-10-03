@@ -474,7 +474,6 @@ describe('sidebarViewStore 旋钮', () => {
     expect(sidebarViewStore.getState().manual).toBe(false)
     expect(localStorage.getItem('mirach.harness.sidebar.manual.v1')).toBe('false')
     expect(sessionCatalog.getState().manualOrder).toEqual({})
-    expect(JSON.parse(localStorage.getItem('mirach.harness.sessions.v1') ?? '{}').manualOrder).toEqual({})
     expect(localStorage.getItem('mirach.harness.sidebar.ordering.v1')).toBe('status')
   })
 

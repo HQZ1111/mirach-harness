@@ -21,6 +21,10 @@ mod pi_settings;
 // packages 只读列举——走 pi 自己的 loader（pi_resources.rs 模块头有出处）
 mod pi_resources;
 
+// 会话管理元数据持久化真相层（session_meta.rs 模块头有生产级裁定）：
+// pinned/archived/水位/折叠存 app_data_dir/session-meta.json（原子写）
+mod session_meta;
+
 // 终端 PTY 桥（terminal.rs 模块头有事件通道裁定）：终端是系统设施不是
 // Agent 数据——输出/退出走 Tauri Event，控制走 IPC invoke
 mod terminal;
@@ -539,8 +543,11 @@ fn main() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_kill,
-            terminal::terminal_open_url
+            terminal::terminal_open_url,
+            session_meta::session_meta_get,
+            session_meta::session_meta_set
         ])
+        .manage(session_meta::SessionMetaPath(std::sync::Mutex::new(None)))
         .run(tauri::generate_context!())
         .expect("error while running mirach-harness");
 }

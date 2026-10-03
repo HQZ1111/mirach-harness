@@ -41,7 +41,7 @@ import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
-import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
+import { sessionCatalog, sessionDisplayName, hydrateSessionMeta } from '@/components/panes/session-manage/session-catalog'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -154,6 +154,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
   const usage = useSelector(actorRef, (s) => s.context.usage)
+  // 会话管理元数据水合（Rust session-meta.json → catalog 管理维度；旧
+  // localStorage 键一次性迁移）。挂载即拉一次——早于任何管理动作。
+  useEffect(() => {
+    void hydrateSessionMeta().catch((e) =>
+      console.error('[session-catalog] 元数据水合失败——管理维度空态', e),
+    )
+  }, [])
   useEffect(() => {
     usageBridge.getState().setUsage(usage as UsageState | null)
   }, [usage])
