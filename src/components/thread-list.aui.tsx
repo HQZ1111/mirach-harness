@@ -74,6 +74,7 @@ import {
 } from "@/components/panes/session-manage/session-actions";
 import { DeleteSessionDialog, RenameSessionDialog } from "@/components/panes/session-manage/session-dialogs";
 import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
+import { VIRTUALIZE_THRESHOLD, VirtualSessionList } from "@/components/panes/session-manage/virtual-session-list";
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
 import { exportSessionHtml } from "@/components/panes/session-manage/session-export";
@@ -1356,6 +1357,30 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
               暂无会话
             </div>
           )
+        ) : rows.length >= VIRTUALIZE_THRESHOLD ? (
+          // 虚拟化分支（hermes virtual-session-list 同构，threshold 25）：
+          // ReorderableList 仍持有 DndContext+SortableContext，虚拟行消费
+          // context；虚拟 scroller flex-1 min-h-0 吃外层滚动容器剩余高度，
+          // 外层自身不再滚（平铺分支不变）。
+          <ReorderableList
+            ids={sortableSessionIds}
+            onReorder={(next) => commitReorder("recent", sortableSessionIds, next)}
+            sensors={dndSensors}
+          >
+            <VirtualSessionList
+              renderDivider={(row) =>
+                row.variant === "project" ? (
+                  <WorkspaceDividerRow bucketKey={row.key} label={row.label} />
+                ) : row.variant === "status" ? (
+                  <StatusDividerRow bucketKey={row.key} label={row.label} />
+                ) : (
+                  <DateDividerRow bucketKey={row.key} label={row.label} />
+                )
+              }
+              renderSessionRow={(id, key) => renderRow(id, "recent", key)}
+              rows={rows as SessionListRow[]}
+            />
+          </ReorderableList>
         ) : (
           <ReorderableList
             ids={sortableSessionIds}
