@@ -481,7 +481,7 @@
   left: 4px !important;
   margin: 0 !important;
   min-width: var(--zone-btn-size) !important;
-  opacity: 0.6;
+  opacity: 1;
   padding: 0 !important;
   pointer-events: auto !important;
   position: absolute !important;
