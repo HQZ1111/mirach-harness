@@ -7,6 +7,7 @@ import { StatusBar } from '@/app/shell/statusbar'
 import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
 import { MainTint } from './chrome-overlays'
 import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
+import { ChevronsDownIcon } from 'lucide-react'
 import { DropOverlay } from './drop-overlay'
 // flexlayout 0.11.1 行节点 max 聚合缺陷的运行时修正（须先于布局执行，见文件头）
 import './flexlayout-rowfix'
@@ -25,8 +26,8 @@ import { LogicalSize } from '@tauri-apps/api/dpi'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
-import { TabOverflowButton } from './tab-overflow-button'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
+import { TabOverviewMenu, type TabOverflowItem } from './tab-overview-menu'
 import { ZoneEditor } from './zone-editor'
 
 import { BotsPane } from '@/components/panes/bots-pane'
@@ -271,9 +272,17 @@ export function FlexLayoutShell() {
     } catch (e) {
       // 不可信输入 → 默认布局；失败必须可见（铁律 12：错误就是错误）
       console.error('[flex-layout] saved layout invalid, falling back to default', e)
-    }
-    return configure(Model.fromJson(makeDefaultLayout()))
+    }    return configure(Model.fromJson(makeDefaultLayout()))
   })
+
+  // 原生溢出菜单面板（ZCode SidePaneTabOverview 照抄）：tabs 超宽被裁后
+  // flexlayout 原生溢出按钮出现，点击经 onShowOverflowMenu 打开本面板。
+  const [overflowMenu, setOverflowMenu] = useState<{
+    node: import('flexlayout-react').TabSetNode | import('flexlayout-react').BorderNode
+    items: TabOverflowItem[]
+    onSelect: (item: TabOverflowItem) => void
+    anchor: { x: number; y: number }
+  } | null>(null)
 
   // 启动自愈：region 继承/约束按 v2.1 规则修正（持久化布局可能来自旧版本）
   // + 过承诺 min 缩让 + 富余兜底（旧存档的权重残骸在第一帧就被修正）。
@@ -1115,11 +1124,6 @@ export function FlexLayoutShell() {
           <ChevronDownIcon />
         </button>,
       )
-      // 多签溢出下拉（用户 2026-10-03 ZCode 形制：所有多签 tabset 的页签条
-      // **尾部**放 chevron 按钮，点击列全 tab 跳转/关闭；单签不显示、轨不显示）
-      if (node.getChildren().filter((c) => c instanceof TabNode).length >= 2 && !cfg.track) {
-        renderValues.buttons.push(<TabOverflowButton key="overflow" tabsetId={node.getId()} />)
-      }
     },
     [model, toggleRegionForm, createPane],
   )
@@ -1883,7 +1887,29 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         onFullReset={fullReset}
       />
       <div className="app-main flexlayout-host" onPointerDownCapture={onHostPointerDown}>
-        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} icons={{ close: <CloseIcon /> }} />        {/* ③ FancyZones 投放预览：拖拽中亮 zone sheet + 页签条插入符 */}
+        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} icons={{ close: <CloseIcon />, more: () => <ChevronsDownIcon size={14} /> }} onShowOverflowMenu={(node, mouseEvent, items, onSelect) => {
+          // 原生溢出按钮点击（tabs 超宽被裁后出现）→ 接 ZCode SidePaneTabOverview
+          // 面板（搜索 + 相对时间 + ✕）；锚点 = 点击位置。
+          const target = mouseEvent.currentTarget as HTMLElement | undefined
+          const rect = target?.getBoundingClientRect()
+          setOverflowMenu({
+            node,
+            items: items as TabOverflowItem[],
+            onSelect: onSelect as (item: TabOverflowItem) => void,
+            anchor: rect ? { x: rect.right, y: rect.bottom } : { x: mouseEvent.clientX, y: mouseEvent.clientY },
+          })
+        }} />
+        {overflowMenu && (
+          <TabOverviewMenu
+            anchor={overflowMenu.anchor}
+            items={overflowMenu.items}
+            onClose={() => setOverflowMenu(null)}
+            onSelect={(item) => {
+              overflowMenu.onSelect(item)
+              setOverflowMenu(null)
+            }}
+          />
+        )}        {/* ③ FancyZones 投放预览：拖拽中亮 zone sheet + 页签条插入符 */}
         <DropOverlay />
         {/* 装饰叠片：主区调色层（E9EEEF@40%）+ 左栏 logo 带（上 logo 下标签） */}
         <MainTint model={model} />

@@ -71,8 +71,14 @@
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
+  /* 等宽收缩下限（ZCode SIDE_PANE_TAB_MIN_WIDTH_PX=60 同源）：空间充足时
+     tab 自然排布，不足时各签等比收缩到 60px，仍溢出才交给原生溢出按钮
+     （hiddenTabs 机制）+ 横向滚动。 */
+  min-width: 60px;
+  overflow: hidden;
   padding: 0 var(--tab-pad-x);
   position: relative; /* 分隔圆点（fl-tab-sep）绝对定位的参照 */
+  text-overflow: ellipsis;
   text-transform: uppercase;
   transition: color 100ms;
 }
@@ -139,7 +145,7 @@
    **flexlayout 的包裹层** .flexlayout__tabset_leading 才是 tabbar_outer
    的直接子级（绝对定位与放行都打在它上面）。竖轨形态内容顶带
    （.rail-pane-railform 内）保持普通流布局。 */
-.flexlayout-host .flexlayout__tabset_tabbar_outer > .flexlayout__tabset_leading {
+.flexlayout-host .flexlayout__tabset_tabbar_outer > .flexlayout__tabset_leading:has(> .rail-logo-leading) {
   left: 0;
   pointer-events: none;
   position: absolute;
@@ -461,11 +467,12 @@
 /* ── 左栏标签条：logo/文字迁入条内（onRenderTabSet leading），不再需要
    margin 让位（宿主层浮层方案已退役，见 overlays.css 注释） ── */
 
-/* ── 多签溢出下拉按钮 + popover（ZCode 形制：用户 2026-10-03，所有多签
-   tabset 的页签条**尾部**放 chevron 按钮，点击弹全 tab 列表跳转/关闭）。
-   trailing buttons 数组的普通 flex item——与 .fl-min-btn 同源令牌
-   （尺寸/圆角/悬停全引用 --zone-btn-* / --tab-*）。 ── */
-.flexlayout-host .tab-overflow-btn {
+/* ── 多签标签总览（ZCode SidePaneTabOverview 照抄：用户 2026-10-03）──
+   **按钮 = flexlayout 原生溢出按钮**（tabs 超宽被裁后自动出现，icons.more
+   已替换为双 chevron；本块只做令牌化样式）。面板 = cmdk Command
+   （搜索框 + "打开的标签页"分组 + 类型图标 + 名字 + 相对时间 + ✕）。
+   全部令牌化（--zone-btn-*/--tab-*/--surface/--text/--stroke/--hover-wash）。 */
+.flexlayout-host .flexlayout__tab_button_overflow {
   align-items: center;
   background: transparent;
   border: 0;
@@ -473,79 +480,146 @@
   color: var(--tab-text);
   cursor: pointer;
   display: flex;
+  flex: none;
   height: var(--zone-btn-size);
   justify-content: center;
   min-width: var(--zone-btn-size);
   padding: 0;
 }
-.flexlayout-host .tab-overflow-btn:hover,
-.flexlayout-host .tab-overflow-btn[data-state='open'] {
+.flexlayout-host .flexlayout__tab_button_overflow:hover {
   background: var(--tab-hover-bg);
   color: var(--tab-text-active);
 }
+/* ZCode 原生无数字——flexlayout 的 count badge 隐藏 */
+.flexlayout-host .flexlayout__tab_button_overflow_count {
+  display: none;
+}
 
-/* popover 内容：竖列，max-height 滚动 */
-.flexlayout-host .tab-overflow-menu {
+/* 面板（PopoverContent w-72 bg-menu p-0 对应物） */
+.tab-overflow-menu {
   background: var(--surface);
   border: 1px solid var(--stroke);
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
-  max-height: 360px;
-  min-width: 220px;
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+  padding: 0;
+  width: 288px;
+  z-index: 70;
+}
+
+/* cmdk 容器/输入框/列表/空态/分组（ZCode Command 体系对应物） */
+.tab-overview-cmd {
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+}
+.tab-overview-input {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--stroke-soft);
+  color: var(--text);
+  display: flex;
+  font-size: 13px;
+  height: 32px;
+  outline: none;
+  padding: 0 12px;
+  width: 100%;
+}
+.tab-overview-input::placeholder {
+  color: var(--text-3);
+}
+.tab-overview-list {
+  max-height: 320px;
   overflow-y: auto;
   padding: 4px;
-  z-index: 60;
 }
-.flexlayout-host .tab-overflow-item {
+.tab-overview-empty {
+  color: var(--text-3);
+  padding: 20px 16px;
+  text-align: center;
+}
+.tab-overview-group {
+  border-bottom: 1px solid var(--stroke-soft);
+  padding: 4px;
+}
+.tab-overview-group:last-child {
+  border-bottom: 0;
+}
+.tab-overview-group > [cmdk-group-heading] {
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 8px 8px 4px;
+}
+.tab-overview-item {
   align-items: center;
-  border-radius: 4px;
+  border-radius: 6px;
   color: var(--text);
   cursor: pointer;
   display: flex;
-  font-size: 13px;
   gap: 8px;
-  justify-content: space-between;
+  margin-bottom: 2px;
+  min-height: 32px;
   outline: none;
-  padding: 6px 10px;
+  padding: 0 8px;
 }
-.flexlayout-host .tab-overflow-item[data-highlighted] {
+.tab-overview-item:last-child {
+  margin-bottom: 0;
+}
+.tab-overview-item[data-selected='true'],
+.tab-overview-item[data-highlighted] {
   background: var(--hover-wash);
 }
-.flexlayout-host .tab-overflow-item.active {
-  background: color-mix(in srgb, var(--fl-accent) 8%, transparent);
-  color: var(--text);
-  font-weight: 600;
+.tab-overview-item.active {
+  background: color-mix(in srgb, var(--fl-accent) 10%, transparent);
 }
-.flexlayout-host .tab-overflow-item .label {
+.tab-overview-icon {
+  align-items: center;
+  color: var(--text-3);
+  display: flex;
+  flex: none;
+  height: 20px;
+  justify-content: center;
+  width: 20px;
+}
+.tab-overview-name {
+  color: var(--text);
   flex: 1 1 auto;
+  font-size: 13px;
+  font-weight: 500;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.flexlayout-host .tab-overflow-item .close-btn {
+.tab-overview-age {
+  color: var(--text-3);
+  flex: none;
+  font-size: 12px;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+.tab-overview-close {
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 3px;
+  border-radius: 4px;
   color: var(--text-3);
   cursor: pointer;
   display: inline-flex;
   flex: none;
   height: 18px;
   justify-content: center;
-  opacity: 0;
+  opacity: 0.7;
   padding: 0;
   transition: opacity 120ms;
   width: 18px;
 }
-.flexlayout-host .tab-overflow-item:hover .close-btn,
-.flexlayout-host .tab-overflow-item[data-highlighted] .close-btn {
+.tab-overview-close:hover {
   opacity: 1;
 }
-.flexlayout-host .tab-overflow-item .close-btn:hover {
-  background: color-mix(in srgb, var(--text) 12%, transparent);
-  color: var(--text);
+.tab-overview-item:hover .tab-overview-close {
+  opacity: 1;
 }
 
 /* ── 对话标签双行 chip（onRenderTab leading 注入，用户定稿 2026-10-03
