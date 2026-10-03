@@ -471,7 +471,7 @@
    **按钮 = flexlayout 原生溢出按钮**（tabs 超宽被裁后自动出现，icons.more
    已替换为双 chevron；本块只做令牌化样式）。面板 = cmdk Command
    （搜索框 + "打开的标签页"分组 + 类型图标 + 名字 + 相对时间 + ✕）。
-   全部令牌化（--zone-btn-*/--tab-*/--surface/--text/--stroke/--hover-wash）。 */
+   全部令牌化（--zone-btn-* 与 --tab-* 与 --surface/--text/--stroke/--hover-wash）。 */
 .flexlayout-host .flexlayout__tab_button_overflow {
   align-items: center;
   background: transparent;
@@ -481,10 +481,11 @@
   cursor: pointer;
   display: flex;
   flex: none;
-  height: var(--zone-btn-size);
+  height: var(--zone-btn-size) !important;
   justify-content: center;
-  min-width: var(--zone-btn-size);
-  padding: 0;
+  min-width: var(--zone-btn-size) !important;
+  padding: 0 !important;
+  width: var(--zone-btn-size) !important;
 }
 .flexlayout-host .flexlayout__tab_button_overflow:hover {
   background: var(--tab-hover-bg);

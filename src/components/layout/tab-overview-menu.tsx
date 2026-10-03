@@ -24,7 +24,7 @@ import {
   SquareTerminalIcon,
   XIcon,
 } from 'lucide-react'
-import type { TabNode } from 'flexlayout-react'
+import { Actions, TabNode, TabSetNode } from 'flexlayout-react'
 import { closePane, PANE_TYPES, paneTypeOf } from './pane-registry'
 import { sessionRowAge } from '@/components/panes/session-manage/session-time'
 
@@ -47,11 +47,6 @@ const TYPE_ICONS: Record<string, ReactElement> = {
   review: <FileDiffIcon size={14} />,
   terminal: <SquareTerminalIcon size={14} />,
   preview: <EyeIcon size={14} />,
-}
-
-export interface TabOverflowItem {
-  node: TabNode
-  index: number
 }
 
 interface TabMeta {
@@ -89,38 +84,47 @@ const getSearchScore = (
 
 export function TabOverviewMenu({
   anchor,
-  items,
-  onSelect,
+  tabset,
   onClose,
 }: {
   anchor: { x: number; y: number }
-  items: TabOverflowItem[]
-  onSelect: (item: TabOverflowItem) => void
+  /** 所属 tabset——面板显示**全部打开的标签**（ZCode「打开的标签页」=全量，
+   *  不只溢出被裁的 hiddenTabs；跳转走 selectTab，原生会滚入视图）。 */
+  tabset: import('flexlayout-react').TabSetNode | import('flexlayout-react').BorderNode
   onClose: () => void
 }): ReactElement {
   const [query, setQuery] = useState('')
   const [nowMs, setNowMs] = useState(() => Date.now())
 
-  rememberOpenedAt(items)
+  // 全部 tab（TabSetNode children；BorderNode 无单选语义，用 items 概念退化）
+  const allTabs = useMemo(() => {
+    if (tabset instanceof TabSetNode) {
+      return tabset.getChildren().filter((c): c is TabNode => c instanceof TabNode)
+    }
+    return tabset.getChildren().filter((c): c is TabNode => c instanceof TabNode)
+  }, [tabset])
+  const selectedId = tabset instanceof TabSetNode ? tabset.getSelectedNode()?.getId() : undefined
+
+  rememberOpenedAt(allTabs.map((node) => ({ node })))
 
   const queryParts = useMemo(() => normalizeSearchQuery(query), [query])
   const metas = useMemo<TabMeta[]>(
     () =>
-      items.map((it) => {
-        const id = it.node.getId()
+      allTabs.map((node) => {
+        const id = node.getId()
         let openedAt = openedAtByTabId.get(id)
         if (openedAt === undefined) {
           openedAt = Date.now()
           openedAtByTabId.set(id, openedAt)
         }
         const ptype = paneTypeOf(id)
-        const name = it.node.getName() || '(未命名)'
+        const name = node.getName() || '(未命名)'
         const typeLabel = ptype ? (PANE_TYPES[ptype]?.name ?? '') : ''
         return {
           id,
           name,
           typeLabel,
-          closeable: it.node.isEnableClose(),
+          closeable: node.isEnableClose(),
           openedAt,
           search: {
             title: normalizeSearchText(name),
@@ -129,7 +133,7 @@ export function TabOverviewMenu({
           },
         }
       }),
-    [items],
+    [allTabs],
   )
   const filtered = useMemo(
     () => {
@@ -180,15 +184,18 @@ export function TabOverviewMenu({
             <Command.List className="tab-overview-list">
               <Command.Empty className="tab-overview-empty">没有匹配的标签页</Command.Empty>
               {filtered.length > 0 && (
-                <Command.Group className="tab-overview-group" data-len={filtered.length} heading="打开的标签页">
-                  {filtered.map((t, i) => (
+                <Command.Group className="tab-overview-group" heading="打开的标签页">
+                  {filtered.map((t) => (
                     <Command.Item
-                      className={`tab-overview-item${i === 0 ? ' active' : ''}`}
+                      className={`tab-overview-item${t.id === selectedId ? ' active' : ''}`}
                       key={t.id}
                       keywords={[t.typeLabel]}
                       onSelect={() => {
-                        const hit = items.find((it) => it.node.getId() === t.id)
-                        if (hit) onSelect(hit)
+                        // 跳转走 selectTab——溢出被裁的 tab 原生会滚入视图
+                        const m = (
+                          globalThis as unknown as { __flModel?: { doAction: (a: unknown) => void } }
+                        ).__flModel
+                        m?.doAction(Actions.selectTab(t.id))
                         onClose()
                       }}
                       value={t.name}

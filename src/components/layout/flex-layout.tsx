@@ -27,7 +27,7 @@ import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, zonePaneTypes, closePane, type PaneType, type Region } from './pane-registry'
 import { PaneAddButton, RailNav, openableTypesForRegion } from './region-rails'
 import { useTabSelection, clearTabSelection, isToggleSelectClick, selectTabRange, selectionFor, toggleTabSelected } from './tab-selection'
-import { TabOverviewMenu, type TabOverflowItem } from './tab-overview-menu'
+import { TabOverviewMenu } from './tab-overview-menu'
 import { ZoneEditor } from './zone-editor'
 
 import { BotsPane } from '@/components/panes/bots-pane'
@@ -279,8 +279,6 @@ export function FlexLayoutShell() {
   // flexlayout 原生溢出按钮出现，点击经 onShowOverflowMenu 打开本面板。
   const [overflowMenu, setOverflowMenu] = useState<{
     node: import('flexlayout-react').TabSetNode | import('flexlayout-react').BorderNode
-    items: TabOverflowItem[]
-    onSelect: (item: TabOverflowItem) => void
     anchor: { x: number; y: number }
   } | null>(null)
 
@@ -1887,27 +1885,22 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         onFullReset={fullReset}
       />
       <div className="app-main flexlayout-host" onPointerDownCapture={onHostPointerDown}>
-        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} icons={{ close: <CloseIcon />, more: () => <ChevronsDownIcon size={14} /> }} onShowOverflowMenu={(node, mouseEvent, items, onSelect) => {
+        <Layout ref={layoutRef} model={model} factory={factory} onAction={onAction} onModelChange={onModelChange} onRenderTab={onRenderTab} onRenderTabSet={onRenderTabSet} onContextMenu={onTabContextMenu} onAuxMouseClick={onAuxMouseClick} onExternalDrag={onExternalDrag} onTabSetPlaceHolder={onTabSetPlaceHolder} tabDragSpeed={0.08} icons={{ close: <CloseIcon />, more: () => <ChevronsDownIcon size={14} /> }} onShowOverflowMenu={(node, mouseEvent) => {
           // 原生溢出按钮点击（tabs 超宽被裁后出现）→ 接 ZCode SidePaneTabOverview
-          // 面板（搜索 + 相对时间 + ✕）；锚点 = 点击位置。
+          // 面板（搜索 + 相对时间 + ✕）；锚点 = 点击位置。面板显示**全部**
+          // 打开的标签（ZCode「打开的标签页」=全量，不只 hiddenTabs）。
           const target = mouseEvent.currentTarget as HTMLElement | undefined
           const rect = target?.getBoundingClientRect()
           setOverflowMenu({
             node,
-            items: items as TabOverflowItem[],
-            onSelect: onSelect as (item: TabOverflowItem) => void,
             anchor: rect ? { x: rect.right, y: rect.bottom } : { x: mouseEvent.clientX, y: mouseEvent.clientY },
           })
         }} />
         {overflowMenu && (
           <TabOverviewMenu
             anchor={overflowMenu.anchor}
-            items={overflowMenu.items}
+            tabset={overflowMenu.node}
             onClose={() => setOverflowMenu(null)}
-            onSelect={(item) => {
-              overflowMenu.onSelect(item)
-              setOverflowMenu(null)
-            }}
           />
         )}        {/* ③ FancyZones 投放预览：拖拽中亮 zone sheet + 页签条插入符 */}
         <DropOverlay />
