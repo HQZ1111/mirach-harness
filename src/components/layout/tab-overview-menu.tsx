@@ -26,6 +26,8 @@ import {
 } from 'lucide-react'
 import { Actions, TabNode, TabSetNode } from 'flexlayout-react'
 import { closePane, PANE_TYPES, paneTypeOf } from './pane-registry'
+import { useLayoutStore } from '@/store/layout-store'
+import { useStore } from 'zustand'
 import { sessionRowAge } from '@/components/panes/session-manage/session-time'
 
 /** tab 首见时间（flexlayout TabNode 无时间戳——ZCode openedAt 对应物）。 */
@@ -96,13 +98,12 @@ export function TabOverviewMenu({
   const [query, setQuery] = useState('')
   const [nowMs, setNowMs] = useState(() => Date.now())
 
-  // 全部 tab（TabSetNode children；BorderNode 无单选语义，用 items 概念退化）
-  const allTabs = useMemo(() => {
-    if (tabset instanceof TabSetNode) {
-      return tabset.getChildren().filter((c): c is TabNode => c instanceof TabNode)
-    }
-    return tabset.getChildren().filter((c): c is TabNode => c instanceof TabNode)
-  }, [tabset])
+  // 全部 tab：**每次渲染现取**（面板开着点 ✕ 关闭后必须立即消失——
+  // useMemo([tabset]) 会因 flexlayout 就地变异节点而永不重算，留下
+  // "关不掉、点不动"的幽灵行，审查 C-2）。layoutRev 订阅承载重渲。
+  const layoutRev = useLayoutStore((s) => s.layoutRev)
+  void layoutRev
+  const allTabs = tabset.getChildren().filter((c): c is TabNode => c instanceof TabNode)
   const selectedId = tabset instanceof TabSetNode ? tabset.getSelectedNode()?.getId() : undefined
 
   rememberOpenedAt(allTabs.map((node) => ({ node })))

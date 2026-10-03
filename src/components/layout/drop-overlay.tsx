@@ -77,9 +77,16 @@ export function DropOverlay() {
 
         const primary = hint?.groupId === zone.id
 
-        // 悬停在目标的页签条上：插入符（StripDropCaret）接管——sheet 退位
+        // 悬停在目标的页签条上：插入符（StripDropCaret）接管——sheet 退位。
+        // caret 必须包在**zone 盒定位的 anchor** 里：caret 坐标是 zone
+        // 相对系（x = target.left - zoneRect.left），直接挂 overlay（inset:0
+        // 宿主相对系）时除贴宿主原点的 zone 外一律错位（审查 C-1）。
         if (primary && hint?.stack !== undefined) {
-          return <StripDropCaret key={zone.id} zoneRect={rect} strip={strip} hint={hint} />
+          return (
+            <div key={zone.id} className="fl-drop-zone-anchor" style={box}>
+              <StripDropCaret zoneRect={rect} strip={strip} hint={hint} />
+            </div>
+          )
         }
 
         if (reorderOnly) {

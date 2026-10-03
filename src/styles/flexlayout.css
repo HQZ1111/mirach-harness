@@ -666,9 +666,7 @@
    恢复显示——十轮的 content 替换方案废弃）。拉伸头栏 tab_button_stretch
    是 align-items:flex-end 沉底布局，chip 用 align-self:stretch + 内部
    justify-content:center 垂直居中（不被沉底压扁）；字号/颜色引 tokens。 */
-  .flexlayout__tab_button .chat-tab-label,
-  .flexlayout__tab_button_stretch .chat-tab-label,
-  .chat-tab-label-anchor .chat-tab-label {
+.chat-tab-label-anchor .chat-tab-label {
   /* 双行块对齐（用户 2026-10-03 定稿，二十轮宿主层叠片化）：撑满
      --logo-strip-h 顶带——项目名顶部与左栏 MIRACH 文字顶部同线
      （--logo-leading-pad 20px），会话名底部与页签行底部对齐（页签行
