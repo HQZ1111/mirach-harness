@@ -428,6 +428,10 @@
   flex: none;
   flex-direction: column;
   gap: 3px;
+  /* hermes TAB_VERTICAL 同款：文字竖排（vertical-rl）+ 高度上限 + 主轴
+     居中；max-h 192px = hermes max-h-48。label 随竖排自适应（py-2 居中）。 */
+  justify-content: center;
+  max-height: 12rem;
   padding: 4px 1px;
   width: 100%;
 }
