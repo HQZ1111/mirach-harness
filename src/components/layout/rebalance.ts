@@ -25,9 +25,20 @@ export const MIN_WINDOW_WIDTH = 600
  *  仅 Tauri 生效；窄屏抽屉模式不参与（窄屏下侧栏撤成 overlay，根行 Σmin
  *  本来就小）。allowGrowRevert = 结构动作触发（手动缩窗走挤压级联，不长
  *  窗）。 */
+/** 最大化同步标志（fitWindowWidth 顶部判定用；由 flex-layout 的
+ *  onResized 监听维护——isMaximized 是异步查询，只能换成标志）。 */
+let windowMaximized = false
+
+export const setWindowMaximized = (v: boolean): void => {
+  windowMaximized = v
+}
+
 export const fitWindowWidth = (m: Model, allowGrowRevert: boolean) => {
   if (!inTauri || !appWindow) return
   if (useLayoutStore.getState().narrowViewport) return
+  // 最大化窗口不受自适应窗宽管辖（用户最大化 = 独占工作区的意图，
+  // revert/grow 都会把几何砸回 1800）。
+  if (windowMaximized) return
   const rootRow = m.getRootRow()
   const kids = rootRow?.getChildren() ?? []
   if (kids.length === 0) return
@@ -55,7 +66,9 @@ export const fitWindowWidth = (m: Model, allowGrowRevert: boolean) => {
   const availW = window.screen?.availWidth ?? target
   const finalW = Math.max(MIN_WINDOW_WIDTH, Math.min(target, availW))
   if (Math.abs(finalW - window.outerWidth) <= 4) return
-  void appWindow.setSize(new LogicalSize(finalW, window.outerHeight)).catch(() => {})
+  void appWindow
+    .setSize(new LogicalSize(finalW, window.outerHeight))
+    .catch((e) => console.error('[rebalance] 自适应窗宽 setSize 失败', e))
 }
 
 // ── 根行解析式配重（竖轨引入的 20px 节点会触发权重归一化重排——
@@ -122,18 +135,40 @@ export const applyRootWeights = (m: Model): boolean => {
     const c = regionCfgOfNode(k)
     return c?.region === 'main' && !c.track
   })
+  // 亏空防护（审查 A-2）：clamp 后 Σ非主栏 > avail（窄窗 min 底线让不出）
+  // 时按比例收缩非主栏目标，主栏份额下限取 min(minW, max(rest,40))——
+  // 否则写出 Σpx > avail 的权重，右栏被 flexbox min-width 挤出窗口
+  // （§2.5 缩让要根治的 bug 类；与 absorbSurplus 的整体放弃语义对齐）。
+  const nonMainPx = px.reduce((s, v, i) => {
+    const c = regionCfgOfNode(kids[i])
+    return c && c.region !== 'main' && !c.track ? s + v : s
+  }, 0)
+  if (nonMainPx > avail) {
+    const scale = avail / nonMainPx
+    kids.forEach((k, i) => {
+      const c = regionCfgOfNode(kids[i])
+      if (c && c.region !== 'main' && !c.track) px[i] = Math.floor(px[i] * scale)
+    })
+  }
   if (mainKids.length > 0) {
     // 主栏（可能多分栏并列）按当前权重比例分吃剩余，每栏不低于**实际生效
     // min**（sync 过承诺缩让后的动态值 40-395，从节点约束读——写死 395
-    // 会把缩让顶回去，再溢出再缩让来回拉锯，2026-10-01 审查 P2-7）
+    // 会把缩让顶回去，再溢出再缩让来回拉锯，2026-10-01 审查 P2-7）；
+    // rest 为负（亏空）时下限取 min(minW, max(rest,40)) 与 absorbSurplus
+    // 的整体放弃语义对齐（审查 A-2）。
     const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
     const wSum = mainKids.reduce((s, k) => s + (weightOf(k) > 0 ? weightOf(k) : 100), 0)
+    const restNow = avail - px.reduce((s, v, i) => {
+      const c = regionCfgOfNode(kids[i])
+      // main 列不计（px 未设=0）；轨（TRACK_W）计入扣减——否则主栏多吃轨宽
+      return c && c.region === 'main' && !c.track ? s : s + v
+    }, 0)
     for (const k of mainKids) {
       const i = kids.indexOf(k)
       // widthBounds 读节点实际生效的 minWidth（tabset）或子项聚合（row），
       // 与 sync 落的属性同一来源；40 = §2.5 缩让底线
       const minW = Math.max(widthBounds(k, k instanceof RowNode).min, 40)
-      px[i] = Math.max((rest * weightOf(k)) / wSum, minW)
+      px[i] = Math.max((restNow * weightOf(k)) / wSum, Math.min(minW, Math.max(restNow, 40)))
     }
   } else {
     // 主栏整栏折叠（无吸收者）：富余给最后一个非轨列——分栏内部由

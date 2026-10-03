@@ -53,7 +53,9 @@ vi.mock('@/lib/tauri-window', () => ({
     return tauri.inTauri
   },
   get appWindow() {
-    return tauri.inTauri ? { setSize: tauri.setSize } : null
+    return tauri.inTauri
+      ? { setSize: tauri.setSize, isMaximized: async () => false }
+      : null
   },
 }))
 

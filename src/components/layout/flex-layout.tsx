@@ -17,7 +17,7 @@ import './flexlayout-rowfix'
 import { RailLogoLeading } from './rail-logo-leading'
 import { ResizeHandles } from './resize-handles'
 import { clampRowWeights, regionCfgOfNode, rootNeededMin, rootAvailPx, widthBounds } from './constraints'
-import { absorbSurplus, applyRootWeights, fitWindowWidth, mergeZonesPerColumn, measureRootPx, rootPxMem, updateNarrowViewport } from './rebalance'
+import { absorbSurplus, applyRootWeights, fitWindowWidth, mergeZonesPerColumn, measureRootPx, rootPxMem, setWindowMaximized, updateNarrowViewport } from './rebalance'
 import { syncTabsetConstraints } from './constraints-sync'
 import { startPaneDrag } from './drag-session'
 import { EditPalette } from './edit-palette'
@@ -321,6 +321,10 @@ export function FlexLayoutShell() {
     return () => {
       cancelAnimationFrame(raf1)
       cancelAnimationFrame(raf2)
+      // 90ms 串行通道的挂起定时器随卸载清理——卸载后开火会在死模型上
+      // 跑全套配重/吸收，且 updateNarrowViewport 会写全局 store
+      // （StrictMode 双挂载/HMR 下可达）
+      window.clearTimeout(rebalanceTimerRef.current)
     }
   }, [])
 
@@ -384,6 +388,20 @@ export function FlexLayoutShell() {
       m!.doAction(Actions.updateNodeAttributes('workspace', { name }))
     }
   }, [activeTitle])
+
+  // 最大化同步标志（rebalance.fitWindowWidth 顶部判定用）：boot 查一次 +
+  // onResized 持续维护（isMaximized 异步——标志化让 fitWindowWidth 保持同步）。
+  useEffect(() => {
+    if (!inTauri || !appWindow) return
+    const win = appWindow
+    let unlisten: (() => void) | undefined
+    const refresh = () => {
+      void win.isMaximized().then((v) => setWindowMaximized(v))
+    }
+    refresh()
+    void win.onResized(() => refresh()).then((fn) => (unlisten = fn))
+    return () => unlisten?.()
+  }, [])
 
   // 折叠/隐藏后的配重重钉（hermes 声明式固定轨 / ZCode expandedSize 的
   // 等价物）：非主栏列按记忆 px（rootPxMem）显式钉回、主栏吃剩余——
@@ -501,6 +519,12 @@ export function FlexLayoutShell() {
   }, [])
   const onModelChange = useCallback(
     (m: Model, action?: Action) => {
+      // adjusting 帧（分隔条拖拽的每个 pointermove）早退：flexlayout 对
+      // adjusting 走直写 DOM 快路径，这里若 persist×2+bump 会让拖拽全程
+      // 每帧 2 次同步磁盘写 + 整壳重渲，击穿快路径。提交帧（非 adjusting）
+      // 必然到达，持久化不丢；pointercancel 丢提交帧的窗口由下一次任意
+      // 动作必 persist 兜住。
+      if (action?.isAdjusting?.()) return
       persist(m)
       setActivePreset(null)
       bumpLayoutRev()
@@ -669,11 +693,14 @@ export function FlexLayoutShell() {
           wAdj.__adjustLog.push({ t: Math.round(performance.now()), weights, adjusting })
         }
         if (adjusting) {
-          lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: data.weights ?? [] }
           if (row instanceof RowNode && Array.isArray(data.weights) && (window as { __noClamp?: boolean }).__noClamp !== true) {
             const corrected = clampRowWeights(row, data.weights)
+            // 先 clamp 后记录——提交帧采纳的是**实际渲染态**（存原始值会把
+            // 拖过界的非规范权重写进持久化 JSON）
+            lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: corrected ?? (data.weights ?? []) }
             if (corrected) return Actions.adjustWeights(row.getId(), corrected).setAdjusting(true)
           }
+          lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: data.weights ?? [] }
           return action
         }
         // 非 adjusting = 松手提交帧
@@ -836,7 +863,22 @@ export function FlexLayoutShell() {
         }
       }
       // ② 回退：按记录 id（缺则一级窗格）在大栏边缘重建分栏堆叠回填
-      const ids = rec?.panes && rec.panes.length > 0 ? rec.panes : [PRIMARY_PANE[side]]
+      // 记录 id 含已拖去别栏仍活着的孤儿——与在场的撞 id 会让 addNode 造出
+      // 同 id 双节点（getNodeById 语义损坏），统一过滤；过滤后为空=错误可见
+      const alive = (() => {
+        const present = new Set<string>()
+        m.visitNodes((n) => {
+          if (n instanceof TabNode) present.add(n.getId())
+        })
+        return present
+      })()
+      const ids = (rec?.panes && rec.panes.length > 0 ? rec.panes : [PRIMARY_PANE[side]]).filter(
+        (id) => !alive.has(id),
+      )
+      if (ids.length === 0) {
+        console.error('[flex-layout] showSide 回退：记录页签全部在场——快照与模型脱同步', side)
+        return false
+      }
       const root = m.getRootRow()
       const kids = (root?.getChildren() ?? []).filter(
         (k) => !(k instanceof TabSetNode && zoneConfigOf(k)?.track),
