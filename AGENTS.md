@@ -2680,6 +2680,54 @@ value 限制）。406 用例。
     attribute 直接读（innerHTML dump 看不到元素自身 attribute）。
   - CDP 终验：长名造溢出→原生按钮 (302,83) 32×16 双箭头→点击面板
     288px、items=2（会话列表/机器人-超长名）。tsc 0/462。
+
+## 标签溢出定稿 + 双行块对齐 + sessionCatalog 单一真相源（2026-10-03 续）
+
+- **十九轮（5bd0479）**：①溢出面板显示**全部**打开的标签（props 改接
+  tabset 读全量 children——ZCode「打开的标签页」=全量，不只 hiddenTabs；
+  跳转 selectTab 原生滚入视图）；②**CSS 注释陷阱（重要）**：注释里写
+  `--zone-btn-*/--tab-*` 的 `*/` **提前闭合注释**，废 token 吞掉紧跟的
+  按钮规则（CSSOM 实锤：库注入规则在、hover/count 在、唯独基础规则消
+  失）——注释改写后按钮 20×20 令牌化生效。教训：CSS 注释中出现 `*/`
+  序列（如 `--x-*/--y-*`）= 灾难。
+- **二十轮（3188d6c）**：主对话双行块**宿主层叠片化**（ChatLabelOverlay，
+  chrome-overlays 同 MainTint 机制，相对 workspace tabset 顶带
+  --logo-strip-h 100px 定位）——stretch 头栏上方有 tabset_header 25px，
+  leading 内永远够不到 MIRACH 顶（21 vs 82 实锤）。对齐 CDP：项目名
+  top 21=MIRACH top、会话名 bottom 83=页签行底（tab_button_stretch
+  padding-bottom 18 同步落）。显示逻辑 ZCode 式：新会话 New Chat +
+  最近工作区（setPendingCwd），标题 = pi name ?? 派生标题
+  （firstUserMessageText+deriveTitle）?? New Chat——首条消息即时跟随。
+- **廿一轮（f08bf07）+ 廿二轮（8230a45）**：**sessionCatalog 单一真相
+  源**（用户定稿："前端只是映射，应该有一个储存会话名，项目名的地方，
+  左侧栏，主对话栏，所有的地方都从那里取"+"所有的数据都只有一个真相
+  源，参考 hermes 和 zcode 能抄就抄"）。
+  - **参考**：zcode tabStore（packages/ui/src/store/tabStore.ts——单
+    store 承载全部 tab 维度状态+动作内聚+工厂创建+settingService 持
+    久化）；hermes api/sessions.ts（pinned/archived/unread/name 全是
+    **后端 API**——pi 无此后端，客户端统一承载）。
+  - **catalog 扩展**：目录（entries/piOrder/activeId/pendingCwd，runtime
+    唯一写入者，不持久化——pi 是真相）+ 管理维度（pinned/manualOrder/
+    archived/seen/markers/groupsCollapsed，hermes 后端字段的客户端对应
+    物）+ 动作内聚（togglePin/setPinnedOrder/setManualOrder/toggleArchive/
+    ackSession/markSessionUnread/ackAll/setGroupCollapsed/prune）+ 未读
+    播种并入 ingest（hermes ingestRows 三规则）+ 统一持久化**单键**
+    `mirach.harness.sessions.v1` + **旧五键一次性迁移**（旧键保留回滚
+    安全）。
+  - **退役**：sessionManageStore/sessionArchiveStore/sessionUnreadStore
+    三 store 删除（960 行-），消费方（thread-list/sidebar-view/runtime）
+    只改 import 路径 + `s.order`→`s.manualOrder` 改名；hook 别名
+    useSessionManage/Archive/Unread 保留指向 catalog（选择器零改动）；
+    mirach:workspace-title CustomEvent 旁路桥退役（flex-layout 直接订阅
+    catalog）；chatTabLabelStore 删除（ChatTabLabel 订阅 catalog）。
+  - **CDP 全链同源**：侧栏行/双行块会话名/workspace 页签名三处同值、
+    双行块对齐 21/83 保持；448 用例（三旧测试合并为 session-catalog.test
+    语义保全 21 用例含迁移公式）。
+  - **教训**：①zustand selector 里 map 新对象 + useShallow = 元素引用
+    每次新建永不相等 → **无限重渲整页卡死**（Runtime.evaluate 永不返
+    回）——派生数组必须 useMemo 依原始引用；②页面假死先重启 app 再
+    bisect——webview 热更叠加的陈旧状态和代码死循环症状相同（本轮
+    bisect 全禁+重启仍活、全恢复+重启仍活=非代码问题）。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
