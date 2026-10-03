@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import { Model, TabSetNode } from 'flexlayout-react'
+import { BorderNode, Model, TabSetNode } from 'flexlayout-react'
 
 import { useLayoutStore } from '@/store/layout-store'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
@@ -127,6 +127,9 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
       const out: { key: string; left: number; top: number; width: number; title: string }[] = []
       model.visitNodes((n) => {
         if (!(n instanceof TabSetNode) || n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
+        // border 里的 tabset（栏折叠进边框轨）DOM 在窗口边缘——浮层不能
+        // 按 border 位置画（会跑到对侧/左栏 logo 角）
+        if (n.getParent() instanceof BorderNode) return
         const cfg = zoneConfigOf(n)
         if (!cfg || n.getChildren().length === 0) return
         if (cfg.track) return // 轨（20px）无条无顶带语义

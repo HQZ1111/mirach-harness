@@ -56,8 +56,9 @@
    是 flexlayout 内联样式的 absolute 定位——**padding 推不动 absolute 子
    项**，必须位移 content 自身（!important 压内联 top/height）。 ── */
 .flexlayout-host .flexlayout__tabset[data-strip-hidden='true'] .flexlayout__tabset_content {
+  bottom: 0 !important;
   box-sizing: border-box;
-  height: calc(100% - var(--logo-strip-h)) !important;
+  height: auto !important;
   top: var(--logo-strip-h) !important;
 }
 
