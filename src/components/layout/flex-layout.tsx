@@ -5,7 +5,7 @@ import 'flexlayout-react/style/light.css'
 import { Titlebar } from '@/app/shell/titlebar'
 import { StatusBar } from '@/app/shell/statusbar'
 import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
-import { ChatLabelOverlay, MainTint } from './chrome-overlays'
+import { ChatLabelOverlay, MainTint, StripHiddenTitleOverlay } from './chrome-overlays'
 import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
 import { ChevronsDownIcon } from 'lucide-react'
 import { useStore } from 'zustand'
@@ -1918,6 +1918,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         {/* 装饰叠片：主区调色层（E9EEEF@40%）+ 左栏 logo 带（上 logo 下标签） */}
         <MainTint model={model} />
         <ChatLabelOverlay model={model} />
+        <StripHiddenTitleOverlay model={model} />
         {/* 离家一级标签 回家钮（onRenderTab）+ logo/文字由
             onRenderTabSet 的 leading 注入会话页签条（RailLogo 浮层已退役） */}
         {/* hermes 编辑模式画布面：zone body 变拖拽把手（veil） */}

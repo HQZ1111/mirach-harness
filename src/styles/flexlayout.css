@@ -48,6 +48,19 @@
   padding-left: 70px;
 }
 
+/* ── 条隐藏（「切换标签」）形态：顶带 100px **保留**——内容不从 tabset
+   顶开始（用户 2026-10-03："和左侧栏一样"）。enableTabStrip=false 时
+   flexlayout 不渲染 tabbar_outer（display:none 仍在 DOM，:has 不可靠）—
+   由 StripHiddenTitleOverlay 的 measure 循环给 tabset 打
+   data-strip-hidden 标记（左栏跳过：railform logo 自带顶带）。content
+   是 flexlayout 内联样式的 absolute 定位——**padding 推不动 absolute 子
+   项**，必须位移 content 自身（!important 压内联 top/height）。 ── */
+.flexlayout-host .flexlayout__tabset[data-strip-hidden='true'] .flexlayout__tabset_content {
+  box-sizing: border-box;
+  height: calc(100% - var(--logo-strip-h)) !important;
+  top: var(--logo-strip-h) !important;
+}
+
 /* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
    （标题栏拖拽区/窗口按钮让位）只属于窗口顶带——下面分栏的条降到
    --strip-low-height。文字与顶带同规：**沉条底**（用户 2026-09-29：

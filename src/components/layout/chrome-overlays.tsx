@@ -14,7 +14,9 @@ import { useEffect, useState } from 'react'
 import { Model, TabSetNode } from 'flexlayout-react'
 
 import { useLayoutStore } from '@/store/layout-store'
+import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 import { ChatTabLabel } from './chat-tab-label'
+import { zoneConfigOf } from './pane-registry'
 
 function tabsetRectOf(
   model: Model,
@@ -63,15 +65,19 @@ function useTabsetRect(model: Model, tabIds: string[]) {
 export function MainTint({ model }: { model: Model }) {
   const rect = useTabsetRect(model, ['workspace'])
   if (!rect) return null
+  // 条被「切换标签」隐藏时 outer 不渲染（rect.stripH=0）——顶带仍按
+  // --logo-strip-h 保留（双行块占位，与左栏 logo 同构），tint 从顶带下开始。
+  const stripHidden = sessionCatalog.getState().stripHidden['main'] === true
+  const stripH = rect.stripH > 0 ? rect.stripH : stripHidden ? 100 : 0
   return (
     <div
       aria-hidden
       className="main-tint"
       style={{
         left: rect.left,
-        top: rect.top + rect.stripH,
+        top: rect.top + stripH,
         width: rect.width,
-        height: rect.height - rect.stripH,
+        height: rect.height - stripH,
       }}
     />
   )
@@ -80,7 +86,7 @@ export function MainTint({ model }: { model: Model }) {
 /** 主对话双行块宿主叠层（用户 2026-10-03 定稿）：相对 workspace tabset
  *  **顶带**（--logo-strip-h 100px）定位——项目名顶部与左栏 MIRACH 文字
  *  顶部同线（tabset 顶 + --logo-leading-pad），会话名底部与页签行底部
- *  对齐（页签行沉顶带底 18px）。stretch 头栏内无法到达（tabset_header
+ *  对齐（页签行沉顶带底 15px）。stretch 头栏内无法到达（tabset_header
  *  25px 把 stretch 顶压到 62，MIRACH 在 21）——必须宿主层叠片。内容 =
  *  ChatTabLabel（store 订阅，assistant-ui 数据经 chatTabLabelStore 单向
  *  进入 layout 层）。 */
@@ -101,5 +107,59 @@ export function ChatLabelOverlay({ model }: { model: Model }) {
     >
       <ChatTabLabel />
     </div>
+  )
+}
+
+/** 条隐藏信息浮层（「切换标签」后右栏等无标题位栏的顶带信息）：条隐藏
+ *  （enableTabStrip=false）的非左非主 tabset 顶带显示**活动页签名**（15px
+ *  灰）——左栏有 railform logo、主区有双行块，右栏补齐三栏一致（用户
+ *  定稿：隐藏标签后内容上移但顶带保留、信息位常驻）。 */
+export function StripHiddenTitleOverlay({ model }: { model: Model }) {
+  const layoutRev = useLayoutStore(s => s.layoutRev)
+  const [items, setItems] = useState<{ key: string; left: number; top: number; width: number; title: string }[]>([])
+  useEffect(() => {
+    const measure = () => {
+      const host = document.querySelector<HTMLElement>('.flexlayout-host')
+      if (!host) return
+      const hostRect = host.getBoundingClientRect()
+      const hostTop = hostRect.top
+      const hostLeft = hostRect.left
+      const out: { key: string; left: number; top: number; width: number; title: string }[] = []
+      model.visitNodes((n) => {
+        if (!(n instanceof TabSetNode) || n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
+        const cfg = zoneConfigOf(n)
+        if (!cfg || n.getChildren().length === 0) return
+        if (cfg.track) return // 轨（20px）无条无顶带语义
+        const el = document.querySelector<HTMLElement>(`.flexlayout__tabset[data-layout-path="${n.getPath()}"]`)
+        if (!el) return
+        const hidden = n.isEnableTabStrip() === false
+        // 条隐藏标记（CSS 顶带保留的钩子；左栏跳过——railform logo 自带顶带）
+        el.setAttribute('data-strip-hidden', hidden && cfg.region !== 'left' ? 'true' : 'false')
+        if (!hidden || cfg.region !== 'right') return // 浮层只补右栏（左/右已有专属位）
+        const r = el.getBoundingClientRect()
+        if (r.width < 100) return
+        const active = n.getSelectedNode()
+        out.push({
+          key: n.getId(),
+          left: r.left - hostLeft,
+          top: r.top - hostTop,
+          width: r.width,
+          title: active?.getName() ?? '',
+        })
+      })
+      setItems(out)
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [model, layoutRev])
+  return (
+    <>
+      {items.map((it) => (
+        <div key={it.key} className="strip-hidden-title" style={{ left: it.left, top: it.top, width: it.width }}>
+          <span className="strip-hidden-title-text">{it.title}</span>
+        </div>
+      ))}
+    </>
   )
 }
