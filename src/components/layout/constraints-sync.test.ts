@@ -60,9 +60,8 @@ function fakeTabset(id: string, o: TabSetOpts = {}) {
   n.getParent = () => n.parent as FN | undefined
   n.isEnableTabStrip = () => o.enableTabStrip ?? true
   n.getClassNameTabStrip = () => o.classNameTabStrip
-  // 阶梯 resolver（stranded/siblingMainZone）需要：选中读端 + 子项 closable
-  n.getSelectedNode = () => (o.tabs ?? []).find((t) => t.getActive?.()) ?? null
-  ;(n as unknown as { _tabs: FN[] })._tabs = o.tabs ?? []
+  // 阶梯 resolver 不读选中态（只读 children closable/paneType）——无需
+  // getSelectedNode；resolver 需要的读端都在 fakeTab 上
   // 主对话标记读端（syncTabsetConstraints 用 getAttributeOwn 通用读——
   // 假节点无 _attributes，返回 undefined = 未打标）
   n.getAttributeOwn = () => undefined
