@@ -461,41 +461,22 @@
 /* ── 左栏标签条：logo/文字迁入条内（onRenderTabSet leading），不再需要
    margin 让位（宿主层浮层方案已退役，见 overlays.css 注释） ── */
 
-/* ── 多签溢出下拉按钮 + popover（ZCode 形制：用户 2026-10-03，leading
-   "标签前面"放计数按钮，点击弹全 tab 列表） ──
-   父级 .flexlayout__tabset_leading 是 absolute 撑满全宽 +
-   pointer-events:none——按钮必须自绝对定位 + 显式尺寸 + 重新开启点击
-   才不会塌成 icon 宽 12px 且点击被吞。 */
+/* ── 多签溢出下拉按钮 + popover（ZCode 形制：用户 2026-10-03，所有多签
+   tabset 的页签条**尾部**放 chevron 按钮，点击弹全 tab 列表跳转/关闭）。
+   trailing buttons 数组的普通 flex item——与 .fl-min-btn 同源令牌
+   （尺寸/圆角/悬停全引用 --zone-btn-* / --tab-*）。 ── */
 .flexlayout-host .tab-overflow-btn {
-  align-items: center !important;
-  background: transparent !important;
-  border: 0 !important;
-  border-radius: var(--zone-btn-radius) !important;
-  box-sizing: border-box !important;
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--zone-btn-radius);
   color: var(--tab-text);
-  cursor: pointer !important;
-  display: inline-flex !important;
-  font-size: 11px !important;
-  height: var(--zone-btn-size) !important;
-  justify-content: center !important;
-  left: 4px !important;
-  margin: 0 !important;
-  min-width: var(--zone-btn-size) !important;
-  opacity: 1;
-  padding: 0 !important;
-  pointer-events: auto !important;
-  position: absolute !important;
-  top: 50% !important;
-  transform: translateY(-50%);
-  transition: opacity 120ms;
-  width: var(--zone-btn-size) !important;
-  z-index: 2;
-}
-.flexlayout-host .flexlayout__tab_button:hover ~ .tab-overflow-btn,
-.flexlayout-host .flexlayout__tabset:hover .tab-overflow-btn,
-.flexlayout-host .tab-overflow-btn:hover,
-.flexlayout-host .tab-overflow-btn[data-state='open'] {
-  opacity: 1;
+  cursor: pointer;
+  display: flex;
+  height: var(--zone-btn-size);
+  justify-content: center;
+  min-width: var(--zone-btn-size);
+  padding: 0;
 }
 .flexlayout-host .tab-overflow-btn:hover,
 .flexlayout-host .tab-overflow-btn[data-state='open'] {

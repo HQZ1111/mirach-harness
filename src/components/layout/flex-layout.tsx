@@ -1093,19 +1093,6 @@ export function FlexLayoutShell() {
       if (node.getChildren().some((c) => c.getId() === 'sessions')) {
         renderValues.leading = <RailLogoLeading />
       }
-      // 多签页签条溢出下拉（ZCode 形制：用户 2026-10-03）——标签前
-      // 面（leading）放计数按钮，点击 popover 列出全部 tab 跳转/关闭。
-      // 单签不显示（拉伸头栏/单窗格 zone 无溢出需求）；轨（折叠栏）不显示。
-      const childTabs = node.getChildren().filter((c) => c instanceof TabNode)
-      if (childTabs.length >= 2 && !cfg.track) {
-        const existingLeading = renderValues.leading
-        renderValues.leading = (
-          <>
-            {existingLeading}
-            <TabOverflowButton tabsetId={node.getId()} />
-          </>
-        )
-      }
       const isPrimaryZone = node.getChildren().some(
         (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
       )
@@ -1128,6 +1115,11 @@ export function FlexLayoutShell() {
           <ChevronDownIcon />
         </button>,
       )
+      // 多签溢出下拉（用户 2026-10-03 ZCode 形制：所有多签 tabset 的页签条
+      // **尾部**放 chevron 按钮，点击列全 tab 跳转/关闭；单签不显示、轨不显示）
+      if (node.getChildren().filter((c) => c instanceof TabNode).length >= 2 && !cfg.track) {
+        renderValues.buttons.push(<TabOverflowButton key="overflow" tabsetId={node.getId()} />)
+      }
     },
     [model, toggleRegionForm, createPane],
   )
