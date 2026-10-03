@@ -2728,6 +2728,36 @@ value 限制）。406 用例。
     回）——派生数组必须 useMemo 依原始引用；②页面假死先重启 app 再
     bisect——webview 热更叠加的陈旧状态和代码死循环症状相同（本轮
     bisect 全禁+重启仍活、全恢复+重启仍活=非代码问题）。
+- **廿三轮（A 349bc26 前半 + C 07cb05d；用户"要做生产级的""不要等直接
+  做"）**：①**所有栏页签行离条底统一 15px**（`--strip-pad-bottom` 令
+  牌；tabbar_outer 全局 padding-bottom；fl-strip-low 36px 紧凑条排除
+  ——15px 只约束顶带 100px 的左/中/右条）。**字形级量测**（Range
+  getClientRects——元素 rect 底含行盒空隙，用户量的"25 都有了"实为
+  字形差）：`--logo-glyph-drop: 8px` 补 MIRACH 50px 行盒下沉 → 项目名
+  字形顶 28=MIRACH 字形顶 28；页签字形底→条底 10px（用户"15→下移
+  5px"）；会话名字形底=页签字形底。**教训：跨字号的对齐一律按字形
+  （Range rect）量，元素 rect 是行盒不是字形**。②**生产级：管理元数
+  据上 Rust 层**——新增 `src-tauri/src/session_meta.rs`：
+  `app_data_dir/session-meta.json`（pinned/manualOrder/archived/seen/
+  markers/groupsCollapsed，camelCase），**原子写**（tmp+rename 防半
+  写），Mutex 懒初始化路径；IPC `session_meta_get`/`session_meta_set`
+  （整量写穿）；前端 `hydrateSessionMeta()`（runtime 挂载水合——
+  Rust 空 && 旧 localStorage 有 → 迁移链成立，旧键保留不删）；persist
+  写穿防抖 250ms；localStorage 退役为迁移源（只读）。CDP 实测：
+  shift+点击置顶 → meta 文件 250ms 内落盘全量字段（含旧数据迁移）。
+  hermes 后端模式（api/sessions.ts 的 setSessionPinnedRemote 等）的
+  宿主实现——**这才是"生产级"与 hermes 的真实对齐**。③**虚拟化**：
+  `virtual-session-list.tsx`（hermes virtual-session-list.tsx 骨架照
+  抄）——@tanstack/react-virtual（threshold **25** 同值/overscan 12/
+  divider 30px·行 31px 估算/measureElement 动态测量/getItemKey）；
+  **dnd 共存**（hermes 实锤注释）：ReorderableList 仍持有
+  DndContext+SortableContext，虚拟行只**消费** context（renderRow 内
+  useSortable），未挂载行不参与拖拽；挂载于 ThreadListItems flex col
+  内 `flex-1 min-h-0` 吃剩余高度（外层滚动与内层虚拟滚动不重叠，非
+  虚拟分支平铺不变）。CDP：threshold 临时 3 时 virtualMounted/scroller
+  620px 可滚/DOM 行数受控。**教训：CDP 动态 import '/src/...' 与应用
+  内 '@/' 别名 import 可能不是同一模块实例（孤儿实例写进 store 应用
+  无感）——涉及应用 store 的验证改走真实 UI 手势（鼠标/键盘）。**
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
