@@ -6,6 +6,7 @@
  */
 
 import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { GLOBAL_ATTRS, makeBordersJson } from './layout-presets'
 import { PANE_TYPES, paneTabJson, type PaneType } from './pane-registry'
@@ -175,7 +176,10 @@ export function ZoneEditor({ onApply, onClose }: { onApply: (json: unknown) => v
     return <div className={`ze-split ${depth % 2 === 0 ? 'ze-horz' : 'ze-vert'}`}>{[...children, actions]}</div>
   }
 
-  return (
+  // portal 到 body（根上下文）：.flexlayout-host 是 isolation:isolate——
+  // 宿主内再高的 z 也压不过根上下文的 .app-titlebar(50)，遮罩挂宿主内时
+  // 窗口圆点/工具钮浮在暗色 scrim 上（审查 D-2）。
+  return createPortal(
     <div className="ze-backdrop" onPointerDown={(e) => e.stopPropagation()}>
       <div className="ze-card">
         <header className="ze-header">
@@ -210,6 +214,7 @@ export function ZoneEditor({ onApply, onClose }: { onApply: (json: unknown) => v
           </button>
         </footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

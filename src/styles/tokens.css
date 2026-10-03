@@ -121,6 +121,15 @@
   /* ── 全局设置浮层（settings-overlay，§7-7；2026-10-01 写进令牌） ── */
   --overlay-mask: rgba(0, 0, 0, 0.32);        /* 遮罩 scrim（.ze-backdrop 同系） */
 
+  /* ── z 层级表（审查 D-2 归位：ui-primitives 私设令牌迁入唯一取值处）──
+     宿主内（.flexlayout-host isolation:isolate）：main-tint -1 < 锚层 30
+     （chat-tab-label-anchor/strip-hidden-title）< 编辑 veil 55 < 投放
+     overlay 60 < 编辑面板 70 <「+」菜单 90 < Zone 编辑器遮罩 120（portal
+     根）。根上下文：app-titlebar 50 < 弹出面板 70 < modal 130。
+     **宿主内 z 永远压不过 app-titlebar**——模态必须 portal 到 body。 */
+  --z-modal-backdrop: 120;
+  --z-modal: 130;
+
   /* ── 文件树（workspace-file-tree，ZCode 移植；2026-10-01） ──
      行字号 = ZCode text-ui-base（--ui-font-size 14px）；其余语义色/悬停/
      描边引用既有令牌（--text* / --hover-wash / --stroke / --fl-accent），

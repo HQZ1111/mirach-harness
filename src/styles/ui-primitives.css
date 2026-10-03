@@ -16,10 +16,8 @@
     0 1.25rem 1.75rem -0.875rem color-mix(in srgb, #000 6%, transparent),
     0 2.25rem 3rem -1.75rem color-mix(in srgb, #000 0%, transparent);
   --stroke-dialog: color-mix(in srgb, currentColor 3%, transparent);
-  /* 弹窗 z 层（settings-overlay 现用 130 = --z-modal，收敛到令牌） */
-  --z-modal-backdrop: 120;
-  --z-modal: 130;
-  --z-modal-popover: 140;
+  /* z 层令牌已迁 tokens.css 唯一取值处（审查 D-2）；--z-modal-popover 全库
+     零消费，已删 */
 }
 
 /* ── 滚动条（hermes 原样：平时隐形，hover 18% / 拖悬 40%）────────

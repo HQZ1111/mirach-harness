@@ -259,12 +259,12 @@
 /* ── Zone 编辑器（hermes「New grid layout」） ── */
 .ze-backdrop {
   align-items: center;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--overlay-mask);
   display: flex;
   inset: 0;
   justify-content: center;
   position: absolute;
-  z-index: 120;
+  z-index: var(--z-modal-backdrop);
 }
 
 .ze-card {
