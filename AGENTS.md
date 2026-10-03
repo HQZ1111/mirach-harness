@@ -2646,6 +2646,40 @@ value 限制）。406 用例。
   串跑的"钉回→兜底"两函数必须**同源取值**（都 mem 或都 measured），
   混用=后写覆盖先写；③"验证通过"要找到生效机制的老教训在此升级：
   **异常中断链路后"结果恰好正确"≠修复生效**。
+- **十六/十七/十八轮（溢出标签三轮返工，用户 2026-10-03）**：
+  - **十六轮教训——位置全错**：把"标签总览下拉"做到左栏 sessions+bots
+    tabset 的 leading（用户："左侧栏为什么有个按钮啊？我要的是所有的
+    标签"）——需求是**所有多签 tabset 的页签溢出处理**（浏览器式：多开
+    →压缩→折叠→下拉），不是左栏窗格切换。十七轮移 trailing 仍不对。
+  - **十八轮定稿——flexlayout 原生机制 + ZCode 面板照抄**（用户："两个
+    同时存在？"+"去 zcode 的源码抄"）：**flexlayout 0.11 自带完整溢出
+    体系**（useTabOverflow：tab 超宽自动裁→hiddenTabs→原生溢出按钮→
+    PopupMenu，`onShowOverflowMenu` 回调可替换面板、`icons.more` 可换
+    图标、函数式 icons.more 不带 count badge）——自制按钮与原生并存
+    是重复造轮子，全删。落地：①Layout 接 `onShowOverflowMenu`（回调
+    items=hiddenTabs）+ `icons.more: () => <ChevronsDownIcon/>`（双箭
+    头，ZCode 截图同款）；②新组件 `tab-overview-menu.tsx` **逐结构照
+    抄 ZCode SidePaneTabOverview.tsx**：cmdk Command（搜索框+「打开的
+    标签页」分组+类型图标+名字+相对时间+✕ 关闭+active 高亮），Radix
+    Popover `virtualRef`（`getBoundingClientRect` 对象）锚定点击处；
+    相对时间复用 sessionRowAge（刚刚/天/时/分）；搜索评分照抄
+    sidePaneTabSearch.ts；TabNode 无 openedAt——模块级 Map 首见时间
+    补；③tab_button `min-width: 60px`（ZCode
+    SIDE_PANE_TAB_MIN_WIDTH_PX 等宽收缩下限：空间足自然排→不足等比
+    收缩到 60→仍溢出才交原生裁切+按钮）；④CSS 隐藏原生 count 数字
+    （`.flexlayout__tab_button_overflow_count { display: none }`）+
+    原生按钮令牌化（`.flexlayout__tab_button_overflow`）。
+  - **照抄的坑（必记）**：①复刻 ZCode 搜索函数**漏了空查询早退**
+    （`if (queryParts.length === 0) return items`）——空 query 时
+    reduce 初值 0 全部条目被 score>0 滤空，面板永远"没有匹配"——
+    **照抄必须完整，缺一行分支就是全量失效**（CDP data-metas=2/
+    filtered=0 实锤）；②vite 陈旧模块缓存连 props 都吞（data-* 属性
+    不进 DOM）——重启 vite 才放新代码；③CDP 造溢出场景：动态 import
+    vite deps 路径 `Actions.renameTab` 真工厂改长名（min-width 60 下
+    左栏两签必溢出）；④debug 手段：React 面板 props 用 `data-*`
+    attribute 直接读（innerHTML dump 看不到元素自身 attribute）。
+  - CDP 终验：长名造溢出→原生按钮 (302,83) 32×16 双箭头→点击面板
+    288px、items=2（会话列表/机器人-超长名）。tsc 0/462。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
