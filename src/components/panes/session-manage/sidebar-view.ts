@@ -59,7 +59,7 @@ import {
   sessionStatusRank,
   type SessionStatusBucket,
 } from './session-status'
-import { ORDER_KEY, parseOrder, sessionManageStore } from './session-manage-store'
+import { sessionCatalog } from './session-catalog'
 
 export const SIDEBAR_GROUPING_KEY = 'mirach.harness.sidebar.grouping.v1'
 export const SIDEBAR_ORDERING_KEY = 'mirach.harness.sidebar.ordering.v1'
@@ -241,13 +241,17 @@ export const parseStatusFilter = (raw: string | null): SidebarStatusFilter => {
 }
 
 /**
- * 手动序旗标初始化（含迁移，纯函数供单测）：manual.v1 缺失时看
- * sessions.order.v1——非空即"手动序曾在生效"（本特性上线前拖拽序无条件
- * 生效的旧语义）；旗标存在则以旗标为准。
+ * 手动序旗标初始化（含迁移，纯函数供单测）：manual.v1 缺失时看手动序表
+ * （catalog.manualOrder——旧 sessions.order.v1 已迁入统一键）——非空即
+ * "手动序曾在生效"（本特性上线前拖拽序无条件生效的旧语义）；旗标存在则
+ * 以旗标为准。
  */
-export function loadInitialManual(manualRaw: string | null, orderRaw: string | null): boolean {
+export function loadInitialManual(
+  manualRaw: string | null,
+  orderRecord: Record<string, unknown>,
+): boolean {
   if (manualRaw !== null) return parseManual(manualRaw)
-  return Object.keys(parseOrder(orderRaw)).length > 0
+  return Object.keys(orderRecord).length > 0
 }
 
 // ── 排序纯函数（hermes store/sidebar-sort.ts 的 $sidebarSessionRankIds
@@ -396,7 +400,11 @@ interface SidebarViewState {
   resetView(): void
 }
 
-const loadManual = (): boolean => loadInitialManual(safeGetItem(SIDEBAR_MANUAL_KEY), safeGetItem(ORDER_KEY))
+const loadManual = (): boolean => {
+  // manual.v1 缺失时看统一持久化的 manualOrder（旧 order 键已迁移进 catalog）
+  if (safeGetItem(SIDEBAR_MANUAL_KEY) !== null) return parseManual(safeGetItem(SIDEBAR_MANUAL_KEY))
+  return loadInitialManual(null, sessionCatalog.getState().manualOrder)
+}
 
 export const sidebarViewStore = createStore<SidebarViewState>((set, get) => ({
   grouping: parseGrouping(safeGetItem(SIDEBAR_GROUPING_KEY)),
@@ -416,7 +424,7 @@ export const sidebarViewStore = createStore<SidebarViewState>((set, get) => ({
     set({ ordering, manual: false })
     safeSetItem(SIDEBAR_ORDERING_KEY, ordering)
     safeSetItem(SIDEBAR_MANUAL_KEY, 'false')
-    sessionManageStore.getState().setOrder({})
+    sessionCatalog.getState().setManualOrder({})
   },
   claimManual: () => {
     if (get().manual) return
@@ -476,7 +484,7 @@ export const sidebarViewStore = createStore<SidebarViewState>((set, get) => ({
     safeSetItem(SIDEBAR_INBOX_KEY, 'false')
     safeSetItem(SIDEBAR_STATUS_FILTER_KEY, '[]')
     safeSetItem(SIDEBAR_PROJECT_FILTER_KEY, 'null')
-    sessionManageStore.getState().setOrder({})
+    sessionCatalog.getState().setManualOrder({})
   },
 }))
 

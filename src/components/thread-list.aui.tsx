@@ -61,9 +61,13 @@ import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { branchBridge } from "@/components/assistant-ui/branch-store";
 import { approvalBridge } from "@/components/assistant-ui/approval-bridge";
 import {
-  sessionArchiveStore,
+  isRowUnread,
+  sessionCatalog,
   useSessionArchive,
-} from "@/components/panes/session-manage/session-archive";
+  useSessionManage,
+  useSessionUnread,
+  type SessionRowGroup,
+} from "@/components/panes/session-manage/session-catalog";
 import {
   projectSessionActions,
   type SessionActionId,
@@ -73,11 +77,6 @@ import { startSessionRowDrag } from "@/components/panes/session-manage/session-d
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
 import { exportSessionHtml } from "@/components/panes/session-manage/session-export";
-import {
-  sessionManageStore,
-  useSessionManage,
-  type SessionRowGroup,
-} from "@/components/panes/session-manage/session-manage-store";
 import {
   buildSessionDisplay,
   buildSessionSearch,
@@ -98,11 +97,6 @@ import {
   sessionRowAge,
   THREAD_TIME_LABELS,
 } from "@/components/panes/session-manage/session-time";
-import {
-  isRowUnread,
-  sessionUnreadStore,
-  useSessionUnread,
-} from "@/components/panes/session-manage/session-unread";
 import { sessionUsageStore, useSessionUsage } from "@/components/panes/session-manage/session-usage";
 import {
   sessionStatusBucket,
@@ -306,7 +300,7 @@ const useThreadDisplay = (searchQuery: string) => {
   const threadItems = useAuiState((s) => s.threads.threadItems);
   const allMetas = useSessionRowMetas();
   const pinned = useSessionManage((s) => s.pinned);
-  const order = useSessionManage((s) => s.order);
+  const order = useSessionManage((s) => s.manualOrder);
   const collapsed = useSessionManage((s) => s.groupsCollapsed);
   const archived = useSessionArchive((s) => s.archived);
   // 侧栏选项（hermes $sidebarGrouping/$sidebarOrdering 同构：manual 压过
@@ -486,7 +480,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   ).length;
 
   const onCollapseAll = () => {
-    const st = sessionManageStore.getState();
+    const st = sessionCatalog.getState();
     for (const key of dividerKeys) st.setGroupCollapsed(key, !foldCollapsed);
   };
 
@@ -942,7 +936,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             className={VIEW_MENU_ITEM_BASE}
             disabled={unreadCount === 0}
             onSelect={() => {
-              sessionUnreadStore.getState().ackAll(
+              sessionCatalog.getState().ackAll(
                 metas.map((m) => ({ id: m.id, messageCount: m.messageCount ?? 0 })),
               );
             }}
@@ -1008,7 +1002,7 @@ const SectionHeader: FC<{
           aria-expanded={!collapsed}
           className="group/section-label flex w-fit min-w-0 cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-left leading-none"
           onClick={() =>
-            sessionManageStore.getState().setGroupCollapsed(headerKey, !collapsed)
+            sessionCatalog.getState().setGroupCollapsed(headerKey, !collapsed)
           }
           title={collapsed ? "展开" : "收起"}
           type="button"
@@ -1026,7 +1020,7 @@ const SectionHeader: FC<{
 /**
  * 日期分隔线（hermes SidebarDateDivider 照抄）：小体量大字距 caption + 发丝
  * 线 + hover 显现折叠 caret——点击收起该桶下的会话（分隔线保留）。折叠态
- * 持久化 sessionManageStore.groupsCollapsed（桶 key → collapsed）。
+ * 持久化 sessionCatalog.groupsCollapsed（桶 key → collapsed）。
  */
 const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
@@ -1039,7 +1033,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
         aria-expanded={!collapsed}
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 bg-transparent text-left"
         onClick={() =>
-          sessionManageStore.getState().setGroupCollapsed(bucketKey, !collapsed)
+          sessionCatalog.getState().setGroupCollapsed(bucketKey, !collapsed)
         }
         title={collapsed ? "展开" : "收起"}
         type="button"
@@ -1077,7 +1071,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
         aria-expanded={!collapsed}
         className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left"
         onClick={() =>
-          sessionManageStore.getState().setGroupCollapsed(bucketKey, !collapsed)
+          sessionCatalog.getState().setGroupCollapsed(bucketKey, !collapsed)
         }
         title={collapsed ? "展开" : "收起"}
         type="button"
@@ -1119,7 +1113,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey,
         aria-expanded={!collapsed}
         className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left"
         onClick={() =>
-          sessionManageStore.getState().setGroupCollapsed(bucketKey, !collapsed)
+          sessionCatalog.getState().setGroupCollapsed(bucketKey, !collapsed)
         }
         title={collapsed ? "展开" : "收起"}
         type="button"
@@ -1178,9 +1172,9 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
   // 归档表/未读水位同纪律（归档会话被 pi_delete_session 后不留死键）。
   useEffect(() => {
-    sessionManageStore.getState().prune(threadIds);
-    sessionArchiveStore.getState().prune(threadIds);
-    sessionUnreadStore.getState().prune(threadIds);
+    sessionCatalog.getState().prune(threadIds);
+    sessionCatalog.getState().prune(threadIds);
+    sessionCatalog.getState().prune(threadIds);
   }, [threadIds]);
 
   // rowMeta 开了 词元数 / 排序切了 词元数 → 拉取可见行的用量（缺/过期才发
@@ -1206,7 +1200,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     () => ({
       group: mode === "search" ? "search" : "recent",
       commitListMove: (sessionId, group, beforeId) => {
-        const st = sessionManageStore.getState();
+        const st = sessionCatalog.getState();
         if (group === "pinned") {
           const visiblePinned =
             mode === "groups" ? display.pinnedIds : [];
@@ -1217,7 +1211,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         const visibleRecents = display.rows
           .filter((r): r is Extract<SessionListRow, { kind: "session" }> => r.kind === "session")
           .map((r) => r.id);
-        st.setOrder(
+        st.setManualOrder(
           commitRecentMove(display.allUnpinnedIds, visibleRecents, sessionId, beforeId),
         );
         sidebarViewStore.getState().claimManual();
@@ -1530,14 +1524,14 @@ export const ThreadListItem: FC = () => {
       suppressCloseFocusRef.current = true;
       setRenameOpen(true);
     },
-    pin: () => sessionManageStore.getState().togglePin(threadId),
+    pin: () => sessionCatalog.getState().togglePin(threadId),
     // hermes read-state 项：未读 → 确认已读（水位 := 当前 count + 撤显式
     // 标记）；已读 → 显式标记未读（水位之外的第二未读源）。
     unread: () => {
       if (isUnread) {
-        sessionUnreadStore.getState().ackSession(threadId, messageCount);
+        sessionCatalog.getState().ackSession(threadId, messageCount);
       } else {
-        sessionUnreadStore.getState().markSessionUnread(threadId);
+        sessionCatalog.getState().markSessionUnread(threadId);
       }
     },
     "copy-id": () => {
@@ -1559,7 +1553,7 @@ export const ThreadListItem: FC = () => {
         console.error("[session] 导出失败（HTML 未落盘）", e);
       });
     },
-    archive: () => sessionArchiveStore.getState().toggleArchive(threadId),
+    archive: () => sessionCatalog.getState().toggleArchive(threadId),
     delete: () => {
       suppressCloseFocusRef.current = true;
       setDeleteOpen(true);
@@ -1692,11 +1686,11 @@ export const ThreadListItem: FC = () => {
             if (action === "pin") {
               e.preventDefault();
               e.stopPropagation();
-              sessionManageStore.getState().togglePin(threadId);
+              sessionCatalog.getState().togglePin(threadId);
             } else if (action === "archive") {
               e.preventDefault();
               e.stopPropagation();
-              sessionArchiveStore.getState().toggleArchive(threadId);
+              sessionCatalog.getState().toggleArchive(threadId);
             } else if (action !== "resume") {
               e.preventDefault();
               e.stopPropagation();

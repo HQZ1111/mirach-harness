@@ -39,7 +39,7 @@ import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
-import { sessionUnreadStore } from '@/components/panes/session-manage/session-unread'
+
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
 
@@ -223,20 +223,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           timestamp: m.timestamp,
         },
       }))
-      // 单一真相源灌入（assistant-ui threads 经上方 useStore 派生）。
+      // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
+      // 侧栏 threads（assistant-ui）title 用统一显示名。
       sessionCatalog.getState().ingest(rows, currentThreadIdRef.current)
-      setThreads(rows.map((r) => ({ ...r, title: sessionCatalog.getState().entries[r.id] ? sessionDisplayName(sessionCatalog.getState().entries[r.id]) : r.title })))
-      // 未读水位播种（hermes ingestRows：未知会话按当前 count 播种不亮绿、
-      // 选中会话恒确认已读）——列表刷新即真相面。
-      sessionUnreadStore.getState().ingestRows(
+      setThreads(
         rows.map((r) => ({
-          id: r.id,
-          messageCount:
-            typeof r.custom.messageCount === 'number' && Number.isFinite(r.custom.messageCount)
-              ? r.custom.messageCount
-              : 0,
+          ...r,
+          title: sessionDisplayName(sessionCatalog.getState().entries[r.id]),
         })),
-        currentThreadIdRef.current,
       )
     } catch (e) {
       console.error('[pi] 会话列表读取失败', e)

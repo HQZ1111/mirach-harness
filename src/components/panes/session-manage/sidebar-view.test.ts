@@ -33,7 +33,7 @@ import {
   rankIdsByOrdering,
   sidebarViewStore,
 } from './sidebar-view'
-import { ORDER_KEY, sessionManageStore } from './session-manage-store'
+import { sessionCatalog, type SessionCatalogState } from './session-catalog'
 
 /** 静音解析失败的 console.error（被测行为就是报错——断言调用而非听噪声） */
 const silenceErrors = () => vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -46,7 +46,7 @@ const resetStores = () => {
     manual: false,
     density: SIDEBAR_DEFAULT_DENSITY,
   })
-  sessionManageStore.setState({ pinned: [], order: {}, groupsCollapsed: {} })
+  sessionCatalog.setState({ pinned: [], manualOrder: {}, groupsCollapsed: {} } as unknown as SessionCatalogState)
 }
 
 // ── 严格解析 ─────────────────────────────────────────────────────────────
@@ -107,14 +107,13 @@ describe('sidebar-view 严格解析', () => {
 
 describe('loadInitialManual（手动序迁移推导）', () => {
   it('旗标存在以旗标为准（order 表内容无关）', () => {
-    expect(loadInitialManual('false', JSON.stringify({ a: 0 }))).toBe(false)
-    expect(loadInitialManual('true', null)).toBe(true)
+    expect(loadInitialManual('false', { a: 0 })).toBe(false)
+    expect(loadInitialManual('true', {})).toBe(true)
   })
 
   it('旗标缺失：order 表非空 = 手动序曾在生效（旧语义拖拽序无条件生效）', () => {
-    expect(loadInitialManual(null, JSON.stringify({ a: 0 }))).toBe(true)
-    expect(loadInitialManual(null, '{}')).toBe(false)
-    expect(loadInitialManual(null, null)).toBe(false)
+    expect(loadInitialManual(null, { a: 0 })).toBe(true)
+    expect(loadInitialManual(null, {})).toBe(false)
   })
 })
 
@@ -469,13 +468,13 @@ describe('sidebarViewStore 旋钮', () => {
   })
 
   it('setOrdering 弃手动序 + 清保存的序号表（hermes setSidebarOrdering 逐语义）', () => {
-    sessionManageStore.getState().setOrder({ a: 0, b: 1 })
+    sessionCatalog.getState().setManualOrder({ a: 0, b: 1 })
     sidebarViewStore.getState().claimManual()
     sidebarViewStore.getState().setOrdering('status')
     expect(sidebarViewStore.getState().manual).toBe(false)
     expect(localStorage.getItem('mirach.harness.sidebar.manual.v1')).toBe('false')
-    expect(sessionManageStore.getState().order).toEqual({})
-    expect(localStorage.getItem(ORDER_KEY)).toBe('{}')
+    expect(sessionCatalog.getState().manualOrder).toEqual({})
+    expect(JSON.parse(localStorage.getItem('mirach.harness.sessions.v1') ?? '{}').manualOrder).toEqual({})
     expect(localStorage.getItem('mirach.harness.sidebar.ordering.v1')).toBe('status')
   })
 
@@ -492,8 +491,8 @@ describe('sidebarViewStore 旋钮', () => {
     sidebarViewStore.getState().setDensity('compact')
     sidebarViewStore.getState().claimManual()
     sidebarViewStore.getState().toggleStatusBucket('working')
-    sessionManageStore.getState().setOrder({ a: 0 })
-    sessionManageStore.getState().setGroupCollapsed('today', true)
+    sessionCatalog.getState().setManualOrder({ a: 0 })
+    sessionCatalog.getState().setGroupCollapsed('today', true)
     sidebarViewStore.getState().resetView()
     expect(sidebarViewStore.getState().grouping).toBe('date')
     expect(sidebarViewStore.getState().ordering).toBe('updated')
@@ -501,8 +500,8 @@ describe('sidebarViewStore 旋钮', () => {
     expect(sidebarViewStore.getState().density).toBe('comfortable')
     expect(sidebarViewStore.getState().statusFilter).toEqual([])
     expect(localStorage.getItem('mirach.harness.sidebar.statusFilter.v1')).toBe('[]')
-    expect(sessionManageStore.getState().order).toEqual({})
-    expect(sessionManageStore.getState().groupsCollapsed).toEqual({ today: true })
+    expect(sessionCatalog.getState().manualOrder).toEqual({})
+    expect(sessionCatalog.getState().groupsCollapsed).toEqual({ today: true })
   })
 
   it('effectiveOrdering：manual 压过排序键（hermes $sidebarOrdering 同构）', () => {
