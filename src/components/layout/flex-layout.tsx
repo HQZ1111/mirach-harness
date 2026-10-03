@@ -306,7 +306,14 @@ export function FlexLayoutShell() {
     let raf2 = 0
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
-        if (modelRef.current === model) absorbSurplus(model)
+        if (modelRef.current === model) {
+          absorbSurplus(model)
+          // 首帧布局后**补跑 sync**：boot 直调的 sync 被未就绪守卫放弃
+          // （widthBounds 全 0），enableTabStrip=false 的竖轨残留（切竖轨
+          // 恢复路径漏恢复）自此无人修——条塌、内容上移 100px（2026-10-03
+          // 用户实锤"标签隐藏后内容上移"）。首帧后量测就绪，补跑即自愈。
+          syncTabsetConstraints(model)
+        }
       })
     })
     // 只在挂载时跑一次（模型替换走 applyJson 自己的 re-apply）
