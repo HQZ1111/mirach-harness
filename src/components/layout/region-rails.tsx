@@ -171,6 +171,14 @@ export function RailNav({
     if (e.button !== 0) return
     const strip = stripRef.current
     if (!strip) return
+    // 指针捕获（drag-session 契约）：pointerup 落在窗外/丢失时仍收得到，
+    // 且 move 的 buttons 守卫能识别"按键已松"（审查 C-P1-10——无 capture
+    // 时悬停即更新 target，下一次 pointerup 会提交过期 reorder）。
+    try {
+      ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    } catch {
+      /* 合成事件无有效 pointerId 时降级（真实指针必成功） */
+    }
     const srect = strip.getBoundingClientRect()
     const startX = e.clientX
     const startY = e.clientY
@@ -184,7 +192,11 @@ export function RailNav({
     let targetZone = row.zoneId
     let insertTop = 0
     let cleanupRef: (() => void) | null = null
-    const move = (ev: PointerEvent) => {
+    // rAF 合帧（引擎"one hit-test per frame"契约）：pointermove 只存最新
+    // 坐标，帧内跑一次命中测试（审查 C-P1-10）
+    let pendingEv: PointerEvent | null = null
+    let rafId = 0
+    const applyMove = (ev: PointerEvent) => {
       // 横向离轨 → 交给拖拽引擎搬去别的大栏（原事件续用，坐标由后续
       // pointermove 驱动）
       if (mode === 'idle' && Math.abs(ev.clientX - startX) > 16) {
@@ -226,13 +238,38 @@ export function RailNav({
       insertTop = (before ? hit.top : hit.bottom) - srect.top
       setInsertY(insertTop)
     }
+    const move = (ev: PointerEvent) => {
+      if (ev.buttons === 0) {
+        // 按键已松（pointerup 丢失）——按结束处理
+        finish()
+        return
+      }
+      pendingEv = ev
+      if (rafId) return
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        if (pendingEv) applyMove(pendingEv)
+        pendingEv = null
+      })
+    }
     const finish = () => {
       cleanupRef?.()
+    }
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        e.stopPropagation()
+        target = -1
+        finish()
+      }
     }
     const cleanup = () => {
       window.removeEventListener('pointermove', move, true)
       window.removeEventListener('pointerup', finish, true)
       window.removeEventListener('pointercancel', finish, true)
+      window.removeEventListener('keydown', onKeyDown, true)
+      if (rafId) cancelAnimationFrame(rafId)
+      rafId = 0
+      pendingEv = null
       cleanupRef = null
       setInsertY(null)
       setDraggingId(null)
@@ -244,6 +281,7 @@ export function RailNav({
     window.addEventListener('pointermove', move, true)
     window.addEventListener('pointerup', finish, true)
     window.addEventListener('pointercancel', finish, true)
+    window.addEventListener('keydown', onKeyDown, true)
   }
 
   return (
