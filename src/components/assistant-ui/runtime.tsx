@@ -8,7 +8,7 @@
  * 会话列表（§7-4）：threadListAdapter 接 pi SessionIndex——threadId =
  * pi 会话 id，切换 = pi_open_session + HYDRATE 注入历史（真相在 pi）。
  */
-import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AssistantRuntimeProvider,
   MessageNotSentError,
@@ -41,7 +41,8 @@ import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
 import { sessionUnreadStore } from '@/components/panes/session-manage/session-unread'
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
-import { chatTabLabelStore } from '@/components/layout/chat-tab-label-store'
+import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
+
 import {
   BoundarySpeechSynthesisAdapter,
   ensureSpeechSupportLogged,
@@ -175,9 +176,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
 
   // ── 会话列表（§7-4 侧栏 sessions）——threadId = pi 会话 id（与
   // pi_get_state.sessionId 同源），path 存 custom 供打开/删除使用。
+  // **真相源 = sessionCatalog**（用户定稿：会话名/项目名单一存储，所有
+  // 消费方——侧栏/双行块/workspace 页签名——只读 catalog）；本组件是
+  // 唯一写入者（pi_list_sessions 灌入 + 消息流派生标题）。assistant-ui
+  // 的 threads 数组从 catalog 派生（title = 统一显示名）。
   // 必须声明在挂载 effect 之前（effect 依赖数组 render 期求值，TDZ）。──
-  const [threads, setThreads] = useState<ThreadListRow[]>([])
   const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
+  // 【bisect】threads 暂回本地 state（title=统一显示名）；catalog 并行灌入。
+  const [threads, setThreads] = useState<ThreadListRow[]>([])
   const threadsRef = useRef<ThreadListRow[]>([])
   threadsRef.current = threads
   // 会话列表刷新是异步回调——ingestRows 需要"当前选中的会话"（选中恒
@@ -185,35 +191,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const currentThreadIdRef = useRef<string | null>(null)
   currentThreadIdRef.current = currentThreadId
 
-  // ── 对话标签双行块同步（用户定稿 2026-10-02 十轮）──
-  // 当前活跃 thread 变更 / threads 列表更新（rename / cwd 等）→ 推到
-  // chatTabLabelStore；flex-layout onRenderTab 拉伸头栏 region='main'
-  // 把 tab content 渲染为 <ChatTabLabel />（工作区 25/bold/#303030 +
-   // 会话名 15/regular/#5A5A5A）。读取 store 在 useExternalStoreRuntime
-   // render 外（chat-tab-label.tsx 不在这里 import——跨层最小耦合）。
-  const currentMeta = currentThreadId
-    ? threads.find((r) => r.id === currentThreadId)
-    : undefined
-  // 新会话 cwd（ZCode「项目名跟随会话」对应物）：pi 无 cwd 查询面——
-  // 「选择工作区新建会话」执行时记住最近一次 cwd，作为新会话/未落盘会话
-  // 的项目名来源（会话落盘后 currentMeta.custom.cwd 接管）。
-  const lastWorkspaceCwdRef = useRef<string | null>(null)
-  // 双行块显示标题：pi name 优先，其次**派生标题**（首条用户消息——侧栏
-  // 自动命名行同款），最后 New Chat。派生标题随首条消息即时变化（用户
-  // 2026-10-03："新会话项目名和会话名显示的都不对，也不会跟着变化"）。
-  const firstUserText = firstUserMessageText(messages)
-  const derivedTitle = currentMeta?.title ?? (firstUserText ? deriveTitle(firstUserText) : null) ?? 'New Chat'
+  // 活动会话切换 → catalog（消费方经 activeId 取显示名/项目名）。
   useEffect(() => {
-    const metaCwd = (currentMeta?.custom as { cwd?: unknown } | undefined)?.cwd
-    chatTabLabelStore.setState({
-      threadId: currentThreadId ?? 'new',
-      title: derivedTitle,
-      cwd:
-        typeof metaCwd === 'string' && metaCwd.length > 0
-          ? metaCwd
-          : lastWorkspaceCwdRef.current,
-    })
-  }, [currentThreadId, derivedTitle, currentMeta?.custom])
+    sessionCatalog.getState().setActive(currentThreadId)
+  }, [currentThreadId])
+
+  // 派生标题（首条用户消息——侧栏/双行块/页签名同源的"自动命名"）：pi
+  // 无名时前端即时显示，消息流变化即重算写入 catalog。
+  const firstUserText = firstUserMessageText(messages)
+  const derivedTitle = currentThreadId && firstUserText ? deriveTitle(firstUserText) : undefined
+  useEffect(() => {
+    if (!currentThreadId || !derivedTitle) return
+    sessionCatalog.getState().setDerivedTitle(currentThreadId, derivedTitle)
+  }, [currentThreadId, derivedTitle])
 
   const refreshThreads = useCallback(async () => {
     try {
@@ -233,7 +223,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           timestamp: m.timestamp,
         },
       }))
-      setThreads(rows)
+      // 单一真相源灌入（assistant-ui threads 经上方 useStore 派生）。
+      sessionCatalog.getState().ingest(rows, currentThreadIdRef.current)
+      setThreads(rows.map((r) => ({ ...r, title: sessionCatalog.getState().entries[r.id] ? sessionDisplayName(sessionCatalog.getState().entries[r.id]) : r.title })))
       // 未读水位播种（hermes ingestRows：未知会话按当前 count 播种不亮绿、
       // 选中会话恒确认已读）——列表刷新即真相面。
       sessionUnreadStore.getState().ingestRows(
@@ -245,14 +237,6 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
               : 0,
         })),
         currentThreadIdRef.current,
-      )
-      // workspace 页签名跟随当前会话（用户问"主会话是哪个会话"——hermes
-      // 页签名即会话名）。经 CustomEvent 通知 flex-layout 改 node name
-      // （跨层最小耦合：layout 不 import assistant-ui）。
-      const active = currentThreadIdRef.current
-      const title = active ? rows.find((r) => r.id === active)?.title : undefined
-      window.dispatchEvent(
-        new CustomEvent('mirach:workspace-title', { detail: { title: title ?? null } }),
       )
     } catch (e) {
       console.error('[pi] 会话列表读取失败', e)
@@ -882,7 +866,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     handledWorkspaceSeqRef.current = workspaceRequest.seq
     workspaceBusyRef.current = true
     const { seq, cwd } = workspaceRequest
-    lastWorkspaceCwdRef.current = cwd
+    sessionCatalog.getState().setPendingCwd(cwd)
     void (async () => {
       try {
         if (!(await interruptIfRunning())) return

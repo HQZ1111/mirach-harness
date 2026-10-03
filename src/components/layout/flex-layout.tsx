@@ -8,6 +8,8 @@ import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
 import { ChatLabelOverlay, MainTint } from './chrome-overlays'
 import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
 import { ChevronsDownIcon } from 'lucide-react'
+import { useStore } from 'zustand'
+import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
 import { DropOverlay } from './drop-overlay'
 // flexlayout 0.11.1 行节点 max 聚合缺陷的运行时修正（须先于布局执行，见文件头）
 import './flexlayout-rowfix'
@@ -360,23 +362,21 @@ export function FlexLayoutShell() {
     setModel(next)
   }, [])
 
-  // workspace 页签名跟随当前会话（hermes：页签名即会话名，"1 #2" 同款；
-  // 无名/无会话回「主会话」）。runtime 在 refreshThreads 末尾经 CustomEvent
-  // 播报（跨层最小耦合：layout 不 import assistant-ui）。
+  // workspace 页签名跟随当前会话（hermes：页签名即会话名）——**订阅
+  // sessionCatalog**（会话名单一真相源，廿一轮：CustomEvent 旁路桥退役）；
+  // 无名/无会话回「主会话」。
+  const activeTitle = useStore(sessionCatalog, (s) =>
+    s.activeId ? sessionDisplayName(s.entries[s.activeId]) : null,
+  )
   useEffect(() => {
-    const onTitle = (e: Event) => {
-      const detail = (e as CustomEvent<{ title?: string | null }>).detail
-      const m = modelRef.current
-      const node = m?.getNodeById('workspace')
-      if (!(node instanceof TabNode)) return
-      const name = (typeof detail?.title === 'string' && detail.title.length > 0 ? detail.title : '主会话')
-      if (node.getName() !== name) {
-        m!.doAction(Actions.updateNodeAttributes('workspace', { name }))
-      }
+    const m = modelRef.current
+    const node = m?.getNodeById('workspace')
+    if (!(node instanceof TabNode)) return
+    const name = (typeof activeTitle === 'string' && activeTitle.length > 0 ? activeTitle : '主会话')
+    if (node.getName() !== name) {
+      m!.doAction(Actions.updateNodeAttributes('workspace', { name }))
     }
-    window.addEventListener('mirach:workspace-title', onTitle)
-    return () => window.removeEventListener('mirach:workspace-title', onTitle)
-  }, [])
+  }, [activeTitle])
 
   // 折叠/隐藏后的配重重钉（hermes 声明式固定轨 / ZCode expandedSize 的
   // 等价物）：非主栏列按记忆 px（rootPxMem）显式钉回、主栏吃剩余——
