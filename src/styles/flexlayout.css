@@ -179,8 +179,10 @@
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
   /* 页签行离头栏底边 18px（用户 2026-10-03 定稿；双行块会话名与此对齐）——
-     旧值 0 的"标签上跳"问题已由 chat-tab-label absolute 化消除 */
-  padding: 0 var(--tab-pad-x) 18px;
+     旧值 0 的"标签上跳"问题已由 chat-tab-label absolute 化消除；
+     页签文字**从中线开始往右排**（用户十轮定稿：双行块占左半、标签右移
+     ——左半让位给 ChatLabelOverlay，避免页签文字与双行块会话名重叠） */
+  padding: 0 var(--tab-pad-x) 18px 50%;
   position: relative; /* 双行块绝对定位参照 */
   text-transform: uppercase;
 }

@@ -250,7 +250,10 @@ export const ThreadListItems: FC<
 > = ({ className, dndSensors, searchQuery = "", ...props }) => {
   return (
     <div
-      className={cn("flex flex-col gap-px", className)}
+      // [&>*]:shrink-0（hermes sessions-section 分组头 shrink-0 同语义）：
+      // scroll 容器是 flex col——子项默认 shrink 会先压扁再溢出，行多时
+      // 表现为"全部行挤到 min-h 而不是滚动"。子项不收缩后长度由滚动承载。
+      className={cn("flex flex-col gap-px [&>*]:shrink-0", className)}
       data-slot="aui_thread-list-items"
       {...props}
     >
