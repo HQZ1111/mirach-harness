@@ -22,7 +22,9 @@ export function ChatTabLabel(): React.ReactElement | null {
   const pendingCwd = useStore(sessionCatalog, (s) => s.pendingCwd);
   const title = sessionDisplayName(entry);
   const cwd = sessionProjectCwd(entry, pendingCwd);
-  const workspace = cwd != null ? workspaceGroupLabel(cwd) : '';
+  // 未选工作区（新会话 pendingCwd=null / 会话无 cwd）→ WORK SPACE 占位
+  // （用户定稿 2026-10-03）。
+  const workspace = cwd != null ? workspaceGroupLabel(cwd) : 'WORK SPACE';
   return (
     <div className="chat-tab-label" data-slot="chat-tab-label">
       <span className="chat-tab-label__workspace" data-workspace={workspace}>
