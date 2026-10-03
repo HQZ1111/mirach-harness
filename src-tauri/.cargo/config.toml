@@ -1,0 +1,18 @@
+# 编译内存护栏（2026-10-03 实测定稿）：asupersync（0.4.11/0.5.0）在
+# nightly-2026-08-31 上**并行全量编译**时会以 STATUS_STACK_BUFFER_OVERRUN
+# 崩溃——诊断结论：单 crate 单独编必然成功（0.4.11 秒过 / 0.5.0 约 4 分钟），
+# 仅当 cargo 并行编多个重 crate（16GB 物理内存 + C 盘页面文件空间不足 →
+# 提交内存峰值不可扩）时触发。**这是资源问题不是代码问题**。
+#
+# 生产级护栏（三条，全部在本文件固化，换机器/清 target 后自动生效）：
+# 1. jobs=4：并发编译单元限 4（16GB 机器实测稳定；默认逻辑核数会过冲）
+# 2. RUST_MIN_STACK：抬升 rustc 线程栈（深度泛型递归的余量）
+# 3. debug=1：debug 信息降级（objects/debuginfo 体积与内存占用大减）
+[build]
+jobs = 4
+
+[env]
+RUST_MIN_STACK = "33554432"
+
+[profile.dev]
+debug = 1
