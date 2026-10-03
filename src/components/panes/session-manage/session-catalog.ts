@@ -172,6 +172,10 @@ export interface SessionCatalogState {
   seen: Record<string, number>
   markers: string[]
   groupsCollapsed: Record<string, boolean>
+  /** 页签条隐藏开关（region → hidden；「切换标签」的持久化选择——boot
+   *  sync 依此区分「用户主动隐藏」与「竖轨残留 false」，后者才修）。 */
+  stripHidden: Record<string, boolean>
+  setStripHidden(region: string, hidden: boolean): void
   // ── 目录动作（runtime 唯一写入） ──
   ingest(rows: readonly SessionCatalogRow[], activeId: string | null): void
   setActive(id: string | null): void
@@ -203,6 +207,7 @@ interface PersistedSessions {
   seen: Record<string, number>
   markers: string[]
   groupsCollapsed: Record<string, boolean>
+  stripHidden: Record<string, boolean>
 }
 
 /** 旧 localStorage 键 → 统一形状合成（hydrate 迁移源；**只读不回写**）。 */
@@ -212,6 +217,7 @@ const loadLegacyLocal = (): PersistedSessions => ({
   archived: parseStringArray(safeGetItem(LEGACY_ARCHIVED_KEY), '旧 archived'),
   seen: parseNumberRecord(safeGetItem(LEGACY_SEEN_KEY), '旧 seenCounts'),
   markers: parseStringArray(safeGetItem(LEGACY_MARKERS_KEY), '旧 unreadMarkers'),
+  stripHidden: {},
   groupsCollapsed: parseBooleanRecord(safeGetItem(LEGACY_GROUPS_KEY), '旧 session-groups'),
 })
 
@@ -237,6 +243,7 @@ const persistNow = (s: SessionCatalogState): void => {
     seen: { ...s.seen },
     markers: [...s.markers],
     groupsCollapsed: { ...s.groupsCollapsed },
+    stripHidden: { ...s.stripHidden },
   }
   void invoke('session_meta_set', { store }).catch((e) =>
     console.error('[session-catalog] session-meta.json 写穿失败', e),
@@ -265,6 +272,7 @@ export async function hydrateSessionMeta(): Promise<void> {
     seen: remote.seen ?? {},
     markers: remote.markers ?? [],
     groupsCollapsed: remote.groupsCollapsed ?? {},
+    stripHidden: remote.stripHidden ?? {},
   }
   if (hasData(remoteStore)) {
     sessionCatalog.setState(remoteStore)
@@ -305,6 +313,13 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
   seen: {},
   markers: [],
   groupsCollapsed: {},
+  stripHidden: {},
+
+  setStripHidden: (region, hidden) => {
+    if (get().stripHidden[region] === hidden) return
+    set({ stripHidden: { ...get().stripHidden, [region]: hidden } })
+    persist(get())
+  },
 
   ingest: (rows, activeId) => {
     const prev = get().entries

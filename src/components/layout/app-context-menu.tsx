@@ -57,6 +57,7 @@ import { CommandPalette, type PaletteCommand } from '@/components/assistant-ui/e
 
 import { zoneTabsetFromDom } from './pane-context-menu'
 import { zoneConfigOf } from './pane-registry'
+import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 
 // ── store（hermes store.ts 的 $contextMenu 同构：单份菜单，两个菜单永不
 //    同开；harness 的 open 载荷只剩坐标——dom/guest/terminal 三 kind 已裁，
@@ -332,6 +333,13 @@ const toggleTargetTabStrip = (): void => {
   }
   for (const patch of patches) {
     model.doAction(Actions.updateNodeAttributes(patch.id, { enableTabStrip: patch.enableTabStrip }))
+    // 隐藏选择持久化（session-catalog stripHidden——boot 补跑 sync 依此
+    // 区分「用户主动隐藏」与「竖轨残留」，后者才修；不持久化则每次启动
+    // 标签条都被 boot sync 打回来）。
+    const cfg = zoneConfigOf(model.getNodeById(patch.id) as TabSetNode)
+    if (cfg?.region) {
+      sessionCatalog.getState().setStripHidden(cfg.region, !patch.enableTabStrip)
+    }
   }
 }
 

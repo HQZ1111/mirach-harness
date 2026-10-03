@@ -2,6 +2,7 @@ import { Actions, DockLocation, Model, Orientation, RowNode, TabNode, TabSetNode
 import { SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_LIMITS, TRACK_W, paneTypeOf, zoneConfigOf, type Region } from './pane-registry'
 import { isTopBand, regionCfgOfNode, rootAvailPx, widthBounds } from './constraints'
+import { sessionCatalog } from '../panes/session-manage/session-catalog'
 
 /**
  * 约束应用器 syncTabsetConstraints（docs/layout-design.md §2 约束引擎 v4）：
@@ -179,7 +180,9 @@ export const syncTabsetConstraints = (m: Model) => {
       if (node.getMinWidth() !== 0) patch.minWidth = 0
       if (node.getMaxWidth() !== 99999) patch.maxWidth = 99999
     }
-    const wantStrip = !rail
+    const wantStrip = sessionCatalog.getState().stripHidden[region] === true
+      ? node.isEnableTabStrip() // 用户「切换标签」主动隐藏——sync 不碰（boot 补跑不得覆盖用户选择）
+      : !rail
     if (node.isEnableTabStrip() !== wantStrip) patch.enableTabStrip = wantStrip
     // 低条（上下分栏的非顶部分栏，isTopBand 判定）：classNameTabStrip 落在
     // tabbar_outer 上，CSS 把条降到 --strip-low-height、文字居中。

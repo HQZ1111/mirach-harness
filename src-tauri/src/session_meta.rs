@@ -31,6 +31,10 @@ pub struct SessionMetaStore {
     pub markers: Vec<String>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub groups_collapsed: std::collections::HashMap<String, bool>,
+    /// 页签条隐藏开关（region → hidden；用户「切换标签」的选择持久化——
+    /// boot sync 依此区分「用户主动隐藏」与「竖轨残留」，后者才修）。
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub strip_hidden: std::collections::HashMap<String, bool>,
 }
 
 fn store_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
