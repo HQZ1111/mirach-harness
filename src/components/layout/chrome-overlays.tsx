@@ -47,6 +47,9 @@ function tabsetRectOf(
 
 function useTabsetRect(model: Model, tabIds: string[]) {
   const layoutRev = useLayoutStore(s => s.layoutRev)
+  // dragRev：分隔条拖拽的 adjusting 帧模型不变（快路径直写 DOM）——
+  // 订阅它逐帧重测，颜色层/双行块拖拽中跟随容器（否则松手才跳）
+  const dragRev = useLayoutStore(s => s.dragRev)
   const [rect, setRect] = useState<{ left: number; top: number; width: number; height: number; stripH: number } | null>(null)
   useEffect(() => {
     const measure = () => setRect(tabsetRectOf(model, tabIds))
@@ -55,7 +58,7 @@ function useTabsetRect(model: Model, tabIds: string[]) {
     return () => window.removeEventListener('resize', measure)
     // tabIds 由调用方常量传入
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, layoutRev])
+  }, [model, layoutRev, dragRev])
   return rect
 }
 
@@ -115,6 +118,9 @@ export function ChatLabelOverlay({ model }: { model: Model }) {
  *  定稿：隐藏标签后内容上移但顶带保留、信息位常驻）。 */
 export function StripHiddenTitleOverlay({ model }: { model: Model }) {
   const layoutRev = useLayoutStore(s => s.layoutRev)
+  // dragRev：拖拽 adjusting 帧逐帧重测（与 useTabsetRect 同理——rect 型
+  // 坐标在拖拽中每帧变化，layoutRev 提交帧才 bump，浮层会停在旧位）
+  const dragRev = useLayoutStore(s => s.dragRev)
   const [items, setItems] = useState<{ key: string; left: number; top: number; width: number; title: string }[]>([])
   useEffect(() => {
     const measure = () => {
@@ -160,7 +166,7 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
     measure()
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
-  }, [model, layoutRev])
+  }, [model, layoutRev, dragRev])
   return (
     <>
       {items.map((it) => (

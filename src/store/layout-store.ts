@@ -86,6 +86,11 @@ export interface LayoutStore {
   /** 活动树版本号：flexlayout 在自己子树内改模型不触发壳重渲，
    * 壳/菜单依赖模型派生状态（徽标）时订阅它，onModelChange/adopt 后 bump */
   layoutRev: number
+  /** 拖拽帧版本号：分隔条拖拽的 adjusting 帧 flexlayout 直写 DOM、模型
+   * 不变（layoutRev 不动）——宿主层量测叠片（MainTint/双行块/条隐藏
+   * 标题）订阅它逐帧跟随容器，提交帧后不再变化。轻消费者专用，壳不订阅
+   * （per-move churn 隔离契约，与 dropHint 同款）。 */
+  dragRev: number
   /** 已应用的预设树（flexlayout JSON）——双击分隔条回默认尺寸时按 split id
    * 查原始权重（hermes presetSplitWeights） */
   appliedTree: unknown
@@ -110,6 +115,7 @@ export interface LayoutStore {
   storeUserPreset(title: string, json: unknown): void
   removeUserPreset(id: string): void
   bumpLayoutRev(): void
+  bumpDragRev(): void
   setAppliedTree(json: unknown): void
   openZoneEditor(): void
   closeZoneEditor(): void
@@ -127,6 +133,7 @@ export const setActivePreset = (id: string | null) => useLayoutStore.getState().
 export const storeUserPreset = (title: string, json: unknown) => useLayoutStore.getState().storeUserPreset(title, json)
 export const removeUserPreset = (id: string) => useLayoutStore.getState().removeUserPreset(id)
 export const bumpLayoutRev = () => useLayoutStore.getState().bumpLayoutRev()
+export const bumpDragRev = () => useLayoutStore.getState().bumpDragRev()
 export const setAppliedTree = (json: unknown) => useLayoutStore.getState().setAppliedTree(json)
 export const openZoneEditor = () => useLayoutStore.getState().openZoneEditor()
 export const closeZoneEditor = () => useLayoutStore.getState().closeZoneEditor()
@@ -140,6 +147,7 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
   activePresetId: applied0?.presetId ?? null,
   userPresets: readUserPresets(),
   layoutRev: 0,
+  dragRev: 0,
   appliedTree: applied0?.json ?? null,
   zoneEditorOpen: false,
   narrowViewport: false, // 真值由 updateNarrowViewport（rebalance 动态判据）驱动，唯一写者
@@ -159,6 +167,7 @@ export const useLayoutStore = create<LayoutStore>()((set, get) => ({
   storeUserPreset: (title, json) => set({ userPresets: saveUserPreset(title, json) }),
   removeUserPreset: (id) => set({ userPresets: deleteUserPreset(id) }),
   bumpLayoutRev: () => set({ layoutRev: get().layoutRev + 1 }),
+  bumpDragRev: () => set({ dragRev: get().dragRev + 1 }),
   setAppliedTree: (json) => {
     set({ appliedTree: json })
     // 应用预设/重置成功后写记录（presetId 取当前值——applyJson 先

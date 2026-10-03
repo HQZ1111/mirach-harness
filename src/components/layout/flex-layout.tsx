@@ -22,7 +22,7 @@ import { syncTabsetConstraints } from './constraints-sync'
 import { startPaneDrag } from './drag-session'
 import { EditPalette } from './edit-palette'
 import { EditVeils } from './edit-veils'
-import { useLayoutStore, bumpLayoutRev, closeEditMode, closeZoneEditor, openZoneEditor, removeUserPreset, setActivePreset, setAppliedTree, setSideCollapsed, storeUserPreset, toggleEditMode } from '@/store/layout-store'
+import { useLayoutStore, bumpLayoutRev, bumpDragRev, closeEditMode, closeZoneEditor, openZoneEditor, removeUserPreset, setActivePreset, setAppliedTree, setSideCollapsed, storeUserPreset, toggleEditMode } from '@/store/layout-store'
 import { appWindow, inTauri } from '@/lib/tauri-window'
 import { LAYOUT_PRESETS, mirrorLayoutJson, presetToModelJson, SPLITTER_PX } from './layout-presets'
 import { PANE_TYPES, PRIMARY_PANE, REGION_DEFAULT_W, REGION_LIMITS, TRACK_W, findRailTabset, paneTypeOf, paneTabJson, nextInstanceId, sendPaneHome, zoneConfigOf, closePane, type PaneType, type Region } from './pane-registry'
@@ -523,7 +523,12 @@ export function FlexLayoutShell() {
       // 每帧 2 次同步磁盘写 + 整壳重渲，击穿快路径。提交帧（非 adjusting）
       // 必然到达，持久化不丢；pointercancel 丢提交帧的窗口由下一次任意
       // 动作必 persist 兜住。
-      if (action?.isAdjusting?.()) return
+      // 帧内 bump dragRev（轻量计数，仅量测叠片订阅）：容器 rect 每帧在
+      // 变，MainTint/双行块/条隐藏标题不跟就是"松手才跳"（用户实测）。
+      if (action?.isAdjusting?.()) {
+        bumpDragRev()
+        return
+      }
       persist(m)
       setActivePreset(null)
       bumpLayoutRev()
