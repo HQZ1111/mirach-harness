@@ -178,10 +178,10 @@
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
-  /* padding-bottom 必须 0：与普通页签同沉条底——旧值 10px 把文字抬高，
-     单页签化瞬间标签上跳 10px（用户 2026-09-29："关闭机器人后会话列表
-     的标签自己往上面移"） */
-  padding: 0 var(--tab-pad-x) 0;
+  /* 页签行离头栏底边 18px（用户 2026-10-03 定稿；双行块会话名与此对齐）——
+     旧值 0 的"标签上跳"问题已由 chat-tab-label absolute 化消除 */
+  padding: 0 var(--tab-pad-x) 18px;
+  position: relative; /* 双行块绝对定位参照 */
   text-transform: uppercase;
 }
 
@@ -629,18 +629,23 @@
    是 align-items:flex-end 沉底布局，chip 用 align-self:stretch + 内部
    justify-content:center 垂直居中（不被沉底压扁）；字号/颜色引 tokens。 */
   .flexlayout__tab_button .chat-tab-label,
-  .flexlayout__tab_button_stretch .chat-tab-label {
+  .flexlayout__tab_button_stretch .chat-tab-label,
+  .chat-tab-label-anchor .chat-tab-label {
+  /* 双行块对齐（用户 2026-10-03 定稿，二十轮宿主层叠片化）：撑满
+     --logo-strip-h 顶带——项目名顶部与左栏 MIRACH 文字顶部同线
+     （--logo-leading-pad 20px），会话名底部与页签行底部对齐（页签行
+     沉顶带底 18px，见 tab_button_stretch padding-bottom）。 */
   pointer-events: none;
-  align-self: stretch;
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: space-between;
   align-items: flex-start;
-  gap: 0;
+  padding: var(--logo-leading-pad) var(--tab-pad-x) 18px;
   text-align: left;
   overflow: hidden;
-  flex: none;
-  margin-right: 10px;
 }
 
   .flexlayout__tab_button .chat-tab-label__workspace,

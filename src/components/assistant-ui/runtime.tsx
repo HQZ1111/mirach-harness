@@ -194,16 +194,26 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const currentMeta = currentThreadId
     ? threads.find((r) => r.id === currentThreadId)
     : undefined
+  // 新会话 cwd（ZCode「项目名跟随会话」对应物）：pi 无 cwd 查询面——
+  // 「选择工作区新建会话」执行时记住最近一次 cwd，作为新会话/未落盘会话
+  // 的项目名来源（会话落盘后 currentMeta.custom.cwd 接管）。
+  const lastWorkspaceCwdRef = useRef<string | null>(null)
+  // 双行块显示标题：pi name 优先，其次**派生标题**（首条用户消息——侧栏
+  // 自动命名行同款），最后 New Chat。派生标题随首条消息即时变化（用户
+  // 2026-10-03："新会话项目名和会话名显示的都不对，也不会跟着变化"）。
+  const firstUserText = firstUserMessageText(messages)
+  const derivedTitle = currentMeta?.title ?? (firstUserText ? deriveTitle(firstUserText) : null) ?? 'New Chat'
   useEffect(() => {
+    const metaCwd = (currentMeta?.custom as { cwd?: unknown } | undefined)?.cwd
     chatTabLabelStore.setState({
-      threadId: currentThreadId,
-      title: currentMeta?.title ?? '',
+      threadId: currentThreadId ?? 'new',
+      title: derivedTitle,
       cwd:
-        typeof (currentMeta?.custom as { cwd?: unknown } | undefined)?.cwd === 'string'
-          ? ((currentMeta?.custom as { cwd?: string }).cwd as string)
-          : null,
+        typeof metaCwd === 'string' && metaCwd.length > 0
+          ? metaCwd
+          : lastWorkspaceCwdRef.current,
     })
-  }, [currentThreadId, currentMeta?.title, currentMeta?.custom])
+  }, [currentThreadId, derivedTitle, currentMeta?.custom])
 
   const refreshThreads = useCallback(async () => {
     try {
@@ -872,6 +882,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     handledWorkspaceSeqRef.current = workspaceRequest.seq
     workspaceBusyRef.current = true
     const { seq, cwd } = workspaceRequest
+    lastWorkspaceCwdRef.current = cwd
     void (async () => {
       try {
         if (!(await interruptIfRunning())) return

@@ -15,7 +15,7 @@ export function ChatTabLabel(): React.ReactElement | null {
   const threadId = useStore(chatTabLabelStore, (s) => s.threadId);
   const title = useStore(chatTabLabelStore, (s) => s.title);
   const cwd = useStore(chatTabLabelStore, (s) => s.cwd);
-  if (threadId == null) return null;
+  // 新会话（threadId==='new'，无 sessionId）同样显示：项目名 + New Chat\r\n  // （ZCode 同款——标签常在，标题/项目随会话状态变化）。\r\n  if (threadId == null) return null;
   const workspace = cwd != null ? workspaceGroupLabel(cwd) : '';
   return (
     <div className="chat-tab-label" data-slot="chat-tab-label">

@@ -5,7 +5,7 @@ import 'flexlayout-react/style/light.css'
 import { Titlebar } from '@/app/shell/titlebar'
 import { StatusBar } from '@/app/shell/statusbar'
 import { ESCAPE_PRIORITY, isTopEscapeLayer } from '@/lib/escape-layers'
-import { MainTint } from './chrome-overlays'
+import { ChatLabelOverlay, MainTint } from './chrome-overlays'
 import { ChevronDownIcon, ChevronUpIcon, CloseIcon } from '@/components/ui/codicons'
 import { ChevronsDownIcon } from 'lucide-react'
 import { DropOverlay } from './drop-overlay'
@@ -43,7 +43,7 @@ import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-fil
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
-import { ChatTabLabel } from './chat-tab-label'
+
 
 // ── 窗格组件注册表（按**类型**分发；多实例共用同一组件） ─────────────────────
 
@@ -1389,21 +1389,13 @@ export function FlexLayoutShell() {
       if (tabs.length > 1 && tabs.indexOf(node) > 0) {
         renderValues.leading = <span aria-hidden className="fl-tab-sep" />
       }
-      // 对话标签双行块（用户定稿 2026-10-03 十一轮）：**leading 形式**（参考
-      // 左栏会话 logo 的注入位置）——主区单签拉伸头栏（原生 strip 隐藏）时
-      // 把双行块放页签 leading（最左），原 tab 名 content 恢复显示；多页签
-      // 条（strip 可见）不注入，页签名即会话名已够。
+      // 对话标签双行块：**宿主层叠片 ChatLabelOverlay**（二十轮定稿——
+      // stretch 头栏上方有 tabset_header 25px，leading 内够不到与左栏
+      // MIRACH 顶对齐的位置；见 chrome-overlays.tsx 注释）。原 tab 名
+      // content 保持显示。
       const ptype0 = paneTypeOf(node.getId())
       const pdef0 = ptype0 ? PANE_TYPES[ptype0] : undefined
       const stretched0 = set.getChildren().length === 1 && set.isEnableSingleTabStretch()
-      if (stretched0 && pdef0?.region === 'main') {
-        renderValues.leading = (
-          <>
-            {renderValues.leading}
-            <ChatTabLabel />
-          </>
-        )
-      }
       // 拉伸头栏（单页签分栏）**不渲染原生 trailing 关闭钮**（flexlayout 缺
       // 口，实测 hasTrailing=false）——可关页签在这里注入 ✕（真关闭）；
       // 多页签条走原生 trailing（显隐统一 hover）
@@ -1906,6 +1898,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         <DropOverlay />
         {/* 装饰叠片：主区调色层（E9EEEF@40%）+ 左栏 logo 带（上 logo 下标签） */}
         <MainTint model={model} />
+        <ChatLabelOverlay model={model} />
         {/* 离家一级标签 回家钮（onRenderTab）+ logo/文字由
             onRenderTabSet 的 leading 注入会话页签条（RailLogo 浮层已退役） */}
         {/* hermes 编辑模式画布面：zone body 变拖拽把手（veil） */}

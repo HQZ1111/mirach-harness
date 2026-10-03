@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react'
 import { Model, TabSetNode } from 'flexlayout-react'
 
 import { useLayoutStore } from '@/store/layout-store'
+import { ChatTabLabel } from './chat-tab-label'
 
 function tabsetRectOf(
   model: Model,
@@ -73,5 +74,30 @@ export function MainTint({ model }: { model: Model }) {
         height: rect.height - rect.stripH,
       }}
     />
+  )
+}
+
+/** 主对话双行块宿主叠层（用户 2026-10-03 定稿）：相对 workspace tabset
+ *  **顶带**（--logo-strip-h 100px）定位——项目名顶部与左栏 MIRACH 文字
+ *  顶部同线（tabset 顶 + --logo-leading-pad），会话名底部与页签行底部
+ *  对齐（页签行沉顶带底 18px）。stretch 头栏内无法到达（tabset_header
+ *  25px 把 stretch 顶压到 62，MIRACH 在 21）——必须宿主层叠片。内容 =
+ *  ChatTabLabel（store 订阅，assistant-ui 数据经 chatTabLabelStore 单向
+ *  进入 layout 层）。 */
+export function ChatLabelOverlay({ model }: { model: Model }) {
+  const rect = useTabsetRect(model, ['workspace'])
+  if (!rect) return null
+  return (
+    <div
+      className="chat-tab-label-anchor"
+      style={{
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: 'var(--logo-strip-h)',
+      }}
+    >
+      <ChatTabLabel />
+    </div>
   )
 }

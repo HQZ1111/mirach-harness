@@ -20,6 +20,15 @@
   z-index: -1;
 }
 
+/* ── 主对话双行块锚（ChatLabelOverlay，二十轮）：相对 workspace tabset
+   顶带（--logo-strip-h）定位；项目名/会话名的上下 padding 在
+   .chat-tab-label 内。pointer-events:none 纯文字不挡页签交互。 ── */
+.chat-tab-label-anchor {
+  pointer-events: none;
+  position: absolute;
+  z-index: 30;
+}
+
 /* ── 布局编辑画布面（hermes edit veil）——浅色 scrim ── */
 .fl-edit-veils {
   inset: 0;
