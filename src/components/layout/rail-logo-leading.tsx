@@ -5,6 +5,6 @@
 export const RailLogoLeading = () => (
   <div className="rail-logo-leading">
     <img alt="" className="rail-logo-mark" src="/brand/logo.png" />
-    <span className="rail-logo-word">MIRACH</span>
+    <span className="rail-logo-word">Mirach</span>
   </div>
 )

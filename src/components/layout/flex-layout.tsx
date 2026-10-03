@@ -1104,6 +1104,18 @@ export function FlexLayoutShell() {
         (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
       )
       const openable = openableTypesForRegion(model, cfg.region)
+      // 主对话栏标记（用户 2026-10-03：**只有主对话栏**的页签从中线往右排
+      // ——双行块占左半；左/右栏靠左）。flexlayout 无 classNameTabset 属性
+      // （updateNodeAttributes 非法属性被忽略）——渲染层 leading 塞标记，
+      // CSS :has 从 tabset 上探命中 stretch。
+      if (cfg.region === 'main') {
+        renderValues.leading = (
+          <>
+            {renderValues.leading}
+            <span data-chat-lead aria-hidden className="hidden" />
+          </>
+        )
+      }
       renderValues.buttons.push(
         <PaneAddButton key="add" items={isPrimaryZone ? openable : []} onCreate={(t) => createPane(node, t)} />,
       )

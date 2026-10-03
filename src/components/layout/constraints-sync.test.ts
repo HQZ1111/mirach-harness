@@ -60,6 +60,9 @@ function fakeTabset(id: string, o: TabSetOpts = {}) {
   n.getParent = () => n.parent as FN | undefined
   n.isEnableTabStrip = () => o.enableTabStrip ?? true
   n.getClassNameTabStrip = () => o.classNameTabStrip
+  // 主对话标记读端（syncTabsetConstraints 用 getAttributeOwn 通用读——
+  // 假节点无 _attributes，返回 undefined = 未打标）
+  n.getAttributeOwn = () => undefined
   return n
 }
 

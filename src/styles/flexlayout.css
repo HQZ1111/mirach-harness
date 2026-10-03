@@ -41,6 +41,12 @@
      （stretch 头栏同理；0 宽 spacer 不影响） */
   padding-left: 10px;
 }
+/* 左栏（logo 栏）：页签与 **Mirach 文字**左对齐（用户定稿——文字在
+   图标 50 + gap 12 之后，左缘 83；70 = 83 - 容器原 10 - 边框 1 - 字形
+   差 2）。 */
+.flexlayout-host .flexlayout__tabset:has(.rail-logo-leading) .flexlayout__tabset_tabbar_inner_tab_container {
+  padding-left: 70px;
+}
 
 /* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
    （标题栏拖拽区/窗口按钮让位）只属于窗口顶带——下面分栏的条降到
@@ -94,14 +100,17 @@
 /* 横向多页签之间的分隔圆点（onRenderTab 对非首签注入 leading）：
    骑在两签交界（前签右 padding 与本签左 padding 的中点 = 圆点半径 2.5px
    从 --tab-dot-size 派生），垂直对文字中线 */
+/* 横向多页签之间的分隔圆点（onRenderTab 对非首签注入 leading）：
+   **内联子项**（原 absolute 骑交界版会被 tab_button 的 overflow:hidden
+   裁掉左半——min-width 60 轮引入）；作为本签 leading 的 flex 子项占位
+   --tab-dot-size，圆点落在前签文字与本签文字之间（前签右 pad + 本签
+   左 pad 各 10px 合成间距），垂直对文字中线。 */
 .flexlayout-host .fl-tab-sep {
+  align-self: center;
   background: var(--tab-dot-color);
   border-radius: 50%;
+  flex: none;
   height: var(--tab-dot-size);
-  left: calc(var(--tab-dot-size) / -2);
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
   width: var(--tab-dot-size);
 }
 
@@ -186,12 +195,18 @@
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
   letter-spacing: var(--tab-tracking);
-  /* 页签行底距由 tabbar_outer 统一管（--strip-pad-bottom 15px，所有栏
-     一致）；页签文字**从中线开始往右排**（用户十轮定稿：双行块占左半、
-     标签右移——左半让位给 ChatLabelOverlay，避免页签文字与双行块重叠） */
-  padding: 0 var(--tab-pad-x) 0 50%;
+  /* 页签行底距由 tabbar_outer 统一管（--strip-pad-bottom，所有栏一致）；
+     页签文字靠左（**只有主对话栏**从中线开始往右排——见
+     .flexlayout__chat-tabset 限定规则） */
+  padding: 0 var(--tab-pad-x) 0;
   position: relative; /* 双行块绝对定位参照 */
   text-transform: uppercase;
+}
+/* 主对话栏专属：页签文字从中线开始往右排（双行块占左半——用户定稿）。
+   tabset 无 classNameTabset 属性——onRenderTabSet 主区 leading 塞
+   [data-chat-lead] 标记，CSS :has 从 tabset 上探命中 stretch。 */
+.flexlayout-host .flexlayout__tabset:has([data-chat-lead]) .flexlayout__tab_button_stretch {
+  padding-left: 50%;
 }
 
 /* ── zone 头部最小化按钮（onRenderTabSet 注入） ──
