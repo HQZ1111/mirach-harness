@@ -2788,6 +2788,51 @@ value 限制）。406 用例。
   **写放大**（通道每个 doAction 被 onModelChange 全额观察——批内抑制
   observer 是下一步）与**偏离核心机器的自建旁路**（RailNav 手势/
   tab-overview memo/pane 菜单 strip 三处 P1 同源）。
+- **排版/双行块/溢出/条隐藏轮（2026-10-03，廿四~廿八轮补登，用户逐轮
+  验收）**：①左栏排版定稿——入口条 16px、组头 15px 品牌色、行 15px、
+  文字色统一 #4C4C4C；②**对话标签双行块**（chat-tab-label.tsx +
+  ChatLabelOverlay 宿主叠片）：工作区名 25px bold + 会话名 15px，
+  cwd pathLeaf + thread title 真实接线，顶对齐 MIRACH、底对齐页签行，
+  占顶带左半；③左栏宽度漂移修复（结构动作时序量测：DELETE_TAB 同步
+  getRect=动作前布局 + absorbSurplus base 与 mem 同源）；④**标签溢出
+  照抄 ZCode**——条内 overflow 双箭头钮（无计数，用户实测驳回归零）+
+  cmdk 搜索总览面板（tab-overview-menu.tsx，hermes SidePaneTabOverview
+  形制）+ threshold 25 虚拟化（virtual-session-list.tsx，
+  @tanstack/react-virtual 与 dnd 共存=虚拟行只消费 SortableContext）；
+  ⑤**条隐藏形态**——内容上移根因=条在文档流（顶带 100px 保留，三栏
+  信息位：左 railform logo/主双行块/右 StripHiddenTitleOverlay 活动
+  页签名）；⑥**sessionCatalog 单一真相源**（用户定稿"所有的数据都只有
+  一个真相源"：entries/piOrder/activeId/pendingCwd/pinned/manualOrder/
+  archived/seen/markers/groupsCollapsed 统一持久化 Rust
+  session_meta.json，左侧栏/主对话栏/浮层全从它取）。
+- **竖轨文字 + 编译护栏轮（2026-10-03）**：竖轨 cell 文字照抄 hermes
+  （justify-center + max-h-48 截断，f8f76b0）；asupersync 并行全量编
+  必崩（STATUS_STACK_BUFFER_OVERRUN：16GB 内存 + C 盘页面文件不可扩，
+  仅并行触发、单 crate 单独编必成）→ **.cargo/config.toml 护栏三条**
+  （jobs=4 / RUST_MIN_STACK=32MB / debug=1，ed5d8e9）。
+- **条隐藏顶带定位修正（14863de）**：`.flexlayout__tabset_content` 是
+  **position:relative**（非 absolute）——top 位移只偏视觉不改布局占位
+  （height 回自然值 → composer 被挤到圆角外，用户截图实锤）；修 =
+  父容器 tabset `padding-top: var(--logo-strip-h)`（推子项+压缩可用高）
+  + content `height: calc(100% - 100px)` 对齐。
+- **标签条显隐 hermes 阶梯（廿九轮，ae75f72/ae05c9a）**：
+  resolveTabStripVisible 完整移植（区域竖轨→空区→stranded→mode 显式→
+  >1 签→sibling main zone）；zone config 加 `tabStripMode` 三态
+  （'always'/'never' 显式 / undefined=auto 不持久化——"nothing outside
+  mode is persisted"）；「切换标签」对**屏幕现状**取反写显式 mode；
+  stripHidden 布尔全链退役。
+- **三十轮（2026-10-04，375eafe）——「切换标签」无效 + 多标签回最左
+  双 bug 根修**：①**zoneConfigOf 返回体截掉了 tabStripMode** → 阶梯
+  mode 分支永远死，toggle 写的 always/never 被 sync 按 auto 立即打回
+  （用户"什么都没变"的根因；zoneConfigOf 返回型别有该键、实现漏了——
+  **教训：pick 型 reader 与写入口径必须对表**）；②sync region 重钉
+  （整对象替换）携带 tabStripMode，mode 随分栏走；③**主栏多标签中线
+  起排**：data-chat-zone 标记（StripHiddenTitleOverlay 打在**收容
+  workspace 的 tabset**上，tab 级存在性不受激活态影响——
+  [data-chat-lead] 随页签内容卸载失灵）+ 容器 padding-left:50%
+  （stretch 规则同改标记源；单签/多签落点实测一致 681/684）。CDP 全链
+  验证：隐藏→reload 持久化→右键显示→bots 拖进主栏→拖回左栏全绿；
+  测试 +4 共 452，tsc 0。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
