@@ -45,13 +45,16 @@ interface TabSetOpts {
   layoutId?: string
   enableTabStrip?: boolean
   classNameTabStrip?: string | undefined
+  tabStripMode?: 'always' | 'never'
 }
 
 function fakeTabset(id: string, o: TabSetOpts = {}) {
   const n = Object.create(TabSetNode.prototype) as FN
   n.getId = () => id
   n.getConfig = () =>
-    o.region === undefined ? undefined : { region: o.region, rail: o.rail === true, track: o.track === true }
+    o.region === undefined
+      ? undefined
+      : { region: o.region, rail: o.rail === true, track: o.track === true, tabStripMode: o.tabStripMode }
   n.getMinWidth = () => o.minW ?? 0
   n.getMaxWidth = () => o.maxW ?? 99999
   n.getLayoutId = () => o.layoutId ?? Model.MAIN_LAYOUT_ID
@@ -264,5 +267,49 @@ describe('syncTabsetConstraints 轨/浮动/缩让/拆轨', () => {
     // 尾随的 colA 正常补丁（无主栏 → max 放开）；轨自身不再吃任何动作
     expect(actions[3].data?.node).toBe('colA')
     expect(actions[3].data?.json).toEqual({ maxWidth: 99999, enableTabStrip: false })
+  })
+})
+
+describe('syncTabsetConstraints tabStripMode 阶梯（hermes mode 显式位）', () => {
+  const etsPatch = (actions: RecAction[], id: string) =>
+    actsFor(actions, id).find((a) => 'enableTabStrip' in (a.data?.json ?? {}))?.data?.json?.enableTabStrip
+
+  it("mode 'always'：lone uncloseable workspace 也给条（显式选择压过 chromeless auto）", () => {
+    const workspace = fakeTab('workspace')
+    const main = fakeTabset('main', { region: 'main', minW: 395, maxW: 99999, tabs: [workspace], enableTabStrip: false, tabStripMode: 'always' })
+    const root = rootWith([main])
+    const { m, actions } = fakeModel(root, [main, workspace])
+    syncTabsetConstraints(m)
+    expect(etsPatch(actions, 'main')).toBe(true)
+  })
+
+  it("mode 'never'：多页签也收条（显式选择压过 >1 规则）", () => {
+    const workspace = fakeTab('workspace')
+    const bots = fakeTab('bots-1', { enableClose: true })
+    const main = fakeTabset('main', { region: 'main', minW: 395, maxW: 99999, tabs: [workspace, bots], tabStripMode: 'never' })
+    const root = rootWith([main])
+    const { m, actions } = fakeModel(root, [main, workspace, bots])
+    syncTabsetConstraints(m)
+    expect(etsPatch(actions, 'main')).toBe(false)
+  })
+
+  it('stranded 压过 mode never：lone closable 强制有条（界面不可达防护优先）', () => {
+    const bots = fakeTab('bots-1', { enableClose: true })
+    const col = fakeTabset('col', { region: 'right', minW: 240, maxW: 420, tabs: [bots], enableTabStrip: false, tabStripMode: 'never' })
+    const root = rootWith([col])
+    const { m, actions } = fakeModel(root, [col, bots])
+    syncTabsetConstraints(m)
+    expect(etsPatch(actions, 'col')).toBe(true)
+  })
+
+  it('region 重钉（整对象替换）携带 tabStripMode——mode 不被抹', () => {
+    const sessions = fakeTab('sessions')
+    // rail:true 的旧戳触发重钉（→ rail:false）；mode 必须随行
+    const col = fakeTabset('col', { region: 'left', rail: true, minW: 240, maxW: 420, tabs: [sessions], tabStripMode: 'always' })
+    const root = rootWith([col])
+    const { m, actions } = fakeModel(root, [col, sessions])
+    syncTabsetConstraints(m)
+    const pin = actsFor(actions, 'col').find((a) => 'config' in (a.data?.json ?? {}))
+    expect(pin?.data?.json?.config).toEqual({ region: 'left', rail: false, tabStripMode: 'always' })
   })
 })

@@ -155,7 +155,9 @@ export const syncTabsetConstraints = (m: Model) => {
     // 一条轨，积累成两排 20px 竖条（2026-09-26 用户截图实锤）。
     const oldCfg = zoneConfigOf(node)
     if (!isTrack && (!oldCfg || oldCfg.region !== region || oldCfg.rail)) {
-      patch.config = { region, rail: false }
+      // tabStripMode 随分栏走（用户对该 zone 的 chrome 选择，hermes group
+      // 同语义）——region 重钉是整对象替换，不带上会被抹掉
+      patch.config = { region, rail: false, tabStripMode: oldCfg?.tabStripMode }
     }
     const parent = node.getParent()
     const parentRow = parent instanceof RowNode ? parent : undefined

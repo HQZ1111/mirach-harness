@@ -11,7 +11,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import { BorderNode, Model, TabSetNode } from 'flexlayout-react'
+import { BorderNode, Model, TabNode, TabSetNode } from 'flexlayout-react'
 
 import { useLayoutStore } from '@/store/layout-store'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
@@ -137,6 +137,12 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
         const hidden = n.isEnableTabStrip() === false
         // 条隐藏标记（CSS 顶带保留的钩子；左栏跳过——railform logo 自带顶带）
         el.setAttribute('data-strip-hidden', hidden && cfg.region !== 'left' ? 'true' : 'false')
+        // 主对话区标记（多页签中线起排的钩子）：标在**当前收容 workspace 的
+        // tabset**上——[data-chat-lead] 只在 workspace 页签激活时在 DOM
+        // （切到别的页签内容卸载，:has 上探失灵、页签跳回最左），tab 级
+        // 存在性不受激活态影响
+        const chatHere = n.getChildren().some((c) => c instanceof TabNode && c.getId() === 'workspace')
+        el.setAttribute('data-chat-zone', chatHere ? 'true' : 'false')
         if (!hidden || cfg.region !== 'right') return // 浮层只补右栏（左/右已有专属位）
         const r = el.getBoundingClientRect()
         if (r.width < 100) return

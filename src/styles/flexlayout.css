@@ -217,9 +217,18 @@
   text-transform: uppercase;
 }
 /* 主对话栏专属：页签文字从中线开始往右排（双行块占左半——用户定稿）。
-   tabset 无 classNameTabset 属性——onRenderTabSet 主区 leading 塞
-   [data-chat-lead] 标记，CSS :has 从 tabset 上探命中 stretch。 */
-.flexlayout-host .flexlayout__tabset:has([data-chat-lead]) .flexlayout__tab_button_stretch {
+   标记 = data-chat-zone（StripHiddenTitleOverlay 打在收容 workspace 的
+   tabset 上，tab 级存在性不受激活态影响）；页签内容里的
+   [data-chat-lead] 依赖 workspace 激活（切走即卸载），不再作定位依据。 */
+.flexlayout-host .flexlayout__tabset[data-chat-zone='true'] .flexlayout__tab_button_stretch {
+  padding-left: 50%;
+}
+/* 主对话栏多页签（拉伸头栏不适用）：双行块仍占左半，页签容器整体从中线
+   起排。data-chat-zone 由 StripHiddenTitleOverlay 打（收容 workspace 的
+   tabset，tab 级存在性不受激活态影响）；:has(.flexlayout__tab_button)
+   限定多签形态——stretch 不带基础 tab_button 类，单签居中由上面规则管，
+   两规则若叠加文字会被推到 75%。 */
+.flexlayout-host .flexlayout__tabset[data-chat-zone='true']:has(.flexlayout__tab_button) .flexlayout__tabset_tabbar_inner_tab_container {
   padding-left: 50%;
 }
 

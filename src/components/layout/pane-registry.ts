@@ -114,7 +114,15 @@ export const zoneConfigOf = (node: FLNode | undefined): ZoneConfig | undefined =
   if (!(node instanceof TabSetNode)) return undefined
   const cfg = node.getConfig() as Partial<ZoneConfig> | undefined
   if (!cfg || (cfg.region !== 'left' && cfg.region !== 'main' && cfg.region !== 'right')) return undefined
-  return { region: cfg.region, rail: cfg.rail === true, track: cfg.track === true }
+  // tabStripMode 必须透传——阶梯 resolver（constraints-sync）读它判显式
+  // mode；截掉后 mode 分支永远死，"切换标签"写的 'always' 会被 sync 按
+  // auto 立即打回（2026-10-04 用户实测开关无效的根因）
+  return {
+    region: cfg.region,
+    rail: cfg.rail === true,
+    track: cfg.track === true,
+    tabStripMode: cfg.tabStripMode,
+  }
 }
 
 /** 竖轨宽（独立停车轨的列宽，用户定值 20） */
