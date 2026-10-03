@@ -67,8 +67,7 @@ export function MainTint({ model }: { model: Model }) {
   if (!rect) return null
   // 条被「切换标签」隐藏时 outer 不渲染（rect.stripH=0）——顶带仍按
   // --logo-strip-h 保留（双行块占位，与左栏 logo 同构），tint 从顶带下开始。
-  const stripHidden = sessionCatalog.getState().stripHidden['main'] === true
-  const stripH = rect.stripH > 0 ? rect.stripH : stripHidden ? 100 : 0
+  const stripH = rect.stripH > 0 ? rect.stripH : 100
   return (
     <div
       aria-hidden

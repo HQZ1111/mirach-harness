@@ -60,6 +60,9 @@ function fakeTabset(id: string, o: TabSetOpts = {}) {
   n.getParent = () => n.parent as FN | undefined
   n.isEnableTabStrip = () => o.enableTabStrip ?? true
   n.getClassNameTabStrip = () => o.classNameTabStrip
+  // 阶梯 resolver（stranded/siblingMainZone）需要：选中读端 + 子项 closable
+  n.getSelectedNode = () => (o.tabs ?? []).find((t) => t.getActive?.()) ?? null
+  ;(n as unknown as { _tabs: FN[] })._tabs = o.tabs ?? []
   // 主对话标记读端（syncTabsetConstraints 用 getAttributeOwn 通用读——
   // 假节点无 _attributes，返回 undefined = 未打标）
   n.getAttributeOwn = () => undefined
@@ -129,7 +132,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
     const a = actsFor(actions, 'colA')
     expect(a).toHaveLength(1)
     expect(a[0].type).toBe(Actions.UPDATE_NODE_ATTRIBUTES)
-    expect(a[0].data?.json).toEqual({ minWidth: 240, maxWidth: 99999 }) // 不含 config——戳不重写
+    expect(a[0].data?.json).toEqual({ minWidth: 240, maxWidth: 99999, enableTabStrip: false }) // 不含 config——戳不重写；auto 阶梯：lone workspace（uncloseable）无条
     // 主会话离家：✕（点击=回家）+ fl-tab-away 语义标记
     const t = actsFor(actions, 'workspace')
     expect(t.map((x) => x.data?.json)).toEqual([{ enableClose: true }, { className: 'fl-tab-away' }])
@@ -147,7 +150,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
     expect(actsFor(actions, 'colA')).toHaveLength(0) // diff 门控：属性一致不发动作
     const b = actsFor(actions, 'colB')
     expect(b).toHaveLength(1)
-    expect(b[0].data?.json).toEqual({ config: { region: 'main', rail: false }, minWidth: 395 }) // main 395，非 left 240
+    expect(b[0].data?.json).toEqual({ config: { region: 'main', rail: false }, minWidth: 395, enableTabStrip: false }) // main 395；auto 阶梯：lone workspace 无条（chromeless）
   })
 
   it('③无 primary 的新列向最近邻传播（左邻优先）', () => {
@@ -162,7 +165,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
     syncTabsetConstraints(m)
     const b = actsFor(actions, 'colB')
     expect(b).toHaveLength(1)
-    expect(b[0].data?.json).toEqual({ config: { region: 'left', rail: false }, minWidth: 240 }) // 继承左邻
+    expect(b[0].data?.json).toEqual({ config: { region: 'left', rail: false }, minWidth: 240, enableTabStrip: false }) // 继承左邻；auto：lone bots 无条
   })
 
   it('③b无左邻时向右邻传播', () => {
@@ -174,7 +177,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
     const { m, actions } = fakeModel(root, [colB, colC, session, review])
     syncTabsetConstraints(m)
     const b = actsFor(actions, 'colB')
-    expect(b[0].data?.json).toEqual({ config: { region: 'right', rail: false }, minWidth: 240 }) // 继承右邻
+    expect(b[0].data?.json).toEqual({ config: { region: 'right', rail: false }, minWidth: 240, enableTabStrip: false }) // 继承右邻；auto：lone session-1 无条
   })
 
   it('④全无锚定来源 → main', () => {
@@ -185,7 +188,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
     syncTabsetConstraints(m)
     const b = actsFor(actions, 'colB')
     expect(b).toHaveLength(1)
-    expect(b[0].data?.json).toEqual({ config: { region: 'main', rail: false }, minWidth: 395 })
+    expect(b[0].data?.json).toEqual({ config: { region: 'main', rail: false }, minWidth: 395, enableTabStrip: false }) // main 395；auto：lone session-1 无条
   })
 })
 
@@ -202,7 +205,7 @@ describe('syncTabsetConstraints 轨/浮动/缩让/拆轨', () => {
     expect(actsFor(actions, 'track')).toHaveLength(0) // 轨不被重钉/不改形态
     const a = actsFor(actions, 'colA')
     expect(a).toHaveLength(1)
-    expect(a[0].data?.json).toEqual({ maxWidth: 99999, enableTabStrip: false }) // railByRegion.left=true → 条隐藏
+    expect(a[0].data?.json).toEqual({ maxWidth: 99999, enableTabStrip: false }) // 区域竖轨形态优先：轨在 → colA 无条
   })
 
   it('浮动布局（getLayoutId ≠ 主布局）整体跳过：不重钉、不参与竖轨形态判定', () => {
@@ -217,7 +220,7 @@ describe('syncTabsetConstraints 轨/浮动/缩让/拆轨', () => {
     expect(actsFor(actions, 'floating')).toHaveLength(0)
     const a = actsFor(actions, 'mainCol')
     expect(a).toHaveLength(1)
-    expect(a[0].data?.json).toEqual({ maxWidth: 99999 }) // 无 enableTabStrip——浮动的轨没把 right 点成竖轨
+    expect(a[0].data?.json).toEqual({ maxWidth: 99999, enableTabStrip: false }) // 浮动的轨被隔离；auto：lone files 无条
   })
 
   it('过承诺缩让：主栏 min 按比例缩让、底线 40', () => {
@@ -261,6 +264,6 @@ describe('syncTabsetConstraints 轨/浮动/缩让/拆轨', () => {
     expect(actions[2].data?.node).toBe('right-prune-spacer')
     // 尾随的 colA 正常补丁（无主栏 → max 放开）；轨自身不再吃任何动作
     expect(actions[3].data?.node).toBe('colA')
-    expect(actions[3].data?.json).toEqual({ maxWidth: 99999 })
+    expect(actions[3].data?.json).toEqual({ maxWidth: 99999, enableTabStrip: false })
   })
 })

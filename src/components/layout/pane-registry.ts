@@ -105,6 +105,9 @@ export interface ZoneConfig {
   rail: boolean
   /** 停车轨（竖轨形态大栏的那条 20px 独立轨：页签折进来，点行开成一栏） */
   track?: boolean
+  /** 页签条模式（hermes group.tabStrip 同构：'always'/'never' 显式选择，
+   *  undefined = auto 由内容推导——constraints-sync 的阶梯 resolver） */
+  tabStripMode?: 'always' | 'never'
 }
 
 export const zoneConfigOf = (node: FLNode | undefined): ZoneConfig | undefined => {

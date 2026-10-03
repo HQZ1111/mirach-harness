@@ -331,15 +331,17 @@ const toggleTargetTabStrip = (): void => {
     console.error('[app-context-menu] 切换标签：目标分栏不在切换面（轨/竖轨形态）', target.getId())
     return
   }
+  // hermes toggleTargetZoneTabStrip 语义：对**屏幕现状**取反，写入显式
+  // mode（zone 离开 auto，不随页签数漂移）；mode 存 tabset config（随布局
+  // JSON 持久化），**条的实际显隐由 sync 的阶梯 resolver 从 mode+内容推导**。
   for (const patch of patches) {
-    model.doAction(Actions.updateNodeAttributes(patch.id, { enableTabStrip: patch.enableTabStrip }))
-    // 隐藏选择持久化（session-catalog stripHidden——boot 补跑 sync 依此
-    // 区分「用户主动隐藏」与「竖轨残留」，后者才修；不持久化则每次启动
-    // 标签条都被 boot sync 打回来）。
-    const cfg = zoneConfigOf(model.getNodeById(patch.id) as TabSetNode)
-    if (cfg?.region) {
-      sessionCatalog.getState().setStripHidden(cfg.region, !patch.enableTabStrip)
-    }
+    const next = patch.enableTabStrip ? 'always' : 'never'
+    model.doAction(
+      Actions.updateNodeAttributes(patch.id, {
+        enableTabStrip: patch.enableTabStrip,
+        config: { ...zoneConfigOf(model.getNodeById(patch.id) as TabSetNode), tabStripMode: next },
+      }),
+    )
   }
 }
 

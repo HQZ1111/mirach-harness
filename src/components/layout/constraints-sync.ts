@@ -180,11 +180,42 @@ export const syncTabsetConstraints = (m: Model) => {
       if (node.getMinWidth() !== 0) patch.minWidth = 0
       if (node.getMaxWidth() !== 99999) patch.maxWidth = 99999
     }
-    // 页签条开关（用户「切换标签」的**区域级**选择，session-catalog）：
-    // stripHidden=true = 该区**无条**（横栏/竖轨/新建分栏一致——flag 与
-    // 实际对齐，diff 门控保证幂等）；无选择才跟竖轨形态（rail=true 无条）。
-    const stripHidden = sessionCatalog.getState().stripHidden[region] === true
-    const wantStrip = stripHidden ? false : !rail
+    // 页签条显隐 = **hermes resolveTabStripVisible 阶梯**（strip-visibility.ts
+    // 照抄；审查 D 层确认 harness 缺这套才导致"开关×内容互相打架"）：
+    // ⓪区域竖轨形态（railByRegion：该区有 20px 轨）优先——网格分栏全部无
+    //   条（轨是唯一导航；窗格在轨里有行级抓手，stranded 不适用）；
+    // ①mode 显式（'always'/'never'，config 持久化）→ 照办，但 stranded
+    //   （lone closeable main tile）优先于 never——"隐藏条是 chrome 请求，
+    //   绝不让界面不可达"；
+    // ②auto（无 mode）：>1 签有条；lone main 且存在 sibling main zone
+    //   有条（tiles 是 tabbed 工作流）；lone uncloseable workspace 无条
+    //   （chromeless，双行块常驻顶带）。
+    const shown = node.getChildren().filter((c): c is TabNode => c instanceof TabNode)
+    const mode = zoneConfigOf(node)?.tabStripMode as 'always' | 'never' | undefined
+    const isClosable = (t: TabNode) => t.isEnableClose()
+    const stranded = shown.length === 1 && isClosable(shown[0])
+    const siblingMainZone =
+      rootKids.filter(
+        (k) =>
+          k instanceof TabSetNode &&
+          kidRegion.get(k.getId()) === 'main' && // 用**推导后**的列 region（旧 config 无戳列 = undefined）
+          zoneConfigOf(k)?.track !== true &&
+          k.getId() !== node.getId(),
+      ).length > 0
+    let wantStrip: boolean
+    if (railByRegion[region]) {
+      wantStrip = false
+    } else if (shown.length === 0) {
+      wantStrip = false
+    } else if (stranded) {
+      wantStrip = true
+    } else if (mode) {
+      wantStrip = mode === 'always'
+    } else if (shown.length > 1) {
+      wantStrip = true
+    } else {
+      wantStrip = siblingMainZone && shown.some((t) => paneTypeOf(t.getId()) !== undefined)
+    }
     if (node.isEnableTabStrip() !== wantStrip) patch.enableTabStrip = wantStrip
     // 低条（上下分栏的非顶部分栏，isTopBand 判定）：classNameTabStrip 落在
     // tabbar_outer 上，CSS 把条降到 --strip-low-height、文字居中。

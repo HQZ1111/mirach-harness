@@ -61,7 +61,6 @@ import { createStore, useStore } from 'zustand'
 
 import { resolveContextMenuScope } from '../panes/session-manage/context-menu-scope'
 import { PANE_TYPES, closePane, paneTypeOf, zoneConfigOf } from './pane-registry'
-import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 
 // ── 状态推导（纯函数，node 可测） ─────────────────────────────────────────────
 
@@ -184,13 +183,17 @@ export const runPaneMenuAction = (itemId: string, model: Model, tabId: string): 
     }
     case 'hide-strip':
     case 'show-strip': {
-      const next = !set.isEnableTabStrip()
-      model.doAction(Actions.updateNodeAttributes(set.getId(), { enableTabStrip: next }))
-      // 与 app 菜单同源的**区域级持久化**（session-catalog stripHidden）：
-      // 不写则 sync 下次（任何结构动作/boot）按 railByRegion 把条翻回来，
-      // 两条隐藏路径分叉（审查 C-3）。
-      const cfg = zoneConfigOf(set)
-      if (cfg?.region) sessionCatalog.getState().setStripHidden(cfg.region, !next)
+      const visible = set.isEnableTabStrip()
+      // hermes 语义：对屏幕现状取反，写显式 mode（zone 离开 auto）；条实
+      // 际显隐由 sync 阶梯 resolver 落属性（含 stranded 保护）。两条隐藏
+      // 路径（app 菜单/pane 菜单）同写一个位面（config.tabStripMode）。
+      const next: 'always' | 'never' = visible ? 'never' : 'always'
+      model.doAction(
+        Actions.updateNodeAttributes(set.getId(), {
+          enableTabStrip: next === 'always',
+          config: { ...zoneConfigOf(set), tabStripMode: next },
+        }),
+      )
       return
     }
     default:
