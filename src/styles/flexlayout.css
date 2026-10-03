@@ -650,8 +650,9 @@
   overflow: hidden;
 }
 
-  .flexlayout__tab_button .chat-tab-label__workspace,
-  .flexlayout__tab_button_stretch .chat-tab-label__workspace {
+/* 字号/颜色规则（chip 唯一挂载点 = .chat-tab-label-anchor 宿主叠片——
+   旧 .flexlayout__tab_button 前缀在叠片化后不再匹配，字号回落默认）。 */
+.chat-tab-label__workspace {
   font-size: var(--chat-tab-workspace-size);
   font-weight: 700;
   line-height: 1.1;
@@ -662,8 +663,7 @@
   max-width: 40vw;
 }
 
-  .flexlayout__tab_button .chat-tab-label__session,
-  .flexlayout__tab_button_stretch .chat-tab-label__session {
+.chat-tab-label__session {
   font-size: var(--chat-tab-session-size);
   font-weight: 400;
   line-height: 1.1;
