@@ -53,13 +53,13 @@
    flexlayout 不渲染 tabbar_outer（display:none 仍在 DOM，:has 不可靠）—
    由 StripHiddenTitleOverlay 的 measure 循环给 tabset 打
    data-strip-hidden 标记（左栏跳过：railform logo 自带顶带）。content
-   是 flexlayout 内联样式的 absolute 定位——**padding 推不动 absolute 子
-   项**，必须位移 content 自身（!important 压内联 top/height）。 ── */
+   是 position:relative——top 位移不压缩布局（底溢 100px 实锤），在
+   **父容器 tabset** 打 padding-top 推子项+压缩 content 可用高。 ── */
+.flexlayout-host .flexlayout__tabset[data-strip-hidden='true'] {
+  padding-top: var(--logo-strip-h);
+}
 .flexlayout-host .flexlayout__tabset[data-strip-hidden='true'] .flexlayout__tabset_content {
-  bottom: 0 !important;
-  box-sizing: border-box;
-  height: auto !important;
-  top: var(--logo-strip-h) !important;
+  height: calc(100% - var(--logo-strip-h)) !important;
 }
 
 /* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
