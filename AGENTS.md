@@ -2758,6 +2758,36 @@ value 限制）。406 用例。
   620px 可滚/DOM 行数受控。**教训：CDP 动态 import '/src/...' 与应用
   内 '@/' 别名 import 可能不是同一模块实例（孤儿实例写进 store 应用
   无感）——涉及应用 store 的验证改走真实 UI 手势（鼠标/键盘）。**
+- **布局全量审查轮（2026-10-03，4 子代理并行：模型层/主组件/CSS/交互）**：
+  共 11 个 P1（0 个 P0）+ 40 个 P2，三批修复已推（f81e917/39f5dff/987967e）。
+  **P1 清单**：①onModelChange 在分隔条拖拽的每个 adjusting 帧全量执行
+  （flexlayout 对 adjusting 走直写 DOM 快路径却被我们 persist×2+bump 击穿
+  ——帧早退，提交帧一次做完）；②showSide 回退路径孤儿页签裸 addNode 造
+  重复 id 模型（getNodeById 语义损坏——统一过滤+错误可见）；③
+  scheduleRebalance 定时器无卸载清理（StrictMode/HMR 下写死模型）；
+  ④fitWindowWidth 无最大化守卫（最大化后关页签被砸回 1800——模块级
+  `windowMaximized` 标志由 onResized 维护，**async 查询会破坏测试同步断
+  言**，必须标志化）；⑤applyRootWeights 亏空场景写出 Σpx>avail 的权重
+  （窄窗右栏挤出窗口——clamp 后按比例收缩，与 absorbSurplus 语义对齐）；
+  ⑥stripHidden **区域级 flag × 分栏级 toggle** 粒度错位（pane 菜单只改
+  单个 tabset 却写区域 flag——两条隐藏路径分叉；sync 改
+  `stripHidden?false:!rail` 全形态一致）；⑦pane 菜单 hide-strip 不写
+  stripHidden（sync 会翻回来）；⑧tab-overview `useMemo([tabset])` 因
+  flexlayout **就地变异节点**永不重算——关闭后幽灵行"关不掉点不动"
+  （改每次渲染现取+layoutRev 订阅）；⑨拖拽插入符坐标是 zone 相对系却被
+  直挂 overlay（宿主相对系）——除贴宿主原点的 zone 外全错位（包 zone 盒
+  anchor）；⑩RailNav 手写手势机无 setPointerCapture/无 Esc/无 rAF 合帧
+  （偏离 drag-session 契约——**待修**）；⑪Zone 编辑器遮罩挂宿主内
+  （.flexlayout-host isolation:isolate 内再高 z 也压不过根上下文
+  app-titlebar 50——窗口圆点浮在 scrim 上；portal 到 body 根治）。
+  **新增 z 层级表**（tokens.css）：宿主内 main-tint -1 < 锚层 30 < veil 55
+  < drop 60 < ep-card 70 < zone-add 90；根上下文 titlebar 50 < 弹出 70 <
+  modal 130；**规则：模态必须 portal 到 body**。
+  **架构评价（代理共识）**：分层干净（constraints 纯几何 →
+  constraints-sync 应用器 → rebalance 通道 → React 壳），主要债是
+  **写放大**（通道每个 doAction 被 onModelChange 全额观察——批内抑制
+  observer 是下一步）与**偏离核心机器的自建旁路**（RailNav 手势/
+  tab-overview memo/pane 菜单 strip 三处 P1 同源）。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
