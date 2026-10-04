@@ -190,9 +190,10 @@
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被
      .flexlayout__layout 上的定义静默压掉） ────────────────────── */
-  --flexlayout-splitter-size: 1px;            /* 1px 发丝线，命中带 8px 由 ::before 提供 */
+  --flexlayout-splitter-size: 1px;            /* 1px 占位（布局数学 SPLITTER_PX 同步），命中带 8px 由 ::before 提供 */
   --flexlayout-splitter-active-size: 8px;
-  --flexlayout-color-splitter: rgba(0, 0, 0, 0.12);
+  --flexlayout-color-splitter: transparent;   /* 分栏描边已去（用户 2026-10-05："所有栏的描边
+                                   效果不要了"）——发丝线不再画，悬停/拖拽蓝保留为拖拽可供性 */
   --flexlayout-color-splitter-hover: var(--fl-accent);
   --flexlayout-color-splitter-drag: var(--fl-accent);
   --flexlayout-color-splitter-handle: transparent;
