@@ -2911,6 +2911,20 @@ value 限制）。406 用例。
   ②两侧光条高度不一致——指针 Y 只发在悬停侧、另一侧停在 50% 中线，
   改发到**父容器**（thread 根）两侧共享同一坐标（两柄同高同位，坐标
   空间一致）。
+- **三十六轮（2026-10-05，c4d14ef）——顶带 chrome 跟随激活页签（用户
+  定稿："项目名和logo应该是哪个标签在激活显示哪个，切换显示的时候跟着
+  切换"）**：①onRenderTabSet：选中=会话列表 → logo leading；选中=对话
+  页签（workspace/session-*）→ data-chat-lead 标记——**按激活互斥**
+  （同分栏叠加不可能，位置论作废）；②ChatLabelOverlay 重写锚定 =
+  **选中态对话页签所在 tabset**（跨 tabset 找、border 折叠不算、宽<100
+  竖轨隐藏），订阅 dragRev；③railform 收敛为只包会话窗格自身内容
+  （node.getId()==='sessions'——原"父分栏包含 sessions"会把同分栏
+  workspace 内容也误包 logo）；④data-chat-zone 标记改按激活对话页签
+  （中线起排 CSS 随激活切换）。**附带三件**：双行块会话名限列宽 50%
+  （40vw→50%）+ 悬停看全名（span title + pointer-events:auto 放行——
+  锚层整体 none 否则 title 永不显形）；光条品牌蓝 **50% 透明度**
+  （color-mix 掺透明——用户定稿）。CDP：拆分布局上带 logo/下带双行块
+  各自正确；同分栏切页签四连互斥无误；title/50% 生效。443 全绿 tsc 0。
 - **三十五轮（2026-10-05）——关栏左栏跳动根修（用户实测："关闭其中一个
   栏，左栏会跳动一下"）**：**根因 = 关栏后的根行权重归一闪跳帧**——
   DELETE_TAB 已改模型、React 提交按剩余权重归一渲染一帧（左栏份额突变
