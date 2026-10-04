@@ -1021,7 +1021,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
       <div
         className="aui-root aui-thread-root bg-transparent @container flex h-full flex-col"
         style={{
-          ["--thread-max-width" as string]: "44rem",
+          // 可读列宽跟随对话宽度设置（dsh mirach 移植的 zosma 三档：
+          // main.tsx initUiSettings 落 --chat-max-width 820/1080/none；
+          // 回退 44rem = 变量不在场时的历史默认）。composer 同列自动跟随。
+          ["--thread-max-width" as string]: "var(--chat-max-width, 44rem)",
           ["--composer-bg" as string]:
             "color-mix(in oklab, var(--color-muted) 30%, transparent)",
           ["--composer-radius" as string]: "1rem",
