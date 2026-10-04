@@ -2852,6 +2852,18 @@ value 限制）。406 用例。
   CDP 左右 inset 均 7.5）+ 地址行文件夹名品牌蓝
   **text-(color:--brand)**——【坑】裸 text-(--brand) 对 Tailwind v4 歧义
   （text-\* = 字号或颜色）不生成规则，须显式色彩提示。449 全绿 tsc 0。
+- **三十二轮（2026-10-04，89b8aa8）——布局二轮清账（用户："为 max 绕路
+  的逻辑继续删"）**：①**clampRowWeights 整函数删除**——2026-09-23 为
+  max 时代而生；**__noClamp 对照实证**：关掉保险网后右列嵌套 min 481
+  仍被原生守住（行聚合 min 经 calcMinMaxSize 内联 DOM + calculateSplit
+  边界钳位）——"嵌套 min 不向上传播"是 max 时代的误诊，min 保险网是
+  死代码（**教训：保险网也要定期验证生效机制，别让反向证明缺席**）；
+  ②heightBounds 删除（唯一消费方是 clamp）；③__noClamp 调试钩子删除；
+  ④widthBounds max 聚合递归删除（轨 20 固定/其余恒 99999）；⑤
+  applyRootWeights ready 守卫与 absorbSurplus boundsOk 守卫删除（依赖
+  max 有限性，废除后永真）。onAction 只留负权重防线+提交帧所见即所得。
+  文档 §2.3/§9.4/§9.5 同步。CDP 回归：压右列停嵌套 min、左栏拖 700 无
+  上限、0 控制台错误；443 全绿 tsc 0（净 -140 行）。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
