@@ -90,8 +90,14 @@ export function WidthHandle(props: {
     setDragging(true)
   }, [])
   const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const box = e.currentTarget.getBoundingClientRect()
-    e.currentTarget.style.setProperty('--dsh-width-handle-pointer-y', `${e.clientY - box.top}px`)
+    // 指针 Y 发布到**父容器**（thread 根）——两侧手柄的 ::after 共享同一个
+    // 值，光条对称等高（用户 2026-10-05：只发在悬停侧会让另一侧停在 50%
+    // 中线，两侧高度看着不一致）。两条手柄同高同位，坐标空间一致。
+    const host = e.currentTarget.parentElement
+    if (host) {
+      const y = e.clientY - host.getBoundingClientRect().top
+      host.style.setProperty('--dsh-width-handle-pointer-y', `${y}px`)
+    }
     if (!e.currentTarget.hasPointerCapture(e.pointerId)) return
     latest.current = e.clientX
     frame.current ??= requestAnimationFrame(() => {

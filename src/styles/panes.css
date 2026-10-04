@@ -608,8 +608,8 @@
 }
 
 /* 光条：骑指针 Y 的 3px 短条（实心核 ±12px、两侧 40px 渐隐），悬停/
-   拖拽显形。色 = dsh 官方浅色主题值 --dsw-static-neutral-300（token 化
-   --width-handle-glow；此前误用 --text-4 深灰发黑，用户 2026-10-05 纠正）。 */
+   拖拽显形。色 = 品牌蓝（--width-handle-glow → --brand，用户 2026-10-05
+   定稿；指针 Y 由手柄发布到 thread 根——两侧共享、对称等高）。 */
 .aui-width-handle::after {
   background: linear-gradient(
     to bottom,
