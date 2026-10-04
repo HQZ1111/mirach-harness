@@ -2946,6 +2946,17 @@ value 限制）。406 用例。
   （合法的同数字他义）：状态栏/圆点的 50 padding（圆角 40 后有余量）、
   --logo-size 50（logo 图直径）、50%（中线/透明度）、chat-panel 示例
   24（未接线组件）。CDP 复核 85 带 + 40/30/20 全部生效。
+- **三十七轮（2026-10-05）——拖拽黑块归因反转 + 删除**：用户截图
+  （会话行拖出时旁边黑底白字块）——**不是浏览器原生拖影**（CDP 实查
+  行/把手均无 draggable 属性，dnd-kit attributes 只有 ARIA），**正是
+  drag-ghost 的深底白字 chip**（#1a1a22/#e6e6ea，跟指针右下 14/12px——
+  与截图配色位置完全吻合）。会话行拖拽（session-drag.ts）删除 chip：
+  engage 不再 createDragGhost、moveTo/destroy 拆除，「直接拖出的效果」
+  = 源行压暗 0.45 跟手 + 落主页签 accent 高亮（原有反馈链不变）。
+  drag-ghost.ts 保留（flexlayout 窗格拖拽 startPaneDrag 仍在用——
+  若窗格拖拽的 chip 也要去，删 drag-session.ts 的 ghost 分支即可）。
+  验证：MutationObserver 布探 chip 特征样式，拖会话行全程 chipSeen=
+  false、源行 dimmed=true；443 全绿 tsc 0。
 - **三十五轮（2026-10-05）——关栏左栏跳动根修（用户实测："关闭其中一个
   栏，左栏会跳动一下"）**：**根因 = 关栏后的根行权重归一闪跳帧**——
   DELETE_TAB 已改模型、React 提交按剩余权重归一渲染一帧（左栏份额突变

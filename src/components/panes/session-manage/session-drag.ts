@@ -12,9 +12,10 @@
  * startDragSession 的提示通道耦合窗格 DropHint，不复用以免污染窗格 overlay。
  *
  * 拖起视觉（hermes session-drag.ts:120 实锤）：engage 起源行内联
- * opacity 0.45（「picked up」反馈）+ label chip ghost 跟手
- * （lib/drag-ghost.ts，opacity 0.6）；行自身 z-10/不透明底/cursor-grabbing
- * 由 dnd-kit isDragging 类负责（thread-list 行上）。
+ * opacity 0.45（「picked up」反馈）；行自身 z-10/不透明底/cursor-grabbing
+ * 由 dnd-kit isDragging 类负责（thread-list 行上）。**label chip ghost
+ * 已删**（用户 2026-10-05："不要黑底白字的效果"——「直接拖出」=
+ * 源行压暗跟随即可；黑块正是 drag-ghost 的深底白字 chip，非原生拖影）。
  *
  * 命中面（engage 时快照，拖拽中纯数学——无 elementsFromPoint）：
  * - 主会话页签：#flexlayout-tabbutton-<PRIMARY_PANE.main>（id 方案见
@@ -26,7 +27,6 @@
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
 import { PRIMARY_PANE } from '@/components/layout/pane-registry'
-import { createDragGhost, type DragGhost } from '@/lib/drag-ghost'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 
 const DRAG_THRESHOLD_PX = 4
@@ -38,7 +38,7 @@ const SOURCE_DIM_OPACITY = '0.45'
 
 export interface SessionRowDragSpec {
   sessionId: string
-  /** chip ghost 标签（hermes sessionLabel(payload) = 会话标题） */
+  /** 会话显示名（压暗行跟随；曾用于 chip ghost，chip 已删） */
   title: string
   /** 松手在主会话页签上（切换主线程到该会话） */
   onCommitMainTab(): void
@@ -116,7 +116,6 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   const restoreSelect = document.body.style.userSelect
   let engaged = false
   let releaseEscapeLayer: (() => void) | null = null
-  let ghost: DragGhost | null = null
   // 源行内联 opacity 的恢复快照（hermes restoreOpacity 语义：还原到原行
   // 自身样式，不是硬写 ''）
   let restoreRowOpacity = ''
@@ -165,8 +164,9 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     setCursor('grabbing')
     document.body.style.userSelect = 'none'
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
-    // label chip 跟手（hermes ghost: { label: sessionLabel(payload) }）
-    ghost = createDragGhost(spec.title)
+    // 黑底白字 chip 已删（用户 2026-10-05："标签拖出…不要黑底白字的效果"
+    // ——「直接拖出的效果」= 源行压暗 0.45 跟手即可，drag-ghost 模块退役；
+    // dnd-kit/行本无 draggable 属性，无原生拖影）
     // 源行压暗 0.45 = 「picked up」反馈（hermes session-drag.ts:120 逐字；
     // dnd-kit 一侧的行自身类负责 z-10/不透明底/cursor-grabbing）
     restoreRowOpacity = handle.style.opacity
@@ -190,7 +190,6 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
       engage()
     }
 
-    ghost?.moveTo(x, y)
     resolve(x, y)
   }
 
@@ -222,8 +221,6 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
 
     document.body.style.cursor = restoreCursor
     document.body.style.userSelect = restoreSelect
-    ghost?.destroy()
-    ghost = null
     handle.style.opacity = restoreRowOpacity
     releaseEscapeLayer?.()
     releaseEscapeLayer = null
