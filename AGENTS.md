@@ -2833,6 +2833,25 @@ value 限制）。406 用例。
   （stretch 规则同改标记源；单签/多签落点实测一致 681/684）。CDP 全链
   验证：隐藏→reload 持久化→右键显示→bots 拖进主栏→拖回左栏全绿；
   测试 +4 共 452，tsc 0。
+- **三十一轮（2026-10-04，7869ca3/ad690cb）——布局 v4.0 最小宽度定稿 +
+  拖拽跟随 + 顶带减负**：①**拖拽中叠片逐帧跟随**（"颜色层/双行块只在
+  松手瞬间跳"）：adjusting 帧 flexlayout 直写 DOM、模型不变——layout-store
+  加 dragRev 轻量计数（仅量测叠片订阅，壳不订阅=churn 隔离契约），
+  onModelChange 的 adjusting 早退分支逐帧 bump；CDP 实测拖动中
+  tabset/tint/anchor 三者 rect 完全相等（用户后实测确认钉死并收回晃动
+  反馈）。②**布局 v4.0（用户定稿：所有栏只保留最小宽度，先改文档后改
+  代码）**——docs/layout-design.md §2.2/§2.3/§2.4/§3/§9/§11/§12 就地改写；
+  代码 REGION_LIMITS 删 maxW、widthBounds 非轨 max 恒 99999、
+  clampRowWeights 退化纯 min 保险网（嵌套 min 不向上传播场景保留）、sync
+  统一 coerce 旧档 maxWidth→99999 自愈、applyRootWeights/absorbSurplus
+  目标=记忆宽托底 min、**flexlayout-rowfix.ts 整文件删除**（只修聚合
+  max——上限废除后上游缺陷无害）+3 用例；CDP：左栏拖到 610 无钳制
+  （旧上限 420/380 废）。③右栏条隐藏顶带**占位文字删除**（顶带保留但
+  空着，hermes 同样无 chrome）——StripHiddenTitleOverlay 退化纯标记层。
+  ④文件树（ZCode 拷贝件适配）：行包裹层 px-1→0（行卡片与地址行同宽，
+  CDP 左右 inset 均 7.5）+ 地址行文件夹名品牌蓝
+  **text-(color:--brand)**——【坑】裸 text-(--brand) 对 Tailwind v4 歧义
+  （text-\* = 字号或颜色）不生成规则，须显式色彩提示。449 全绿 tsc 0。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
