@@ -74,7 +74,8 @@
   --logo-text-weight: 900;                    /* black */
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */
-  --logo-strip-h: 100px;                      /* 页签条总高（顶带分栏） */
+  --logo-strip-h: 85px;                       /* 页签条总高（顶带分栏；标题栏同源
+                                   ——用户 2026-10-05：100 → 85 一处取值） */
   --strip-pad-bottom: 7px;                    /* 页签行离条底边距（视觉 10px：字形底隙 3px 补偿后；用户定稿 15→下移 5px；所有栏统一） */
   --logo-glyph-drop: 8px;                     /* MIRACH 50px 行盒内字形下沉量（双行块项目名顶对齐字形补偿） */
   --logo-leading-gap: 12px;                   /* logo 带内 logo 与文字的间距 */

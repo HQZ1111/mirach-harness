@@ -69,8 +69,9 @@ export function MainTint({ model }: { model: Model }) {
   const rect = useTabsetRect(model, ['workspace'])
   if (!rect) return null
   // 条被「切换标签」隐藏时 outer 不渲染（rect.stripH=0）——顶带仍按
-  // --logo-strip-h 保留（双行块占位，与左栏 logo 同构），tint 从顶带下开始。
-  const stripH = rect.stripH > 0 ? rect.stripH : 100
+      // --logo-strip-h 保留（双行块占位，与左栏 logo 同构），tint 从顶带下开始。
+      // 回退值须与令牌同步（85，用户 2026-10-05：100→85）
+      const stripH = rect.stripH > 0 ? rect.stripH : 85
   return (
     <div
       aria-hidden
