@@ -23,8 +23,9 @@ body {
 .app-shell {
   background: var(--surface);
   /* 描边已去（用户 2026-10-05："壳，所有栏的描边效果不要了"）——圆角
-     仍由 border-radius 裁切，边缘定义不再靠线 */
-  border-radius: 50px;
+     仍由 border-radius 裁切，边缘定义不再靠线。圆角 40（用户 2026-10-05
+     定稿；resize 手柄离角 50 仍大于圆角，无需改）。 */
+  border-radius: 40px;
   color: var(--text);
   display: flex;
   flex-direction: column;

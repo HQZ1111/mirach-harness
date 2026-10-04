@@ -1036,7 +1036,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           // composer 与消息同列，自动跟随。
           ["--composer-bg" as string]:
             "color-mix(in oklab, var(--color-muted) 30%, transparent)",
-          ["--composer-radius" as string]: "1rem",
+          ["--composer-radius" as string]: "20px",
           ["--composer-padding" as string]: "8px",
         }}
       >

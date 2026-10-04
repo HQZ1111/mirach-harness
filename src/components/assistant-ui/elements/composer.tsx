@@ -130,7 +130,9 @@ export function ComposerBar({
       data-drag-active={dragActive || undefined}
       className={cn(
         paper,
-        "flex w-full flex-col gap-2 rounded-[24px] p-2.5 transition-colors",
+        /* 圆角 20（用户 2026-10-05 定稿；kit 原值 24）——harness 侧对官方
+           kit 的取值调整，编辑态 composer 的 --composer-radius 同步 */
+        "flex w-full flex-col gap-2 rounded-[20px] p-2.5 transition-colors",
         dragActive && "bg-blue-500/[0.04] dark:bg-blue-500/10",
         className,
       )}
