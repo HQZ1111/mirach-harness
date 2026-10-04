@@ -125,9 +125,6 @@ export const syncTabsetConstraints = (m: Model) => {
       mainMinW = scaled >= REGION_LIMITS.main.minW ? REGION_LIMITS.main.minW : Math.max(scaled, 40)
     }
   }
-  // 主栏吸收者是否在场——不在场时非主栏 max 放开、只留 min
-  // （用户 2026-09-26 定稿："最大宽度限制应该变没有"）
-  const hasMainKid = [...kidRegion.values()].some((r) => r === 'main')
   m.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
     // 浮动窗格隔离（§8/§12）：非主布局子树（浮动/弹出窗）不被 sync 污染
@@ -174,14 +171,13 @@ export const syncTabsetConstraints = (m: Model) => {
       // 主栏 min 用过承诺缩让值（正常宽度下 = 395）
       const minW = region === 'main' ? mainMinW : limits.minW
       if (node.getMinWidth() !== minW) patch.minWidth = minW
-      // 主栏不在场（无吸收者）→ 非主栏 max 放开、只留 min——否则列顶到
-      // max 后无人吸收富余又是行尾留白；主栏回来后 diff 门控自动恢复
-      const maxW = !hasMainKid ? 99999 : (limits.maxW ?? 99999)
-      if (node.getMaxWidth() !== maxW) patch.maxWidth = maxW
     } else {
       if (node.getMinWidth() !== 0) patch.minWidth = 0
-      if (node.getMaxWidth() !== 99999) patch.maxWidth = 99999
     }
+    // **v4.0：最大宽度不限制**（docs/layout-design.md §2.2）——任何残留的
+    // max 上限（旧存档的 420 等）统一冲开为 99999；轨除外（20 固定已在
+    // 上面分支落账）。diff 门控：已是 99999 的不发动作。
+    if (!isTrack && node.getMaxWidth() !== 99999) patch.maxWidth = 99999
     // 页签条显隐 = **hermes resolveTabStripVisible 阶梯**（strip-visibility.ts
     // 照抄；审查 D 层确认 harness 缺这套才导致"开关×内容互相打架"）：
     // ⓪区域竖轨形态（railByRegion：该区有 20px 轨）优先——网格分栏全部无

@@ -47,11 +47,13 @@ export const paneTypeOf = (paneId: string): PaneType | undefined => {
   return PANE_TYPES[t] ? t : undefined
 }
 
-/** 大栏约束（docs/layout-design.md §2 数值） */
-export const REGION_LIMITS: Record<Region, { minW: number; maxW: number | null }> = {
-  left: { minW: 240, maxW: 420 },
-  main: { minW: 395, maxW: null },
-  right: { minW: 240, maxW: 420 },
+/** 大栏约束（docs/layout-design.md §2 数值）。**v4.0：只保留最小宽**——
+ *  最大宽度不限制（用户 2026-10-04 定稿），max 配套逻辑全部废除；唯一
+ *  例外 20px 竖轨 min=max=20 固定（§4.2，导航特殊子项不是"栏"）。 */
+export const REGION_LIMITS: Record<Region, { minW: number }> = {
+  left: { minW: 240 },
+  main: { minW: 395 },
+  right: { minW: 240 },
 }
 
 /** 大栏默认宽（新建/预设用） */

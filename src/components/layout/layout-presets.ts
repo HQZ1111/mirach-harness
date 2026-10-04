@@ -24,7 +24,8 @@ export const COLLAPSED_ZONE_PX = 28
 
 // ── 固定 px 轨道（hermes 的 zone 声明式尺寸 + 用户覆盖：默认宽 350） ────────
 // 大栏约束数值（用户 2026-09-26 定稿，docs/layout-design.md §2）：左栏
-// 240-420 / 主栏 仅 min 395（无上限）/ 右栏 240-420；默认宽 350/746/700。
+// 240 / 主栏 395 / 右栏 240（v4.0：只保留最小宽，最大宽不限制）；
+// 默认宽 350/746/700。
 // **单一来源 = pane-registry.ts 的 REGION_LIMITS / REGION_DEFAULT_W**（P2-12
 // 单源化：此前的副本无人导入，已删——勿再在此复制一份）。高度：堆叠分栏
 // min = 标题栏（28）、max 无（v2.1 删除了终端 80vh 上限——"最大高度没
@@ -33,13 +34,13 @@ export const SIDEBAR_DEFAULT_WIDTH = 350
 
 /** 左栏 tabset（logo 带在上、标签条紧随其下）：宽度钳制 + 标签条自定义类
  *  （styles/flexlayout.css 给 .rail-tabstrip 顶部让出 logo 带高度） */
-export const RAIL_TABSET_ATTRS = { minWidth: 240, maxWidth: 420, classNameTabStrip: 'rail-tabstrip' }
+export const RAIL_TABSET_ATTRS = { minWidth: 240, classNameTabStrip: 'rail-tabstrip' }
 
 /** 主栏 zone 约束（仅 min 395，无上限） */
 export const MAIN_ZONE_ATTRS = { minWidth: 395 }
 
 /** 右栏 zone 约束（min 240 / max 420） */
-export const RIGHT_ZONE_ATTRS = { minWidth: 240, maxWidth: 420 }
+export const RIGHT_ZONE_ATTRS = { minWidth: 240 }
 
 /** 堆叠分栏高度下限（内容高；"挤压到最小只保留标题栏"） */
 export const STACKED_MIN_H = 0
@@ -68,7 +69,7 @@ const row = (weight: number, children: unknown[], attrs: Record<string, unknown>
 })
 
 // Default：根行水平 [左栏 | 主栏 | 右栏]；右栏垂直 [上排(检查|文件) / 终端]。
-// 宽度：左 350（240-420）/ 主吃剩余（min 395）/ 检查、文件各 350（240-420）。
+// 宽度：左 350（min 240）/ 主吃剩余（min 395）/ 检查、文件各 350（min 240）。
 // 高度：终端默认 20vh（weight 制，无 max——"最大高度没限制"）。
 
 /** flexlayout 分隔条占位：视觉是 1px 发丝线（--flexlayout-splitter-size），
@@ -98,8 +99,8 @@ const DEFAULT_TREE = () => {
     tabset((main / rootAvail) * 100, [tab('workspace', '主会话', false)], { minWidth: 395, ...zoneCfg('main') }),
     row((railTop / rootAvail) * 100, [
       row(((rightAvailH - term) / rightAvailH) * 100, [
-        tabset(50, [tab('review', '检查')], { minWidth: 240, maxWidth: 420, ...zoneCfg('right') }),
-        tabset(50, [tab('files', '文件树')], { minWidth: 240, maxWidth: 420, ...zoneCfg('right') }),
+        tabset(50, [tab('review', '检查')], { minWidth: 240, ...zoneCfg('right') }),
+        tabset(50, [tab('files', '文件树')], { minWidth: 240, ...zoneCfg('right') }),
       ], { id: 'spl-rail' }),
       tabset((term / rightAvailH) * 100, [tab('terminal', '终端')], { ...zoneCfg('right') }),
     ], { id: 'spl-right', ...zoneCfg('right') }),
@@ -149,7 +150,7 @@ const TERMINAL_TREE = () => {
       row(((colAvailH - term) / colAvailH) * 100, [
         tabset((rail / topAvail) * 100, [tab('sessions', '会话列表', false), tab('bots', '机器人', true)], { ...RAIL_TABSET_ATTRS, ...zoneCfg('left') }),
         tabset((main / topAvail) * 100, [tab('workspace', '主会话', false)], { minWidth: 395, ...zoneCfg('main') }),
-        tabset((deckSide / topAvail) * 100, [tab('files', '文件树', false), tab('review', '检查')], { minWidth: 240, maxWidth: 420, ...zoneCfg('right') }),
+        tabset((deckSide / topAvail) * 100, [tab('files', '文件树', false), tab('review', '检查')], { minWidth: 240, ...zoneCfg('right') }),
       ], { id: 'spl-deck-top' }),
       tabset((term / colAvailH) * 100, [tab('terminal', '终端')], { ...zoneCfg('right') }),
     ], { id: 'spl-deck-col' }),
@@ -175,7 +176,7 @@ const QUAD_TREE = () => {
       ], { id: 'spl-quad-top' }),
       row((term / colAvailH) * 100, [
         tabset(100 - (review / bottomAvail) * 100, [tab('terminal', '终端')], { ...zoneCfg('right') }),
-        tabset((review / bottomAvail) * 100, [tab('review', '检查')], { minWidth: 240, maxWidth: 420, ...zoneCfg('right') }),
+        tabset((review / bottomAvail) * 100, [tab('review', '检查')], { minWidth: 240, ...zoneCfg('right') }),
       ], { id: 'spl-quad-bottom' }),
     ], { id: 'spl-quad-col' }),
   ], { id: 'spl-quad-root' })

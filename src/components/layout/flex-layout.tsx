@@ -11,8 +11,6 @@ import { ChevronsDownIcon } from 'lucide-react'
 import { useStore } from 'zustand'
 import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
 import { DropOverlay } from './drop-overlay'
-// flexlayout 0.11.1 行节点 max 聚合缺陷的运行时修正（须先于布局执行，见文件头）
-import './flexlayout-rowfix'
 
 import { RailLogoLeading } from './rail-logo-leading'
 import { ResizeHandles } from './resize-handles'
@@ -895,10 +893,9 @@ export function FlexLayoutShell() {
       )
       const newSet = m.getNodeById(leadId)?.getParent()
       if (newSet instanceof TabSetNode) {
-        // 重建分栏直接按记忆宽写权重（不依赖延迟计算——否则 flexbox 默认
-        // 权重会被 max 钳住、measureRootPx 又把钳制值记回记忆）
-        const lim = REGION_LIMITS[side]
-        const memW = Math.min(Math.max(rootPxMem[side], lim.minW), lim.maxW ?? 99999)
+        // 重建分栏直接按记忆宽写权重（不依赖延迟计算）——v4.0：max 上限
+        // 已废除，目标 = 记忆宽、不低于底线
+        const memW = Math.max(rootPxMem[side], REGION_LIMITS[side].minW)
         const availNow = Math.max(rootAvailPx() - SPLITTER_PX * kids.length, 1)
         m.doAction(
           Actions.updateNodeAttributes(newSet.getId(), {
@@ -961,10 +958,9 @@ export function FlexLayoutShell() {
         )
         const newSet = lead.getParent()
         if (newSet instanceof TabSetNode) {
-          // 重建分栏直接按记忆宽写权重（不依赖延迟计算——否则 flexbox
-          // 默认权重会被 max 钳住、measureRootPx 又把钳制值记回记忆）
-          const lim = REGION_LIMITS[side]
-          const memW = Math.min(Math.max(rootPxMem[side], lim.minW), lim.maxW ?? 99999)
+          // 重建分栏直接按记忆宽写权重（不依赖延迟计算）——v4.0：max 上限
+          // 已废除，目标 = 记忆宽、不低于底线
+          const memW = Math.max(rootPxMem[side], REGION_LIMITS[side].minW)
           const availNow = Math.max(rootAvailPx() - SPLITTER_PX * kids.length, 1)
           m.doAction(
             Actions.updateNodeAttributes(newSet.getId(), {

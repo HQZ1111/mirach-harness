@@ -151,47 +151,34 @@ const UPD = Actions.UPDATE_NODE_ATTRIBUTES
 // ── absorbSurplus（§9 富余兜底） ─────────────────────────────────────────────
 
 describe('absorbSurplus（§9 富余兜底：吸收者唯一、根行 Σ=可用宽）', () => {
-  it('①有主栏：非吸收者钳进 [min,max]，富余全部进主栏分栏（Σ=可用宽）', () => {
+  it('①有主栏：非吸收者按记忆原位（v4 无 max 钳制），富余全部进主栏分栏（Σ=可用宽）', () => {
     const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 420, measured: 350, weight: 100 })
     const main = fakeTabset('main', { region: 'main', minW: 395, maxW: 99999, measured: 500, weight: 100 })
     const right = fakeTabset('right', { region: 'right', minW: 240, maxW: 420, measured: 700, weight: 100 })
     const root = fakeRow('root', [left, main, right])
     const { m, actions } = fakeModel(root)
     absorbSurplus(m)
-    // 3 kids → avail = 1800 − 2×1 缝 = 1798；右栏 700 钳进 max 420
+    // 3 kids → avail = 1800 − 2×1 缝 = 1798；右栏目标 = 记忆 700（不再钳 420）
     expect(actions).toHaveLength(3)
     expect(actions.map((a) => a.data?.node)).toEqual(['left', 'main', 'right'])
     expect(decode(actions[0], 1798)).toBeCloseTo(350, 6) // 左栏原位（量测即目标）
-    expect(decode(actions[1], 1798)).toBeCloseTo(1028, 6) // 主栏 = 1798−350−420，全部富余
-    expect(decode(actions[2], 1798)).toBeCloseTo(420, 6) // 右栏钳进聚合 max
+    expect(decode(actions[1], 1798)).toBeCloseTo(748, 6) // 主栏 = 1798−350−700
+    expect(decode(actions[2], 1798)).toBeCloseTo(700, 6) // 右栏原位（v4 无上限）
     const sum = actions.reduce((s, a) => s + decode(a, 1798), 0)
     expect(sum).toBeCloseTo(1798, 6) // 根行不变式：Σ = 可用宽
   })
 
-  it('②无主栏：富余进无上限列（吸收者钳制份额归还总账，Σ=可用宽）', () => {
-    // sync §2.4 放开后的状态：主栏不在场，非主栏 max=99999 只留 min
-    const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 99999, measured: 350, weight: 100 })
-    const right = fakeTabset('right', { region: 'right', minW: 240, maxW: 420, measured: 700, weight: 100 })
-    const root = fakeRow('root', [left, right])
-    const { m, actions } = fakeModel(root)
-    absorbSurplus(m)
-    // avail = 1799；右栏钳 420；差额 1379 全部给无上限的左栏（含其原位 350）
-    expect(actions).toHaveLength(2)
-    expect(decode(actions[0], 1799)).toBeCloseTo(1379, 6) // 1799−420（吸收者）
-    expect(decode(actions[1], 1799)).toBeCloseTo(420, 6)
-    expect(decode(actions[0], 1799) + decode(actions[1], 1799)).toBeCloseTo(1799, 6)
-  })
-
-  it('②b无主栏且无上限列：最后一个非轨列当吸收者（同样归还总账，Σ=可用宽）', () => {
+  it('②无主栏：第一个非轨列当吸收者（钳制份额归还总账，Σ=可用宽）', () => {
+    // 旧档残留 maxW 420（v4 语义下无害）：非吸收者按记忆原位，无 max 可钳
     const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 420, measured: 350, weight: 100 })
     const right = fakeTabset('right', { region: 'right', minW: 240, maxW: 420, measured: 700, weight: 100 })
     const root = fakeRow('root', [left, right])
     const { m, actions } = fakeModel(root)
     absorbSurplus(m)
-    // 吸收者 = 最后非轨列（右栏）：左栏 350 钳位保留，差额 1449 归右栏
+    // avail = 1799；吸收者 = 第一个非轨列（左栏）：350 原位归还 + 富余 749
     expect(actions).toHaveLength(2)
-    expect(decode(actions[0], 1799)).toBeCloseTo(350, 6)
-    expect(decode(actions[1], 1799)).toBeCloseTo(1449, 6) // 1799−350
+    expect(decode(actions[0], 1799)).toBeCloseTo(1099, 6) // 350 + 1799−1050
+    expect(decode(actions[1], 1799)).toBeCloseTo(700, 6) // 右栏记忆原位
     expect(decode(actions[0], 1799) + decode(actions[1], 1799)).toBeCloseTo(1799, 6)
   })
 
@@ -227,25 +214,22 @@ describe('absorbSurplus（§9 富余兜底：吸收者唯一、根行 Σ=可用�
     expect(actions).toHaveLength(0)
   })
 
-  it('④列超聚合 max 的内部留白被收回：右列 VERT 行 1100 → 841，富余归主栏', () => {
+  it('④Σ非主栏目标超可用宽（v4 无 max 收不回）：rest ≤ 0 整体放弃不写权重', () => {
     const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 420, measured: 350, weight: 100 })
     const main = fakeTabset('main', { region: 'main', minW: 395, maxW: 99999, measured: 500, weight: 100 })
     const review = fakeTabset('review', { region: 'right', minW: 240, maxW: 420 })
     const files = fakeTabset('files', { region: 'right', minW: 240, maxW: 420 })
     const terminal = fakeTabset('terminal', { region: 'right', minW: 0, maxW: 99999 })
     const band = fakeRow('band', [review, files]) // 检查|文件并排（hermes Default 右列上半）
-    const col = fakeRow('col', [band, terminal], 1100) // 右列 VERT 行，实测 1100 > 聚合 max
+    const col = fakeRow('col', [band, terminal], 1100) // 右列 VERT 行，实测 1100
     const root = fakeRow('root', [left, main, col])
     const { m, actions } = fakeModel(root)
-    // 超宽渲染已入记忆（measureRootPx 前置）——base=mem=1100 → 钳回聚合 max
+    // 记忆目标 350 + 1100 = 1450 > 可用宽（host 1200 → avail 1198）：
+    // v4 无聚合上限可收回，rest < 0 → 无富余可分配，整体放弃
+    hostEl.clientWidth = 1200
     rootPxMem.right = 1100
     absorbSurplus(m)
-    // 右列聚合 max = 420+420+1 缝 = 841（VERT 行 MIN 跨轴，终端柔性不约束列宽）
-    expect(actions).toHaveLength(3)
-    expect(actions[2].data?.node).toBe('col')
-    expect(decode(actions[0], 1798)).toBeCloseTo(350, 6)
-    expect(decode(actions[1], 1798)).toBeCloseTo(607, 6) // 主栏吸收 1798−350−841
-    expect(decode(actions[2], 1798)).toBeCloseTo(841, 6) // 列收回聚合 max
+    expect(actions).toHaveLength(0)
   })
 
   it('量测未就绪（任一列 rect 宽 ≤ 0）：整体放弃', () => {
@@ -270,41 +254,41 @@ describe('absorbSurplus（§9 富余兜底：吸收者唯一、根行 Σ=可用�
 
 // ── applyRootWeights（§9 根行解析式配重） ────────────────────────────────────
 
-describe('applyRootWeights（轨固定 / 主栏下限取实际生效 min / 非主栏钳聚合）', () => {
-  it('轨 20 固定不参与；非主栏钳聚合约束；主栏吃剩余（Σ=可用宽）', () => {
-    const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 300, weight: 100 }) // 记忆 350 被钳到 max 300
+describe('applyRootWeights（轨固定 / 主栏下限取实际生效 min / 非主栏记忆托底）', () => {
+  it('轨 20 固定不参与；非主栏按记忆宽（v4 无 max 钳）；主栏吃剩余（Σ=可用宽）', () => {
+    const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 300, weight: 100 }) // 旧档 maxW 300 在 v4 无效：目标 = 记忆 350
     const track = fakeTabset('track', { region: 'left', rail: true, track: true })
     const main = fakeTabset('main', { region: 'main', minW: 395, maxW: 99999, weight: 100 })
     const root = fakeRow('root', [left, track, main])
     const { m, actions } = fakeModel(root)
     applyRootWeights(m)
-    // avail = 1798；左 = clamp(记忆350, [240,300]) = 300；轨 = 20 固定；主 = 1478
+    // avail = 1798；左 = max(记忆350, min240) = 350；轨 = 20 固定；主 = 1428
     expect(actions).toHaveLength(3)
     expect(actions.map((a) => a.data?.node)).toEqual(['left', 'track', 'main'])
-    expect(decode(actions[0], 1798)).toBeCloseTo(300, 6)
+    expect(decode(actions[0], 1798)).toBeCloseTo(350, 6)
     expect(decode(actions[1], 1798)).toBeCloseTo(20, 6) // 轨不吃富余也不被钳
-    expect(decode(actions[2], 1798)).toBeCloseTo(1478, 6)
+    expect(decode(actions[2], 1798)).toBeCloseTo(1428, 6)
     const sum = actions.reduce((s, a) => s + decode(a, 1798), 0)
     expect(sum).toBeCloseTo(1798, 6)
   })
 
-  it('主栏下限取实际生效 minWidth（缩让态 40）：份额低于硬编码 395 时不再被顶回', () => {
+  it('主栏下限取实际生效 minWidth（缩让态 40）：亏空缩让后主栏不再被顶回 395', () => {
     const left = fakeTabset('left', { region: 'left', minW: 240, maxW: 420, weight: 100 }) // 记忆 350
     const track = fakeTabset('track', { region: 'left', rail: true, track: true })
-    const r1 = fakeTabset('r1', { region: 'right', minW: 240, maxW: 420, weight: 100 }) // 记忆 700 → 钳 420
+    const r1 = fakeTabset('r1', { region: 'right', minW: 240, maxW: 420, weight: 100 }) // 记忆 700（v4 无钳）
     const r2 = fakeTabset('r2', { region: 'right', minW: 240, maxW: 420, weight: 100 })
     const r3 = fakeTabset('r3', { region: 'right', minW: 240, maxW: 420, weight: 100 })
     const main = fakeTabset('main', { region: 'main', minW: 40, maxW: 99999, weight: 100 }) // sync 缩让后的生效 min
     const root = fakeRow('root', [left, track, r1, r2, r3, main])
     const { m, actions } = fakeModel(root)
     applyRootWeights(m)
-    // 6 kids → avail = 1795；350+20+420×3 = 1630 → 主栏份额 165（≥ 生效 min 40，
-    // 若下限写死 395 会被顶回 395 → Σ 超可用宽再溢出再缩让来回拉锯）
+    // 6 kids → avail = 1795；Σ非主栏记忆 = 350+20+700×3 = 2470 > avail
+    // → 亏空防护按比例缩让非主栏（floor）：350×0.7327=256、700×0.7327=512×3
+    // → 主栏份额为负，下限取生效 min 40（写死 395 会顶回再溢出再缩让拉锯）
     expect(actions).toHaveLength(6)
-    expect(decode(actsFor(actions, 'main')[0], 1795)).toBeCloseTo(165, 6)
-    expect(decode(actsFor(actions, 'r1')[0], 1795)).toBeCloseTo(420, 6) // 非主栏钳聚合 max
-    const sum = actions.reduce((s, a) => s + decode(a, 1795), 0)
-    expect(sum).toBeCloseTo(1795, 6)
+    expect(decode(actsFor(actions, 'main')[0], 1795)).toBeCloseTo(40, 6)
+    expect(decode(actsFor(actions, 'r1')[0], 1795)).toBeCloseTo(512, 6) // 缩让、非 max 钳
+    expect(decode(actsFor(actions, 'left')[0], 1795)).toBeCloseTo(256, 6)
   })
 
   it('单列（kids < 2）：不动作', () => {
@@ -325,14 +309,17 @@ describe('applyRootWeights（轨固定 / 主栏下限取实际生效 min / 非�
     expect(actions).toHaveLength(0)
   })
 
-  it('布局未就绪（任一列 bounds 上限为 0）：整体放弃', () => {
-    // fromJson 后未布局：calculatedMin/Max 全 0 → 目标会被钳成 0、主栏吃满
+  it('未布局冷启动（v4 无 max 守卫）：min 全 0 也有记忆托底，不再产生 0 目标', () => {
+    // fromJson 后未布局：v3 时代 bounds {0,0} 把目标钳成 0、主栏吃满；
+    // v4 目标 = max(记忆, min)——min 0 也有记忆 350 托底，权重合理
     const left = fakeTabset('left', { region: 'left', minW: 0, maxW: 0 })
     const main = fakeTabset('main', { region: 'main', minW: 395, maxW: 99999 })
     const root = fakeRow('root', [left, main])
     const { m, actions } = fakeModel(root)
     applyRootWeights(m)
-    expect(actions).toHaveLength(0)
+    expect(actions).toHaveLength(2)
+    expect(decode(actions[0], 1799)).toBeCloseTo(350, 6)
+    expect(decode(actions[1], 1799)).toBeCloseTo(1449, 6)
   })
 })
 

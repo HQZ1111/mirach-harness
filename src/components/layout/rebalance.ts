@@ -108,12 +108,11 @@ export const applyRootWeights = (m: Model): boolean => {
   const avail = rootAvailPx() - SPLITTER_PX * (kids.length - 1)
   if (avail < 300) return false // 窗口不可信（最小化/CDP 伪影），配重会烙进存档
   // 布局未就绪守卫（同 absorbSurplus）：flexlayout 首次布局前
-  // calculatedMin/Max 全 0，widthBounds = {0,0} 会把左右栏目标钳成 0、
-  // 主栏吃满全部可用宽（weight 100）——量不到就整体放弃
+  // calculatedMin/Max 全 0——量不到就整体放弃，等下一次触发
   const ready = kids.every((k) => {
     if (regionCfgOfNode(k)?.track) return true
     const b = widthBounds(k, k instanceof RowNode)
-    return Number.isFinite(b.min) && Number.isFinite(b.max) && b.max > 0
+    return Number.isFinite(b.min) && Number.isFinite(b.max)
   })
   if (!ready) return false
   const px: number[] = kids.map(() => 0)
@@ -126,9 +125,10 @@ export const applyRootWeights = (m: Model): boolean => {
       return
     }
     if (cfg?.region === 'main') return // 主栏吃剩余
+    // v4.0：max 上限已废除——目标 = 记忆宽、不低于聚合 min
     const b = widthBounds(k, k instanceof RowNode)
     const mem = cfg ? rootPxMem[cfg.region] : 700
-    px[i] = Math.min(Math.max(mem, b.min), b.max)
+    px[i] = Math.max(mem, b.min)
     rest -= px[i]
   })
   const mainKids = kids.filter((k) => {
@@ -171,8 +171,8 @@ export const applyRootWeights = (m: Model): boolean => {
       px[i] = Math.max((restNow * weightOf(k)) / wSum, Math.min(minW, Math.max(restNow, 40)))
     }
   } else {
-    // 主栏整栏折叠（无吸收者）：富余给最后一个非轨列——分栏内部由
-    // 各自的 max 钳制接管，这里只保证根行权重总量正确
+    // 主栏整栏折叠（无吸收者）：富余给第一个非轨列——根行不变式由这里的
+    // 显式分配保证（v4.0：无 max 可言，列间不再有"由上限接管"的次级机制）
     let last = kids.length - 1
     while (last >= 0 && regionCfgOfNode(kids[last])?.track) last--
     if (last >= 0) px[last] += Math.max(rest, 0)
@@ -194,13 +194,10 @@ export const applyRootWeights = (m: Model): boolean => {
   return true
 }
 
-/** 富余兜底（常跑版）：量测根行各列实际 px，非主栏列钳进聚合约束
- *  [min,max] 后把差额全部交给主栏分栏。两个入口都靠它：
- *  ① Σ < 可用宽（无人吸收的富余/行尾留白）；② 列超出**聚合 max**——
- *  子分栏全顶到 max 后列内部留白（用户截图实锤：检查|文件树 347/320，
- *  列 1100，行内空 375——根行 Σ=可用宽，deficit 探测不到，必须把列收
- *  回 max、富余还给主栏）。写入权重与渲染真相对齐，消掉 flexbox 的
- *  min/max 钉住态；变化 <2px 的列不动（防噪声 churn）。 */
+/** 富余兜底（常跑版）：量测根行各列实际 px，非主栏列钳到不低于聚合
+ *  min（v4.0：max 上限已废除）后把差额全部交给主栏分栏。入口：
+ *  Σ < 可用宽（无人吸收的富余/行尾留白）。写入权重与渲染真相对齐，
+ *  消掉 flexbox 的 min 钉住态；变化 <2px 的列不动（防噪声 churn）。 */
 export const absorbSurplus = (m: Model) => {
   const root = m.getRootRow()
   const kids = root?.getChildren() ?? []
@@ -209,20 +206,19 @@ export const absorbSurplus = (m: Model) => {
   if (availTotal < 300) return // 窗口不可信（最小化/CDP 伪影）
   const avail = availTotal - SPLITTER_PX * (kids.length - 1)
   // 布局未就绪守卫（boot 冷启动实测踩过）：flexlayout 要到首次布局才算
-  // calculatedMin/Max（fromJson 后全 0），DOM 也可能未量得——此时 widthBounds
-  // = {0,0}、各列目标全被钳成 0，主栏会吃到"rest = 全部可用宽"（权重 100），
-  // 左右栏被钳到最小 = 用户截图的右侧空白。任何一列量不到或约束无上限意义
-  // 时整体放弃，等下一次触发（90ms/resize/rAF）再做。
+  // calculatedMin（fromJson 后全 0），DOM 也可能未量得——此时量测整体
+  // 放弃，等下一次触发（90ms/resize/rAF）再做。
   const measured = kids.map((k) => measuredPxWidth(k))
   if (measured.some((w) => w <= 0)) return
   const boundsOk = kids.every((k) => {
     if (regionCfgOfNode(k)?.track) return true
     const b = widthBounds(k, k instanceof RowNode)
-    return Number.isFinite(b.min) && Number.isFinite(b.max) && b.max > 0
+    return Number.isFinite(b.min) && Number.isFinite(b.max)
   })
   if (!boundsOk) return
   const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
-  // 目标 px：轨=20 固定；主栏=-1（吸收者标记）；其余列钳进聚合约束。
+  // 目标 px：轨=20 固定；主栏=-1（吸收者标记）；其余列不低于聚合 min
+  // （v4.0：max 上限废除，目标=记忆宽托底）。
   // **base 用记忆 px 而非 measured**（2026-10-03 实锤）：结构动作后本函数
   // 与 applyRootWeights 同帧串跑，此刻渲染还是 stale 权重的旧帧（关 review
   // 后左栏 measured=420）——用 measured 会把 applyRootWeights 刚按记忆钉
@@ -236,11 +232,11 @@ export const absorbSurplus = (m: Model) => {
     const b = widthBounds(k, k instanceof RowNode)
     const memW = c ? rootPxMem[c.region] : undefined
     const base = typeof memW === 'number' && memW > 40 ? memW : measured[i]
-    return Math.min(Math.max(base, b.min), b.max)
+    return Math.max(base, b.min)
   })
   let rest = avail - px.reduce((s, v) => s + Math.max(v, 0), 0)
   // 吸收者：主栏分栏按当前权重比例分吃 rest（各不低于实际生效 min——
-  // sync 的过承诺缩让值）；没有主栏分栏 → 无上限列 → 最后一个非轨列
+  // sync 的过承诺缩让值）；没有主栏分栏 → 第一个非轨列兜底
   // （右栏的 20px 轨贴在行尾，不能当吸收者）
   let mains: number[] = []
   kids.forEach((_, i) => {
@@ -250,10 +246,8 @@ export const absorbSurplus = (m: Model) => {
     let cand = -1
     for (let i = 0; i < kids.length; i++) {
       if (regionCfgOfNode(kids[i])?.track) continue
-      if (widthBounds(kids[i], kids[i] instanceof RowNode).max >= 9999) {
-        cand = i
-        break
-      }
+      cand = i
+      break
     }
     if (cand === -1) {
       cand = kids.length - 1

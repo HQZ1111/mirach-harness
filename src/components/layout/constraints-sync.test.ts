@@ -130,7 +130,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
     const root = rootWith([colA])
     const { m, actions } = fakeModel(root, [colA, workspace])
     syncTabsetConstraints(m)
-    // 列身份 = left（戳保持）：min 回 240；无主栏在场 → 非主栏 max 放开
+    // 列身份 = left（戳保持）：min 回 240；残留的 420 上限被 v4 统一冲开
     const a = actsFor(actions, 'colA')
     expect(a).toHaveLength(1)
     expect(a[0].type).toBe(Actions.UPDATE_NODE_ATTRIBUTES)
@@ -143,7 +143,7 @@ describe('syncTabsetConstraints 列 identity 四步优先级', () => {
   it('②无戳列由一级窗格家乡锚定：主会话拖出的新列 = main（而非邻居的 left）', () => {
     // 防回归（P1-2）：② 必须先于 ③ 邻居传播，否则新列被左邻抢锚成 left
     const sessions = fakeTab('sessions')
-    const colA = fakeTabset('colA', { region: 'left', minW: 240, maxW: 420, tabs: [sessions] })
+    const colA = fakeTabset('colA', { region: 'left', minW: 240, maxW: 99999, tabs: [sessions] })
     const workspace = fakeTab('workspace')
     const colB = fakeTabset('colB', { minW: 0, maxW: 99999, tabs: [workspace] })
     const root = rootWith([colA, colB])
@@ -243,8 +243,9 @@ describe('syncTabsetConstraints 轨/浮动/缩让/拆轨', () => {
     // → 主栏 min = max(18, 40) = 40（左右栏 240 底线不让）
     expect(actsFor(actions, 'mainA').map((x) => x.data?.json)).toEqual([{ minWidth: 40 }])
     expect(actsFor(actions, 'mainB').map((x) => x.data?.json)).toEqual([{ minWidth: 40 }])
-    expect(actsFor(actions, 'left')).toHaveLength(0)
-    expect(actsFor(actions, 'right')).toHaveLength(0)
+    // 左右栏 min 已就位（240），仅残留 420 上限被 v4 冲开
+    expect(actsFor(actions, 'left').map((x) => x.data?.json)).toEqual([{ maxWidth: 99999 }])
+    expect(actsFor(actions, 'right').map((x) => x.data?.json)).toEqual([{ maxWidth: 99999 }])
   })
 
   it('空区竖轨清理：某区已无任何分栏 → 拆轨（假页签建轨即删）', () => {

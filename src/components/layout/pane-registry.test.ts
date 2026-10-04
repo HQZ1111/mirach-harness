@@ -25,14 +25,13 @@ describe('PANE_TYPES 不变量', () => {
     expect(primaries.sort()).toEqual(['files', 'sessions', 'workspace'])
   })
 
-  it('REGION_LIMITS：min ≤ max（有 max 的区）；默认宽在区间内', () => {
+  it('REGION_LIMITS：默认宽不低于 min（v4.0：只有 min，max 不限制）', () => {
     for (const region of ['left', 'main', 'right'] as Region[]) {
       const lim = REGION_LIMITS[region]
-      if (lim.maxW != null) expect(lim.minW).toBeLessThanOrEqual(lim.maxW)
+      expect(typeof lim.minW).toBe('number')
+      expect(lim.minW).toBeGreaterThan(0)
       const def = REGION_DEFAULT_W[region]
       expect(def).toBeGreaterThanOrEqual(lim.minW)
-      // 列默认宽的天花板是**聚合** max（§2.3，随列内结构变化），
-      // 不与单分栏 maxW 直接比较——只做量级卫生检查（≤ 2×420 并排聚合）
       expect(def).toBeLessThanOrEqual(900)
     }
     expect((Object.keys(REGION_LIMITS) as PaneType[]).length).toBeGreaterThan(0)

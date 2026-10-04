@@ -60,17 +60,18 @@ export const rootAvailPx = (): number => {
   return avail
 }
 
-/** 子树沿宽度轴的聚合约束：tabset=大栏限制（轨=20 固定）；行按方向
- * 聚合——垂直行（子项横跨整行）宽 min=MAX(子)/max=MIN(子)，水平行
- * （并排）宽 min=Σ/max=Σ。行的方向按深度交替（根=水平，子行=垂直）。 */
+/** 子树沿宽度轴的聚合约束：tabset=大栏 min（轨=20 固定，**v4.0：栏无
+ *  上限，max 恒 99999**）；行按方向聚合——垂直行（子项横跨整行）宽
+ *  min=MAX(子)，水平行（并排）宽 min=Σ。行的方向按深度交替（根=水平，
+ *  子行=垂直）。max 侧保留递归只为轨的 20 固定（嵌套轨不是现实形态，
+ *  递归对 99999 是恒等运算）。 */
 export const widthBounds = (n: Node, vert: boolean): { min: number; max: number } => {
   if (n instanceof TabSetNode) {
     const cfg = zoneConfigOf(n)
     if (cfg?.track) return { min: TRACK_W, max: TRACK_W }
-    // 读节点**实际生效**的 min/max（sync 已按堆叠语境清过：垂直堆叠
-    // 分栏宽度跟随所在列 [0,∞]——不能回头按大栏限制表钳，否则右列
-    // 会被终端的 420 上限整列钳死）
-    return { min: n.getMinWidth(), max: Math.min(n.getMaxWidth(), 99999) }
+    // 读节点**实际生效**的 min（sync 已按堆叠语境清过：垂直堆叠分栏宽度
+    // 跟随所在列 [0,∞]——不能回头按大栏限制表钳）；max 恒无上限（v4.0）
+    return { min: n.getMinWidth(), max: 99999 }
   }
   if (n instanceof RowNode) {
     const kids = n.getChildren()
@@ -159,13 +160,10 @@ export const rootNeededMin = (m: Model): number => {
   return sum + SPLITTER_PX * Math.max(kids.length - 1, 0)
 }
 
-/** 拖拽实时钳制：flexlayout 的 calculateSplit 只按 MIN 侧钳位，**不钳聚
- *  合 MAX**——手柄把右栏拖过聚合上限后，DOM 的内联 max-width 把列钉住、
- *  富余甩给别的列，松手权重提交又跳回，跟限制"打架闪烁"（用户实测）。
- *  逐子项钳进 [minAlong, maxAlong]，差额交给有容量（未顶格）的子项
- *  ——主栏/无上限列容量最大，自然承担吸收者角色。返回修正后的权重；
- *  无需修正返回 null。**按行方向取轴**：HORZ 行钳宽度、VERT 行钳高度
- *  （此前 VERT 行被按宽度轴钳，高度拖拽被错误界限卡死）。 */
+/** 拖拽实时钳制（**min 侧保险网**，v4.0：max 上限已废除）：嵌套行的 min
+ *  不向上传播（flexlayout 原生只钳直接子项）——逐子项钳到不低于聚合
+ *  min，防止嵌套组合被拖破底线。**按行方向取轴**：HORZ 行钳宽度、VERT
+ *  行钳高度（此前 VERT 行被按宽度轴钳，高度拖拽被错误界限卡死）。 */
 export const clampRowWeights = (row: RowNode, weights: number[]): number[] | null => {
   const kids = row.getChildren()
   if (kids.length !== weights.length || kids.length < 2) return null
@@ -176,21 +174,14 @@ export const clampRowWeights = (row: RowNode, weights: number[]): number[] | nul
   const sum = weights.reduce((s, w) => s + (Number.isFinite(w) ? w : 0), 0)
   if (!(sum > 0)) return null
   const minPx: number[] = []
-  const maxPx: number[] = []
   for (const k of kids) {
     const b = horz ? widthBounds(k, k instanceof RowNode) : heightBounds(k)
     minPx.push(b.min)
-    maxPx.push(Math.min(b.max, avail))
   }
-  if (minPx.some((m) => !Number.isFinite(m)) || maxPx.some((m) => !Number.isFinite(m))) return null
-  // 纯逐子项钳制（保险网）：行的聚合上限由 flexlayout-rowfix 修正后的
-  // 引擎原生执行（内联 max-width + calculateSplit 对被拖子项的自钳），
-  // 正常拖拽到不了这里；本函数只兜非拖拽路径的权重越界。不做差额回填
-  // （flexbox 归一化的越界渲染已由内联上限在 DOM 层硬钳）。
+  if (minPx.some((m) => !Number.isFinite(m))) return null
   const clamped = weights.map((w, i) => {
     const px = (w / sum) * avail
-    const c = Math.min(Math.max(px, minPx[i]), maxPx[i])
-    return (c / avail) * 100
+    return (Math.max(px, minPx[i]) / avail) * 100
   })
   let changed = false
   for (let i = 0; i < clamped.length; i++) {
