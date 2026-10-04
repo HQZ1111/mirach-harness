@@ -2911,6 +2911,19 @@ value 限制）。406 用例。
   ②两侧光条高度不一致——指针 Y 只发在悬停侧、另一侧停在 50% 中线，
   改发到**父容器**（thread 根）两侧共享同一坐标（两柄同高同位，坐标
   空间一致）。
+- **三十五轮（2026-10-05）——关栏左栏跳动根修（用户实测："关闭其中一个
+  栏，左栏会跳动一下"）**：**根因 = 关栏后的根行权重归一闪跳帧**——
+  DELETE_TAB 已改模型、React 提交按剩余权重归一渲染一帧（左栏份额突变
+  349.6），90ms 串行通道才按记忆钉回（262）——廿四轮的"同步量测+90ms
+  钉回"留了这个窗口。**修复 = DELETE_TAB 时同步钉回**（onModelChange 的
+  DELETE_TAB 分支：measureRootPx 记录关闭前所见宽 → 立即 applyRootWeights
+  写权重——React 提交帧即带最终几何，闪跳帧根本不渲染；90ms 通道保留作
+  批量/兜底，二次执行幂等；pinPending 挂起期不插手）。**复现法（模型直
+  操作，绕开拖拽几何）**：`window.__flModel.doAction(Actions.addNode(…,
+  root.getId(), DockLocation.RIGHT, …))` 建临时列 → 逐帧采样左栏宽 →
+  `deleteTab` → 修复前 trace 262→349.6→262，修复后仅 262。**坑**：探针
+  里 flexlayout 的 Actions 要从 vite deps 缓存 URL `import()`（与应用同
+  实例；裸对象 doAction 会炸链）。443 全绿 tsc 0。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径

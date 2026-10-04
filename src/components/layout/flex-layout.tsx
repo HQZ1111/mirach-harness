@@ -542,7 +542,16 @@ export function FlexLayoutShell() {
         // 关闭前看到的各列宽（想要的状态），90ms 定时器 applyRootWeights
         // 据此钉回 → 关闭不漂移；且覆盖任何历史污染（stale 权重写进
         // rootPxMem/localStorage 的 413），关闭一次即自愈为"保持不变"。
-        if (action?.type === Actions.DELETE_TAB) measureRootPx(m)
+        if (action?.type === Actions.DELETE_TAB) {
+          measureRootPx(m)
+          // **同步钉回**：关闭已改模型、尚未渲染——此刻把记忆宽（= 用户
+          // 关闭前所见）立即写成权重，React 提交帧即带最终几何。不等
+          // 90ms 通道的话，flexbox 先按剩余权重归一渲染一帧（左栏份额
+          // 突变 = 用户实测"关栏左栏跳动一下"），然后才被钉回。钉回的
+          // 90ms 通道保留（批量/兜底，二次执行幂等）；钉回挂起期不插手
+          //（hide/show 的 pinAfterLayout 自己管）。
+          if (!pinPendingRef.current) applyRootWeights(m)
+        }
         scheduleRebalance(action?.type !== Actions.ADJUST_WEIGHTS)
       }
       if (migratingRef.current) return
