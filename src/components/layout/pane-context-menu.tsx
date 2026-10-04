@@ -82,9 +82,6 @@ export interface ZoneMenuFlags {
   maximized: boolean
   /** 非轨分栏 ≥2 才可最大化（"最大化仅多窗格时可用"）。 */
   canMaximize: boolean
-  stripVisible: boolean
-  /** 竖轨形态大栏（rail）：标签条由区域形态管，菜单不开放单栏开关。 */
-  stripLocked: boolean
 }
 
 export const zoneMenuFlags = (model: Model, tabId: string): ZoneMenuFlags | undefined => {
@@ -112,8 +109,6 @@ export const zoneMenuFlags = (model: Model, tabId: string): ZoneMenuFlags | unde
     allCloseable: closeables.length,
     maximized: set.isMaximized(),
     canMaximize: setCount >= 2,
-    stripVisible: set.isEnableTabStrip(),
-    stripLocked: !!cfg?.rail,
   }
 }
 
@@ -133,13 +128,6 @@ export const buildPaneMenuItems = (f: ZoneMenuFlags): PaneMenuItem[] => [
   { kind: 'item', id: 'close-others', label: '关闭其他', disabled: !f.othersCloseable },
   { kind: 'item', id: 'close-right', label: '关闭右侧', disabled: !f.rightCloseable },
   { kind: 'item', id: 'close-all', label: '全部关闭', disabled: !f.allCloseable },
-  { kind: 'sep', id: 'sep-strip' },
-  {
-    kind: 'item',
-    id: f.stripVisible ? 'hide-strip' : 'show-strip',
-    label: f.stripVisible ? '隐藏标签' : '显示标签',
-    disabled: f.stripLocked,
-  },
 ]
 
 // ── 动作映射（flexlayout Actions；doAction 经壳 onModelChange 自动
@@ -181,21 +169,6 @@ export const runPaneMenuAction = (itemId: string, model: Model, tabId: string): 
       }
       return
     }
-    case 'hide-strip':
-    case 'show-strip': {
-      const visible = set.isEnableTabStrip()
-      // hermes 语义：对屏幕现状取反，写显式 mode（zone 离开 auto）；条实
-      // 际显隐由 sync 阶梯 resolver 落属性（含 stranded 保护）。两条隐藏
-      // 路径（app 菜单/pane 菜单）同写一个位面（config.tabStripMode）。
-      const next: 'always' | 'never' = visible ? 'never' : 'always'
-      model.doAction(
-        Actions.updateNodeAttributes(set.getId(), {
-          enableTabStrip: next === 'always',
-          config: { ...zoneConfigOf(set), tabStripMode: next },
-        }),
-      )
-      return
-    }
     default:
       console.error('[pane-context-menu] unknown menu item', itemId)
   }
@@ -221,8 +194,6 @@ const ITEM_ICONS: Record<string, FC<{ className?: string }>> = {
   'close-all': EraserIcon,
   maximize: Maximize2Icon,
   restore: Minimize2Icon,
-  'hide-strip': EyeOffIcon,
-  'show-strip': EyeIcon,
 }
 
 const ZoneMenuIcon: FC<{ itemId: string }> = ({ itemId }) => {

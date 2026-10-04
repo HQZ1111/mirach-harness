@@ -1,251 +1,94 @@
-import { Actions, DockLocation, Model, Orientation, RowNode, TabNode, TabSetNode, type Node } from 'flexlayout-react'
-import { SPLITTER_PX } from './layout-presets'
-import { PANE_TYPES, PRIMARY_PANE, REGION_LIMITS, TRACK_W, paneTypeOf, zoneConfigOf, type Region } from './pane-registry'
-import { isTopBand, regionCfgOfNode, rootAvailPx, widthBounds } from './constraints'
-import { sessionCatalog } from '../panes/session-manage/session-catalog'
+import { Actions, Model, Orientation, RowNode, TabSetNode, type Node } from 'flexlayout-react'
+import { REGION_LIMITS, zoneConfigOf } from './pane-registry'
+import { rootAvailPx } from './constraints'
 
 /**
- * 约束应用器 syncTabsetConstraints（docs/layout-design.md §2 约束引擎 v4）：
- * 限制跟随状态——列 identity 三级推导（config 戳→一级窗格→最近邻）、
- * 过承诺缩让、空区竖轨清理、分栏 min/max/条形态/低条/关闭钮语义落属性。
- * diff 门控：属性一致的 tabset 不发动作。
- */
-/**
- * 约束引擎 v4（docs/layout-design.md）——**限制跟随状态**：列 identity 由
- * 一级窗格锚定（含 sessions=左栏、workspace=主栏、files=右栏），分栏的
- * 宽度限制/关闭钮跟随其所在列动态推导（拖进哪栏继承哪栏，回家自动变
- * 回来）。**diff 门控**：属性一致的 tabset 不发动作。
+ * 约束应用器 syncTabsetConstraints（docs/layout-design.md v5.0 §2/§3）——
+ * **静态三栏校验**：三栏固定后，这里只剩三件事：
+ *   ①min/max 下发（左栏唯一有 max 420）；
+ *   ②上下行数限制（≤2，竖分不可再分）——超限的冗余竖分结构不存在于出厂树，
+ *     拖拽投放层已拒，此处仅防御；
+ *   ③config 跟随所在列（页签不会跨栏，但防御旧档/异常）。
+ * diff 门控：属性一致不发动作。
  */
 export const syncTabsetConstraints = (m: Model) => {
-  // 竖轨形态由**轨**决定（railByRegion = 该栏有没有 20px 轨）——分栏自身
-  // 不携带形态；有轨的大栏，其分栏横向条统一隐藏、内容向上充满
-  const railByRegion: Record<Region, boolean> = { left: false, main: false, right: false }
-  m.visitNodes((node) => {
-    if (!(node instanceof TabSetNode)) return
-    // 浮动窗格隔离（§8/§12）：非主布局子树（浮动/弹出窗）不参与竖轨形态
-    // 判定——轨只建在主布局网格里
-    if (node.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
-    const cfg = zoneConfigOf(node)
-    if (cfg?.rail && cfg.track) railByRegion[cfg.region] = true
-  })
-  // 过承诺防护（"右栏被挤出窗口"的根治）：Σ(各大栏最小宽) > 可用宽时，
-  // 主栏分栏的 min 按比例缩让——主栏是吸收者，富余归它，亏空也只能归它
-  // （左右栏的 240 底线不让）。多开主栏分栏（395×n）或窗口变窄时触发；
-  // 宽度恢复后这里自动回 395（diff 门控双向生效）。flexbox 的内联
-  // min-width 钳死了权重层的一切缩让，min 必须在这里改。
   const rootRow = m.getRootRow()
   const rootKids = rootRow?.getChildren() ?? []
-  // ── 列 region 推导（"宽度限制跟随状态"的核心，用户 2026-09-26 定稿）──
-  // 来源优先级：①config 戳（有戳列 identity 永久保持——防夺锚：拖入别
-  // 的一级窗格、或原锚离开，都不改变列身份）；②列子树内第一个一级窗格
-  // （全新列由它锚定，如拖出的主会话新列 = 主栏）；③**最近邻已推导列**
-  // （拖出的非一级新分栏继承来源列——v4 曾丢失此规则，机器人拖出双栏
-  // 并列后错继承 main）；④main。轨不参与（无 region 条目）。
-  const kidRegion = new Map<string, Region>()
-  const primaryRegionOf = (k: Node): Region | undefined => {
-    let r: Region | undefined
-    const walk = (n: Node) => {
+
+  // 每个根行子项的列 region：沿父链上溯 = 根行直接子项，读 config.region；
+  // 无戳（异常）按位置兜底——中间=chat，最右=panels，最左=left
+  const kidRegion = new Map<string, 'left' | 'chat' | 'panels'>()
+  rootKids.forEach((k, i) => {
+    let r: 'left' | 'chat' | 'panels' | undefined
+    const walk = (n: Node): void => {
       if (r) return
-      if (n instanceof TabNode) {
-        const t = paneTypeOf(n.getId())
-        const def = t ? PANE_TYPES[t] : undefined
-        if (def?.primary) r = def.region
-        return
+      if (n instanceof TabSetNode) {
+        const cfg = zoneConfigOf(n)
+        if (cfg) { r = cfg.region; return }
       }
-      for (const c of n.getChildren()) walk(c)
+      const kids = typeof n.getChildren === 'function' ? n.getChildren() : []
+      for (const c of kids) walk(c)
     }
     walk(k)
-    return r
-  }
-  const nonTrackKids = rootKids.filter((k) => !regionCfgOfNode(k)?.track)
-  for (const k of nonTrackKids) {
-    const stamped = regionCfgOfNode(k)?.region
-    if (stamped) kidRegion.set(k.getId(), stamped)
-  }
-  // ② 全新列（无戳）由列子树内第一个一级窗格的家乡 region 锚定——**必须
-  // 先于邻居传播**（§2.1 优先级）：否则拖出的主会话新列会被邻居（如左栏）
-  // 的 region 抢锚，宽度限制跟着错（"主会话拖到左栏旁分裂"场景，
-  // 2026-10-01 审查 P1-2）。
-  for (const k of nonTrackKids) {
-    if (kidRegion.get(k.getId())) continue
-    const r = primaryRegionOf(k)
-    if (r) kidRegion.set(k.getId(), r)
-  }
-  // ③ 邻居传播：仍无 region 的列（子树无一级窗格，如拖出的机器人分栏）
-  // 从最近邻（左先右后）继承，直到收敛
-  let propagated = true
-  while (propagated) {
-    propagated = false
-    for (let i = 0; i < nonTrackKids.length; i++) {
-      const k = nonTrackKids[i]
-      if (kidRegion.get(k.getId())) continue
-      const leftR = i > 0 ? kidRegion.get(nonTrackKids[i - 1].getId()) : undefined
-      const rightR = i < nonTrackKids.length - 1 ? kidRegion.get(nonTrackKids[i + 1].getId()) : undefined
-      const r = leftR ?? rightR
-      if (r) {
-        kidRegion.set(k.getId(), r)
-        propagated = true
-      }
-    }
-  }
-  // ④ 都不满足 → main
-  for (const k of nonTrackKids) {
-    if (!kidRegion.get(k.getId())) kidRegion.set(k.getId(), 'main')
-  }
-  // 空区竖轨清理（用户 2026-09-27：竖轨里关闭区内最后一个窗格后，空轨
-  // 不残留——原"空轨保留"设计作废）：某区的轨还在、但该区已无任何分栏
-  // → 拆轨（区丢失后回种走回家/拖缘/+，不依赖空轨）。
-  for (const k of rootKids) {
-    const cfg = regionCfgOfNode(k)
-    if (!cfg?.track) continue
-    if (nonTrackKids.some((z) => kidRegion.get(z.getId()) === cfg.region)) continue
-    m.doAction(Actions.updateNodeAttributes(k.getId(), { enableDeleteWhenEmpty: true, enableClose: true }))
-    const spacerId = `${cfg.region}-prune-spacer`
-    m.doAction(
-      Actions.addNode(
-        { type: 'tab' as const, id: spacerId, component: 'external', name: '', enableClose: true },
-        k.getId(),
-        DockLocation.CENTER,
-        0,
-      ),
-    )
-    m.doAction(Actions.deleteTab(spacerId))
-  }
-  let mainMinW = REGION_LIMITS.main.minW
-  if (nonTrackKids.length > 0 && window.innerWidth >= 600) {
-    const avail = rootAvailPx() - SPLITTER_PX * Math.max(rootKids.length - 1, 0)
-    if (avail > 300) {
-      let nonMainMin = 0
-      let mainTabs = 0
-      for (const k of nonTrackKids) {
-        if (kidRegion.get(k.getId()) === 'main') mainTabs++
-        else nonMainMin += widthBounds(k, k instanceof RowNode).min
-      }
-      const scaled = mainTabs > 0 ? Math.floor((avail - nonMainMin) / mainTabs) : REGION_LIMITS.main.minW
-      mainMinW = scaled >= REGION_LIMITS.main.minW ? REGION_LIMITS.main.minW : Math.max(scaled, 40)
-    }
-  }
+    if (!r) r = rootKids.length === 3 ? (i === 0 ? 'left' : i === 1 ? 'chat' : 'panels') : i === rootKids.length - 1 ? 'panels' : 'chat'
+    kidRegion.set(k.getId(), r)
+  })
+
+  // 可用宽（三栏间 2 条缝）
+  const avail = rootAvailPx() - 1 * Math.max(rootKids.length - 1, 0)
+
   m.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
-    // 浮动窗格隔离（§8/§12）：非主布局子树（浮动/弹出窗）不被 sync 污染
-    // ——浮窗内分栏不推 minWidth/不打 fl-strip-low/不改 enableClose，
-    // 限制与形态语义只属于主布局网格。
-    if (node.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
-    // 空分栏跳过；空轨（20px 导航轨）必须过——它的 min/max 在这里修
-    if (node.getChildren().length === 0 && !zoneConfigOf(node)?.track) return
-    const isTrack = zoneConfigOf(node)?.track === true
-    // 列 region：沿父链上溯到根行直接子项，查列 region 表
+    if (node.getChildren().length === 0) return
+    const parent = node.getParent()
+    const parentRow = parent instanceof RowNode ? parent : undefined
+    const alongWidth = parentRow ? parentRow.getOrientation() === Orientation.HORZ : true
+
     let rootKid: Node = node
     for (;;) {
       const p = rootKid.getParent()
       if (!p || p === rootRow) break
       rootKid = p
     }
-    const region = kidRegion.get(rootKid.getId()) ?? regionCfgOfNode(node)?.region ?? 'main'
-    const limits = REGION_LIMITS[region]
-    const rail = railByRegion[region]
+    const region = kidRegion.get(rootKid.getId()) ?? 'chat'
     const patch: Record<string, unknown> = {}
-    // config 跟随状态重钉：分栏现在的 region = 它所在列的 region（"标签
-    // 要知道自己被拖进哪一栏"，回家后自动变回来）。**轨必须跳过重钉**：
-    // updateNodeAttributes 的 config 是整对象替换，重钉 {region, rail} 会
-    // 把轨的 track:true 身份抹掉 → findRailTabset 失效 → 每次切竖轨都新建
-    // 一条轨，积累成两排 20px 竖条（2026-09-26 用户截图实锤）。
+
+    // config 跟随所在列（防御旧档；diff 门控下常态零动作）
     const oldCfg = zoneConfigOf(node)
-    if (!isTrack && (!oldCfg || oldCfg.region !== region || oldCfg.rail)) {
-      // tabStripMode 随分栏走（用户对该 zone 的 chrome 选择，hermes group
-      // 同语义）——region 重钉是整对象替换，不带上会被抹掉
-      patch.config = { region, rail: false, tabStripMode: oldCfg?.tabStripMode }
+    if (!oldCfg || oldCfg.region !== region) {
+      patch.config = { region }
     }
-    const parent = node.getParent()
-    const parentRow = parent instanceof RowNode ? parent : undefined
-    const alongWidth = parentRow ? parentRow.getOrientation() === Orientation.HORZ : true
-    // 纵向堆叠列的**第一个（顶部）分栏**保留列宽度限制，其余跟随上部
-    // （[0,∞]）——列的聚合 min=MAX(子 min)=列 min、max=MIN(子 max)=列 max，
-    // 列限制得保（终端这类柔性子项不受影响）。
-    const stackedFirst = !alongWidth && !!parentRow && parentRow.getChildren()[0] === node
-    if (isTrack) {
-      // 竖轨（栏外缘 20px 导航轨）：固定宽，不受大栏限制管
-      if (node.getMinWidth() !== TRACK_W) patch.minWidth = TRACK_W
-      if (node.getMaxWidth() !== TRACK_W) patch.maxWidth = TRACK_W
-    } else if (alongWidth || stackedFirst) {
-      // 主栏 min 用过承诺缩让值（正常宽度下 = 395）
-      const minW = region === 'main' ? mainMinW : limits.minW
+
+    // min/max 下发：沿宽度轴的直属子项才有宽约束（堆叠非首行跟随列宽）
+    if (alongWidth) {
+      const lim = REGION_LIMITS[region]
+      let minW = lim.minW
+      // 过承诺缩让（Σmin > avail 时按比例，底线 40）
+      if (region === 'chat' || region === 'panels') {
+        let nonChatMin = 0
+        let chatTabs = 0
+        for (const k of rootKids) {
+          const r = kidRegion.get(k.getId())
+          if (r === 'chat') chatTabs++
+          else if (r !== undefined) nonChatMin += REGION_LIMITS[r].minW
+        }
+        const scaled = chatTabs > 0 ? Math.floor((avail - nonChatMin) / chatTabs) : lim.minW
+        if (scaled < minW) minW = Math.max(scaled, 40)
+      }
       if (node.getMinWidth() !== minW) patch.minWidth = minW
+      if (region === 'left' && node.getMaxWidth() !== REGION_LIMITS.left.maxW) patch.maxWidth = REGION_LIMITS.left.maxW
     } else {
       if (node.getMinWidth() !== 0) patch.minWidth = 0
     }
-    // **v4.0：最大宽度不限制**（docs/layout-design.md §2.2）——任何残留的
-    // max 上限（旧存档的 420 等）统一冲开为 99999；轨除外（20 固定已在
-    // 上面分支落账）。diff 门控：已是 99999 的不发动作。
-    if (!isTrack && node.getMaxWidth() !== 99999) patch.maxWidth = 99999
-    // 页签条显隐 = **hermes resolveTabStripVisible 阶梯**（strip-visibility.ts
-    // 照抄；审查 D 层确认 harness 缺这套才导致"开关×内容互相打架"）：
-    // ⓪区域竖轨形态（railByRegion：该区有 20px 轨）优先——网格分栏全部无
-    //   条（轨是唯一导航；窗格在轨里有行级抓手，stranded 不适用）；
-    // ①mode 显式（'always'/'never'，config 持久化）→ 照办，但 stranded
-    //   （lone closeable main tile）优先于 never——"隐藏条是 chrome 请求，
-    //   绝不让界面不可达"；
-    // ②auto（无 mode）：>1 签有条；lone main 且存在 sibling main zone
-    //   有条（tiles 是 tabbed 工作流）；lone uncloseable workspace 无条
-    //   （chromeless，双行块常驻顶带）。
-    const shown = node.getChildren().filter((c): c is TabNode => c instanceof TabNode)
-    const mode = zoneConfigOf(node)?.tabStripMode as 'always' | 'never' | undefined
-    const isClosable = (t: TabNode) => t.isEnableClose()
-    const stranded = shown.length === 1 && isClosable(shown[0])
-    const siblingMainZone =
-      rootKids.filter(
-        (k) =>
-          k instanceof TabSetNode &&
-          kidRegion.get(k.getId()) === 'main' && // 用**推导后**的列 region（旧 config 无戳列 = undefined）
-          zoneConfigOf(k)?.track !== true &&
-          k.getId() !== node.getId(),
-      ).length > 0
-    let wantStrip: boolean
-    if (railByRegion[region]) {
-      wantStrip = false
-    } else if (shown.length === 0) {
-      wantStrip = false
-    } else if (stranded) {
-      wantStrip = true
-    } else if (mode) {
-      wantStrip = mode === 'always'
-    } else if (shown.length > 1) {
-      wantStrip = true
-    } else {
-      wantStrip = siblingMainZone && shown.some((t) => paneTypeOf(t.getId()) !== undefined)
-    }
-    if (node.isEnableTabStrip() !== wantStrip) patch.enableTabStrip = wantStrip
-    // 低条（上下分栏的非顶部分栏，isTopBand 判定）：classNameTabStrip 落在
-    // tabbar_outer 上，CSS 把条降到 --strip-low-height、文字居中。
-    // 轨跳过（无条）；竖轨形态条本就隐藏，类挂着无副作用。
-    if (!isTrack) {
-      const wantCls = isTopBand(rootRow, node) ? undefined : 'fl-strip-low'
-      if (node.getClassNameTabStrip() !== wantCls) patch.classNameTabStrip = wantCls
-    }
-    // 高度：垂直堆叠语境不设限（min 由标题条天然保证，max 无——"最大高度
-    // 没限制"）；历史遗留的 min/max 清回默认（白带类 bug 的根源随之消失）
+
+    // 高度：垂直堆叠不设限（min 由标题条天然保证）
     if (parentRow && parentRow.getOrientation() === Orientation.VERT) {
       if (node.getMinHeight() !== 0) patch.minHeight = 0
       if (node.getMaxHeight() !== 99999) patch.maxHeight = 99999
     }
+
     if (Object.keys(patch).length > 0) {
       m.doAction(Actions.updateNodeAttributes(node.getId(), patch))
-    }
-    // 一级窗格页签的关闭钮（回家语义）：离家显示 ✕（点击=回家），在家隐藏；
-    // 显隐统一走 hover（用户 2026-09-27 撤销常显）——fl-tab-away 仅作语义标记
-    for (const c of node.getChildren()) {
-      if (!(c instanceof TabNode)) continue
-      const ptype = paneTypeOf(c.getId())
-      const pdef = ptype ? PANE_TYPES[ptype] : undefined
-      if (!pdef?.primary) continue
-      const wantClose = region !== pdef.region
-      if (c.isEnableClose() !== wantClose) {
-        m.doAction(Actions.updateNodeAttributes(c.getId(), { enableClose: wantClose }))
-      }
-      const wantCls = wantClose ? 'fl-tab-away' : undefined
-      if (c.getClassName() !== wantCls) {
-        m.doAction(Actions.updateNodeAttributes(c.getId(), { className: wantCls }))
-      }
     }
   })
 }
