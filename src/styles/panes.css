@@ -608,14 +608,15 @@
 }
 
 /* 光条：骑指针 Y 的 3px 短条（实心核 ±12px、两侧 40px 渐隐），悬停/
-   拖拽显形。色 = 品牌蓝（--width-handle-glow → --brand，用户 2026-10-05
-   定稿；指针 Y 由手柄发布到 thread 根——两侧共享、对称等高）。 */
+   拖拽显形。色 = 品牌蓝 50% 透明度（--width-handle-glow → --brand，
+   color-mix 掺 50% 透明——用户 2026-10-05 定稿；指针 Y 由手柄发布到
+   thread 根——两侧共享、对称等高）。 */
 .aui-width-handle::after {
   background: linear-gradient(
     to bottom,
     transparent calc(var(--dsh-width-handle-pointer-y, 50%) - 52px),
-    var(--width-handle-glow) calc(var(--dsh-width-handle-pointer-y, 50%) - 12px),
-    var(--width-handle-glow) calc(var(--dsh-width-handle-pointer-y, 50%) + 12px),
+    color-mix(in srgb, var(--width-handle-glow) 50%, transparent) calc(var(--dsh-width-handle-pointer-y, 50%) - 12px),
+    color-mix(in srgb, var(--width-handle-glow) 50%, transparent) calc(var(--dsh-width-handle-pointer-y, 50%) + 12px),
     transparent calc(var(--dsh-width-handle-pointer-y, 50%) + 52px)
   );
   border-radius: 3px;

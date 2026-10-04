@@ -30,7 +30,9 @@ export function ChatTabLabel(): React.ReactElement | null {
       <span className="chat-tab-label__workspace" data-workspace={workspace}>
         {workspace}
       </span>
-      <span className="chat-tab-label__session" data-session={title}>
+      {/* title 悬停看全名：pointer-events 需在 span 上放行（锚层整体
+          none——见 flexlayout.css 的 __session 规则） */}
+      <span className="chat-tab-label__session" data-session={title} title={title}>
         {title || '\u00a0'}
       </span>
     </div>

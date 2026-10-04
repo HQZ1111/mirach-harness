@@ -1146,19 +1146,24 @@ export function FlexLayoutShell() {
       if (!(node instanceof TabSetNode)) return
       const cfg = zoneConfigOf(node)
       if (!cfg) return
-      // 会话分栏（左栏一级栏）：logo/文字注入 leading
-      if (node.getChildren().some((c) => c.getId() === 'sessions')) {
+      // 顶带 chrome 跟随**激活页签**（用户 2026-10-05 定稿：哪个标签激活
+      // 显示哪个，切换时跟着切）——激活 = 会话列表 → logo 注入 leading；
+      // 激活 = 对话页签（workspace/session-*）→ data-chat-lead 标记（双行
+      // 块由宿主层锚定激活对话所在 tabset；列宽中线起排的 CSS 钩子 =
+      // data-chat-zone，见 StripHiddenTitleOverlay）。两者按激活互斥——
+      // 同分栏切页签即切顶带身份，logo 与双行块叠加不可能发生。
+      const sel = node.getSelectedNode()
+      const selIsChat = !!sel && (sel.getId() === 'workspace' || paneTypeOf(sel.getId()) === 'session')
+      if (sel && sel.getId() === 'sessions') {
         renderValues.leading = <RailLogoLeading />
       }
       const isPrimaryZone = node.getChildren().some(
         (c) => c instanceof TabNode && paneTypeOf(c.getId()) === PRIMARY_PANE[cfg.region],
       )
       const openable = openableTypesForRegion(model, cfg.region)
-      // 主对话栏标记（用户 2026-10-03：**只有主对话栏**的页签从中线往右排
-      // ——双行块占左半；左/右栏靠左）。flexlayout 无 classNameTabset 属性
-      // （updateNodeAttributes 非法属性被忽略）——渲染层 leading 塞标记，
-      // CSS :has 从 tabset 上探命中 stretch。
-      if (cfg.region === 'main') {
+      // 对话区标记（激活 = 对话页签时注入；双行块/列宽中线的 CSS 钩子
+      // 走 data-chat-zone——StripHiddenTitleOverlay 按激活页签打标）。
+      if (selIsChat) {
         renderValues.leading = (
           <>
             {renderValues.leading}
@@ -1644,10 +1649,13 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         content = <div className="pane-placeholder"><p>未知窗格: {componentName}</p></div>
       }
       const parent = node.getParent()
+      // 竖轨形态 railform：**只包会话窗格自己的内容**（railform logo 跟随
+      // 会话激活——工厂按页签逐个渲染，wrapper 条件 = 本页签是 sessions 且
+      // 所在分栏条隐藏；workspace 等其他页签内容不再误包 logo）
       const surface =
         parent instanceof TabSetNode &&
         !parent.isEnableTabStrip() &&
-        parent.getChildren().some((c) => c.getId() === 'sessions')
+        node.getId() === 'sessions'
           ? (
               <div className="rail-pane-railform">
                 <RailLogoLeading />

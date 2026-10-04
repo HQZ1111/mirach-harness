@@ -708,7 +708,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 40vw;
+  max-width: 50%; /* 栏宽的 50%（页签从同一条中线起排）——超宽省略 */
 }
 
 .chat-tab-label__session {
@@ -719,6 +719,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 40vw;
+  max-width: 50%; /* 栏宽的 50%——会话名超宽省略，悬停看全名（title） */
   margin-top: 1px;
+  pointer-events: auto; /* 锚层整体 none——放行悬停 title（用户 2026-10-05） */
 }

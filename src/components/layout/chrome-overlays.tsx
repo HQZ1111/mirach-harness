@@ -14,9 +14,9 @@ import { useEffect, useState } from 'react'
 import { BorderNode, Model, TabNode, TabSetNode } from 'flexlayout-react'
 
 import { useLayoutStore } from '@/store/layout-store'
+import { paneTypeOf, zoneConfigOf } from './pane-registry'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 import { ChatTabLabel } from './chat-tab-label'
-import { zoneConfigOf } from './pane-registry'
 
 function tabsetRectOf(
   model: Model,
@@ -85,18 +85,55 @@ export function MainTint({ model }: { model: Model }) {
   )
 }
 
-/** 主对话双行块宿主叠层（用户 2026-10-03 定稿）：相对 workspace tabset
- *  **顶带**（--logo-strip-h 100px）定位——项目名顶部与左栏 MIRACH 文字
- *  顶部同线（tabset 顶 + --logo-leading-pad），会话名底部与页签行底部
- *  对齐（页签行沉顶带底 15px）。stretch 头栏内无法到达（tabset_header
- *  25px 把 stretch 顶压到 62，MIRACH 在 21）——必须宿主层叠片。内容 =
- *  ChatTabLabel（store 订阅，assistant-ui 数据经 chatTabLabelStore 单向
- *  进入 layout 层）。 */
+/** 主对话双行块宿主叠层（用户 2026-10-03 定稿；2026-10-05 改**跟随激活
+ *  对话页签**）：锚定 = 「选中的对话页签」（workspace 或 session-*）所在
+ *  tabset——哪个对话标签激活，双行块就显示在哪条顶带；非对话页签激活时
+ *  隐藏（顶带 chrome 跟随激活页签，与 logo 互斥，见 onRenderTabSet）。
+ *  内容 = ChatTabLabel（store 订阅，assistant-ui 数据经 chatTabLabelStore
+ *  单向进入 layout 层）。 */
 export function ChatLabelOverlay({ model }: { model: Model }) {
-  const rect = useTabsetRect(model, ['workspace'])
-  // 主区折叠成竖轨（宽 < 100）时双行块无空间承载——隐藏（与左栏竖轨
-  // 的 railform logo 同语义：形态不承载时不硬塞）。
-  if (!rect || rect.width < 100) return null
+  const layoutRev = useLayoutStore(s => s.layoutRev)
+  // dragRev：分隔条拖拽 adjusting 帧模型不变——订阅它逐帧跟随容器
+  const dragRev = useLayoutStore(s => s.dragRev)
+  const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null)
+  useEffect(() => {
+    const measure = () => {
+      // 找**选中态**的对话页签（跨 tabset 找；折叠在 border 的不算——
+      // 折叠页签不可见，顶带无空间承载）
+      let setPath: string | null = null
+      model.visitNodes((n) => {
+        if (setPath || !(n instanceof TabNode)) return
+        if (n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
+        const id = n.getId()
+        if (id !== 'workspace' && paneTypeOf(id) !== 'session') return
+        const p = n.getParent()
+        if (
+          p instanceof TabSetNode &&
+          p.getSelectedNode()?.getId() === id &&
+          !(p.getParent() instanceof BorderNode)
+        ) {
+          setPath = p.getPath()
+        }
+      })
+      if (setPath === null) {
+        setRect(null)
+        return
+      }
+      const el = setPath === null ? null : document.querySelector(`.flexlayout__tabset[data-layout-path="${setPath}"]`)
+      const hr = document.querySelector('.flexlayout-host')?.getBoundingClientRect()
+      const r = el?.getBoundingClientRect()
+      // 主区折叠成竖轨（宽 < 100）时双行块无空间承载——隐藏
+      if (!el || !hr || !r || !(r.width >= 100 && r.height > 0)) {
+        setRect(null)
+        return
+      }
+      setRect({ left: r.left - hr.left, top: r.top - hr.top, width: r.width })
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [model, layoutRev, dragRev])
+  if (!rect) return null
   return (
     <div
       className="chat-tab-label-anchor"
@@ -132,10 +169,11 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
         if (!el) return
         const hidden = n.isEnableTabStrip() === false
         el.setAttribute('data-strip-hidden', hidden && cfg.region !== 'left' ? 'true' : 'false')
-        // 主对话区标记：标在**当前收容 workspace 的 tabset**上——
-        // [data-chat-lead] 只在 workspace 页签激活时在 DOM（切到别的页签
-        // 内容卸载，:has 上探失灵、页签跳回最左），tab 级存在性不受激活态影响
-        const chatHere = n.getChildren().some((c) => c instanceof TabNode && c.getId() === 'workspace')
+        // 对话区标记：**激活页签是对话页签**的 tabset 才标（顶带 chrome
+        // 跟随激活页签——双行块/列宽中线的 CSS 钩子随之切换，用户
+        // 2026-10-05 定稿"哪个标签激活显示哪个"）
+        const sel = n.getSelectedNode()
+        const chatHere = !!sel && (sel.getId() === 'workspace' || paneTypeOf(sel.getId()) === 'session')
         el.setAttribute('data-chat-zone', chatHere ? 'true' : 'false')
       })
     }
