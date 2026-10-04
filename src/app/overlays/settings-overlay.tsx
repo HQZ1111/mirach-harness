@@ -31,9 +31,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
-import { useUiSettings } from '@/store/ui-settings'
-import type { ChatWidth } from '@/lib/chat-width'
-import { Cpu, Info, KeyRound, Layers, MessageSquare, RefreshCw, Wrench, XIcon } from 'lucide-react'
+import { Cpu, Info, KeyRound, Layers, RefreshCw, Wrench, XIcon } from 'lucide-react'
 
 import pkg from '../../../package.json'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
@@ -369,12 +367,9 @@ function SetEnumField({ read, options, unsetLabel, onWrite }: {
 // 的六段全部保留，只挪进各自的 sticky 标题 + 条件渲染壳）。id 仅用于左
 // 导航寻址（data-section-id），不进任何持久化面。
 
-type SectionId = 'chat' | 'model' | 'auth' | 'compaction' | 'retry' | 'raw' | 'about'
+type SectionId = 'model' | 'auth' | 'compaction' | 'retry' | 'raw' | 'about'
 
 const SECTIONS: readonly { icon: typeof Cpu; id: SectionId; label: string }[] = [
-  // 对话分段居首（dsh mirach 的 General 分段第一位同构；对话宽度等
-  // UI 级偏好与 pi 配置无关，放模型前）
-  { icon: MessageSquare, id: 'chat', label: '对话' },
   { icon: Cpu, id: 'model', label: '模型' },
   { icon: KeyRound, id: 'auth', label: '提供方凭据' },
   { icon: Layers, id: 'compaction', label: '压缩 · Compaction' },
@@ -424,9 +419,6 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
   // ── 主从两栏状态 ──
   // 选中节：左导航高亮 + 右栏条件渲染的依据，默认落模型节。
   const [activeSection, setActiveSection] = useState<SectionId>('model')
-  // 对话宽度（ui-settings store，即改即生效 + 持久化）
-  const chatWidth = useUiSettings((s) => s.chatWidth)
-  const setChatWidth = useUiSettings((s) => s.setChatWidth)
   // 数字字段草稿（键 = 段.键名，如 compaction.reserve_tokens）——从
   // SetNumField 本地 state 提升到此，条件渲染下切节不丢未落盘输入。
   const [numDrafts, setNumDrafts] = useState<Record<string, string | null>>({})
@@ -801,33 +793,6 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
         </nav>
         {/* 右内容区：只渲染选中节，独立滚动（节标题 sticky 见 overlays.css） */}
         <div className="set-content">
-          {/* ── 对话：对话宽度（dsh mirach General 段移植的 zosma 三档
-              820/1080/无限制）——即改即生效，持久化 localStorage ── */}
-          {activeSection === 'chat' && (
-          <section className="set-section">
-            <header className="set-section-head">
-              <h3 className="set-section-title">对话</h3>
-            </header>
-            <label className="set-hint" htmlFor="chat-width-select">
-              对话宽度
-            </label>
-            <select
-              id="chat-width-select"
-              className="set-select"
-              value={chatWidth === 'medium' ? 'medium' : chatWidth === 'full' ? 'full' : 'small'}
-              onChange={(e) => setChatWidth(e.target.value as ChatWidth)}
-            >
-              <option value="small">小 — 820px</option>
-              <option value="medium">中 — 1080px</option>
-              <option value="full">大 — 全宽（无限制）</option>
-            </select>
-            <p className="set-hint">
-              可读消息列的最大宽度（输入框随列同宽居中）；「大」为无边距铺满。
-              文案与三档取值照抄 dsh mirach 的 General 段（zosma 移植）。
-            </p>
-          </section>
-          )}
-
           {/* ── 模型：pi_list_models 目录 + 默认模型写 settings ── */}
           {activeSection === 'model' && (
           <section className="set-section">

@@ -4,6 +4,10 @@ import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired'
 import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
 import {
+  useConversationWidthAxis,
+  WidthHandle,
+} from '@/components/assistant-ui/width-handle';
+import {
   branchBridge,
   toBranchPickerView,
 } from "@/components/assistant-ui/branch-store";
@@ -1014,17 +1018,22 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
     }, 300);
   }, []);
 
+  // 对话宽度轴（dsh ConversationRoot 移植，见 width-handle.tsx）：观察列宽
+  // 发布 --dsh-chat-user-width / --dsh-conversation-column-width，供手柄
+  // 拖拽与 CSS 宽度轴消费
+  const widthAxis = useConversationWidthAxis();
+
   return (
     // asChild：Thread 不渲染自己的 div，行为合并到我们传入的容器上
     // （FlexLayout tab content 就是滚动/布局容器——官方"已有容器"场景）
     <ThreadPrimitive.Root asChild>
       <div
-        className="aui-root aui-thread-root bg-transparent @container flex h-full flex-col"
+        ref={widthAxis.rootResizeRef}
+        className="aui-root aui-thread-root bg-transparent @container relative flex h-full flex-col"
         style={{
-          // 可读列宽跟随对话宽度设置（dsh mirach 移植的 zosma 三档：
-          // main.tsx initUiSettings 落 --chat-max-width 820/1080/none；
-          // 回退 44rem = 变量不在场时的历史默认）。composer 同列自动跟随。
-          ["--thread-max-width" as string]: "var(--chat-max-width, 44rem)",
+          // 可读列宽 = dsh 对话宽度轴（width-handle.tsx：拖拽手柄发布
+          // --dsh-chat-user-width，自适应回退 = 列宽 64% 夹 [330,920]）。
+          // composer 与消息同列，自动跟随。
           ["--composer-bg" as string]:
             "color-mix(in oklab, var(--color-muted) 30%, transparent)",
           ["--composer-radius" as string]: "1rem",
@@ -1041,7 +1050,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
           >
         <div
           className={cn(
-            "mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4",
+            "mx-auto flex w-full max-w-(--dsh-chat-content-width) flex-1 flex-col px-4 pt-4",
             isEmpty && "justify-center",
           )}
         >
@@ -1099,9 +1108,22 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
               <ThreadSuggestions />
             </AuiIf>
           </ThreadPrimitive.ViewportFooter>
-        </div>
+          </div>
           </div>
         </ThreadPrimitive.Viewport>
+        {/* 对话宽度手柄（dsh ConversationRoot 同款：左右各一条，拖拽 =
+            对称缩放内容宽并持久化；仅对话在屏时渲染——新会话 hero 无列） */}
+        {!isEmpty &&
+          (['left', 'right'] as const).map((side) => (
+            <WidthHandle
+              key={side}
+              side={side}
+              onStart={widthAxis.onHandleStart}
+              onDrag={widthAxis.onHandleDrag}
+              onCommit={widthAxis.onHandleCommit}
+              onEnd={widthAxis.onHandleEnd}
+            />
+          ))}
       </div>
     </ThreadPrimitive.Root>
   );

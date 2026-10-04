@@ -5,7 +5,6 @@ import { App } from './app'
 import { AppContextMenu, openAppContextMenu } from './components/layout/app-context-menu'
 import { ZoneContextMenuHost, openZoneContextMenuAt } from './components/layout/pane-context-menu'
 import { inTauri } from './lib/tauri-window'
-import { initUiSettings } from './store/ui-settings'
 import { resolveContextMenuScope } from './components/panes/session-manage/context-menu-scope'
 // HarmonyOS Sans SC webfont（用户定稿：全局字体）——切片 woff2 + CSS
 // （包 exports 只开放 default=dist/index.css，子路径导入会被 vite 拦）
@@ -27,10 +26,6 @@ import './styles/tailwind.css'
 
 // 纯浏览器直开（无 Tauri 透明窗体）：铺满不圆角，见 base.css 窗体段
 if (!inTauri) document.body.classList.add('in-browser')
-
-// 对话宽度 CSS 变量（--chat-max-width/--chat-composer-max-width，dsh mirach
-// 移植的 zosma 三档设置）：渲染前落到 documentElement，首帧即正确列宽
-initUiSettings()
 
 // 全局右键范围裁定（hermes app-context-menu 体系的 Tauri 语义裁剪，纯函数
 // 见 context-menu-scope.ts）。capture 段一次监听、全应用一个裁定：

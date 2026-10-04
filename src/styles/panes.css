@@ -571,3 +571,71 @@
   line-height: 1.6;
   padding: 6px var(--hub-row-pad-x);
 }
+
+/* ── 对话宽度手柄（dsh ui-conversation ConversationRoot 移植，2026-10-05）
+   宽度轴：一个内容宽 W 同时管消息列与 composer（harness 里 composer 与
+   消息同列，输入卡片天然 = W；--dsh-composer-card-max-width 留作官方
+   ui-conversation 接入时的对齐轴）。W 自适应列宽：地板 330（mirach 用户
+   设定）、取列宽 64%、920px 行长上限；拖出的 --dsh-chat-user-width 整体
+   替换自适应项。列宽本体由 width-handle.tsx 的 ResizeObserver 发布。 ── */
+.aui-thread-root {
+  --dsh-chat-content-width: var(
+    --dsh-chat-user-width,
+    clamp(330px, calc(var(--dsh-conversation-column-width, 0px) * 0.64), 920px)
+  );
+  --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
+}
+
+/* 手柄：40px col-resize 条带 absolute 在 thread 根（不是滚动口——滚动口
+   里的绝对条会扩大可滚范围）。内缘在内容列外 24px（与光条同位），条带
+   从那里向外延 40px；外缘留 24px 安全区——余量不足时宽度算出负值、
+   条带归零（窄列不出现错位热区）。 */
+.aui-width-handle {
+  bottom: 0;
+  cursor: col-resize;
+  position: absolute;
+  top: 0;
+  width: min(40px, calc((100% - var(--dsh-chat-content-width)) / 2 - 24px - 24px));
+  z-index: 8;
+}
+
+.aui-width-handle[data-side='left'] {
+  right: calc(50% + var(--dsh-chat-content-width) / 2 + 24px);
+}
+
+.aui-width-handle[data-side='right'] {
+  left: calc(50% + var(--dsh-chat-content-width) / 2 + 24px);
+}
+
+/* 光条：骑指针 Y 的 3px 短条（实心核 ±12px、两侧 40px 渐隐），悬停/
+   拖拽显形。dsh 的 --dsw-alias-scrollbar-hover-l1 → 本工程 --text-4。 */
+.aui-width-handle::after {
+  background: linear-gradient(
+    to bottom,
+    transparent calc(var(--dsh-width-handle-pointer-y, 50%) - 52px),
+    var(--text-4) calc(var(--dsh-width-handle-pointer-y, 50%) - 12px),
+    var(--text-4) calc(var(--dsh-width-handle-pointer-y, 50%) + 12px),
+    transparent calc(var(--dsh-width-handle-pointer-y, 50%) + 52px)
+  );
+  border-radius: 3px;
+  bottom: 0;
+  content: '';
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 3px;
+}
+
+.aui-width-handle[data-side='left']::after {
+  right: 16px;
+}
+
+.aui-width-handle[data-side='right']::after {
+  left: 16px;
+}
+
+.aui-width-handle:hover::after,
+.aui-width-handle[data-dragging]::after {
+  opacity: 1;
+}
