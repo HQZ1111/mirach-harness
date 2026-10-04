@@ -2879,6 +2879,30 @@ value 限制）。406 用例。
   DOM，harness 的 assistant-ui 栈没有该树——将来接官方 ui-conversation
   包时一并移植（lib 头注释留档）。CDP 全链：默认 820→切中 1080→刷新
   持久化→还原 small；443 全绿 tsc 0。
+- **三十四轮（2026-10-05，109cf9e）——对话宽度改用 dsh 官方 WidthHandle
+  （用户纠正："不是 zosma 的，是 dsh 的"）**：三十三轮的 zosma 三档移植
+  理解错了方向，本轮整体替换。①width-handle.tsx = 官方
+  ui-conversation ConversationRoot 的 WidthHandle 完整移植（指针捕获 +
+  rAF 合帧 + **对称缩放**：外移 1px 内容宽 +2；指针 Y 发布光条变量；**有
+  位移的松手才落盘**——原地按放不得用夹紧显示值覆盖已存偏好；
+  pointercancel/丢捕获放弃手势）+ 宽度轴 hook（ResizeObserver 发布
+  --dsh-conversation-column-width 与重夹后的 --dsh-chat-user-width；**列宽
+  变化偏好等比迁移** = apps/mirach conversation-width.ts 补丁行为，官方
+  只重夹不迁移——最大化/还原时宽度跟随缩放）；②panes.css 手柄几何/
+  光条/宽度轴照抄官方 module.css（40px 条带/24 内缩/24 安全区/3px 光条，
+  窄列算负自动归零；dsw-alias-scrollbar-hover-l1→--text-4）；③
+  thread.aui.tsx 消息列走 --dsh-chat-content-width（自适应=列宽 64% 夹
+  [330,920]；CONTENT_MIN 330 = dsh 检出里已带的 mirach 调参），双手柄
+  仅对话在屏渲染（hero 无列=dsh 同语义）；④zosma 三档四处全撤（settings
+  段/main init/lib/store）。**两处有意偏差**：resolveContentWidth 与 CSS
+  clamp 完全一致（官方 TS 的 max(680,…) 地板在 <1063px 列与其自身 CSS
+  打架，harness 主栏常驻该区间——照抄会"抓柄瞬间跳宽"）；偏好等比迁移。
+  **CDP 验证**：自适应 477、拖拽实时发布+落盘、刷新持久化、等比迁移
+  330×(712/474)=496 分毫不差、悬停光条显形。**验证坑**：①会话水合期间
+  手柄随 !isEmpty 卸载——赶在水合窗口按下手柄 = 打在空处（首次拖拽无效
+  的假象，等水合完再拖即好）；②窗口最小化时 viewport=160px，布局在压缩
+  态被持久化（清 v6 也救不了——每次重载都再压缩再存）——测试前先用
+  PowerShell ShowWindow(9) 恢复 mirach-harness.exe 窗口。443 全绿 tsc 0。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
