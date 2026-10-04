@@ -48,6 +48,10 @@
   --hover-wash: rgba(0, 0, 0, 0.07);
   --surface: #ffffff;
   --brand: #006fff;                           /* 品牌色/主题色（用户定稿） */
+  --width-handle-glow: rgb(212, 212, 212);    /* 对话宽度手柄光条（dsh
+                                   ui-theme --dsw-static-neutral-300 浅色
+                                   值原样移植——2026-10-05 用户纠正"黑色"
+                                   后从 --text-4 改正 */
   --success: #10b981;                         /* 成功绿（未读圆点，hermes
                                    --ui-success 的基色 #10b981——hermes
                                    主题经 harmonize 向中景旋转 25%，浅色
