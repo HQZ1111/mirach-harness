@@ -278,6 +278,9 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
   let engaged = false
   let releaseEscapeLayer: (() => void) | null = null
   let cursor: string | null = null
+  // 被拖页签的跟手克隆件（「拖出来」视觉；engage 时创建、finish 时拆除）
+  let follower: HTMLElement | null = null
+  let grabOffset = { x: 0, y: 0 }
   // rAF-coalesced move processing: the raw handler only records the latest
   // point; all hit testing happens at most once per frame.
   let pending: { x: number; y: number; shift: boolean } | null = null
@@ -320,11 +323,38 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
     // mode, overlays) must not also fire on the same press.
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
 
-    // Floating ghost chip removed (user 2026-10-05: no dark label chip on
-    // tab drags) — the dragged zone/insertion overlays + cursor are the
-    // "what am I holding" feedback.
+    // 「拖出来」的视觉（用户 2026-10-05：页签要跟着指针走，不是原地压暗）：
+    // 克隆被拖的页签元素做跟手替身（外观 = 页签本尊，从按下点被"拿起"）。
+    // **克隆源 = e.target 上溯的页签按钮**——本会话从宿主捕获段进入
+    // （onPointerDownCapture 挂在 .flexlayout-host），currentTarget 是宿主
+    // 不是页签按钮，按 handle 判定永远不中（克隆从没创建过=「拖不出来」）。
+    const pressedTab =
+      e.target instanceof Element
+        ? (e.target.closest(
+            '.flexlayout__tab_button, .flexlayout__tab_button_stretch, .flexlayout__border_button',
+          ) as HTMLElement | null)
+        : null
+    if (pressedTab) {
+      const rect = pressedTab.getBoundingClientRect()
+      follower = pressedTab.cloneNode(true) as HTMLElement
+      follower.removeAttribute('id') // 页签按钮 id 全局唯一——克隆件不得重号
+      follower.classList.add('fl-drag-clone')
+      follower.style.width = `${rect.width}px`
+      follower.style.height = `${rect.height}px`
+      // 记住抓取偏移：指针相对页签原位的落点，跟随即从原姿态被提起
+      grabOffset = { x: x - rect.left, y: y - rect.top }
+      document.body.appendChild(follower)
+      moveFollower(x, y)
+    }
 
     spec.onEngage(x, y)
+  }
+
+  const moveFollower = (x: number, y: number) => {
+    follower?.style.setProperty(
+      'transform',
+      `translate3d(${x - grabOffset.x}px, ${y - grabOffset.y}px, 0)`,
+    )
   }
 
   const processMove = (x: number, y: number, shift: boolean) => {
@@ -337,6 +367,8 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
     }
 
     const hint = spec.resolveMove(x, y, shift)
+
+    moveFollower(x, y)
 
     // Over a deny area (no target — titlebar / statusbar / gutters /
     // off-window) the release cancels; the cursor says so up front.
@@ -375,6 +407,8 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
 
     document.body.style.cursor = restoreCursor
     document.body.style.userSelect = restoreSelect
+    follower?.remove()
+    follower = null
     releaseEscapeLayer?.()
     releaseEscapeLayer = null
 

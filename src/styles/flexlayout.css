@@ -317,6 +317,19 @@
   visibility: hidden !important;
 }
 
+/* ── 页签拖出的跟手克隆件（drag-session 的「拖出来」视觉）── 页签本尊
+   的克隆：surface 底 + 浮起阴影让它读作"被拿起的页签"（黑底白字 chip 的
+   替代，用户 2026-10-05）；跟随指针、pointer-events none 不挡命中。 */
+.fl-drag-clone {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
+  opacity: 0.95;
+  pointer-events: none;
+  position: fixed;
+  z-index: 9998;
+  background: var(--surface);
+  border-radius: 6px;
+}
+
 /* ── 三种轨道页签同一形态（用户定稿：文字横向直立、字号字重字距与横向
    页签完全一致，取值全部来自令牌）── flexlayout 的 border 页签原生整行
    旋转 90°（字形侧躺），摆正为纵向排列的普通页签：文字直立 + 还原钮

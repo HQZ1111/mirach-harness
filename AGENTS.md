@@ -2962,7 +2962,13 @@ value 限制）。406 用例。
   三个调用点（flex-layout 1585/1700/1979）去参；**drag-ghost.ts 整文件
   删除**（两消费方全去后无 import）。反馈链 = zone sheet/插入符预览 +
   no-drop/grabbing 光标（DropOverlay 侧不受影响）。CDP：拖页签全程
-  chipSeen=false、dropOverlay 在、拖拽提交成功。
+  chipSeen=false、dropOverlay 在、拖拽提交成功。**续（用户："标签还是
+  没被拖出来"）**：克隆件从没创建——**真根因 = startPaneDrag 从宿主
+  捕获段进入（onPointerDownCapture 挂 .flexlayout-host），capture 段
+  currentTarget = 宿主不是页签按钮**，按 handle.classList 判定永远不中。
+  修复：克隆源改 `e.target.closest(页签按钮类)`（真实按下元素上溯）。
+  CDP：clone 跟随指针（页签尺寸/文字/opacity 0.95/pointer-events none，
+  松手即拆）。
 - **三十五轮（2026-10-05）——关栏左栏跳动根修（用户实测："关闭其中一个
   栏，左栏会跳动一下"）**：**根因 = 关栏后的根行权重归一闪跳帧**——
   DELETE_TAB 已改模型、React 提交按剩余权重归一渲染一帧（左栏份额突变
