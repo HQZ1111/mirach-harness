@@ -14,7 +14,7 @@ import { DropOverlay } from './drop-overlay'
 
 import { RailLogoLeading } from './rail-logo-leading'
 import { ResizeHandles } from './resize-handles'
-import { clampRowWeights, regionCfgOfNode, rootNeededMin, rootAvailPx, widthBounds } from './constraints'
+import { regionCfgOfNode, rootNeededMin, rootAvailPx, widthBounds } from './constraints'
 import { absorbSurplus, applyRootWeights, fitWindowWidth, mergeZonesPerColumn, measureRootPx, rootPxMem, setWindowMaximized, updateNarrowViewport } from './rebalance'
 import { syncTabsetConstraints } from './constraints-sync'
 import { startPaneDrag } from './drag-session'
@@ -658,11 +658,12 @@ export function FlexLayoutShell() {
       // 浮窗内的拖动/配重不受主布局的 rail 不变量与钳制管。
       if (actionInFloatLayout(model, action)) return action
       if (action.type === Actions.ADJUST_WEIGHTS) {
-        // 拖拽实时钳制（含 adjusting 中间帧）：把权重钳进各子项的
-        // [minAlong, maxAlong]，手柄到 max 就推不动，不再和限制打架闪烁。
         // **提交帧采用最后一帧实时权重**（所见即所得）：实测 flexlayout 的
         // 非 adjusting 提交帧会以不同状态重算，把拖好的列砸回 min（2026-
         // 09-26 逐帧日志实锤：实时帧 [15.4,37.8,46.8] → 提交帧 [13.4,…]）。
+        // min 钳制本身由 flexlayout 原生承担（行聚合 min 经 calcMinMaxSize
+        // 内联到 DOM + calculateSplit 边界；2026-10-04 __noClamp 对照实测
+        // 嵌套 min 481 原生守住）——v3 时代的逐子项钳制保险网已删。
         const data = action.data as { nodeId?: string; weights?: number[] }
         const adjusting = (action as unknown as { isAdjusting?: () => boolean }).isAdjusting?.() ?? false
         const row = model.getNodeById(data.nodeId ?? '')
@@ -695,13 +696,8 @@ export function FlexLayoutShell() {
           wAdj.__adjustLog.push({ t: Math.round(performance.now()), weights, adjusting })
         }
         if (adjusting) {
-          if (row instanceof RowNode && Array.isArray(data.weights) && (window as { __noClamp?: boolean }).__noClamp !== true) {
-            const corrected = clampRowWeights(row, data.weights)
-            // 先 clamp 后记录——提交帧采纳的是**实际渲染态**（存原始值会把
-            // 拖过界的非规范权重写进持久化 JSON）
-            lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: corrected ?? (data.weights ?? []) }
-            if (corrected) return Actions.adjustWeights(row.getId(), corrected).setAdjusting(true)
-          }
+          // 先记录实际渲染态——提交帧采纳的是它（存原始值会把拖过的权重
+          // 写进持久化 JSON 的歧义由提交帧重算兜住）
           lastAdjustRef.current = { nodeId: data.nodeId ?? '', weights: data.weights ?? [] }
           return action
         }
@@ -710,10 +706,6 @@ export function FlexLayoutShell() {
         lastAdjustRef.current = null
         if (last && last.nodeId === data.nodeId && last.weights.length > 0) {
           return Actions.adjustWeights(last.nodeId, last.weights)
-        }
-        if (row instanceof RowNode && Array.isArray(data.weights) && (window as { __noClamp?: boolean }).__noClamp !== true) {
-          const corrected = clampRowWeights(row, data.weights)
-          if (corrected) return Actions.adjustWeights(row.getId(), corrected)
         }
         return action
       }

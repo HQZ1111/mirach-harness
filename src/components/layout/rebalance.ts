@@ -107,14 +107,8 @@ export const applyRootWeights = (m: Model): boolean => {
   if (!root || kids.length < 2) return false
   const avail = rootAvailPx() - SPLITTER_PX * (kids.length - 1)
   if (avail < 300) return false // 窗口不可信（最小化/CDP 伪影），配重会烙进存档
-  // 布局未就绪守卫（同 absorbSurplus）：flexlayout 首次布局前
-  // calculatedMin/Max 全 0——量不到就整体放弃，等下一次触发
-  const ready = kids.every((k) => {
-    if (regionCfgOfNode(k)?.track) return true
-    const b = widthBounds(k, k instanceof RowNode)
-    return Number.isFinite(b.min) && Number.isFinite(b.max)
-  })
-  if (!ready) return false
+  // （v4.0 清理：原"布局未就绪"守卫依赖聚合 max 的有限性——上限废除后
+  // 恒 99999，守卫永真；min 侧目标有记忆 px 托底，0 目标失败模式不存在）
   const px: number[] = kids.map(() => 0)
   let rest = avail
   kids.forEach((k, i) => {
@@ -208,14 +202,10 @@ export const absorbSurplus = (m: Model) => {
   // 布局未就绪守卫（boot 冷启动实测踩过）：flexlayout 要到首次布局才算
   // calculatedMin（fromJson 后全 0），DOM 也可能未量得——此时量测整体
   // 放弃，等下一次触发（90ms/resize/rAF）再做。
+  // （v4.0 清理：原 boundsOk 守卫检查聚合 max 有限性——上限废除后恒
+  // 99999 永真，删除；min 侧目标有记忆 px 托底。）
   const measured = kids.map((k) => measuredPxWidth(k))
   if (measured.some((w) => w <= 0)) return
-  const boundsOk = kids.every((k) => {
-    if (regionCfgOfNode(k)?.track) return true
-    const b = widthBounds(k, k instanceof RowNode)
-    return Number.isFinite(b.min) && Number.isFinite(b.max)
-  })
-  if (!boundsOk) return
   const weightOf = (k: Node) => (k as unknown as { getWeight?: () => number }).getWeight?.() ?? 100
   // 目标 px：轨=20 固定；主栏=-1（吸收者标记）；其余列不低于聚合 min
   // （v4.0：max 上限废除，目标=记忆宽托底）。

@@ -63,38 +63,27 @@ export const rootAvailPx = (): number => {
 /** 子树沿宽度轴的聚合约束：tabset=大栏 min（轨=20 固定，**v4.0：栏无
  *  上限，max 恒 99999**）；行按方向聚合——垂直行（子项横跨整行）宽
  *  min=MAX(子)，水平行（并排）宽 min=Σ。行的方向按深度交替（根=水平，
- *  子行=垂直）。max 侧保留递归只为轨的 20 固定（嵌套轨不是现实形态，
- *  递归对 99999 是恒等运算）。 */
+ *  子行=垂直）。max 侧不再聚合（v4.0：上限废除；行内无轨——轨是根行
+ *  直接子项，嵌套 max 无从产生）。 */
 export const widthBounds = (n: Node, vert: boolean): { min: number; max: number } => {
   if (n instanceof TabSetNode) {
     const cfg = zoneConfigOf(n)
     if (cfg?.track) return { min: TRACK_W, max: TRACK_W }
     // 读节点**实际生效**的 min（sync 已按堆叠语境清过：垂直堆叠分栏宽度
-    // 跟随所在列 [0,∞]——不能回头按大栏限制表钳）；max 恒无上限（v4.0）
+    // 跟随所在列 [0,∞]——不能回头按大栏限制表钳）
     return { min: n.getMinWidth(), max: 99999 }
   }
   if (n instanceof RowNode) {
     const kids = n.getChildren()
     const gaps = 1 * Math.max(kids.length - 1, 0)
     let min = 0
-    let max = 99999
     if (vert) {
-      for (const c of kids) {
-        const b = widthBounds(c, false)
-        min = Math.max(min, b.min)
-        max = Math.min(max, b.max)
-      }
+      for (const c of kids) min = Math.max(min, widthBounds(c, false).min)
     } else {
-      max = 0
-      for (const c of kids) {
-        const b = widthBounds(c, true)
-        min += b.min
-        max += b.max
-      }
+      for (const c of kids) min += widthBounds(c, true).min
       min += gaps
-      max += gaps
     }
-    return { min, max: Math.min(max, 99999) }
+    return { min, max: 99999 }
   }
   return { min: 0, max: 99999 }
 }
@@ -115,36 +104,6 @@ export const isTopBand = (rootRow: RowNode | undefined, n: Node): boolean => {
   }
 }
 
-/** 高度轴的聚合界限（clampRowWeights 用于 VERT 行）：tabset=实际生效的
- *  min/maxHeight；行按方向聚合——VERT（子项纵向堆叠）高度=Σ，HORZ
- *  （子项并排）高度=MAX(min)/MIN(max)。与 widthBounds 互为转置。 */
-export const heightBounds = (n: Node): { min: number; max: number } => {
-  if (n instanceof TabSetNode) return { min: n.getMinHeight(), max: Math.min(n.getMaxHeight(), 99999) }
-  if (n instanceof RowNode) {
-    const kids = n.getChildren()
-    const gaps = SPLITTER_PX * Math.max(kids.length - 1, 0)
-    if (n.getOrientation() === Orientation.VERT) {
-      let min = 0
-      let max = 0
-      for (const c of kids) {
-        const b = heightBounds(c)
-        min += b.min
-        max += b.max
-      }
-      return { min: min + gaps, max: max + gaps }
-    }
-    let min = 0
-    let max = 99999
-    for (const c of kids) {
-      const b = heightBounds(c)
-      min = Math.max(min, b.min)
-      max = Math.min(max, b.max)
-    }
-    return { min, max: Math.min(max, 99999) }
-  }
-  return { min: 0, max: 99999 }
-}
-
 /** 根行装下所需的最小宽：Σ(各列聚合 min) + Σ(轨 20) + 缝 */
 export const rootNeededMin = (m: Model): number => {
   const kids = m.getRootRow()?.getChildren() ?? []
@@ -158,34 +117,4 @@ export const rootNeededMin = (m: Model): number => {
     sum += widthBounds(k, k instanceof RowNode).min
   }
   return sum + SPLITTER_PX * Math.max(kids.length - 1, 0)
-}
-
-/** 拖拽实时钳制（**min 侧保险网**，v4.0：max 上限已废除）：嵌套行的 min
- *  不向上传播（flexlayout 原生只钳直接子项）——逐子项钳到不低于聚合
- *  min，防止嵌套组合被拖破底线。**按行方向取轴**：HORZ 行钳宽度、VERT
- *  行钳高度（此前 VERT 行被按宽度轴钳，高度拖拽被错误界限卡死）。 */
-export const clampRowWeights = (row: RowNode, weights: number[]): number[] | null => {
-  const kids = row.getChildren()
-  if (kids.length !== weights.length || kids.length < 2) return null
-  const horz = row.getOrientation() === Orientation.HORZ
-  const rect = row.getRect()
-  const avail = (horz ? rect.width : rect.height) - SPLITTER_PX * (kids.length - 1)
-  if (!(avail > 50)) return null
-  const sum = weights.reduce((s, w) => s + (Number.isFinite(w) ? w : 0), 0)
-  if (!(sum > 0)) return null
-  const minPx: number[] = []
-  for (const k of kids) {
-    const b = horz ? widthBounds(k, k instanceof RowNode) : heightBounds(k)
-    minPx.push(b.min)
-  }
-  if (minPx.some((m) => !Number.isFinite(m))) return null
-  const clamped = weights.map((w, i) => {
-    const px = (w / sum) * avail
-    return (Math.max(px, minPx[i]) / avail) * 100
-  })
-  let changed = false
-  for (let i = 0; i < clamped.length; i++) {
-    if (Math.abs(clamped[i] - weights[i]) > 0.05) changed = true
-  }
-  return changed ? clamped : null
 }

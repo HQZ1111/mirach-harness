@@ -70,8 +70,8 @@
 ### 2.3 列的最小宽按**聚合**计算
 
 一列的最小宽 = 内部分栏 min 的**最大值**（并排取 Σ，含分隔缝）。实现见
-`widthBounds`/`heightBounds`（v4.0 起 max 侧聚合只服务轨的 20 固定，
-"栏"恒为无上限）。
+`widthBounds`（v4.0：只聚合 min，max 恒 99999/轨 20；heightBounds 已随
+高度钳制消费方 clampRowWeights 一并删除）。
 
 ### 2.4 富余的分配：吸收者唯一（v4.0 简化）
 
@@ -268,12 +268,17 @@ min 按比例缩让**（底线 40px），宽度恢复后自动回 395。左右�
    收者钳到不低于聚合 min，差额全部交给吸收者——主栏分栏；无主栏 → 非
    轨列兜底（§2.4）。写入权重与渲染真相对齐，消掉 flexbox 钉住态。
 
-4. **拖拽实时钳制（min 侧保险网）**：flexlayout 的 calculateSplit 按 MIN
-   侧钳位；嵌套行的 min 不向上传播（原生只钳直接子项）——onAction 对
-   ADJUST_WEIGHTS（含 adjusting 中间帧）逐子项钳到不低于聚合 min。
+4. **拖拽钳制 = flexlayout 原生**（v4.0 实证收编）：行聚合 min 经
+   `calcMinMaxSize` 内联到 DOM（flexbox 硬钳）+ `calculateSplit` 边界
+   钳位，**嵌套行的聚合 min 原生生效**——2026-10-04 对照实测（关掉我方
+   保险网后右列嵌套 min 481 仍被原生守住）。v3 时代的逐子项钳制保险网
+   （clampRowWeights）系 max 时代产物，随 max 一并废除；onAction 只保留
+   负权重防线（见下）。
 5. **提交帧所见即所得**：flexlayout 的非 adjusting 提交帧会以不同内部状
    态重算权重，把拖好的列砸回 min（逐帧日志实锤）——onAction 记录最后一
-   帧 adjusting 权重，提交帧改用之（所见即所得）。
+   帧 adjusting 权重，提交帧改用之（所见即所得）。**负/非有限权重防线**
+   同在 onAction：拖拽与 fresh reset 渲染竞争时库内数学可能算出负权重
+   （渲染异常 + React 树停摆）——直接拒收，提交帧退回最后一帧好权重。
 6. **拖拽进行中推迟重排**：sync 的重渲会重置拖拽中的 DOM 权重，下一帧以
    重置后尺寸为新基线、逐帧复利放大——分隔条拖拽进行中，串行重排推迟到
    pointerup 之后执行。

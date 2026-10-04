@@ -1,5 +1,7 @@
 /**
- * constraints.ts 纯函数单测：聚合界限 / 钳制 / 顶带判定 / region 读取。
+ * constraints.ts 纯函数单测：聚合界限 / 顶带判定 / region 读取。
+ * （v4.0：clampRowWeights/heightBounds 已随 max 上限废除——嵌套 min 的
+ * 原生钳制经 __noClamp 对照实测足够，保险网是死代码，用例一并移除。）
  * 假节点 = Object.create(真原型) + 自有字段/方法——instanceof 判定真实，
  * 行为受控（不需要真 flexlayout 布局）。
  */
@@ -7,8 +9,6 @@ import { describe, expect, it } from 'vitest'
 import { Orientation, RowNode, TabSetNode } from 'flexlayout-react'
 
 import {
-  clampRowWeights,
-  heightBounds,
   isTopBand,
   regionCfgOfNode,
   rootNeededMin,
@@ -89,82 +89,6 @@ describe('widthBounds 聚合', () => {
     const soft = fakeTabset('soft', { minW: 0, maxW: 99999 })
     const col = fakeRow('col', { orientation: VERT, children: [inner, soft] })
     expect(widthBounds(col as never, true)).toEqual({ min: 481, max: 99999 })
-  })
-})
-
-describe('heightBounds 聚合（转置）', () => {
-  it('VERT 行：高 = Σ 子项（+缝）', () => {
-    const row = fakeRow('col', {
-      orientation: VERT,
-      children: [
-        fakeTabset('a', { minH: 100, maxH: 500 }),
-        fakeTabset('b', { minH: 50, maxH: 300 }),
-      ],
-    })
-    expect(heightBounds(row as never)).toEqual({ min: 151, max: 801 }) // Σ + 1px 缝
-  })
-
-  it('HORZ 行：高 = MAX(min)/MIN(max)', () => {
-    const row = fakeRow('row', {
-      orientation: HORZ,
-      children: [
-        fakeTabset('a', { minH: 100, maxH: 500 }),
-        fakeTabset('b', { minH: 150, maxH: 300 }),
-      ],
-    })
-    expect(heightBounds(row as never)).toEqual({ min: 150, max: 300 })
-  })
-})
-
-describe('clampRowWeights 拖拽钳制（保险网）', () => {
-  function fakeDragRow(orientation: Orientation, kids: Record<string, unknown>[], w: number, h: number) {
-    const row = Object.create(RowNode.prototype) as Record<string, unknown>
-    row.getChildren = () => kids
-    row.getOrientation = () => orientation
-    row.getRect = () => ({ width: w, height: h } as never)
-    return row as never
-  }
-  const tab = (minW: number, maxW: number, minH = 0, maxH = 99999) =>
-    fakeTabset('t' + Math.random(), { minW, maxW, minH, maxH })
-
-  it('无越界：返回 null（不干预）', () => {
-    const kids = [tab(240, 420), tab(395, 99999), tab(240, 99999)]
-    // 1796px 可用：[350, 746, 700] 全部在界内
-    const row = fakeDragRow(HORZ, kids, 1798, 1000)
-    expect(clampRowWeights(row as never, [(350 / 1796) * 100, (746 / 1796) * 100, (700 / 1796) * 100])).toBeNull()
-  })
-
-  it('超过旧上限（420）的权重不再被钳（v4.0：max 废除）', () => {
-    const kids = [tab(240, 420), tab(240, 420)]
-    const row = fakeDragRow(HORZ, kids, 842, 500)
-    // 权重 [50,50]（flexlayout 制：Σ=100）把两栏顶到 420.5/420.5
-    // （> 旧聚合上限 841 的一半）——v4 无上限，min 均已满足 → 不干预
-    const fixed = clampRowWeights(row as never, [50, 50])
-    expect(fixed).toBeNull()
-  })
-
-  it('低于 min 的权重仍被钳回（min 侧保险网保留）', () => {
-    const kids = [tab(240, 99999), tab(240, 99999)]
-    const row = fakeDragRow(HORZ, kids, 842, 500)
-    // 权重把第一栏压到 100px（< min 240）
-    const fixed = clampRowWeights(row as never, [(100 / 841) * 100, (741 / 841) * 100])
-    expect(fixed).not.toBeNull()
-    for (const wPct of fixed!) {
-      const px = (wPct / 100) * 841
-      expect(px).toBeGreaterThanOrEqual(240 - 0.5)
-    }
-  })
-
-  it('VERT 行钳高度轴（不是宽度）', () => {
-    const kids = [tab(240, 420, 50, 99999), tab(240, 420, 50, 99999)]
-    const row = fakeDragRow(VERT, kids, 900, 600)
-    // 高度 600：权重把两栏压到 100/100 → 各自 min 高 50 不触发，改用超 min 方向
-    const fixed = clampRowWeights(row as never, [(50 / 600) * 100, (50 / 600) * 100])
-    expect(fixed).not.toBeNull()
-    for (const wPct of fixed!) {
-      const px = (wPct / 100) * (600 - 1)
-      expect(px).toBeGreaterThanOrEqual(50 - 0.5)
-    }
   })
 })
 
