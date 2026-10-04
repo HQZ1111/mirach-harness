@@ -29,30 +29,6 @@
   z-index: 30;
 }
 
-/* ── 条隐藏信息浮层（StripHiddenTitleOverlay，廿七轮）：「切换标签」隐藏
-   条后，右栏等无标题位栏的顶带显示活动页签名（与左栏 railform logo、
-   主区双行块三栏一致）。内容区 padding-top 由 flexlayout.css 的
-   :has 负向规则承担。 ── */
-.strip-hidden-title {
-  align-items: center;
-  box-sizing: border-box;
-  display: flex;
-  height: var(--logo-strip-h);
-  padding: var(--logo-leading-pad) var(--tab-pad-x) var(--strip-pad-bottom);
-  pointer-events: none;
-  position: absolute;
-  z-index: 30;
-}
-.strip-hidden-title-text {
-  color: var(--text-3);
-  flex: 1 1 auto;
-  font-size: 15px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* ── 布局编辑画布面（hermes edit veil）——浅色 scrim ── */
 .fl-edit-veils {
   inset: 0;

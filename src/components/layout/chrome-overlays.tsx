@@ -112,28 +112,18 @@ export function ChatLabelOverlay({ model }: { model: Model }) {
   )
 }
 
-/** 条隐藏信息浮层（「切换标签」后右栏等无标题位栏的顶带信息）：条隐藏
- *  （enableTabStrip=false）的非左非主 tabset 顶带显示**活动页签名**（15px
- *  灰）——左栏有 railform logo、主区有双行块，右栏补齐三栏一致（用户
- *  定稿：隐藏标签后内容上移但顶带保留、信息位常驻）。 */
+/** 条隐藏形态标记（「切换标签」后）：遍历主布局 tabset 打 data-strip-hidden
+ *  （CSS 顶带保留的钩子；左栏跳过——railform logo 自带顶带）与
+ *  data-chat-zone（主对话区多签中线起排钩子）。**不渲染任何可见内容**——
+ *  v3.1 时代的右栏"活动页签名"浮层已按用户 2026-10-04 定稿删除（顶带
+ *  保留但空着；hermes 对应形态同样无 chrome）。 */
 export function StripHiddenTitleOverlay({ model }: { model: Model }) {
   const layoutRev = useLayoutStore(s => s.layoutRev)
-  // dragRev：拖拽 adjusting 帧逐帧重测（与 useTabsetRect 同理——rect 型
-  // 坐标在拖拽中每帧变化，layoutRev 提交帧才 bump，浮层会停在旧位）
-  const dragRev = useLayoutStore(s => s.dragRev)
-  const [items, setItems] = useState<{ key: string; left: number; top: number; width: number; title: string }[]>([])
   useEffect(() => {
     const measure = () => {
-      const host = document.querySelector<HTMLElement>('.flexlayout-host')
-      if (!host) return
-      const hostRect = host.getBoundingClientRect()
-      const hostTop = hostRect.top
-      const hostLeft = hostRect.left
-      const out: { key: string; left: number; top: number; width: number; title: string }[] = []
       model.visitNodes((n) => {
         if (!(n instanceof TabSetNode) || n.getLayoutId() !== Model.MAIN_LAYOUT_ID) return
-        // border 里的 tabset（栏折叠进边框轨）DOM 在窗口边缘——浮层不能
-        // 按 border 位置画（会跑到对侧/左栏 logo 角）
+        // border 里的 tabset（栏折叠进边框轨）DOM 在窗口边缘——标记无意义
         if (n.getParent() instanceof BorderNode) return
         const cfg = zoneConfigOf(n)
         if (!cfg || n.getChildren().length === 0) return
@@ -141,39 +131,17 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
         const el = document.querySelector<HTMLElement>(`.flexlayout__tabset[data-layout-path="${n.getPath()}"]`)
         if (!el) return
         const hidden = n.isEnableTabStrip() === false
-        // 条隐藏标记（CSS 顶带保留的钩子；左栏跳过——railform logo 自带顶带）
         el.setAttribute('data-strip-hidden', hidden && cfg.region !== 'left' ? 'true' : 'false')
-        // 主对话区标记（多页签中线起排的钩子）：标在**当前收容 workspace 的
-        // tabset**上——[data-chat-lead] 只在 workspace 页签激活时在 DOM
-        // （切到别的页签内容卸载，:has 上探失灵、页签跳回最左），tab 级
-        // 存在性不受激活态影响
+        // 主对话区标记：标在**当前收容 workspace 的 tabset**上——
+        // [data-chat-lead] 只在 workspace 页签激活时在 DOM（切到别的页签
+        // 内容卸载，:has 上探失灵、页签跳回最左），tab 级存在性不受激活态影响
         const chatHere = n.getChildren().some((c) => c instanceof TabNode && c.getId() === 'workspace')
         el.setAttribute('data-chat-zone', chatHere ? 'true' : 'false')
-        if (!hidden || cfg.region !== 'right') return // 浮层只补右栏（左/右已有专属位）
-        const r = el.getBoundingClientRect()
-        if (r.width < 100) return
-        const active = n.getSelectedNode()
-        out.push({
-          key: n.getId(),
-          left: r.left - hostLeft,
-          top: r.top - hostTop,
-          width: r.width,
-          title: active?.getName() ?? '',
-        })
       })
-      setItems(out)
     }
     measure()
     window.addEventListener('resize', measure)
     return () => window.removeEventListener('resize', measure)
-  }, [model, layoutRev, dragRev])
-  return (
-    <>
-      {items.map((it) => (
-        <div key={it.key} className="strip-hidden-title" style={{ left: it.left, top: it.top, width: it.width }}>
-          <span className="strip-hidden-title-text">{it.title}</span>
-        </div>
-      ))}
-    </>
-  )
+  }, [model, layoutRev])
+  return null
 }

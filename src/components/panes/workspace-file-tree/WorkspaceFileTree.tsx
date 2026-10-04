@@ -243,7 +243,7 @@ export function WorkspaceFileTree({
       <div className="flex shrink-0 items-center px-2 pb-1.5 pt-2">
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            className="min-w-0 truncate py-0.5 text-(--filetree-row-font-size) font-medium text-(--text)"
+            className="min-w-0 truncate py-0.5 text-(--filetree-row-font-size) font-medium text-(color:--brand)"
             title={workspacePath}
           >
             {workspaceTitle}

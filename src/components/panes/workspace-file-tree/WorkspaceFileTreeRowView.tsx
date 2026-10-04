@@ -152,7 +152,10 @@ export function WorkspaceFileTreeRowView({
 
   return (
     <div
-      className={cn(layout === "absolute" ? "absolute left-0 top-0 w-full px-1" : "w-full")}
+      // harness 适配（用户 2026-10-04）：ZCode 原版 wrapper 是 px-1——行卡片
+      // 比头部地址行（px-2）多缩 4px，"地址行与文件行到边缘的间距"不一致；
+      // 改 px-0 让行卡片与地址行同宽对齐（内容缩进公式不动）。
+      className={cn(layout === "absolute" ? "absolute left-0 top-0 w-full" : "w-full")}
       style={rowStyle}
     >
       <ContextMenuRoot>
