@@ -5,7 +5,8 @@
 
 * { box-sizing: border-box; }
 
-/* ── 窗体（Tauri 无边框透明窗：白色 50px 圆角软件，圆角外透桌面） ──
+/* ── 窗体（Tauri 无边框透明窗：白色圆角软件，圆角外透桌面；圆角 40，
+   用户 2026-10-05 定稿） ──
    tauri.conf: decorations:false + transparent:true + shadow:false。
    **关键（品红测试实证）**：白底必须画在 .app-shell 上（html/body 必须
    transparent）——html 无背景时 body 的背景会传播到整个 canvas 且不受
@@ -196,8 +197,8 @@ body.in-browser { background: var(--surface); }
   font-size: 11px;
 }
 
-/* ── 状态栏（用户：高度 20；内容左右 50 避开 50px 圆角区域；描边已去
-   ——用户 2026-10-05"底栏的描边还在"）── */
+/* ── 状态栏（用户：高度 20；内容左右 50 避开 40px 圆角区域——壳圆角
+   50→40 后维持 50 有余量；描边已去——用户 2026-10-05"底栏的描边还在"）── */
 .app-statusbar {
   align-items: center;
   background: transparent;

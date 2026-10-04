@@ -32,7 +32,7 @@ function tabsetRectOf(
         // 转宿主相对坐标（叠片画在宿主层，viewport 坐标会整体偏移宿主原点）
         const hr = document.querySelector('.flexlayout-host')?.getBoundingClientRect()
         if (r.width > 0 && r.height > 0 && hr) {
-          // 真实页签栏高度（顶带 100 / 低条 36 / 无条 0）——颜色层顶边自动
+          // 真实页签栏高度（顶带 85 / 低条 36 / 无条 0）——颜色层顶边自动
           // 贴条底，不用固定数值（用户 2026-09-29：低条时固定 100 让出
           // 64px 不铺色，标签看着像悬在错位）
           const bar = el.querySelector('.flexlayout__tabset_tabbar_outer')
@@ -63,7 +63,7 @@ function useTabsetRect(model: Model, tabIds: string[]) {
 }
 
 /** 主区调色层：颜色/圆角走令牌 --main-tint-*；顶部**自动贴真实页签栏
- *  下缘**（现量 tabbar_outer 高度——顶带 100 / 低条 36 自适应，用户
+ *  下缘**（现量 tabbar_outer 高度——顶带 85 / 低条 36 自适应，用户
  *  2026-09-29：高度不该用固定数值）；z -1 垫到文字组件下面（overlays.css）。 */
 export function MainTint({ model }: { model: Model }) {
   const rect = useTabsetRect(model, ['workspace'])

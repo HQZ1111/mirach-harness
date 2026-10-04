@@ -2,7 +2,7 @@
  * 接线版 composer：官方 elements/composer kit + @assistant-ui/react 原语。
  * 构图对齐官方（/elements/composer）：附件区在输入上方（无附件不占位）、
  * 工具行=左附件钮 / 右动作组（模型触发器 → 语音钮 → 上下文环 → 发送/
- * 停止）、容器=kit 默认 paper rounded-[24px] p-2.5。语音=Web Speech，
+ * 停止）、容器=kit paper rounded-[20px]（用户 2026-10-05：24→20）p-2.5。语音=Web Speech，
  * 交互对齐官方 Dictation（/elements/composer-voice）：激活期输入行被
  * ComposerVoice（波形+计时/Transcribing 微光）替换（官方："replace
  * ComposerInput while active, not sit beside it"），按钮 ink/ghost 两态。
@@ -298,7 +298,7 @@ export function ComposerWired() {
           660）。twMerge 下 max-w-none 覆盖 kit 默认，宽度全权归外层。 */}
       <Composer className="w-full max-w-none">
         <ComposerPrimitive.AttachmentDropzone asChild>
-          {/* 官方容器默认：paper 面 + rounded-[24px] + p-2.5 + gap-2 */}
+          {/* 容器：paper 面 + rounded-[20px]（用户 2026-10-05：24→20）+ p-2.5 + gap-2 */}
           <ComposerBar>
             {/* 官方构图第一条：附件区在输入上方；empty:hidden，无附件不占位 */}
             <ComposerAttachmentsRow />

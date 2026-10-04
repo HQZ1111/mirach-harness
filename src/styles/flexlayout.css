@@ -48,7 +48,7 @@
   padding-left: 70px;
 }
 
-/* ── 条隐藏（「切换标签」）形态：顶带 100px **保留**——内容不从 tabset
+/* ── 条隐藏（「切换标签」）形态：顶带（--logo-strip-h=85）**保留**——内容不从 tabset
    顶开始（用户 2026-10-03："和左侧栏一样"）。enableTabStrip=false 时
    flexlayout 不渲染 tabbar_outer（display:none 仍在 DOM，:has 不可靠）—
    由 StripHiddenTitleOverlay 的 measure 循环给 tabset 打
@@ -330,7 +330,7 @@
   right: 0 !important;
   top: 0 !important;
   transform: none !important;
-  /* 折叠轨道与栏级竖轨同规：上下各避一个页签条带（--logo-strip-h=100，
+  /* 折叠轨道与栏级竖轨同规：上下各避一个页签条带（--logo-strip-h=85，
      页签条带 + 圆角） */
   padding: var(--logo-strip-h) 0;
 }
