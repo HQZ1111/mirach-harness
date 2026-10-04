@@ -2864,6 +2864,21 @@ value 限制）。406 用例。
   max 有限性，废除后永真）。onAction 只留负权重防线+提交帧所见即所得。
   文档 §2.3/§9.4/§9.5 同步。CDP 回归：压右列停嵌套 min、左栏拖 700 无
   上限、0 控制台错误；443 全绿 tsc 0（净 -140 行）。
+- **三十三轮（2026-10-05，6c180f7）——对话区宽度设置：dsh mirach 移植件
+  完整搬运**（用户提供 G:\deepseek-harness-master\apps\mirach）：①
+  lib/chat-width.ts 逐字移植（zosma 三档 small 820/medium 1080/full 无
+  限制；存储键 mirach.chatWidth；applyChatWidth 落 --chat-max-width/
+  --chat-composer-max-width 到 documentElement）；②store/ui-settings.ts
+  （dsh 同名文件形状，仅取对话宽度切片，nanostores→Zustand）；③main.tsx
+  启动 initUiSettings（首帧即正确列宽）；④thread.aui.tsx 可读列
+  --thread-max-width 跟随 var(--chat-max-width, 44rem 回退)，composer 同
+  列自动跟随（dsh 需独立 composer 变量因其 composer 在列外，harness 同
+  列）；⑤设置页新增「对话」段居首（MessageSquare 图标 + set-select 控件，
+  文案照抄 dsh General 段）。**不搬 conversation-width.ts**：其观察目标
+  （centerCol/data-phase/WidthHandle）是 dsh 官方 ConversationRoot 内部
+  DOM，harness 的 assistant-ui 栈没有该树——将来接官方 ui-conversation
+  包时一并移植（lib 头注释留档）。CDP 全链：默认 820→切中 1080→刷新
+  持久化→还原 small；443 全绿 tsc 0。
 - 教训：①间距/字号需求的落位要先确认**是哪两层之间**（"上下间距
   加大"本轮两次返工：组头→行间→组头间+工作区组间），按自认为的结构
   批量调 = 每轮都错一层；②cmd shell 的 findstr 对多点路径
