@@ -195,11 +195,11 @@ body.in-browser { background: var(--surface); }
   font-size: 11px;
 }
 
-/* ── 状态栏（用户：高度 20；内容左右 50 避开 50px 圆角区域）── */
+/* ── 状态栏（用户：高度 20；内容左右 50 避开 50px 圆角区域；描边已去
+   ——用户 2026-10-05"底栏的描边还在"）── */
 .app-statusbar {
   align-items: center;
   background: transparent;
-  border-top: 1px solid var(--stroke-soft);
   color: var(--text-2);
   display: flex;
   flex: none;
