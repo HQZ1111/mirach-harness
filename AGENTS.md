@@ -2956,7 +2956,13 @@ value 限制）。406 用例。
   drag-ghost.ts 保留（flexlayout 窗格拖拽 startPaneDrag 仍在用——
   若窗格拖拽的 chip 也要去，删 drag-session.ts 的 ghost 分支即可）。
   验证：MutationObserver 布探 chip 特征样式，拖会话行全程 chipSeen=
-  false、源行 dimmed=true；443 全绿 tsc 0。
+  false、源行 dimmed=true；443 全绿 tsc 0。**续（用户："标签拖拽还是
+  黑底白字"）**：窗格页签拖拽（drag-session.ts）的 chip 同删——
+  PaneDragSpec.ghostLabel 字段、spec.ghost 分支、moveTo/destroy 全拆，
+  三个调用点（flex-layout 1585/1700/1979）去参；**drag-ghost.ts 整文件
+  删除**（两消费方全去后无 import）。反馈链 = zone sheet/插入符预览 +
+  no-drop/grabbing 光标（DropOverlay 侧不受影响）。CDP：拖页签全程
+  chipSeen=false、dropOverlay 在、拖拽提交成功。
 - **三十五轮（2026-10-05）——关栏左栏跳动根修（用户实测："关闭其中一个
   栏，左栏会跳动一下"）**：**根因 = 关栏后的根行权重归一闪跳帧**——
   DELETE_TAB 已改模型、React 提交按剩余权重归一渲染一帧（左栏份额突变

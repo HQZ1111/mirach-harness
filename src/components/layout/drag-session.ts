@@ -43,7 +43,6 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 
 import { Actions, DockLocation, Model, Orientation, RowNode, TabNode, TabSetNode, type Node } from 'flexlayout-react'
 
-import { createDragGhost, type DragGhost } from '@/lib/drag-ghost'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
 
@@ -230,9 +229,6 @@ export interface DragSessionSpec {
   onEnd?(): void
   /** Sub-threshold release = a click on the handle. */
   onTap?(): void
-  /** Floating chip following the pointer — for drags whose source doesn't
-   *  stay visibly "held". See `@/lib/drag-ghost`. */
-  ghost?: { label: string }
 }
 
 /** After an ENGAGED drag, the release still synthesizes a `click` on the
@@ -281,7 +277,6 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
   const restoreSelect = document.body.style.userSelect
   let engaged = false
   let releaseEscapeLayer: (() => void) | null = null
-  let ghost: DragGhost | null = null
   let cursor: string | null = null
   // rAF-coalesced move processing: the raw handler only records the latest
   // point; all hit testing happens at most once per frame.
@@ -325,9 +320,9 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
     // mode, overlays) must not also fire on the same press.
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
 
-    if (spec.ghost) {
-      ghost = createDragGhost(spec.ghost.label)
-    }
+    // Floating ghost chip removed (user 2026-10-05: no dark label chip on
+    // tab drags) — the dragged zone/insertion overlays + cursor are the
+    // "what am I holding" feedback.
 
     spec.onEngage(x, y)
   }
@@ -340,8 +335,6 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
 
       engage(x, y)
     }
-
-    ghost?.moveTo(x, y)
 
     const hint = spec.resolveMove(x, y, shift)
 
@@ -382,8 +375,6 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
 
     document.body.style.cursor = restoreCursor
     document.body.style.userSelect = restoreSelect
-    ghost?.destroy()
-    ghost = null
     releaseEscapeLayer?.()
     releaseEscapeLayer = null
 
@@ -481,7 +472,6 @@ export interface PaneDragSpec {
   /** 有 reorder 上下文 = 从 tabset 页签条发起：条内是插入槽重排，撕出条外
    *  变 zone 移动。无（如从折叠轨道发起）直接进 zone 模式。 */
   reorder?: { groupId: string }
-  ghostLabel?: string
   /** Multi-tab selection riding this drag (strip order, includes `paneId`).
    *  The whole block moves/reorders together; `paneId` stays the pressed tab
    *  (it fronts at the destination). */
@@ -574,7 +564,6 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
     Boolean(spec.reorder) && rectContains(reorderStrip().rect, x, y, TEAR_OFF_SLACK_PX)
 
   startDragSession(e, {
-    ghost: spec.ghostLabel ? { label: spec.ghostLabel } : undefined,
     onTap: spec.onTap,
 
     onEngage(x, y) {

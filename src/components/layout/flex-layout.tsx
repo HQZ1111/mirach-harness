@@ -1582,8 +1582,7 @@ export function FlexLayoutShell() {
       startPaneDrag(model, tabId, e, {
         onTap: () => clearTabSelection(),
         reorder: inTabset ? { groupId } : undefined,
-        ghostLabel: dragSelection ? `${dragSelection.length} 个页签` : tab.getName(),
-        selection: dragSelection ?? undefined,
+          selection: dragSelection ?? undefined,
       })
     },
     [model],
@@ -1697,7 +1696,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
               bumpLayoutRev()
             }}
             onDragOut={(e, id, name) => {
-              startPaneDrag(model, id, e, { ghostLabel: name })
+              startPaneDrag(model, id, e, {})
             }}
           />
         )
@@ -1976,7 +1975,7 @@ const layoutRev = useLayoutStore(s => s.layoutRev)
         <EditVeils
           model={model}
           onVeilPointerDown={(e, activeId, title) => {
-            startPaneDrag(model, activeId, e, { ghostLabel: title })
+            startPaneDrag(model, activeId, e, {})
           }}
         />
         {editMode && (
