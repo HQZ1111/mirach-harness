@@ -1,47 +1,52 @@
 /**
- * 会话行跨面拖拽（投放主会话页签切换）——列表内让位排序已交 dnd-kit
- * （reorderable-list.tsx 照抄 hermes），本机器只负责「出侧栏」那一半。
+ * 会话行跨面拖拽（docs/layout-design.md v6.0 §6）——列表内让位排序已交
+ * dnd-kit（reorderable-list.tsx 照抄 hermes），本机器只负责「出侧栏」那一半。
  *
  * 双机器并行照抄 hermes（session-row.tsx:374-395 实锤）：同一 pointerdown
  * 起 dnd-kit 排序 + 本 pointer 会话，各管各的区域、互不仲裁——侧栏上只有
- * 排序有目标（本机器拒绝），主区页签上只有本机器有目标（列表已松手）。
- * 释放落点是谁的合法区，就谁提交。
+ * 排序有目标（本机器拒绝），对话栏页签条/主页签上只有本机器有目标（列表
+ * 已松手）。释放落点是谁的合法区，就谁提交。
  *
- * 机器照抄 layout/drag-session.ts 的 startDragSession（4px 阈值 / rAF 合帧 /
- * pointer capture / Esc 顶层逃生层 / engaged 后吞合成 click），独立实现——
- * startDragSession 的提示通道耦合窗格 DropHint，不复用以免污染窗格 overlay。
+ * 机器与 layout/drag-session.ts 同款（4px 阈值 / rAF 合帧 / pointer
+ * capture / Esc 顶层逃生层 / engaged 后吞合成 click），独立实现——不复用
+ * startDragSession：它的提示通道耦合窗格 DropHint（overlay sheet），会话行
+ * 拖拽的反馈是命中面内描边，不能污染窗格 overlay。
  *
  * 拖起视觉（hermes session-drag.ts:120 实锤）：engage 起源行内联
  * opacity 0.45（「picked up」反馈）；行自身 z-10/不透明底/cursor-grabbing
- * 由 dnd-kit isDragging 类负责（thread-list 行上）。**label chip ghost
- * 已删**（用户 2026-10-05："不要黑底白字的效果"——「直接拖出」=
- * 源行压暗跟随即可；黑块正是 drag-ghost 的深底白字 chip，非原生拖影）。
+ * 由 dnd-kit isDragging 类负责。**chip ghost 已删**（用户 2026-10-05）。
  *
  * 命中面（engage 时快照，拖拽中纯数学——无 elementsFromPoint）：
- * - 主会话页签：#flexlayout-tabbutton-<PRIMARY_PANE.main>（id 方案见
- *   flex-layout.tsx；拉伸头栏与普通页签按钮同 id 方案，都算命中面）→
- *   内嵌 accent 描边高亮 + 松手切换主线程（onCommitMainTab）；
- * - 其余（侧栏列表——那里 dnd-kit 在排、标题栏/分隔条/窗格内容）= 拒绝区
- *   （no-drop，松手不提交）。
+ * - 主会话页签按钮（#flexlayout-tabbutton-workspace，单签拉伸形态同 id）→
+ *   内嵌 accent 描边 + 松手**切换主会话**（onCommitMainTab）；
+ * - **对话栏任一分栏的页签条**（region=chat 的 tabset 条带）→ 条带内嵌
+ *   accent 描边 + 松手**开出该会话的页签**（onCommitOpenTab；已开 → 置前，
+ *   由 flex-layout 的 openSessionTab 保证同会话不重复开签）；
+ * - 其余（面板栏条带/窗格 body/侧栏列表/标题栏）= 拒绝区（no-drop，
+ *   松手不提交）。
  */
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
-import { PRIMARY_PANE } from '@/components/layout/pane-registry'
+import { TabSetNode, type Model } from 'flexlayout-react'
+
+import { PRIMARY_PANE, zoneConfigOf } from '@/components/layout/pane-registry'
+import { snapshotStrips, type StripSnapshot } from '@/components/layout/drag-session'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 
 const DRAG_THRESHOLD_PX = 4
 const TAB_BUTTON_ID = 'flexlayout-tabbutton-'
 
-/** 拖起源行的压暗值（hermes session-drag.ts:120 `source?.style.setProperty
- *  ('opacity', '0.45')` 逐字实锤——用户点名「拖出来的透明度不对」即此值）。 */
+/** 拖起源行的压暗值（hermes session-drag.ts:120 逐字）。 */
 const SOURCE_DIM_OPACITY = '0.45'
 
 export interface SessionRowDragSpec {
   sessionId: string
-  /** 会话显示名（压暗行跟随；曾用于 chip ghost，chip 已删） */
+  /** 会话显示名（压暗行跟随） */
   title: string
   /** 松手在主会话页签上（切换主线程到该会话） */
   onCommitMainTab(): void
+  /** 松手在对话栏某分栏的页签条上（开出该会话的页签，多标签模式） */
+  onCommitOpenTab(tabsetId: string): void
 }
 
 interface Rect {
@@ -54,18 +59,45 @@ interface Rect {
 const rectContains = (r: Rect, x: number, y: number): boolean =>
   x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
 
+/** 活动布局模型（flex-layout 的 __flModel 通道——pane-context-menu 同款
+ *  生产用法）。不在场 = 条带目标不可用（只见主页签），错误可见。 */
+const flModel = (): Model | undefined => {
+  const m = (window as { __flModel?: Model }).__flModel
+  if (!m) console.error('[session-drag] 活动布局模型不在场（__flModel 未挂载）——条带目标不可用')
+  return m
+}
+
 /**
  * 主会话页签元素。flexlayout 页签按钮 id = flexlayout-tabbutton-<tabId>
- * （tabset 与 border 按钮同前缀；单页签拉伸头栏也带此 id）——直接按 id 取
- * workspace 页签；id 在但不是页签按钮（不该发生）不算命中面。
+ * ——直接按 id 取 workspace 页签；id 在但不是页签按钮（不该发生）不算
+ * 命中面。
  */
 export const mainTabButton = (): HTMLElement | null => {
-  const el = document.getElementById(TAB_BUTTON_ID + PRIMARY_PANE.main)
+  const el = document.getElementById(TAB_BUTTON_ID + PRIMARY_PANE.chat)
   if (!el) return null
   return el.classList.contains('flexlayout__tab_button') ||
     el.classList.contains('flexlayout__tab_button_stretch')
     ? el
     : null
+}
+
+/** engage 快照：对话栏（region=chat）各分栏的页签条。 */
+const chatStripSnapshots = (): { el: HTMLElement; snap: StripSnapshot }[] => {
+  const model = flModel()
+  if (!model) return []
+  const out: { el: HTMLElement; snap: StripSnapshot }[] = []
+  model.visitNodes((n) => {
+    if (!(n instanceof TabSetNode)) return
+    if (n.getChildren().length === 0) return
+    if (zoneConfigOf(n)?.region !== 'chat') return
+    const setEl = document.querySelector(`.flexlayout__tabset[data-layout-path="${n.getPath()}"]`)
+    const bar = setEl?.querySelector('.flexlayout__tabset_tabbar_outer')
+    if (!(bar instanceof HTMLElement)) return
+    const strips = snapshotStrips(model).filter((s) => s.groupId === n.getId())
+    if (strips.length === 0) return
+    out.push({ el: bar, snap: strips[0] })
+  })
+  return out
 }
 
 /** engaged 松手后吞掉恰一个合成 click（照抄 drag-session.ts：commit 与
@@ -91,8 +123,7 @@ function suppressDragClick(committed: boolean) {
 /**
  * 起一次会话行跨面拖拽。阈值内松开 = 普通点击（切会话照常，机器不干预）；
  * 越阈值后落点与提交全由本会话接管，Esc 随时中止（dnd-kit 一侧的排序拖
- * 由 PointerSensor 原生 Esc 取消——core AbstractPointerSensor.handleKeydown，
- * 两边同一次按键各自回到静止态）。列表内排序不在这里——dnd-kit。
+ * 由 PointerSensor 原生 Esc 取消，两边同一次按键各自回到静止态）。
  */
 export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: SessionRowDragSpec) {
   if (e.button !== 0) return
@@ -123,10 +154,13 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   let raf = 0
   let pending: { x: number; y: number } | null = null
 
-  // engage 快照：主页签矩形（拖拽中布局不重组，全程纯数学）
+  // engage 快照：主页签矩形 + 对话栏条带（拖拽中布局不重组，全程纯数学）
   let mainTab: HTMLElement | null = null
   let mainRect: Rect | null = null
-  let lastMainTab = false
+  let strips: { el: HTMLElement; rect: Rect; snap: StripSnapshot }[] = []
+  // 当前悬停的高亮目标：null=拒绝区；'main'=主页签；否则条带元素
+  type Hover = { kind: 'main' } | { kind: 'strip'; el: HTMLElement; tabsetId: string } | null
+  let hover: Hover = null
 
   const setCursor = (value: string) => {
     if (cursor !== value) {
@@ -135,21 +169,29 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     }
   }
 
-  const applyMainHighlight = (on: boolean) => {
-    if (!mainTab) return
-    if (on) mainTab.style.boxShadow = 'inset 0 0 0 2px var(--fl-accent)'
-    else mainTab.style.removeProperty('box-shadow')
+  const setHighlight = (el: HTMLElement | null, on: boolean) => {
+    if (!el) return
+    if (on) el.style.boxShadow = 'inset 0 0 0 2px var(--fl-accent)'
+    else el.style.removeProperty('box-shadow')
   }
 
-  const publish = (overMainTab: boolean) => {
+  const clearHover = () => {
+    if (!hover) return
+    if (hover.kind === 'main') setHighlight(mainTab, false)
+    else setHighlight(hover.el, false)
+    hover = null
+  }
+
+  const publish = (next: Hover) => {
     // 拒绝区（hermes resolveMove 返回 null 的等价面）：no-drop 光标，松手
-    // 什么都不提交——侧栏列表区正被 dnd-kit 排序占用，这里同样归拒绝区。
-    // 光标每帧对齐（setCursor 自带值变守卫；hermes startDragSession
-    // processMove 同款——hint 恒定时也要保证 engage→grabbing 起手值不丢）。
-    setCursor(overMainTab ? 'grabbing' : 'no-drop')
-    if (lastMainTab === overMainTab) return
-    lastMainTab = overMainTab
-    applyMainHighlight(overMainTab)
+    // 什么都不提交。光标每帧对齐（setCursor 自带值变守卫）。
+    setCursor(next ? 'grabbing' : 'no-drop')
+    if (next?.kind === 'strip' && hover?.kind === 'strip' && next.el === hover.el) return
+    if ((next?.kind ?? null) === (hover?.kind ?? null) && next?.kind !== 'strip') return
+    clearHover()
+    hover = next
+    if (hover?.kind === 'main') setHighlight(mainTab, true)
+    else if (hover?.kind === 'strip') setHighlight(hover.el, true)
   }
 
   const engage = () => {
@@ -164,9 +206,6 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     setCursor('grabbing')
     document.body.style.userSelect = 'none'
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
-    // 黑底白字 chip 已删（用户 2026-10-05："标签拖出…不要黑底白字的效果"
-    // ——「直接拖出的效果」= 源行压暗 0.45 跟手即可，drag-ghost 模块退役；
-    // dnd-kit/行本无 draggable 属性，无原生拖影）
     // 源行压暗 0.45 = 「picked up」反馈（hermes session-drag.ts:120 逐字；
     // dnd-kit 一侧的行自身类负责 z-10/不透明底/cursor-grabbing）
     restoreRowOpacity = handle.style.opacity
@@ -178,10 +217,25 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
       mr && mr.width > 0 && mr.height > 0
         ? { left: mr.left, top: mr.top, right: mr.right, bottom: mr.bottom }
         : null
+    strips = chatStripSnapshots().map(({ el, snap }) => {
+      const r = el.getBoundingClientRect()
+      return {
+        el,
+        snap,
+        rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
+      }
+    })
   }
 
   const resolve = (x: number, y: number) => {
-    publish(mainRect !== null && rectContains(mainRect, x, y))
+    // 主页签优先：指针压在主页签按钮上 = 切换主会话（§6 命中面 1）
+    if (mainRect && rectContains(mainRect, x, y)) {
+      publish({ kind: 'main' })
+      return
+    }
+    // 对话栏条带 = 开签（§6 命中面 2）；其余拒绝
+    const hit = strips.find((s) => rectContains(s.rect, x, y))
+    publish(hit ? { kind: 'strip', el: hit.el, tabsetId: hit.snap.groupId } : null)
   }
 
   const processMove = (x: number, y: number) => {
@@ -238,21 +292,20 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
 
     if (engaged) {
       suppressDragClick(commit)
-      applyMainHighlight(false)
 
-      if (commit && lastMainTab) spec.onCommitMainTab()
+      if (commit && hover?.kind === 'main') spec.onCommitMainTab()
+      else if (commit && hover?.kind === 'strip') spec.onCommitOpenTab(hover.tabsetId)
+      clearHover()
     }
   }
 
   const onUp = () => finish(true)
   const onCancel = () => finish(false)
 
-  // Esc = 拖拽独占的"不要了"：高亮消失、什么都不提交（顶层逃生层，
-  // 低于它且守契约的编辑模式/浮层不再同时响应同一次 Esc）。
-  // 不 stopPropagation：dnd-kit PointerSensor 的 Esc 取消挂在 document 冒泡段
-  // （core AbstractPointerSensor.attach → documentListeners.add(Keydown)），
-  // 捕获段阻断会连排序侧的取消一起杀死——实测（CDP）捕获段 stop 时松手仍
-  // 提交换位，即此。排序侧的中止交给 dnd-kit 自己（onDragCancel 复原位）。
+  // Esc = 拖拽独占的"不要了"：高亮消失、什么都不提交（顶层逃生层）。
+  // 不 stopPropagation：dnd-kit PointerSensor 的 Esc 取消挂在 document 冒泡段，
+  // 捕获段阻断会连排序侧的取消一起杀死（实测踩过）。排序侧的中止交给
+  // dnd-kit 自己（onDragCancel 复原位）。
   const onKey = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape') {
       ev.preventDefault()

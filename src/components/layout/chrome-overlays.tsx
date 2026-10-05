@@ -165,7 +165,6 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
         if (n.getParent() instanceof BorderNode) return
         const cfg = zoneConfigOf(n)
         if (!cfg || n.getChildren().length === 0) return
-        if (cfg.track) return // 轨（20px）无条无顶带语义
         const el = document.querySelector<HTMLElement>(`.flexlayout__tabset[data-layout-path="${n.getPath()}"]`)
         if (!el) return
         const hidden = n.isEnableTabStrip() === false

@@ -1,7 +1,8 @@
 /**
- * 左侧栏（v5.0 · docs/layout-design.md §1）——会话列表/机器人花名册双视图，
- * 无页签条。顶带 = logo + Mirach 文字（可点击切换视图）；顶带下是活动视图。
- * v5.0 以前 sessions/bots 是两个独立页签；v5.0 合为一个窗格内切换。
+ * 左侧栏（docs/layout-design.md v6.0 §3）——会话列表/机器人花名册双视图，
+ * 无页签条。顶带 = logo + **Mirach 文字**；点击 Mirach 文字切换两视图
+ * （文字 hover 变色/按压效果，与页签"文字即按钮"范式同款）。
+ * v5.0 以前 sessions/bots 是两个独立页签；v5.0 起合为一个窗格内切换。
  */
 import { useState } from 'react'
 
@@ -16,14 +17,14 @@ export function LeftRailPane() {
   return (
     <div className="left-rail-pane" data-slot="left-rail-pane">
       <div className="left-rail-logo-row">
-        <RailLogoLeading />
-        <button
-          className={`left-rail-switch${view === 'bots' ? ' left-rail-switch-alt' : ''}`}
-          onClick={() => setView((v) => (v === 'sessions' ? 'bots' : 'sessions'))}
-          type="button"
-        >
-          {view === 'sessions' ? '机器人' : '会话列表'}
-        </button>
+        <RailLogoLeading
+          wordTitle="点击切换 会话 / 机器人"
+          onWordClick={() => setView((v) => (v === 'sessions' ? 'bots' : 'sessions'))}
+        />
+        {/* 当前视图指示（Mirach 文字是唯一切换钮；指示字只读） */}
+        <span className="left-rail-view-name" data-view={view}>
+          {view === 'sessions' ? '会话' : '机器人'}
+        </span>
       </div>
       <div className="left-rail-body">
         {view === 'sessions' ? <AssistantSessionsPane /> : <BotsPane />}

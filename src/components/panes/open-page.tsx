@@ -1,26 +1,29 @@
 /**
- * 面板栏打开页（v5.0 · docs/layout-design.md §5）——三个全宽按钮（文件树/
- * 终端/预览），点击=开出或激活对应页签/终端行。ZCode home 按钮范式。
+ * 面板栏打开页（docs/layout-design.md v6.0 §7）——面板栏默认显示本页；
+ * 三个全宽按钮（ZCode home 按钮范式：图标 + 文字 + 提示位），点击 = 开出
+ * 或激活对应页签/终端行。动作经 props 由 flex-layout 工厂注入（需要模型，
+ * 见 flex-layout.tsx 的 openPanelsAction）。
  */
-import { MousePointerClickIcon, SquareTerminalIcon, FolderTreeIcon, EyeIcon } from 'lucide-react'
+import { EyeIcon, FolderTreeIcon, SquareTerminalIcon } from 'lucide-react'
 
-export interface OpenPageAction {
-  icon: typeof FolderTreeIcon
-  label: string
-  hint: string
-  onOpen(): void
-}
+export type OpenPageKind = 'files' | 'terminal' | 'preview'
 
-export function OpenPage({ actions }: { actions: OpenPageAction[] }) {
+const ACTIONS: { kind: OpenPageKind; icon: typeof FolderTreeIcon; label: string; hint: string }[] = [
+  { kind: 'files', icon: FolderTreeIcon, label: '文件树', hint: '浏览工作区文件' },
+  { kind: 'terminal', icon: SquareTerminalIcon, label: '终端', hint: '打开终端行' },
+  { kind: 'preview', icon: EyeIcon, label: '预览', hint: '预览打开的文件' },
+]
+
+export function OpenPage({ onOpen }: { onOpen(kind: OpenPageKind): void }) {
   return (
     <div className="open-page" data-slot="open-page">
       <h2 className="open-page-title">打开</h2>
       <div className="open-page-actions">
-        {actions.map((a) => (
+        {ACTIONS.map((a) => (
           <button
-            key={a.label}
+            key={a.kind}
             className="open-page-btn"
-            onClick={a.onOpen}
+            onClick={() => onOpen(a.kind)}
             type="button"
           >
             <a.icon className="open-page-btn-icon" size={18} strokeWidth={1.6} />
@@ -32,5 +35,3 @@ export function OpenPage({ actions }: { actions: OpenPageAction[] }) {
     </div>
   )
 }
-
-export { MousePointerClickIcon, SquareTerminalIcon, FolderTreeIcon, EyeIcon }

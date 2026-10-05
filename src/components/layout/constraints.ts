@@ -1,23 +1,22 @@
-import { Model, Orientation, RowNode, TabSetNode, type Node } from 'flexlayout-react'
+import { Model, RowNode, TabSetNode, type Node } from 'flexlayout-react'
 import { SPLITTER_PX } from './layout-presets'
 import { zoneConfigOf, type Region } from './pane-registry'
 
 /**
- * 约束几何（纯函数，docs/layout-design.md v5.0 §2/§3）：行/tabset 树沿宽度
- * 轴的聚合界限（min）、根行可用宽量测、顶带判定、region 读取。
+ * 约束几何（纯函数，docs/layout-design.md v6.0 §2/§4）：行/tabset 树沿宽度
+ * 轴的聚合界限（min）、根行可用宽量测、region 读取。
  * 不含 React、不含动作提交。
  */
-export const regionCfgOfNode = (n: Node): { region: Region; track: boolean } | undefined => {
+export const regionOfNode = (n: Node): Region | undefined => {
   if (n instanceof TabSetNode) {
-    const cfg = zoneConfigOf(n)
-    return cfg ? { region: cfg.region, track: false } : undefined
+    return zoneConfigOf(n)?.region
   }
   if (n instanceof RowNode) {
-    const walk = (kids: Node[]): { region: Region; track: boolean } | undefined => {
+    const walk = (kids: Node[]): Region | undefined => {
       for (const c of kids) {
         if (c instanceof TabSetNode) {
-          const cfg = zoneConfigOf(c)
-          if (cfg) return { region: cfg.region, track: false }
+          const region = zoneConfigOf(c)?.region
+          if (region) return region
         } else if (c instanceof RowNode) {
           const deep = walk(c.getChildren())
           if (deep) return deep
@@ -66,18 +65,6 @@ export const widthBounds = (n: Node, vert: boolean): { min: number; max: number 
     return { min, max: 99999 }
   }
   return { min: 0, max: 99999 }
-}
-
-/** 分栏是否在窗口顶带（沿父链上行——VERT 行只有第一个孩子在顶带）。 */
-export const isTopBand = (rootRow: RowNode | undefined, n: Node): boolean => {
-  let cur: Node = n
-  for (;;) {
-    const p = cur.getParent()
-    if (!(p instanceof RowNode)) return false
-    if (p.getOrientation() === Orientation.VERT && p.getChildren()[0] !== cur) return false
-    if (p === rootRow) return true
-    cur = p
-  }
 }
 
 /** 根行装下所需的最小宽：Σ(各列聚合 min) + 缝 */

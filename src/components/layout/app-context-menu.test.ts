@@ -1,7 +1,10 @@
 /**
  * app 右键菜单（hermes shellSections 移植）的纯投影单测：段结构/项序/
- * 图标/文案、命令面板命令与菜单动作同源、状态栏可见性解析。node 环境。
- * v5.0：「切换标签」链已删，菜单项和 PALETTE_COMMANDS 同步缩减。
+ * 图标/文案、布局段的 ctx 门控、命令面板命令与菜单动作同源、状态栏可见性
+ * 解析。node 环境（无 DOM——布局段在 __flModel 缺席时整段缺席，见
+ * buildShellMenuSections 的 flModel 守卫）。
+ * v6.0：布局动词入菜单（隐藏标签/栏显隐/互换/面板栏位置）；「隐藏标签」
+ * 行按 ctx.tabsetId 出席——测试里无模型 = 布局段恒空，只验 shell 段。
  */
 import { describe, expect, it } from 'vitest'
 
@@ -16,11 +19,17 @@ import { parseStatusbarVisible } from '@/app/shell/statusbar'
 const flatten = (sections: ReturnType<typeof buildShellMenuSections>) => sections.flat()
 
 describe('buildShellMenuSections', () => {
-  it('段结构与项序：[新建会话, 命令面板] | [切换状态栏, 设置]', () => {
+  it('段结构与项序（无模型：strip 行缺席）', () => {
     const sections = buildShellMenuSections()
-    expect(sections.length).toBe(2)
+    expect(sections.length).toBe(3)
     expect(sections[0].map((i) => i.id)).toEqual(['shell-new-chat', 'shell-palette'])
-    expect(sections[1].map((i) => i.id)).toEqual(['shell-statusbar', 'shell-settings'])
+    expect(sections[1].map((i) => i.id)).toEqual([
+      'shell-left',
+      'shell-panels',
+      'shell-swap',
+      'shell-panels-pos',
+    ])
+    expect(sections[2].map((i) => i.id)).toEqual(['shell-statusbar', 'shell-settings'])
   })
 
   it('文案逐字', () => {
@@ -29,6 +38,9 @@ describe('buildShellMenuSections', () => {
     expect(labels.get('shell-palette')).toBe('命令面板')
     expect(labels.get('shell-statusbar')).toBe('切换状态栏')
     expect(labels.get('shell-settings')).toBe('设置')
+    expect(labels.get('shell-left')).toBe('隐藏左侧栏')
+    expect(labels.get('shell-panels')).toBe('隐藏面板栏')
+    expect(labels.get('shell-swap')).toBe('交换左栏与面板栏')
   })
 
   it('图标字形表齐全', () => {
@@ -38,22 +50,33 @@ describe('buildShellMenuSections', () => {
     expect(flatten(buildShellMenuSections()).map((i) => i.icon)).toEqual([
       'add',
       'search',
+      'layout-sidebar-left',
+      'layout-sidebar-right',
+      'arrow-both',
+      'layout-panel',
       'layout-statusbar',
       'layout-menubar',
     ])
   })
 
-  it('裁剪行确实缺席（shell-tabstrip 已废）', () => {
-    const ids = flatten(buildShellMenuSections()).map((i) => i.id)
+  it('布局段图标在字形表内', () => {
+    for (const icon of ['layout-sidebar-left', 'layout-sidebar-right', 'arrow-both', 'layout-panel']) {
+      expect(CODICON_GLYPHS[icon].d.length).toBeGreaterThan(0)
+    }
+  })
+
+  it('「隐藏标签」行按 ctx.tabsetId + live 模型门控：node 环境无模型 → 缺席', () => {
+    // 行内开关/搁浅 noop 态由 column-ops 的 stripToggleInfoOf 决定（CDP 冒烟覆盖）
+    const ids = flatten(buildShellMenuSections({ tabsetId: 'chat-set' })).map((i) => i.id)
     expect(ids).not.toContain('shell-tabstrip')
   })
 })
 
 describe('PALETTE_COMMANDS', () => {
-  it('命令与菜单动作同源（shell-tabstrip 已废）', () => {
+  it('命令与菜单动作同源', () => {
     const ids = PALETTE_COMMANDS.map((c) => c.id)
-    expect(ids).not.toContain('shell-tabstrip')
     expect(ids).toContain('shell-new-chat')
+    expect(ids).toContain('shell-statusbar')
   })
 })
 

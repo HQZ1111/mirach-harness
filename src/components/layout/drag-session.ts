@@ -1,47 +1,36 @@
 /**
- * THE in-app drag primitive —— 移植 hermes
- * pane-shell/tree/renderer/drag-session.ts，flexlayout 适配版。
+ * THE in-app drag primitive —— hermes drag-session 的 flexlayout 适配版
+ * （docs/layout-design.md v6.0 §4：单目标解析）。
  *
  * One pointer-capture session (`startDragSession`) owns the machinery every
  * in-app drag shares — threshold, rAF-coalesced moves, cursor/user-select
- * chrome, ghost chip, Esc-as-top-escape-layer, hint publishing, teardown —
+ * chrome, 跟手克隆件, Esc-as-top-escape-layer, hint publishing, teardown —
  * and a per-kind RESOLVER supplies the semantics: what the pointer is over
  * (`resolveMove` → DropHint) and what a release does (`onCommit`).
  *
- * Pane drags use the FancyZones engine (zones-engine.ts, ported verbatim):
- * sensitivity-radius hit testing, HighlightedZones state machine, Shift =
- * select-many (combined zone range), ClosestCenter primary on drop. The
- * LAYOUT STAYS FIXED and every zone lights up as a whole-region drop target;
- * NOTHING moves until release (tab reorder included — the strip shows an
- * insertion divider, not a live shuffle). Over a zone's TAB STRIP the drop
- * stacks at the divider's slot; elsewhere the radial position picks
- * center/edge.
+ * Pane drags resolve ONE target per frame: a tab strip first (stack at the
+ * insertion caret), else the zone under the pointer (center = join the
+ * stack, edge = split). The LAYOUT STAYS FIXED and nothing moves until
+ * release (placement-on-release). Admission is by 页签归属 (§4): 对话栏页签
+ * 只进对话栏，面板栏页签进面板栏+对话栏，打开页钉在面板栏，左栏拒收一切。
  *
  * PERFORMANCE CONTRACT: the layout never restructures mid-drag, so every
  * rect a resolver needs is snapshotted once at drag start (zones AND tab
- * strips) and each pointermove is pure math against those caches — no
- * elementsFromPoint, no getBoundingClientRect, no style writes unless a
- * value actually changed. Moves are coalesced to one hit-test per animation
- * frame, with the pending move flushed synchronously on release so the drop
- * commits at the exact final position.
+ * strips) and each pointermove is pure math against those caches. Moves are
+ * coalesced to one hit-test per animation frame, flushed synchronously on
+ * release so the drop commits at the exact final position.
  *
  * flexlayout 适配差异（与 hermes 自绘树的分叉点，全部在此文件）：
- *  - zone = flexlayout TabSetNode（网格），strip = .flexlayout__tabset_tabbar_outer；
- *    border（折叠轨道）不进 zone 集合——轨道交互仍走原生 DnD（onAction/allowDrop 管）。
- *  - 提交走 model.doAction（程序化路径：绕过 onAction 否决，但 change listener
- *    仍触发壳的 onModelChange 记账）。v2.1 无分区不变量——窗格可落任何
- *    大栏，宽度/高度约束由壳的 syncTabsetConstraints 在动作后按 region 继承修正。
- *  - 多页签块提交 = hermes movePanes：lead 吃几何、其余按条带序跟队、按下的
- *    页签在落点组置前；Shift 跨区 merge = hermes mergeZonesWithPane（非矩形
- *    回退单区投放）。
- *  - 原生 HTML5 DnD（flexlayout 页签拖拽）被 pointerdown preventDefault 压掉
- *    （Chromium：pointerdown 取消默认 → 不派发 mousedown → 不起原生拖拽），
- *    页签拖拽全部由本引擎接管；strip 空白处拖整个 tabset 仍走原生路径。
+ *  - zone = flexlayout TabSetNode，strip = .flexlayout__tabset_tabbar_outer。
+ *  - 提交走 model.doAction（程序化路径：绕过 onAction 否决，但 change
+ *    listener 仍触发壳的 onModelChange 记账）；准入/上下限在这里判。
+ *  - 原生 HTML5 DnD（flexlayout 页签拖拽）被 pointerdown preventDefault
+ *    压掉，页签拖拽全部由本引擎接管。
  */
 
 import type { PointerEvent as ReactPointerEvent } from 'react'
 
-import { Actions, DockLocation, Model, Orientation, RowNode, TabNode, TabSetNode, type Node } from 'flexlayout-react'
+import { Actions, DockLocation, Model, RowNode, TabNode, TabSetNode, type Node } from 'flexlayout-react'
 
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
 import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
@@ -49,15 +38,12 @@ import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
 import type { DropHint, DropPosition } from '@/store/layout-store'
 import { useLayoutStore } from '@/store/layout-store'
 import { PANE_TYPES, paneTypeOf, zoneConfigOf, type Region } from './pane-registry'
-import { clearTabSelection } from './tab-selection'
-import { type EngineZone, HighlightedZones, primaryZone, type ZoneRect } from './zones-engine'
 
 const DRAG_THRESHOLD_PX = 4
 
-/** Normalized radius of the elliptical CENTER region (stack/link). Outside it
+/** Normalized radius of the elliptical CENTER region (stack). Outside it
  *  the drop targets the dominant-axis edge — the boundary curves with the
- *  zone's aspect ratio instead of snapping at a rigid pixel band, and corners
- *  ease into their nearest edge along the quadrant diagonals. */
+ *  zone's aspect ratio instead of snapping at a rigid pixel band. */
 const CENTER_RADIUS = 0.62
 
 /** How far (px) the pointer may stray from the strip before a tab drag stops
@@ -65,24 +51,35 @@ const CENTER_RADIUS = 0.62
 const TEAR_OFF_SLACK_PX = 18
 
 // ---------------------------------------------------------------------------
-// 快照（flexlayout 版 snapshotZones/snapshotStrips）：布局拖拽中不重组，
-// 一次抓取，全程纯数学。
+// 快照（拖拽中不重组，一次抓取，全程纯数学）
 // ---------------------------------------------------------------------------
+
+/** Viewport-space rect（zones-engine 已删，类型收留于此）。 */
+export interface ZoneRect {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+export interface EngineZone {
+  id: string
+  region: Region
+  rect: ZoneRect
+}
 
 export function snapshotZones(model: Model): EngineZone[] {
   const zones: EngineZone[] = []
 
   model.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
-    // 竖轨（20px 导航空轨）不是投放目标：吞签（签进轨不显示）+ 边缘落点
-    // 会把轨分栏（用户实测 bug）。flexlayout 原生路径由 setOnAllowDrop 拒，
-    // 本引擎的 zone 集合在这里拒。
-    if (zoneConfigOf(node)?.track) return
+    const region = zoneConfigOf(node)?.region
+    if (!region) return
     const el = document.querySelector(`.flexlayout__tabset[data-layout-path="${node.getPath()}"]`)
     if (!el) return
     const r = el.getBoundingClientRect()
     if (r.width === 0 || r.height === 0) return
-    zones.push({ id: node.getId(), rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } })
+    zones.push({ id: node.getId(), region, rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } })
   })
 
   return zones
@@ -90,7 +87,7 @@ export function snapshotZones(model: Model): EngineZone[] {
 
 /** One tab's insertion geometry: its pane id + horizontal midpoint（+两缘，
  *  overlay 的插入符从快照取位，拖拽中不再查 DOM）. */
-interface StripSlot {
+export interface StripSlot {
   id: string
   mid: number
   left: number
@@ -111,17 +108,10 @@ const stripSlots = (tabsetEl: Element): StripSlot[] =>
 
 /** Insertion slot from the pointer x against the OTHER tabs' midpoints:
  *  stack BEFORE the returned pane id (`null` = append). `exclude` is the
- *  dragged tab — or the whole selection on a multi-tab drag, so the block
- *  can't target a slot inside itself. */
-export function slotBefore(
-  slots: StripSlot[],
-  x: number,
-  exclude: readonly string[] | string = ''
-): { before: null | string } {
-  const excluded = typeof exclude === 'string' ? [exclude] : exclude
-
+ *  dragged tab. */
+export function slotBefore(slots: StripSlot[], x: number, exclude: string): { before: null | string } {
   for (const slot of slots) {
-    if (excluded.includes(slot.id)) {
+    if (slot.id === exclude) {
       continue
     }
 
@@ -135,12 +125,10 @@ export function slotBefore(
 
 /** Drag-start snapshot of one zone's tab strip. Strips never overlap and the
  *  layout never restructures mid-drag, so rect containment replaces a
- *  per-move elementsFromPoint hit test. A drop on a strip STACKS at the
- *  divider's slot — the strip is where tabs live, so it wins over the radial
- *  top-edge band that would otherwise read as "split top". 单页签拉伸 zone
- *  （SingleTabStretch）没有 tabbar → 无 strip 快照 → 只能 center/edge。 */
+ *  per-move elementsFromPoint hit test. */
 export interface StripSnapshot {
   groupId: string
+  region: Region
   rect: ZoneRect
   slots: StripSlot[]
 }
@@ -150,6 +138,8 @@ export function snapshotStrips(model: Model): StripSnapshot[] {
 
   model.visitNodes((node) => {
     if (!(node instanceof TabSetNode)) return
+    const region = zoneConfigOf(node)?.region
+    if (!region) return
     const el = document.querySelector(`.flexlayout__tabset[data-layout-path="${node.getPath()}"]`)
     if (!el) return
     const bar = el.querySelector('.flexlayout__tabset_tabbar_outer')
@@ -158,6 +148,7 @@ export function snapshotStrips(model: Model): StripSnapshot[] {
     if (r.width === 0 || r.height === 0) return
     strips.push({
       groupId: node.getId(),
+      region,
       rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom },
       slots: stripSlots(el),
     })
@@ -170,9 +161,8 @@ export const rectContains = (rect: ZoneRect, x: number, y: number, pad = 0) =>
   x >= rect.left - pad && x <= rect.right + pad && y >= rect.top - pad && y <= rect.bottom + pad
 
 /** Radial drop position within `rect`: inside the center ellipse = the center
- *  action (stack/link); outside, the dominant axis picks the edge (VS Code
- *  dock-preview geometry). `centerRadius` sizes the ellipse — larger = more
- *  center, slimmer curved edge bands. */
+ *  action (stack); outside, the dominant axis picks the edge (VS Code
+ *  dock-preview geometry). */
 export function radialPosition(rect: ZoneRect, x: number, y: number, centerRadius = CENTER_RADIUS): DropPosition {
   // Zone-centered coordinates, ±1 at the edge midpoints.
   const dx = ((x - rect.left) / Math.max(1, rect.right - rect.left)) * 2 - 1
@@ -185,23 +175,13 @@ export function radialPosition(rect: ZoneRect, x: number, y: number, centerRadiu
   return Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'top' : 'bottom'
 }
 
-/** Sub-zone drop position within the zone `groupId` (radial hit-testing). */
-export function subZonePosition(zones: EngineZone[], groupId: string, x: number, y: number): DropPosition {
-  const rect = zones.find((zone) => zone.id === groupId)?.rect
-
-  return rect ? radialPosition(rect, x, y) : 'center'
-}
-
 const sameHint = (a: DropHint | null, b: DropHint | null) =>
   a?.groupId === b?.groupId &&
   a?.pos === b?.pos &&
   a?.stack?.before === b?.stack?.before &&
-  (a?.stack === undefined) === (b?.stack === undefined) &&
-  (a?.groupIds?.length ?? 0) === (b?.groupIds?.length ?? 0) &&
-  (a?.groupIds ?? []).every((id, i) => b?.groupIds?.[i] === id)
+  (a?.stack === undefined) === (b?.stack === undefined)
 
-// 临时调试钩子（CDP 冒烟用，模块级——startDragSession/startPaneDrag 都写）。
-// 有界：cap 200，超限丢最旧（长会话探针不再无限增长，2026-10-01 审查 P2-13）。
+// 临时调试钩子（CDP 冒烟用，模块级）。有界：cap 200，超限丢最旧。
 const DRAG_LOG_CAP = 200
 const dragLog = (what: string, data?: unknown) => {
   const w = window as any
@@ -221,7 +201,7 @@ export interface DragSessionSpec {
   /** Per-frame target resolution — pure math against drag-start snapshots.
    *  Returns the hint to publish; `null` = deny area (no-drop cursor, a
    *  release commits nothing). */
-  resolveMove(x: number, y: number, shift: boolean): DropHint | null
+  resolveMove(x: number, y: number): DropHint | null
   /** Release over the final published hint (already flushed to the exact
    *  release position). Only called for engaged drags. */
   onCommit(hint: DropHint | null): void
@@ -266,9 +246,9 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
     return
   }
 
-  // RailNav 的拖出把手在 pointermove 里转交**已结束的** pointerdown 事件，
-  // 此时 React 的 currentTarget 已置空——捕获退化到 documentElement（同一
-  // pointerId 仍有效），否则指针拖出窗口后 pointerup 收不到，会话卡死。
+  // 从宿主捕获段进入时 React 的 currentTarget 已是宿主——捕获退化到
+  // documentElement（同一 pointerId 仍有效），否则指针拖出窗口后
+  // pointerup 收不到，会话卡死。
   const handle: Element = e.currentTarget ?? document.documentElement
   const { pointerId } = e
   const sx = e.clientX
@@ -283,7 +263,7 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
   let grabOffset = { x: 0, y: 0 }
   // rAF-coalesced move processing: the raw handler only records the latest
   // point; all hit testing happens at most once per frame.
-  let pending: { x: number; y: number; shift: boolean } | null = null
+  let pending: { x: number; y: number } | null = null
   let raf = 0
 
   // Cursor writes are per-frame; only touch the style when the value changes.
@@ -319,15 +299,14 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
 
     setCursor('grabbing')
     document.body.style.userSelect = 'none'
-    // While dragging, Esc belongs to the drag ALONE — lower layers (edit
-    // mode, overlays) must not also fire on the same press.
+    // While dragging, Esc belongs to the drag ALONE — lower layers must not
+    // also fire on the same press.
     releaseEscapeLayer = pushEscapeLayer(ESCAPE_PRIORITY.drag)
 
-    // 「拖出来」的视觉（用户 2026-10-05：页签要跟着指针走，不是原地压暗）：
-    // 克隆被拖的页签元素做跟手替身（外观 = 页签本尊，从按下点被"拿起"）。
-    // **克隆源 = e.target 上溯的页签按钮**——本会话从宿主捕获段进入
-    // （onPointerDownCapture 挂在 .flexlayout-host），currentTarget 是宿主
-    // 不是页签按钮，按 handle 判定永远不中（克隆从没创建过=「拖不出来」）。
+    // 「拖出来」的视觉（用户 2026-10-05：页签要跟着指针走）：克隆被拖的
+    // 页签元素做跟手替身。**克隆源 = e.target 上溯的页签按钮**——本会话从
+    // 宿主捕获段进入（onPointerDownCapture 挂 .flexlayout-host），
+    // currentTarget 是宿主不是页签按钮，按 handle 判定永远不中。
     const pressedTab =
       e.target instanceof Element
         ? (e.target.closest(
@@ -357,7 +336,7 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
     )
   }
 
-  const processMove = (x: number, y: number, shift: boolean) => {
+  const processMove = (x: number, y: number) => {
     if (!engaged) {
       if (Math.hypot(x - sx, y - sy) < DRAG_THRESHOLD_PX) {
         return
@@ -366,12 +345,12 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
       engage(x, y)
     }
 
-    const hint = spec.resolveMove(x, y, shift)
+    const hint = spec.resolveMove(x, y)
 
     moveFollower(x, y)
 
-    // Over a deny area (no target — titlebar / statusbar / gutters /
-    // off-window) the release cancels; the cursor says so up front.
+    // Over a deny area (no target — 左栏/面板栏拒收面 / titlebar / off-window)
+    // the release cancels; the cursor says so up front.
     setCursor(hint ? 'grabbing' : 'no-drop')
     publishHint(hint)
   }
@@ -380,14 +359,14 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
     raf = 0
 
     if (pending) {
-      const { shift, x, y } = pending
+      const { x, y } = pending
       pending = null
-      processMove(x, y, shift)
+      processMove(x, y)
     }
   }
 
   const onMove = (ev: PointerEvent) => {
-    pending = { shift: ev.shiftKey, x: ev.clientX, y: ev.clientY }
+    pending = { x: ev.clientX, y: ev.clientY }
     raf ||= requestAnimationFrame(flushMove)
   }
 
@@ -441,10 +420,10 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
   const onUp = () => finish(true)
   const onCancel = () => finish(false)
 
-  // Esc aborts the drag — the target selection vanishes and nothing moves,
-  // the universal "never mind" for an in-flight drag. Capture-phase + stop so
-  // it doesn't also close a pane/overlay behind the drag (the escape layer
-  // covers contract-following handlers; the stop covers the rest).
+  // Esc aborts the drag — the target selection vanishes and nothing moves.
+  // Capture-phase + stop so it doesn't also close a pane/overlay behind the
+  // drag (the escape layer covers contract-following handlers; the stop
+  // covers the rest).
   const onKey = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape') {
       ev.preventDefault()
@@ -460,8 +439,35 @@ export function startDragSession(e: ReactPointerEvent<Element>, spec: DragSessio
 }
 
 // ---------------------------------------------------------------------------
-// 提交层（flexlayout 适配）：hermes 的 movePanes / mergeZonesWithPane /
-// reorderPanesInGroup 在 flexlayout action 上的等价物。
+// 准入与分栏上下限（docs/layout-design.md v6.0 §4）
+// ---------------------------------------------------------------------------
+
+/** 页签可去的大栏（§4 归属表）：对话栏页签只进对话栏；打开页钉在面板栏；
+ *  其余面板栏页签面板栏+对话栏均可；左栏拒收一切（leftrail 无条不参与）。 */
+export const allowedRegionsOf = (paneId: string): Region[] => {
+  const t = paneTypeOf(paneId)
+  if (!t) return ['left', 'chat', 'panels'] // 未知 id（外部拖入占位等）不设限
+  const def = PANE_TYPES[t]
+  if (t === 'open') return [] // 打开页锚：不参与拖拽（语义钉死在面板栏顶组）
+  if (def.region === 'chat') return ['chat']
+  if (def.region === 'left') return []
+  return ['panels', 'chat']
+}
+
+/** 列的竖向行数：tabset=1；VERT 行=Σ子项；HORZ 行=MAX 子项（横向分栏
+ *  不新增竖向行）。上下限 = 列行数 < 2 才允许 top/bottom 投放。 */
+export const verticalRowCount = (n: RowNode | TabSetNode): number => {
+  if (n instanceof TabSetNode) return 1
+  let sum = 0
+  for (const c of n.getChildren()) {
+    if (c instanceof TabSetNode) sum += 1
+    else if (c instanceof RowNode) sum += verticalRowCount(c)
+  }
+  return sum
+}
+
+// ---------------------------------------------------------------------------
+// 提交层：center=入栈、edge=分裂（lead 吃几何，其余跟队）。
 // ---------------------------------------------------------------------------
 
 const dropDockLocation = (pos: DropPosition): DockLocation => {
@@ -479,49 +485,50 @@ const dropDockLocation = (pos: DropPosition): DockLocation => {
   }
 }
 
-const tabsetChildCount = (model: Model, tabsetId: string) => {
-  const set = model.getNodeById(tabsetId)
-  return set instanceof TabSetNode ? set.getChildren().length : 0
+/** center 投放：index = before 页签在"除拖动签外"中的序（hermes slot→index
+ *  语义）；无 before = 追加。 */
+function dropStack(model: Model, paneId: string, targetId: string, before: null | string) {
+  const set = model.getNodeById(targetId)
+  if (!(set instanceof TabSetNode)) return
+  const others = set.getChildren().filter((c): c is TabNode => c instanceof TabNode && c.getId() !== paneId)
+  const raw = before ? others.findIndex((c) => c.getId() === before) : others.length
+  const toIndex = raw >= 0 ? raw : others.length
+  model.doAction(Actions.moveNode(paneId, targetId, DockLocation.CENTER, toIndex))
 }
 
-/** guillotine 树上被 `ids` 恰好覆盖的子树（hermes findCover）：叶集合相等。
- *  矩形区域检查——不成立时 merge 回退单区投放。 */
-function findCoverTabset(model: Model, ids: string[]): boolean {
-  const want = new Set(ids)
-  const root = model.getRootRow()
-  if (!root) return false
-  const leaves = (n: Node): string[] => (n instanceof TabSetNode ? [n.getId()] : n.getChildren().flatMap(leaves))
-
-  const walk = (n: Node): boolean => {
-    const ls = leaves(n)
-    if (ls.length === want.size && ls.every((id) => want.has(id))) return true
-    return n.getChildren().some(walk)
+/** edge 投放：lead 分裂出新 tabset（新栏预戳目标列 region——"放到检查的
+ *  左边"=检查所在的列），selectTab 激活。 */
+function dropSplit(model: Model, paneId: string, targetId: string, pos: DropPosition) {
+  model.doAction(Actions.moveNode(paneId, targetId, dropDockLocation(pos), 0))
+  const leadParent = model.getNodeById(paneId)?.getParent()
+  if (leadParent instanceof TabSetNode && leadParent.getId() !== targetId) {
+    // v7.0：新分栏预戳 = **被拖页签的语义 region**（docs §4——分栏身份跟
+    // 内容走；面板页签拖到对话栏旁分栏，新分栏仍是面板栏子栏）
+    const t = paneTypeOf(paneId)
+    const region = t ? PANE_TYPES[t].region : undefined
+    if (region) {
+      model.doAction(
+        Actions.updateNodeAttributes(leadParent.getId(), { config: { region } }),
+      )
+    }
   }
-
-  return walk(root)
 }
 
 export interface PaneDragSpec {
   onTap?: () => void
   /** 有 reorder 上下文 = 从 tabset 页签条发起：条内是插入槽重排，撕出条外
-   *  变 zone 移动。无（如从折叠轨道发起）直接进 zone 模式。 */
+   *  变 zone 移动。 */
   reorder?: { groupId: string }
-  /** Multi-tab selection riding this drag (strip order, includes `paneId`).
-   *  The whole block moves/reorders together; `paneId` stays the pressed tab
-   *  (it fronts at the destination). */
-  selection?: readonly string[]
 }
 
 /**
- * Begin a pane drag from any handle（hermes startPaneDrag 的 flexlayout 版）.
+ * Begin a pane drag from a tab（hermes startPaneDrag 的 flexlayout 版）.
  * A sub-threshold release is a click (`onTap`, tab activation rides the
- * native click). With a `reorder` context (tab drags), movement inside the
- * strip targets an insertion slot — the strip renders a divider at it,
- * NOTHING moves until release (placement-on-release, like every other drop);
- * tearing away from the strip converts the drag into a zone move. Zone mode:
- * zones light up, the target's tab strip stacks at its divider slot, Shift
- * extends the highlight range, release drops into the ClosestCenter primary
- * zone. Esc aborts either mode.
+ * native click). With a `reorder` context, movement inside the strip targets
+ * an insertion slot — the strip renders a divider at it, NOTHING moves until
+ * release; tearing away from the strip converts the drag into a zone move.
+ * Zone move: the zone under the pointer lights up, its strip stacks at the
+ * divider slot, an edge splits. Esc aborts either mode.
  */
 export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent<Element>, spec: PaneDragSpec = {}) {
   if (e.button !== 0) {
@@ -534,25 +541,18 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
   e.preventDefault()
   e.stopPropagation()
 
-  // The moving block: the selection when the pressed tab rides one, else just
-  // the pressed tab. Order is strip order (selectionFor guarantees it).
-  const moving: readonly string[] = spec.selection && spec.selection.length > 1 ? spec.selection : [paneId]
-
-  const highlighted = new HighlightedZones()
+  const allowed = allowedRegionsOf(paneId)
   let zones: EngineZone[] = []
   let strips: StripSnapshot[] = []
   let mode: 'reorder' | 'zone' | null = null
-  let dimmed: HTMLElement[] = []
+  const dimmed: HTMLElement[] = []
 
   const markSource = () => {
-    // Every dragged tab dims for the drag's life — the divider says where
-    // they GO, the dim says what MOVES. No live shuffle
-    // (placement-on-release).
-    if (dimmed.length === 0 && spec.reorder) {
-      for (const id of moving) {
-        const el = document.getElementById(`flexlayout-tabbutton-${id}`)
-        if (el) dimmed.push(el)
-      }
+    // The dragged tab dims for the drag's life — the divider says where it
+    // GOES, the dim says what MOVES. No live shuffle (placement-on-release).
+    if (dimmed.length === 0) {
+      const el = document.getElementById(`flexlayout-tabbutton-${paneId}`)
+      if (el) dimmed.push(el)
     }
 
     for (const el of dimmed) {
@@ -565,7 +565,6 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
     // The layout never restructures mid-drag, so zone/strip rects are stable.
     zones = snapshotZones(model)
     strips = snapshotStrips(model)
-    useLayoutStore.getState().setTreeDragging(paneId)
     if (dragGeometry) dragGeometry.mode = 'zone'
     markSource()
   }
@@ -601,7 +600,7 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
     onTap: spec.onTap,
 
     onEngage(x, y) {
-      dragLog('engage', { x, y, hasReorder: Boolean(spec.reorder) })
+      dragLog('engage', { x, y, paneId, hasReorder: Boolean(spec.reorder) })
       // 快照给 DropOverlay 用（viewport 坐标 + 宿主偏移）
       const host = document.querySelector('.flexlayout-host')
       const hr = host?.getBoundingClientRect()
@@ -609,7 +608,7 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
         hostOffset: { x: hr?.left ?? 0, y: hr?.top ?? 0 },
         zones: snapshotZones(model),
         strips: snapshotStrips(model),
-        moving,
+        moving: [paneId],
         mode: 'reorder',
       }
       if (spec.reorder && withinStrip(x, y)) {
@@ -623,15 +622,14 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
       dragLog('mode', mode)
     },
 
-    resolveMove(x, y, shift) {
+    resolveMove(x, y) {
       if (mode === 'reorder') {
         if (withinStrip(x, y)) {
           return {
             kind: 'group',
             groupId: spec.reorder!.groupId,
-            groupIds: [spec.reorder!.groupId],
             pos: 'center',
-            stack: slotBefore(reorderStrip().slots, x, moving),
+            stack: slotBefore(reorderStrip().slots, x, paneId),
           }
         }
 
@@ -639,146 +637,57 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
         enterZoneMode()
       }
 
-      // A strip is an exact target. Resolve it before the fuzzy zone engine:
-      // near a panel seam, proximity can otherwise pick the neighboring sidebar.
-      const hitStrip = !shift && strips.find((strip) => rectContains(strip.rect, x, y))
+      // A strip is an exact target. Resolve it before the zone rect:
+      // near a panel seam, containment can otherwise pick the neighbor zone.
+      const hitStrip = strips.find((strip) => rectContains(strip.rect, x, y) && allowed.includes(strip.region))
 
       if (hitStrip) {
         return {
           kind: 'group',
           groupId: hitStrip.groupId,
-          groupIds: [hitStrip.groupId],
           pos: 'center',
-          stack: slotBefore(hitStrip.slots, x, moving),
+          stack: slotBefore(hitStrip.slots, x, paneId),
         }
       }
 
-      // The hint updates on highlight-set changes AND on sub-zone position
-      // changes (center/edge regions within the same primary zone).
-      const point = { x, y }
-      highlighted.update(zones, point, shift)
-      let groupIds = [...highlighted.zones()]
+      // Zone under the pointer (region-admitted only).
+      const zone = zones.find((z) => rectContains(z.rect, x, y) && allowed.includes(z.region))
+      if (!zone) return null
 
-      // Spanning multiple zones is EXPLICIT (Shift). Without it, the seam-
-      // proximity capture (sensitivity radius grabs both neighbors near a
-      // shared edge) collapses to the primary zone — otherwise a drop near a
-      // seam silently merges zones the user never asked to merge.
-      if (!shift && groupIds.length > 1) {
-        const collapsed = primaryZone(zones, groupIds, point)
-        groupIds = collapsed ? [collapsed] : []
+      const pos = radialPosition(zone.rect, x, y)
+      const strip = strips.find((s) => s.groupId === zone.id && rectContains(s.rect, x, y))
+      if (strip) {
+        return { kind: 'group', groupId: zone.id, pos: 'center', stack: slotBefore(strip.slots, x, paneId) }
       }
 
-      const gid = groupIds.length > 0 ? primaryZone(zones, groupIds, point) : null
-
-      // Over the target's TAB STRIP the drop stacks at the divider's slot;
-      // sub-positions only make sense for a single-zone drop (a Shift-span
-      // always merges, pos ignored).
-      const strip = gid && groupIds.length === 1 ? strips.find((s) => s.groupId === gid && rectContains(s.rect, x, y)) : null
-
-      const stack = strip ? slotBefore(strip.slots, x, moving) : undefined
-
-      const pos: DropPosition = stack
-        ? 'center'
-        : gid && groupIds.length === 1
-          ? subZonePosition(zones, gid, x, y)
-          : 'center'
-
-      // 贴轨拒绝：edge 落点的新分栏会插在目标与 20px 轨之间。dropBlock 走
-      // model.doAction 直提、**不经过 setOnAllowDrop**——必须在这里拒，否则
-      // "拖签把竖轨分栏"从这个口子漏进来（2026-09-26 复审补）。
-      if (gid && groupIds.length === 1 && !stack && (pos === 'left' || pos === 'right')) {
-        const set = model.getNodeById(gid)
-        if (set instanceof TabSetNode) {
-          const parent = set.getParent()
-          if (parent instanceof RowNode && parent.getOrientation() === Orientation.HORZ) {
-            const sibs = parent.getChildren()
-            const i = sibs.indexOf(set)
-            const side = pos === 'left' ? sibs[i - 1] : sibs[i + 1]
-            if (side instanceof TabSetNode && zoneConfigOf(side)?.track) {
-              return null
-            }
-          }
-        }
+      // 上下两行上限（§2）：edge=top/bottom 会新增竖向行——目标列已满 2 行
+      // 则拒（center/edge 左右仍可）。
+      if (pos === 'top' || pos === 'bottom') {
+        const targetColumn = columnOfZone(model, zone.id)
+        if (targetColumn && verticalRowCount(targetColumn) >= 2) return null
       }
 
-      return gid ? { kind: 'group', groupId: gid, groupIds, pos, stack } : null
+      return { kind: 'group', groupId: zone.id, pos, stack: undefined }
     },
 
     onCommit(hint) {
       dragLog('commit', { mode, hint })
-      // A multi-tab selection is spent by a LANDED drop (reorder or zone) —
-      // a deny-area release keeps it, so a missed drop can just be retried.
-      const spendSelection = () => {
-        if (moving.length > 1) {
-          clearTabSelection()
-        }
-      }
-
       if (mode === 'reorder' && spec.reorder && hint?.stack !== undefined) {
-        // Slot -> index among the OTHER tabs (the block re-inserts there).
-        const set = model.getNodeById(spec.reorder.groupId)
-        const others =
-          set instanceof TabSetNode
-            ? set.getChildren().filter((c): c is TabNode => c instanceof TabNode && !moving.includes(c.getId()))
-            : []
-        const toIndex = hint.stack.before ? others.findIndex((c) => c.getId() === hint.stack!.before) : others.length
-
-        dragLog('reorderCommit', {
-          groupId: spec.reorder.groupId,
-          before: hint.stack.before,
-          toIndex,
-          others: others.map((o) => o.getId()),
-        })
-        if (toIndex >= 0) {
-          for (let i = 0; i < moving.length; i++) {
-            model.doAction(Actions.moveNode(moving[i], spec.reorder.groupId, DockLocation.CENTER, toIndex + i))
-          }
-          reorderCommitHaptic()
-          spendSelection()
-        }
+        dropStack(model, paneId, spec.reorder.groupId, hint.stack.before)
+        reorderCommitHaptic()
+        return
       }
 
-      if (mode === 'zone') {
-        // Drop what the hint SHOWS — the overlay and the commit share one
-        // truth (the raw highlight set can hold both seam neighbors; the hint
-        // already collapsed that to the primary unless Shift made the span
-        // explicit).
-        const targets = hint?.groupIds ?? []
-
-        if (targets.length > 1) {
-          // Shift-span: merge the highlighted zones, dropping the block
-          // across them（hermes mergeZonesWithPane：非矩形回退单区投放）。
-          if (findCoverTabset(model, targets)) {
-            const primary = hint?.groupId ?? targets[0]
-            // block 顶到主 zone 前端，再吸收其余 zone 的页签（hermes 语义：
-            // [moving..., panesInSet...]）
-            for (let i = 0; i < moving.length; i++) {
-              model.doAction(Actions.moveNode(moving[i], primary, DockLocation.CENTER, i))
-            }
-            for (const zoneId of targets) {
-              if (zoneId === primary) continue
-              const set = model.getNodeById(zoneId)
-              if (!(set instanceof TabSetNode)) continue
-              for (const t of [...set.getChildren()]) {
-                if (t instanceof TabNode && !moving.includes(t.getId())) {
-                  model.doAction(
-                    Actions.moveNode(t.getId(), primary, DockLocation.CENTER, tabsetChildCount(model, primary)),
-                  )
-                }
-              }
-            }
-            model.doAction(Actions.selectTab(paneId))
-          } else if (hint?.groupId) {
-            dropBlock(model, moving, paneId, hint.groupId, 'center', null)
-          }
-          spendSelection()
-        } else if (hint?.groupId) {
-          // strip = stack at the divider slot; center = join the stack;
-          // an edge = split the zone and land there. The whole selection
-          // rides — the pressed tab fronts at the destination.
-          dropBlock(model, moving, paneId, hint.groupId, hint.pos ?? 'center', hint.stack?.before ?? null)
-          spendSelection()
+      if (mode === 'zone' && hint?.groupId) {
+        if (hint.stack !== undefined) {
+          dropStack(model, paneId, hint.groupId, hint.stack.before)
+        } else if (hint.pos === 'center') {
+          dropStack(model, paneId, hint.groupId, null)
+        } else {
+          dropSplit(model, paneId, hint.groupId, hint.pos)
         }
+        model.doAction(Actions.selectTab(paneId))
+        reorderCommitHaptic()
       }
     },
 
@@ -787,86 +696,21 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
         el.style.removeProperty('opacity')
       }
 
-      highlighted.reset()
       dragGeometry = null
     },
   })
 }
 
-/** 投放块内第一个一级窗格的家乡 region（无 → undefined）——dropBlock 预戳
- *  门控用（§2.1 ②：含一级窗格的投放不预戳，交给 sync 的 primary 锚定） */
-const movingPrimaryRegion = (moving: readonly string[]): Region | undefined => {
-  for (const id of moving) {
-    const t = paneTypeOf(id)
-    const def = t ? PANE_TYPES[t] : undefined
-    if (def?.primary) return def.region
+/** zone id（tabset id）所在列的根行直接子项。 */
+const columnOfZone = (model: Model, zoneId: string): RowNode | TabSetNode | undefined => {
+  const rootRow = model.getRootRow()
+  let cur: Node | undefined = model.getNodeById(zoneId)
+  while (cur) {
+    const p: Node | undefined = cur.getParent()
+    if (!p || p === rootRow) break
+    cur = p
   }
-  return undefined
-}
-
-/** hermes movePanes 的 flexlayout 版：lead 吃几何（edge=分裂、center=进栈），
- *  其余按条带序跟队，`activeId`（按下的页签）在落点组置前。 */
-function dropBlock(
-  model: Model,
-  moving: readonly string[],
-  activeId: string,
-  targetId: string,
-  pos: DropPosition,
-  before: null | string,
-) {
-  const lead = moving[0]
-  if (!lead) return
-
-  if (pos === 'center') {
-    // index = before 页签在"除 block 外页签"中的序（hermes slot→index 语义）；
-    // 无 before = 追加
-    const set = model.getNodeById(targetId)
-    if (!(set instanceof TabSetNode)) return
-    const others = set.getChildren().filter((c): c is TabNode => c instanceof TabNode && !moving.includes(c.getId()))
-    const raw = before ? others.findIndex((c) => c.getId() === before) : others.length
-    const toIndex = raw >= 0 ? raw : others.length
-    for (let i = 0; i < moving.length; i++) {
-      model.doAction(Actions.moveNode(moving[i], targetId, DockLocation.CENTER, toIndex + i))
-    }
-  } else {
-    // lead 分裂出新 tabset（edge 几何），其余跟进 lead 的新家
-    model.doAction(Actions.moveNode(lead, targetId, dropDockLocation(pos), 0))
-    const leadParent = model.getNodeById(lead)?.getParent()
-    if (leadParent instanceof TabSetNode && leadParent.getId() !== targetId) {
-      // 新分栏预戳**被投入分栏（目标）**的列 identity——"放到检查的左边"=
-      // 检查所在的列（跟随状态），不能用几何左邻猜（2026-09-26 用户场景）。
-      // **门控（§2.1 ②，2026-10-01 审查 P1-2）**：仅当投放内容不含一级窗格
-      // （或其家乡 region 与目标列一致）才预戳——含一级窗格（如主会话拖到
-      // 左栏旁分裂）时留空，交给 sync 的"列子树内第一个一级窗格锚定"：
-      // config 戳防夺锚，预戳的错误 region 会抢在 primary 锚定之前生效，
-      // 把主会话钉进左栏限制。
-      const targetNode = model.getNodeById(targetId)
-      const targetCfg = targetNode instanceof TabSetNode ? zoneConfigOf(targetNode) : undefined
-      const movingPrimary = movingPrimaryRegion(moving)
-      if (targetCfg && (movingPrimary === undefined || movingPrimary === targetCfg.region)) {
-        model.doAction(
-          Actions.updateNodeAttributes(leadParent.getId(), { config: { region: targetCfg.region, rail: targetCfg.rail } }),
-        )
-      }
-      for (let i = 1; i < moving.length; i++) {
-        model.doAction(Actions.moveNode(moving[i], leadParent.getId(), DockLocation.CENTER, i))
-      }
-    } else if (leadParent instanceof TabSetNode) {
-      // 分裂没发生（单页签 tabset 上落 edge 原地合并之类）——逐个追加
-      for (let i = 1; i < moving.length; i++) {
-        model.doAction(
-          Actions.moveNode(
-            moving[i],
-            leadParent.getId(),
-            DockLocation.CENTER,
-            tabsetChildCount(model, leadParent.getId()),
-          ),
-        )
-      }
-    }
-  }
-
-  model.doAction(Actions.selectTab(activeId))
+  return cur instanceof TabSetNode || cur instanceof RowNode ? cur : undefined
 }
 
 // ---------------------------------------------------------------------------

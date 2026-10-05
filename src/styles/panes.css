@@ -643,3 +643,95 @@
 .aui-thread-root:has(.aui-width-handle[data-dragging]) .aui-width-handle::after {
   opacity: 1;
 }
+
+/* ── 左侧栏（left-rail-pane，v6.0 §3：无页签条，Mirach 文字切换视图） ── */
+.left-rail-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.left-rail-logo-row {
+  flex: none;
+  position: relative;
+}
+
+/* 顶带右下的当前视图指示（只读；Mirach 文字是唯一切换钮） */
+.left-rail-view-name {
+  bottom: 10px;
+  color: var(--left-rail-view-color);
+  font-size: var(--left-rail-view-size);
+  position: absolute;
+  right: var(--logo-leading-pad);
+}
+
+.left-rail-view-name[data-view='bots'] {
+  color: var(--left-rail-view-active-color);
+}
+
+.left-rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
+.open-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: auto;
+  padding: var(--openpage-pad-x);
+}
+
+.open-page-title {
+  color: var(--h2-color);
+  font-size: var(--h2-size);
+  font-weight: var(--h2-weight);
+  margin: 0;
+}
+
+.open-page-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--openpage-btn-row-gap);
+  margin-top: var(--openpage-title-gap);
+}
+
+.open-page-btn {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--openpage-btn-radius);
+  cursor: pointer;
+  display: flex;
+  gap: var(--openpage-btn-gap);
+  padding: var(--openpage-btn-pad-y) var(--openpage-btn-pad-x);
+  text-align: left;
+  transition: background 100ms, border-color 100ms;
+  width: 100%;
+}
+
+.open-page-btn:hover {
+  background: var(--hover-wash);
+  border-color: var(--stroke);
+}
+
+.open-page-btn-icon {
+  color: var(--fl-accent);
+  flex: none;
+  width: var(--openpage-btn-icon-size);
+}
+
+.open-page-btn-label {
+  color: var(--text);
+  font-size: var(--body-size);
+}
+
+.open-page-btn-hint {
+  color: var(--text-4);
+  font-size: var(--openpage-hint-size);
+  margin-left: auto;
+}

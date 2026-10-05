@@ -42,6 +42,7 @@ import { sessionQueue } from './session-queue-store'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import { sessionCatalog, sessionDisplayName, hydrateSessionMeta } from '@/components/panes/session-manage/session-catalog'
+import { setSessionThreadSwitcher } from '@/components/panes/session-manage/session-tab-bridge'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -1094,6 +1095,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     },
     [actorRef, hydratePiMessages, refreshThreads, resetSessionScopedBridges],
   )
+
+  // 会话页签激活 → 切线程（docs/layout-design.md v6.0 §8）：flex-layout 的
+  // SELECT_TAB 拦截经 bridge 调这里；switchToThread 换新（依赖变化）时
+  // 重登记，卸载清空（未注册 = bridge 侧错误可见）。
+  useEffect(() => {
+    setSessionThreadSwitcher((id) => void switchToThread(id))
+    return () => setSessionThreadSwitcher(null)
+  }, [switchToThread])
 
   const threadListAdapter = {
     threadId: currentThreadId ?? undefined,

@@ -74,6 +74,7 @@ import {
 } from "@/components/panes/session-manage/session-actions";
 import { DeleteSessionDialog, RenameSessionDialog } from "@/components/panes/session-manage/session-dialogs";
 import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
+import { openSessionTabBridge } from "@/components/panes/session-manage/session-tab-bridge";
 import { VIRTUALIZE_THRESHOLD, VirtualSessionList } from "@/components/panes/session-manage/virtual-session-list";
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
@@ -139,6 +140,10 @@ interface SessionListCtxValue {
   meta?: SessionRowMeta;
   commitListMove(sessionId: string, group: SessionRowGroup, beforeId: string | null): void;
   commitMainTab(sessionId: string): void;
+  /** 跨面拖拽落对话栏页签条（docs/layout-design.md v6.0 §6）——在该分栏
+   *  开出该会话的页签（多标签模式；已开 → 置前）。实现经 session-tab-bridge
+   *  由 flex-layout 注册。 */
+  commitOpenTab(tabsetId: string, sessionId: string): void;
 }
 
 const SessionListContext = createContext<SessionListCtxValue | null>(null);
@@ -1223,6 +1228,9 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
       commitMainTab: (sessionId) => {
         void aui.threads.switchToThread(sessionId);
       },
+      commitOpenTab: (tabsetId, sessionId) => {
+        openSessionTabBridge(sessionId, tabsetId);
+      },
     }),
     [aui, display, mode],
   );
@@ -1737,6 +1745,7 @@ export const ThreadListItem: FC = () => {
               sessionId: threadId,
               title: title ?? "New Chat",
               onCommitMainTab: () => ctx.commitMainTab(threadId),
+              onCommitOpenTab: (tabsetId) => ctx.commitOpenTab(tabsetId, threadId),
             });
             sortable?.dragHandleProps.onPointerDown?.(e);
           }}

@@ -31,52 +31,153 @@
 **原生能力清单**（哪些能直接用原生）：
 
 已在用原生：树操作全套（moveNode/addNode/deleteTab/selectTab/
-setTabPinned/updateNodeAttributes）、tidy 自动回收、border 折叠轨道 +
-peek + autoHide、SingleTabStretch 头栏、双击改名/右键钉住/最大化、
-enableEdgeDock:false 配置、分隔条对直接子 tabset 的原生 min/max 钳制。
+updateNodeAttributes）、tidy 自动回收、enableEdgeDock:false 配置、
+分隔条对直接子 tabset 的原生 min/max 钳制、addNode 的 DockLocation
+竖分/横分（打开页终端按钮重建底部行就靠它）。
 
-必须自建（flexlayout 没有）：最小化到轨道 + 快照原位还原、主栏竖轨
-（border 只能贴窗缘）、嵌套约束传播 + 富余回灌（原生只钳直接子项、
-再分配按 grow 比例不支持 prefer）、FancyZones 投放预览、多页签选择、
-pointer 拖拽接管（原生 HTML5 DnD 在 Tauri dragDropEnabled:false 下不触发
-+ 功能不支持）、px 记忆/钉回（原生纯权重制）、logo 带/MainTint
-（tabset DOM 不可注入）。
+必须自建（flexlayout 没有）：嵌套约束传播 + 富余回灌（原生只钳直接
+子项、再分配按 grow 比例不支持 prefer）、投放预览 overlay、页签归属
+准入（region 过滤）+ 上下两行上限、pointer 拖拽接管（原生 HTML5 DnD
+在 Tauri dragDropEnabled:false 下不触发 + 功能不支持）、px 记忆/钉回
+（原生纯权重制）、MainTint/双行块（tabset DOM 不可注入）。
 
 未用的原生能力（接 pi 前定取舍）：popout/float 浮动窗口、tabGroups
-分组着色、keyMap 键盘导航。
+分组着色、keyMap 键盘导航、border 折叠轨道（v5.0 废）、
+SingleTabStretch（v6.0 关——对话栏页签条恒显）。
 
 **审计方法教训**：①"验证通过"要找到真正的生效机制——min/max 生效可能
 只是原生直接子项钳制的巧合（我方钳制当时从未运行）；②flexlayout 的
 action 数据键不统一（node/nodeId/tabNode/fromNode），写拦截器必须逐个
 对照工厂签名；③行元素没有 data-layout-path——对行的 DOM 查询一律用
 后代 tabset 的 union rect。
-## 布局逻辑规范（2026-09-26 v3 已确认 · 代码已对齐）
+## 布局逻辑规范（2026-10-06 v7.1 · 代码已对齐，四动词全量矩阵 477 checks 全绿）
 
-**唯一规范 = `docs/layout-design.md`（v3，§9 四问已拍板）**。竖轨最终形态：
-每大栏外缘一条 **20px 空轨 tabset**（左栏左缘/主栏左缘/右栏右缘，全应用
-最多三条），工厂经 onTabSetPlaceHolder 对它渲染 **RailNav 整栏页签导航**
-（跨分栏投影：点行=selectTab 切换显示且页签常驻；行纵向拖=同分栏轨内
-重排（插入符预览）；横向拖出=搬去别的大栏；行下关闭图标；顶部切横轨钮；
-底部 +）；该栏分栏**不合并**、保持可见，横向条由 sync 统一隐藏
-（railByRegion 只认轨）。**存储键 = mirach.harness.layout.v6**（v5 带着三
-轮废弃竖轨实验的残骸——停车轨/吸收区/合并式轨——整体作废；用户看到的
-"无数竖轨+空白轨道区域"即此残骸）。
-**切换=建/拆轨，无快照**（快照会把折叠期间关掉的页签复活、残骸布局下
-还原前后无变化=「没反应」——用户实测双双踩中）：建轨=假页签建轨即删
-（enableDeleteWhenEmpty:false 保轨）；拆轨=翻 enableDeleteWhenEmpty+enableClose
-后加假页签再删，tidy 收走。竖轨态「+」= **直接多加一栏**（该栏最外侧分
-栏旁并列新分栏，非堆叠——用户："多加一个会话栏"）。根行配重三坑
-（adjustWeights 数组映射错位 / row 无 config / 读实际生效 min/max）见
-v3 文档 §11；主栏多分栏按当前权重比例分吃剩余。**富余兜底
-absorbSurplus**：分隔条拖拽（ADJUST_WEIGHTS）**与页签拖拽等结构性动作**
-（MOVE/ADD/DELETE）提交后 90ms 量测根行，Σpx < 可用宽的差额强制归主栏
-分栏（用户实测把各栏推到极限/跨栏拖页签后行尾留白的根治——主栏"吸收
-一切富余"的执行者，实测空白 -1px≈0；注意这是补差额不重排，不与用户
-拖拽打架；行盲量测 bug 与根行不变式见「2026-09-26 根行不变式轮」与
-设计文档 §10）。RailNav 行按**分栏分组**
-（.zone-rail-group，组上下各一条横向分割线——用户定稿）；占位窗格注入
-tabName（WorkspacePane 等——多实例占位内容相同，靠标题区分"切没切"，
-用户："点击标签没有转换页面"实为看不出变化）。
+**唯一规范 = `docs/layout-design.md`（v7.1）**。**v7.1 四动词全量矩阵修复
+（2026-10-06，24 状态 × 4 动词 × 双击 + 24 状态重载持久 + 120 步随机游走
+= 477 checks 全绿；确定性状态机下全状态×全动词覆盖 ≡ 全序列覆盖）**：
+①**投影不变量**（§3）：物理列序 ≡ colOrder 去隐藏投影，一切栏动词后必须
+维持；②**毁列链**：`withdrawOpenOnPanelTabArrival` 曾把栏级 moveNode 的
+fromNode（列节点本体）误判成"实签抵达面板栏"→删 open→嵌套 DELETE_TAB
+再进 onModelChange→关空收列见列已空→整列带走——修 = **TabNode 门**
+（只有页签级到达才撤打开页；flexlayout 列节点 id 是 UUID 永不撞
+paneTypeOf）；③**交换重写** = colOrder 旗标互换 + alignVisibleToOrder
+统一一条路径（双在场/缺席同权，任意状态恒等回放）——旧"两次 moveNode
+锚 chat"在 [L,P,C] 类序不回位（[L,P,C]→[P,C,L]→[L,C,P]）且破坏投影；
+④**show-left 不重算 colOrder**（重算把隐藏列挤成 2 项——位置记忆丢失 +
+重载校验 length===3 失败整表回退默认）；⑤**setFlagsColOrder 改 merge
+规则**：可见列按物理序重排、隐藏列保持原槽位（走原 colOrder 回插）——
+旧"缺席期整跳过"守卫把 v4 物理移动后的重映射一并跳掉（左栏隐藏时位置
+切换 colOrder 不再更新）。
+**矩阵 E2E 方法论（脚本 %TEMP%\fl-fullmatrix.mjs）**：探针全在页面内
+求值只回 JSON；**窗口最小化时几何依赖的点击全落空而探针照常**（最小化
+护栏 = 每次点击前查 innerWidth<600 即中止 + PowerShell IsIconic 看门狗
+仅在最小化时 SW_RESTORE 不抢焦点）；**✕ 是 hover 门控**（visibility:
+hidden 不参与命中，2026-09-27 用户定稿"关闭钮不常显"）——合成点击必须
+先 mouseMoved 悬停再点击（真实用户无此问题）；vite dev 转换会剥注释，
+"在所供模块里搜中文注释标记"恒 false——要用功能性代码标记验证。
+**v7.0 语义归属**：tabset
+约束由**语义戳**驱动（config.region = 锚页签即第一个有语义页签的
+PANE_TYPES.region，syncSemanticStamps 在结构动作后同步重算）——面板页签
+拖到主栏分栏仍是面板栏子栏（min 240 非 chat 395），dropSplit 预戳 =
+被拖页签语义（非目标列）；"在哪栏分继承哪栏"废除。**根面板** = 打开页
+宿主 tabset，定义"面板栏在哪"；子栏可关可搬（拖空即关=ZCode 语义，
+空白 tabset 一律 deleteTabset），根面板不可关不可拖（open
+enableDrag:false）→ 面板栏打开期间永不空；面板栏缺席仅"隐藏面板栏"一
+条路径，缺席时**交换/位置 = 纯逻辑旗标**（colOrder 恒 3 项记录根面板
+位；在场的另一列按 colOrder 去隐藏对齐——alignVisibleToOrder），打开
+面板栏按 colOrderInsertIndex 语义位重建。多 panels 语义列：hide 收全部
+（colstash.panels 为数组整组快照/整组按位插回）、setFlagsColOrder 按
+物理首现序去重排序。三栏固定：
+左栏（350 默认/240-420，唯一有上限）| 对话栏（395+，吸收者）| 面板栏
+（350 默认/240+，上行页签组〔打开页+文件树/检查/预览〕+ 下行终端 20vh）。
+分栏：上下最多 2 行不可再竖分（投放层拒）、左右不限。存储键
+`mirach.harness.layout.v8`（v7 及更早作废不迁移）。
+
+**页签条显隐（对话/面板栏，hermes strip-visibility ladder 抄写）**：
+搁浅优先（唯一可关页签的 ✕ 只在条上——孤终端/孤文件树条强制在位，
+压过手动 never）；手动开关 = **应用右键菜单「隐藏/显示标签」行**（目标
+= 右键落点所在栏，main.tsx 解析 tabsetId 随 open 载荷传入；hermes
+setTreeGroupTabStrip 同款 always/never，存 config.stripMode）；缺省自动
+（单签隐藏、≥2 签显示）。下发在 constraints-sync（stripVisibleOf）。
+
+**应用右键菜单（v6.0 · 唯一右键菜单）**：全应用只此一份（app-context-
+menu.tsx），页签 body/chrome/**页签按钮**/标题栏右键全弹它（flexlayout
+自管页签菜单与 ZoneMenu 均已裁）；布局段 = 隐藏/显示标签 + 隐藏/打开左
+侧栏 + 隐藏/打开面板栏 + 交换左栏与面板栏 + 面板栏位置。实现 =
+column-ops.ts。**四个坑**：①旗标不能放根行 config——RowNode 运行时无
+getConfig（实测 undefined），走 localStorage
+`mirach.harness.layout.colflags.v1`（列快照 = colstash.v1）；
+②moveNode 的 toNode 落 **CENTER 到 row 会把整列溶解成签**（RowNode.drop
+的 CENTER 分支逐签 addChild）——整列移动必须锚到兄弟列节点本体、
+LEFT/RIGHT 边缘插入；③applyDeleteTabset **只删 isCloseable 的子签**——
+撤列改用逐签 deleteTab（applyDeleteTab 无 isCloseable 检查）+ 残留空
+tabset deleteTabset 兜底（锚组 enableDeleteWhenEmpty=false 不被 tidy
+收）；④hide 面板栏时 **syncOpenAnchor 会删一个 open 立刻加回一个**
+（空态锚打架，show 时撞 id）——syncOpenAnchor 尊重 panelsHidden 旗标
+先行。互换/位置 = moveNode 整列移动（零卸载、终端不死）；hide/show =
+快照 + deleteTab / 拼回 + 重采纳（hermes mirrorTreeHorizontal / v4
+hideSide 同款）。**重采纳通道返回 boolean**（adopt 成功才提交旗标/快
+照——失败整体放弃，状态不脱同步）；adopter 内 **applyRootWeights 同步
+跑**（rootPxMem 记忆值，首帧即最终几何——否则恢复列按归一化缩放、90ms
+后才纠正 = 可见的"从上往下弹"）；boot 旗标未隐藏但快照在场 = **判废快
+照**（陈旧快照拼回会撞 id）。**colOrder 恒 3 项（含隐藏列）**——hide 不缩序、show 按 colOrder 语义位插回（colOrderInsertIndex：colOrder 序里排在 region 前的可见列数 = 根行下标），互换/移位后的位置记忆在隐藏-恢复间保留。
+
+**打开页 = ZCode 空态逻辑**：open 签只在面板栏顶组无实签时存在——有
+实签 syncOpenAnchor 程序化撤下、全关自动回来（flexlayout 0.11 无单签
+隐藏 API，删/建实现；顶组 enableDeleteWhenEmpty=false 保空组不塌——
+**注意 tidy 回收条件 = enableDeleteWhenEmpty && enableClose 双真**）。
+单例窗格（files/terminal）id = 类型名，**别用 nextInstanceId**（会生成
+files-1 之类）。
+**打开页三坑（2026-10-05 用户实测"多打开页/空白面板"轮）**：
+①**实签判定 = 宿主横带**（宿主所在的水平 RowNode 内的页签；终端行在 VERT
+行的另一格不算——横带误取整个面板列 ROW 会把终端当实签，boot 就把出厂
+打开页删掉）；②**addNode 前全局查重**（open 在任何位置在场不再 add——
+boot 中间态重建曾 duplicate id:open 白屏）；③**重建的新 tabset 无
+config，add 后立即盖 panels 戳**（否则位置回退误标），重建仅
+allowRecreate（boot normalize）路径开放。open 签 enableDrag:false（不
+可拖出顶组），sync 对空 tabset 一律 deleteTabset（空白面板=bug）。
+
+**顶带两大坑（2026-10-05 用户实测翻车轮）**：
+1. **`.app-titlebar` 外面不得再包一层同名容器**——flex-layout 曾写
+   `<div className="app-titlebar"><Titlebar /></div>`，Titlebar 自渲染
+   一层 .app-titlebar，内层命中 `.app-titlebar > * { pointer-events:
+   auto }` 变成盖满 85px 顶带的透明板，**全部栏的页签点击/拖拽静默失效**
+   （elementsFromPoint 首位 = app-titlebar 即此症）。Titlebar 直接渲染。
+2. **顶带空白拖窗口走 window 捕获段**（flex-layout 的 onWinPointerDown
+   effect，v4 恢复）：页签整钮/按钮/输入/分隔条/resize 手柄归原主，
+   clientY≤100 的条带容器/logo 带/双行块锚层/条隐藏分栏让位带 →
+   startDragging，双击 toggleMaximize。**绝不用绝对定位盖层**（截胡页签
+   pointerdown，2026-09-29 定稿）。
+
+- **左栏无页签条**（enableTabStrip=false 由 constraints-sync 按区域下发）；
+  会话/机器人两视图住一个 leftrail 窗格，**点顶带 Mirach 文字切换**
+  （RailLogoLeading 的 onWordClick，文字 hover/按压效果）；会话行 dnd-kit
+  上下排序不变。
+- **页签归属（drag-session 的 allowedRegionsOf）**：对话栏页签
+  （workspace/session-N）只进对话栏；面板栏页签进面板栏+对话栏；打开页
+  钉死面板栏（不可关不可拖出）；左栏拒收一切。上下限 =
+  verticalRowCount(列)<2 才许 top/bottom 投放。
+- **会话多标签（hermes 语义）**：主会话页签（workspace）恒在不可关；
+  左栏会话行拖到对话栏页签条 = 开会话页签（session-N，tab.config 带
+  threadId，同会话不重复开→置前）；拖到主页签/点击行 = 切主会话；
+  条隐藏（单签缺省）时主页签按钮不存在 → 行拖入无处落 = 无法多开。
+  **页签激活切线程的拦截挂在 onModelChange 的 SELECT_TAB 分支**
+  （onAction 拦不住程序化路径；ADD_TAB 会自动选中新签——探针/测试里
+  点已选中签不再派发 SELECT_TAB）。bridge = session-tab-bridge.ts
+  （openSessionTabBridge 由 flex-layout 注册给 thread-list，
+  setSessionThreadSwitcher 由 runtime 注册给 flex-layout）。
+- **拖拽引擎（drag-session.ts v6 瘦身）**：单目标解析（先条带插入符后
+  zone 径向），FancyZones 多区高亮/Shift 合并/多签块/track 拒绝全删；
+  跟手克隆件/机械层保留。**工厂 body 右键面 = PaneBodyMenu**
+  （pane-context-menu.tsx，.pane-zone-menu-surface 铺满 body——缺它窗格
+  右键漏 WebView2 菜单）。
+- **打开页（open，常驻锚）**：面板栏默认显示；三按钮 文件树/终端/预览
+  → 开/激活对应页签；终端重开 = 面板栏列已两行→落最后一行，塌成单
+  tabset→BOTTOM 竖分出新底部行。文件树点文件→预览（preview-opener 链）。
+- **v5.0 重建烂尾已修复**：flex-layout.tsx 曾是带 `declare` 假声明的骨架
+  （tsc 35 错、运行白屏）——本轮完整重建；死窗格文件（workspace-pane/
+  sessions-pane/files-pane/file-tree-pane）已删，placeholder-pane 保留
+  （review/terminal 在用）。
 
 ## 目录结构（2026-09-25 定稿，参照 hermes desktop 按本架构 L1-L5 裁剪）
 

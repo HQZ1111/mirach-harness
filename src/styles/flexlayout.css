@@ -202,6 +202,27 @@
   letter-spacing: var(--logo-text-tracking);
 }
 
+/* Mirach 文字切换钮（左栏顶带，v6.0 §3）：文字即按钮——点击效果与页签
+   同族（hover 深灰、按压降透明度），常态保持品牌色。 */
+.rail-logo-leading .rail-logo-word-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: inherit;
+  padding: 0;
+  transition: color 100ms, opacity 100ms;
+}
+
+.rail-logo-leading .rail-logo-word-btn:hover {
+  color: var(--logo-word-btn-hover-color);
+}
+
+.rail-logo-leading .rail-logo-word-btn:active {
+  color: var(--logo-word-btn-hover-color);
+  opacity: var(--logo-word-btn-active-opacity);
+}
+
 .flexlayout-host .flexlayout__tab_button_stretch {
   align-items: flex-end; /* 拉伸头栏 100 高：文字沉底，上部留白（logo/文字区） */
   background: transparent;

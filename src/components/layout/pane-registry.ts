@@ -51,8 +51,8 @@ export const REGION_LIMITS: Record<Region, { minW: number; maxW?: number }> = {
   panels: { minW: 240 },
 }
 
-/** 大栏默认宽（出厂用） */
-export const REGION_DEFAULT_W: Record<Region, number> = { left: 350, chat: 746, panels: 700 }
+/** 大栏默认宽（出厂用，docs/layout-design.md v6.0 §2：左/面板 350，对话吃剩余） */
+export const REGION_DEFAULT_W: Record<Region, number> = { left: 350, chat: 746, panels: 350 }
 
 /** 各大栏的常驻窗格类型（打开页/主会话/左侧栏——三栏各一，不可关闭） */
 export const PRIMARY_PANE: Record<Region, PaneType> = { left: 'leftrail', chat: 'workspace', panels: 'open' }
@@ -98,6 +98,9 @@ export const paneTabJson = (paneId: string) => {
 
 export interface ZoneConfig {
   region: Region
+  /** 页签条手动开关（hermes TabStripMode：右键「隐藏/显示标签」写入并
+   *  持久化）。缺省 = 自动：≥2 页签显示、单签隐藏。 */
+  stripMode?: 'always' | 'never'
   /** 会话页签绑定的会话 id（仅 session-* 页签携带） */
   threadId?: string
 }
@@ -106,7 +109,30 @@ export const zoneConfigOf = (node: FLNode | undefined): ZoneConfig | undefined =
   if (!(node instanceof TabSetNode)) return undefined
   const cfg = node.getConfig() as Partial<ZoneConfig> | undefined
   if (!cfg || (cfg.region !== 'left' && cfg.region !== 'chat' && cfg.region !== 'panels')) return undefined
-  return { region: cfg.region, threadId: cfg.threadId }
+  return {
+    region: cfg.region,
+    ...(cfg.stripMode === 'always' || cfg.stripMode === 'never' ? { stripMode: cfg.stripMode } : {}),
+    ...(typeof cfg.threadId === 'string' ? { threadId: cfg.threadId } : {}),
+  }
+}
+
+/** 页签条有效可见性（hermes tree/renderer/strip-visibility.ts 的 ladder，
+ *  docs/layout-design.md §1）：左栏恒无条；**搁浅优先**——唯一可关页签的
+ *  ✕ 只住在条上（孤终端/孤文件树等），条强制在位、压过手动 never
+ *  （"隐藏标签"永远不能让一个面失去所有把手）；手动 stripMode 次之；
+ *  缺省自动 = ≥2 页签显示、单签隐藏。override = 菜单行的预演判定。 */
+export const stripVisibleOf = (node: TabSetNode, region: Region, override?: 'always' | 'never'): boolean => {
+  if (region === 'left') return false
+  const kids = node.getChildren().filter((c): c is TabNode => c instanceof TabNode)
+  if (kids.length === 0) return false
+  if (kids.length === 1) {
+    const t = paneTypeOf(kids[0].getId())
+    const closeable = t ? !PANE_TYPES[t].primary : true
+    if (closeable) return true
+  }
+  const mode = override ?? zoneConfigOf(node)?.stripMode
+  if (mode) return mode === 'always'
+  return kids.length > 1
 }
 
 /** 分栏成员的类型集合（跨类型混合的 zone 以第一个窗格的类型为准判 region） */

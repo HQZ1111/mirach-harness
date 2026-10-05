@@ -44,34 +44,34 @@ function fakeModel(rootRow: FN, nodes: FN[] = []) {
 const decode = (a: { data?: { json?: { weight?: number } } } | undefined, avail: number): number =>
   (((a?.data?.json as { weight?: number } | undefined)?.weight ?? NaN) / 100) * avail
 
-describe('rebalance v5.0 三栏固定', () => {
+describe('rebalance v6.0 三栏固定', () => {
   describe('absorbSurplus', () => {
     it('有对话栏：非吸收者按记忆原位，富余全部进对话栏', () => {
       const left = fakeTabset('left', { region: 'left', minW: 240, measured: 350, weight: 100 })
       const chat = fakeTabset('chat', { region: 'chat', minW: 395, measured: 500, weight: 100 })
-      const panels = fakeTabset('panels', { region: 'panels', minW: 240, measured: 700, weight: 100 })
+      const panels = fakeTabset('panels', { region: 'panels', minW: 240, measured: 350, weight: 100 })
       const root = fakeRow('root', [left, chat, panels])
       const { m, actions } = fakeModel(root)
       absorbSurplus(m)
       expect(actions).toHaveLength(3)
       const avail = 1798 - 2 // 3 kids = 2 gaps
       expect(decode(actions[0], avail)).toBeCloseTo(350, 0)
-      expect(decode(actions[1], avail)).toBeCloseTo(avail - 350 - 700, 0)
-      expect(decode(actions[2], avail)).toBeCloseTo(700, 0)
+      expect(decode(actions[1], avail)).toBeCloseTo(avail - 350 - 350, 0)
+      expect(decode(actions[2], avail)).toBeCloseTo(350, 0)
       const sum = actions.reduce((s, a) => s + decode(a, avail), 0)
       expect(sum).toBeCloseTo(avail, 0)
     })
 
     it('无对话栏：第一个非对话列兜底', () => {
       const left = fakeTabset('left', { region: 'left', minW: 240, measured: 350, weight: 100 })
-      const panels = fakeTabset('panels', { region: 'panels', minW: 240, measured: 700, weight: 100 })
+      const panels = fakeTabset('panels', { region: 'panels', minW: 240, measured: 350, weight: 100 })
       const root = fakeRow('root', [left, panels])
       const { m, actions } = fakeModel(root)
       absorbSurplus(m)
       const avail = 1797 // 2 kids = 1 gap
       expect(actions).toHaveLength(2)
-      expect(decode(actions[0], avail)).toBeCloseTo(avail - 700, 0)
-      expect(decode(actions[1], avail)).toBeCloseTo(700, 0)
+      expect(decode(actions[0], avail)).toBeCloseTo(avail - 350, 0)
+      expect(decode(actions[1], avail)).toBeCloseTo(350, 0)
     })
 
     it('量测未就绪（rect 宽 ≤ 0）：整体放弃', () => {
@@ -95,7 +95,7 @@ describe('rebalance v5.0 三栏固定', () => {
       expect(actions).toHaveLength(3)
       const avail = 1798 - 2
       expect(decode(actions[0], avail)).toBeCloseTo(350, 0)
-      expect(decode(actions[2], avail)).toBeCloseTo(700, 0)
+      expect(decode(actions[2], avail)).toBeCloseTo(350, 0)
       const sum = actions.reduce((s, a) => s + decode(a, avail), 0)
       expect(sum).toBeCloseTo(avail, 0)
     })

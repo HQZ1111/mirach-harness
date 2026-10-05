@@ -11,12 +11,11 @@ import { create } from 'zustand'
 /** 径向投放位置（hermes tree/model.ts DropPosition） */
 export type DropPosition = 'center' | 'left' | 'right' | 'top' | 'bottom'
 
-/** 拖拽高亮提示：groupId=主投放 zone（tabset id），groupIds=高亮集合
- * （Shift 跨区时 >1），stack=页签条插入槽（before=插到该页签前，null=追加） */
+/** 拖拽高亮提示（v6.0 单目标解析）：groupId=主投放 zone（tabset id），
+ * pos=径向区位，stack=页签条插入槽（before=插到该页签前，null=追加） */
 export interface DropHint {
   kind: 'group'
   groupId: string
-  groupIds: string[]
   pos: DropPosition
   stack?: { before: null | string }
 }

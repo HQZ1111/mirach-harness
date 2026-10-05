@@ -1,15 +1,14 @@
 /**
- * constraints.ts 纯函数单测：聚合界限 / 顶带判定 / region 读取。
+ * constraints.ts 纯函数单测：聚合界限 / region 读取。
  * （v5.0：clampRowWeights/heightBounds 已随 max 上限废除；轨用例删——
- * 竖轨形态已废。）
+ * 竖轨形态已废。v6.0：isTopBand 顶带判定随低条废除。）
  * 假节点 = Object.create(真原型) + 自有字段/方法——instanceof 判定真实。
  */
 import { describe, expect, it } from 'vitest'
 import { Orientation, RowNode, TabSetNode } from 'flexlayout-react'
 
 import {
-  isTopBand,
-  regionCfgOfNode,
+  regionOfNode,
   rootNeededMin,
   widthBounds,
 } from './constraints'
@@ -81,40 +80,7 @@ describe('widthBounds 聚合', () => {
   })
 })
 
-describe('isTopBand 顶带判定', () => {
-  function nodeWithParent(parent: Record<string, unknown>) {
-    const n = Object.create(TabSetNode.prototype) as Record<string, unknown>
-    n.getParent = () => parent as never
-    return n
-  }
-  function row(orientation: Orientation, children: unknown[]) {
-    const r = Object.create(RowNode.prototype) as Record<string, unknown>
-    r.getOrientation = () => orientation
-    r.getChildren = () => children as never
-    return r
-  }
-
-  it('根行直接子项（列）= 顶带', () => {
-    const root = row(HORZ, [])
-    const col = nodeWithParent(root)
-    root.getChildren = () => [col] as never
-    expect(isTopBand(root as never, col as never)).toBe(true)
-  })
-
-  it('VERT 行的第二个孩子不在顶带', () => {
-    const root = row(HORZ, [])
-    const col = row(VERT, [])
-    const a = nodeWithParent(col)
-    const b = nodeWithParent(col)
-    col.getChildren = () => [a, b] as never
-    col.getParent = () => root as never
-    root.getChildren = () => [col] as never
-    expect(isTopBand(root as never, a as never)).toBe(true)
-    expect(isTopBand(root as never, b as never)).toBe(false)
-  })
-})
-
-describe('rootNeededMin / regionCfgOfNode', () => {
+describe('rootNeededMin / regionOfNode', () => {
   it('根行所需最小宽 = Σ(列聚合 min) + 缝', () => {
     const root = fakeRow('root', {
       orientation: HORZ,
@@ -130,11 +96,11 @@ describe('rootNeededMin / regionCfgOfNode', () => {
     expect(rootNeededMin(m)).toBe(240 + 395 + 240 + 2)
   })
 
-  it('regionCfgOfNode：读 config；非 tabset 返回 undefined', () => {
+  it('regionOfNode：读 config；非 tabset 返回 undefined', () => {
     const t = fakeTabset('a', { config: { region: 'left' } })
-    expect(regionCfgOfNode(t as never)).toEqual({ region: 'left', track: false })
+    expect(regionOfNode(t as never)).toBe('left')
     const rowFake = Object.create(RowNode.prototype) as Record<string, unknown>
     rowFake.getChildren = () => []
-    expect(regionCfgOfNode(rowFake as never)).toBeUndefined()
+    expect(regionOfNode(rowFake as never)).toBeUndefined()
   })
 })

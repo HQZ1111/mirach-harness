@@ -21,7 +21,7 @@ import type { CSSProperties } from 'react'
 
 import type { DropPosition } from '@/store/layout-store'
 import { useLayoutStore } from '@/store/layout-store'
-import { getDragGeometry } from './drag-session'
+import { getDragGeometry, type StripSnapshot } from './drag-session'
 
 /** Overlay entry fade. FancyZones ships 200ms（FADE_IN_DURATION_MILLIS，
  *  zones-engine.ts）；on a drag that starts under the cursor that ramp reads
@@ -93,10 +93,8 @@ export function DropOverlay() {
           return null
         }
 
-        const active = hint?.groupIds?.includes(zone.id) ?? false
-        const multi = (hint?.groupIds?.length ?? 0) > 1
-        // Sub-positions only exist for a single-zone target (a Shift-span merges).
-        const pos = primary && !multi ? (hint?.pos ?? 'center') : 'center'
+        const active = primary
+        const pos = primary ? (hint?.pos ?? 'center') : 'center'
 
         return (
           <div key={zone.id} className="fl-drop-zone-anchor" style={box}>
@@ -121,12 +119,7 @@ function StripDropCaret({
   hint,
 }: {
   zoneRect: { left: number; top: number }
-  strip:
-    | {
-        rect: import('./zones-engine').ZoneRect
-        slots: { id: string; left: number; right: number; top: number; height: number }[]
-      }
-    | undefined
+  strip: StripSnapshot | undefined
   hint: { stack?: { before: null | string } }
 }) {
   if (!strip || hint.stack === undefined) {

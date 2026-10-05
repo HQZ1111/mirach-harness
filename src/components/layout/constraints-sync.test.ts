@@ -32,11 +32,12 @@ function fakeTabset(id: string, o: TabOpts = {}) {
 
 /** 页签 = 普通对象（非 TabSetNode）——visitNodes 的 walk 对它不上溯 */
 function fakeTab(id: string) {
-  return { id, type: 'tab' } as unknown as FN
+  return { id, type: 'tab', getId: () => id, getChildren: () => [] } as unknown as FN
 }
 
-function fakeRow(o: { orientation: Orientation; children: FN[] }) {
+function fakeRow(_id: string, o: { orientation: Orientation; children: FN[] }) {
   const n = Object.create(RowNode.prototype) as FN
+  n.getId = () => _id
   n.getOrientation = () => o.orientation
   n.getChildren = () => o.children
   n.getParent = () => undefined
@@ -52,6 +53,7 @@ function fakeModel(rootRow: FN, nodes: FN[]) {
   const actions: RecAction[] = []
   const m = {
     getRootRow: () => rootRow,
+    getNodeById: (id: string) => nodes.find((n) => (n.getId as () => string)() === id) ?? null,
     visitNodes: (cb: (n: unknown) => void) => nodes.forEach(cb),
     doAction: (a: RecAction) => {
       actions.push({ type: a.type, data: a.data })
@@ -113,6 +115,7 @@ describe('syncTabsetConstraints v5.0 静态三栏', () => {
     ;(col as { parent?: FN }).parent = root
     const m = {
       getRootRow: () => root,
+      getNodeById: () => null,
       visitNodes: (cb: (n: unknown) => void) => [col, top, bottom].forEach(cb),
       doAction: () => {},
     } as unknown as Model

@@ -266,3 +266,25 @@
   --hub-card-gap: 2px;                        /* 卡内行距（hermes name/details 两行） */
   --hub-section-label-size: 11px;             /* 段头字号（hermes 0.6875rem 系） */
 }
+
+/* ── 左侧栏（left-rail-pane，v6.0 §3）+ Mirach 文字切换钮 ── */
+:root {
+  --left-rail-view-size: 12px;                /* 顶带当前视图指示字号 */
+  --left-rail-view-color: var(--text-3);      /* 指示文字色 */
+  --left-rail-view-active-color: var(--brand);/* 机器人视图指示色 */
+  --logo-word-btn-hover-color: #303030;       /* Mirach 文字 hover 色 */
+  --logo-word-btn-active-opacity: 0.55;       /* Mirach 文字按压透明度 */
+}
+
+/* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
+:root {
+  --openpage-pad-x: 20px;                     /* 页内左右边距 */
+  --openpage-title-gap: 18px;                 /* 标题与按钮列表间距 */
+  --openpage-btn-radius: 10px;                /* 按钮圆角 */
+  --openpage-btn-pad-y: 12px;                 /* 按钮上下内边距 */
+  --openpage-btn-pad-x: 14px;                 /* 按钮左右内边距 */
+  --openpage-btn-gap: 12px;                   /* 图标-文字间距 */
+  --openpage-btn-row-gap: 8px;                /* 按钮行间距 */
+  --openpage-btn-icon-size: 20px;             /* 图标盒 */
+  --openpage-hint-size: 12px;                 /* 提示文字字号 */
+}
