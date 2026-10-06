@@ -40,9 +40,9 @@ describe('buildShellMenuSections', () => {
     expect(labels.get('shell-settings')).toBe('设置')
     expect(labels.get('shell-left')).toBe('隐藏左侧栏')
     expect(labels.get('shell-panels')).toBe('隐藏面板栏')
-    // v7.2 独立双位置切换：出厂序 [L,C,P] → 左栏在左端、面板栏外位
+    // v7.2 独立双位置切换：出厂序 [L,C,P] → 面板栏在 chat 右侧
     expect(labels.get('shell-left-pos')).toBe('左侧栏移到最右侧')
-    expect(labels.get('shell-panels-pos')).toBe('面板栏移到左栏旁')
+    expect(labels.get('shell-panels-pos')).toBe('面板栏移到左侧')
   })
 
   it('图标字形表齐全', () => {

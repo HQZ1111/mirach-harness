@@ -277,16 +277,15 @@ export const panelsPosToggle = (): void => {
   if (colIndexOf(m, 'panels') >= 0) alignVisibleToOrder(m)
 }
 
-/** 菜单文案（v7.2 两行位置切换的自描述标签）。 */
+/** 菜单文案（v7.2 两行位置切换的自描述标签）。面板栏 = 两态（按当前在
+ *  chat 哪一侧翻转）；让位在点击结算——目标侧被左栏占时面板栏落到该侧
+ *  紧挨左栏、不占边缘。 */
 export const leftPosLabel = (): string =>
   columnFlagsOf().colOrder.indexOf('left') === 0 ? '左侧栏移到最右侧' : '左侧栏移到最左侧'
 
 export const panelsPosLabel = (): string => {
   const { colOrder } = columnFlagsOf()
-  const inner = Math.abs(colOrder.indexOf('panels') - colOrder.indexOf('left')) === 1
-  // 内位（紧挨左栏）→ 目标 = 远端；外位 → 目标 = 左栏旁
-  if (!inner) return '面板栏移到左栏旁'
-  return colOrder.indexOf('left') === 0 ? '面板栏移到最右侧' : '面板栏移到最左侧'
+  return colOrder.indexOf('panels') < colOrder.indexOf('chat') ? '面板栏移到右侧' : '面板栏移到左侧'
 }
 
 /** 隐藏/打开左侧栏（单次重采纳：JSON 摘除/拼回；adopt 成功才提交旗标与
