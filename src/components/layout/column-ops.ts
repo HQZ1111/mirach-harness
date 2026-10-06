@@ -255,8 +255,8 @@ export const leftPosToggle = (): void => {
   if (li === 0) order.push('left')
   else order.unshift('left')
   setFlags({ ...flags, colOrder: order })
-  // 左栏在场 = 物理兑现（对齐投影）；缺席 = 纯记录（重开按新位插回）
-  if (colIndexOf(m, 'left') >= 0) alignVisibleToOrder(m)
+  // 左栏在场（未隐藏）才物理兑现；缺席态 = 纯记录（投影不变，重开按新位插回）
+  if (!flags.leftHidden) alignVisibleToOrder(m)
 }
 
 /** 面板栏位置切换：colOrder 里 panels 与 chat 条目换位（= 跨过 chat 到
@@ -274,7 +274,9 @@ export const panelsPosToggle = (): void => {
   }
   ;[order[pi], order[ci]] = [order[ci], order[pi]]
   setFlags({ ...flags, colOrder: order })
-  if (colIndexOf(m, 'panels') >= 0) alignVisibleToOrder(m)
+  // 面板栏在场（未隐藏）才物理兑现；缺席态 = 纯记录（子栏是用户自己的
+  // 独立分栏，不因缺席期的位置记录而跳位）
+  if (!flags.panelsHidden) alignVisibleToOrder(m)
 }
 
 /** 菜单文案（v7.2 两行位置切换的自描述标签）。面板栏 = 两态（按当前在
@@ -340,15 +342,24 @@ export const setPanelsHidden = (hidden: boolean): void => {
   const stash = loadStash()
   const flags = columnFlagsOf()
   if (hidden) {
-    // **收全部 panels 语义根行子项**（v7.0 语义归属：面板子栏可多个——
-    // files 拖到主栏的分栏与原面板列都是 panels 语义，整组收起）
-    const cols = kids.filter((k) => colRegion(k) === 'panels')
-    if (cols.length === 0) {
+    // **只收根面板列**（v7.3.1 根面板唯一——打开页宿主那根；用户拖出的
+    // 子栏是独立分栏，不随隐藏）
+    const jsonHasAnchor = (k: JsonNode): boolean =>
+      k.type === 'tabset' ? k.enableDeleteWhenEmpty === false : (k.children ?? []).some(jsonHasAnchor)
+    let rootIdx = -1
+    let fallbackIdx = -1
+    kids.forEach((k, i) => {
+      if (colRegion(k) !== 'panels') return
+      fallbackIdx = fallbackIdx < 0 ? i : fallbackIdx
+      if (rootIdx < 0 && jsonHasAnchor(k)) rootIdx = i
+    })
+    const li = rootIdx >= 0 ? rootIdx : fallbackIdx
+    if (li < 0) {
       console.error('[column-ops] 面板栏不在场——隐藏放弃')
       return
     }
-    const nextKids = kids.filter((k) => colRegion(k) !== 'panels')
-    const nextStash: ColStash = { ...stash, panels: cols }
+    const nextKids = kids.filter((_, i) => i !== li)
+    const nextStash: ColStash = { ...stash, panels: [kids[li]] }
     const nextFlags: ColumnFlags = { ...flags, panelsHidden: true }
     if (!adopt({ layout: { ...json.layout, children: nextKids } })) return
     saveStashSafe(nextStash)
@@ -426,22 +437,9 @@ export const normalizeColumns = (): void => {
     discardStash('panels')
     return
   }
-  const desired = flags.colOrder.filter((r) => (r === 'left' ? !flags.leftHidden : r === 'panels' ? !flags.panelsHidden : true))
-  if (desired.length !== actual.length) return
-  // 选择排序式对齐：逐位把期望列插到当前该位列节点之前（列节点锚）
-  for (let target = 0; target < desired.length; target++) {
-    const cur = rootKidsOf(m).map((kid) => regionOfColumn(kid)).filter((r): r is ColRegion => !!r)
-    if (cur[target] === desired[target]) continue
-    const idx = cur.indexOf(desired[target])
-    if (idx < 0) {
-      console.error('[column-ops] 期望列不在场——列序对齐放弃', desired[target])
-      return
-    }
-    const nodeId = colNodeIdAt(m, idx)
-    const anchorId = colNodeIdAt(m, target)
-    if (!nodeId || !anchorId) return
-    m.doAction(Actions.moveNode(nodeId, anchorId, DockLocation.LEFT, 0))
-  }
+  // 列序对齐 = 语义组展开版 alignVisibleToOrder（多根 panels 语义列整组
+  // 跟移，见 alignVisibleToOrder 注释）
+  alignVisibleToOrder(m)
   setFlagsColOrder(m)
   // 列序归位后补建打开页锚（面板列溶解场景；allowRecreate 只在 boot 开）
   syncOpenAnchor(m, true)
@@ -467,45 +465,45 @@ export const closePanelsColumnIfEmptied = (m: Model, action?: { type?: string; d
     setFlags({ ...columnFlagsOf(), panelsHidden: true })
     return
   }
-  // 列内还有实签吗（横带 + 终端行全算；open 不是实签）
-  let hasReal = false
-  for (const kid of rootKidsOf(m)) {
-    if (regionOfColumn(kid) !== 'panels') continue
-    const walk = (n: FLNode): void => {
-      if (hasReal) return
-      if (n instanceof TabSetNode) {
-        for (const tab of n.getChildren()) {
-          if (tab instanceof TabNode && tab.getId() !== 'open') {
-            hasReal = true
-            return
-          }
-        }
-        return
-      }
-      for (const c of n.getChildren()) walk(c)
-    }
-    walk(kid)
-    if (hasReal) return
+  // **根面板列**（唯一）内还有实签吗（横带 + 纵向行全算；open 不是实签）
+  // ——子栏是独立分栏：它们的实签不算，它们自己拖空由 tidy 收（v7.3.1）
+  const rootKid = rootPanelColumnKid(m)
+  if (!rootKid) {
+    setFlags({ ...columnFlagsOf(), panelsHidden: true })
+    return
   }
+  let hasReal = false
+  const walk = (n: FLNode): void => {
+    if (hasReal) return
+    if (n instanceof TabSetNode) {
+      for (const tab of n.getChildren()) {
+        if (tab instanceof TabNode && tab.getId() !== 'open') {
+          hasReal = true
+          return
+        }
+      }
+      return
+    }
+    for (const c of n.getChildren()) walk(c)
+  }
+  walk(rootKid)
   if (hasReal) return
-  // 关列：逐子项翻 enableClose 后 deleteTabset（applyDeleteTabset 只删
-  // isCloseable 子签；open 也随列消失——这就是打开页"怎么消失的"）
+  // 关根面板列（唯一）：逐子项翻 enableClose 后 deleteTabset（
+  // applyDeleteTabset 只删 isCloseable 子签；open 也随列消失——这就是
+  // 打开页"怎么消失的"）。子栏不动。
   anchorBusy = true
   try {
-    for (const kid of rootKidsOf(m)) {
-      if (regionOfColumn(kid) !== 'panels') continue
-      const collectSets = (n: FLNode): TabSetNode[] => {
-        if (n instanceof TabSetNode) return [n]
-        return n.getChildren().flatMap((x) => collectSets(x))
-      }
-      for (const set of collectSets(kid)) {
-        for (const tab of set.getChildren()) {
-          if (tab instanceof TabNode && !tab.isEnableClose()) {
-            m.doAction(Actions.updateNodeAttributes(tab.getId(), { enableClose: true }))
-          }
+    const collectSets = (n: FLNode): TabSetNode[] => {
+      if (n instanceof TabSetNode) return [n]
+      return n.getChildren().flatMap((x) => collectSets(x))
+    }
+    for (const set of collectSets(rootKid)) {
+      for (const tab of set.getChildren()) {
+        if (tab instanceof TabNode && !tab.isEnableClose()) {
+          m.doAction(Actions.updateNodeAttributes(tab.getId(), { enableClose: true }))
         }
-        m.doAction(Actions.deleteTabset(set.getId()))
       }
+      m.doAction(Actions.deleteTabset(set.getId()))
     }
   } finally {
     anchorBusy = false
@@ -608,21 +606,68 @@ const firstPanelsTabsetId = (m: Model): string | undefined => {
   return undefined
 }
 
-/** 可见列按 colOrder（去隐藏）物理对齐（选择排序式：逐位 LEFT 锚插入；
- *  单列语义区域各一列，多 panels 语义列取首现）。 */
+/** 在场列按 colOrder（去隐藏）物理对齐——**根面板唯一**（v7.3.1，用户
+ *  定稿）：动词只作用于根面板那一根列（打开页宿主），用户拖出的子栏是
+ *  独立分栏、不跟动词走。面板槽位 = 根面板列；left 槽位 = 左栏列；chat
+ *  的位置由前两者的槽位自然补出（complement），永不需要显式移动。
+ *  方向：curIdx > target → LEFT of 目标位kid；curIdx < target → RIGHT of
+ *  末位 kid（"最右" = 全部列之后）。 */
 const alignVisibleToOrder = (m: Model): void => {
   const flags = columnFlagsOf()
-  const desired = flags.colOrder.filter((r) => (r === 'left' ? !flags.leftHidden : r === 'panels' ? !flags.panelsHidden : true))
-  for (let target = 0; target < desired.length; target++) {
-    const cur = rootKidsOf(m).map((kid) => regionOfColumn(kid)).filter((r): r is ColRegion => !!r)
-    if (cur[target] === desired[target]) continue
-    const idx = cur.indexOf(desired[target])
-    if (idx < 0) return
-    const nodeId = colNodeIdAt(m, idx)
-    const anchorId = colNodeIdAt(m, target)
-    if (!nodeId || !anchorId) return
-    m.doAction(Actions.moveNode(nodeId, anchorId, DockLocation.LEFT, 0))
+  const isVisible = (r: ColRegion): boolean =>
+    r === 'left' ? !flags.leftHidden : r === 'panels' ? !flags.panelsHidden : true
+  const moveRegionToSlot = (region: ColRegion): void => {
+    let target = -1
+    let at = 0
+    for (const slot of flags.colOrder) {
+      if (slot === region) {
+        target = at
+        break
+      }
+      if (isVisible(slot)) at++
+    }
+    if (target < 0) return
+    const kid = region === 'panels' ? rootPanelColumnKid(m) : rootKidsOf(m).find((k) => regionOfColumn(k) === region)
+    if (!kid) return
+    const kids = rootKidsOf(m)
+    const curIdx = kids.indexOf(kid)
+    if (curIdx === target) return
+    if (curIdx > target) {
+      const anchor = kids[target]
+      if (!anchor || anchor === kid) return
+      m.doAction(Actions.moveNode(kid.getId(), anchor.getId(), DockLocation.LEFT, 0))
+    } else {
+      // 右移：插到目标位 kid 之后（槽位精确——RIGHT of 末位会越过目标槽）
+      const anchor = kids[target]
+      if (!anchor || anchor === kid) return
+      m.doAction(Actions.moveNode(kid.getId(), anchor.getId(), DockLocation.RIGHT, 0))
+    }
   }
+  moveRegionToSlot('left')
+  moveRegionToSlot('panels')
+}
+
+/** 根面板列（**唯一**，docs §2）：子树里含 enableDeleteWhenEmpty=false 锚
+ *  tabset 的 panels 语义根行子项——打开页宿主定义"面板栏在哪"；锚缺席
+ *  （理论不到场）回退第一根 panels 语义列。子栏不在此列。 */
+const rootPanelColumnKid = (m: Model): FLNode | undefined => {
+  let fallback: FLNode | undefined
+  const hasAnchor = (n: FLNode): boolean => {
+    if (n instanceof TabSetNode) {
+      try {
+        if (n.isEnableDeleteWhenEmpty?.() === false) return true
+      } catch {
+        // 测试替身无内部字段
+      }
+    }
+    return (n.getChildren() as FLNode[]).some(hasAnchor)
+  }
+  for (const kid of rootKidsOf(m)) {
+    if (regionOfColumn(kid) !== 'panels') continue
+    fallback ??= kid
+    if (hasAnchor(kid)) return kid
+  }
+  return fallback
 }
 
 /** chat 列第一个 tabset 的 id（打开页重建锚）。 */

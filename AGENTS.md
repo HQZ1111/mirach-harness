@@ -50,7 +50,7 @@ SingleTabStretch（v6.0 关——对话栏页签条恒显）。
 action 数据键不统一（node/nodeId/tabNode/fromNode），写拦截器必须逐个
 对照工厂签名；③行元素没有 data-layout-path——对行的 DOM 查询一律用
 后代 tabset 的 union rect。
-## 布局逻辑规范（2026-10-06 v7.3 · 代码已对齐——v7.3 E2E 7/7 + 矩阵 350 + fourverb 19/19 + closecol 3/3 全绿）
+## 布局逻辑规范（2026-10-06 v7.3.1 · 代码已对齐——根面板唯一 + v73b 8/8 + 矩阵 350 + fourverb 19/19 + closecol 3/3 + v73 7/7 全绿）
 
 **唯一规范 = `docs/layout-design.md`（v7.2）**。**v7.2 独立双位置切换
 （2026-10-06，用户定稿"没有交换位置了"）**：交换动词废除，布局段两行
@@ -95,14 +95,16 @@ hidden 不参与命中，2026-09-27 用户定稿"关闭钮不常显"）——合
 PANE_TYPES.region，syncSemanticStamps 在结构动作后同步重算）——面板页签
 拖到主栏分栏仍是面板栏子栏（min 240 非 chat 395），dropSplit 预戳 =
 被拖页签语义（非目标列）；"在哪栏分继承哪栏"废除。**根面板** = 打开页
-宿主 tabset，定义"面板栏在哪"；子栏可关可搬（拖空即关=ZCode 语义，
-空白 tabset 一律 deleteTabset），根面板不可关不可拖（open
+宿主 tabset，**唯一**——定义"面板栏在哪"，动词（隐藏/打开/位置）只作用
+根面板列；子栏（拖出的 panels 语义列）= **独立分栏**（v7.3.1 用户定稿：
+不跟动词跟移/隐藏，自己拖空自己关=ZCode 语义，空白 tabset 一律
+deleteTabset），根面板不可关不可拖（open
 enableDrag:false）→ 面板栏打开期间永不空；面板栏缺席仅"隐藏面板栏"一
 条路径，缺席时**交换/位置 = 纯逻辑旗标**（colOrder 恒 3 项记录根面板
-位；在场的另一列按 colOrder 去隐藏对齐——alignVisibleToOrder），打开
-面板栏按 colOrderInsertIndex 语义位重建。多 panels 语义列：hide 收全部
-（colstash.panels 为数组整组快照/整组按位插回）、setFlagsColOrder 按
-物理首现序去重排序。三栏固定：
+位；缺席态位置切换纯记录、子栏不跳位），打开
+面板栏按 colOrderInsertIndex 语义位重建。多 panels 语义列：hide 只收根
+面板列（colstash.panels 单列快照）、setFlagsColOrder 按物理首现序去重
+排序。三栏固定：
 左栏（350 默认/240-420，唯一有上限）| 对话栏（395+，吸收者）| 面板栏
 （350 默认/240+，上行页签组〔打开页+文件树/检查/预览〕+ 下行终端 20vh）。
 分栏：上下最多 2 行不可再竖分（投放层拒）、左右不限。存储键
