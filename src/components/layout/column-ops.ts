@@ -642,18 +642,30 @@ const alignVisibleToOrder = (m: Model): void => {
   if (!flags.panelsHidden) {
     const root = rootPanelColumnKid(m)
     const kids = rootKidsOf(m)
-    const chatKids = kids.filter((k) => regionOfColumn(k) === 'chat')
-    if (root && chatKids.length > 0) {
-      const before = flags.colOrder.indexOf('panels') < flags.colOrder.indexOf('chat')
+    if (root && kids.length >= 2) {
+      // 优先级结算（v7.3.3）：面板栏目标侧 = colOrder 里 panels 相对 chat
+      // 的侧别；左栏占它自己的边缘——同侧 → 让位（左栏第一、根面板第二），
+      // 异侧 → 占物理远端（子栏之外）。
+      const panelsSide = flags.colOrder.indexOf('panels') < flags.colOrder.indexOf('chat') ? 'L' : 'R'
+      const leftEdge = flags.colOrder.indexOf('left') === 0 ? 'L' : 'R'
       const curIdx = kids.indexOf(root)
-      const first = chatKids[0]
-      const last = chatKids[chatKids.length - 1]
-      const settled = before ? kids[curIdx + 1] === first : kids[curIdx - 1] === last
-      if (!settled) {
-        const anchor = before ? first : last
-        m.doAction(
-          Actions.moveNode(root.getId(), anchor.getId(), before ? DockLocation.LEFT : DockLocation.RIGHT, 0),
-        )
+      // 同侧让位只在左栏**在场**时成立（左栏缺席 = 边缘无人占，面板栏直接
+      // 占该侧边缘——矩阵 LCP10/PCL10 实锤）
+      const targetIdx =
+        panelsSide === leftEdge && !flags.leftHidden
+          ? leftEdge === 'L'
+            ? 1
+            : kids.length - 2
+          : panelsSide === 'L'
+            ? 0
+            : kids.length - 1
+      if (curIdx !== targetIdx) {
+        // 槽位精确：目标位 kid 为锚（右移 = 插它之后 / 左移 = 插它之前）
+        const anchor = kids[targetIdx]
+        if (anchor && anchor !== root) {
+          const dir = curIdx < targetIdx ? DockLocation.RIGHT : DockLocation.LEFT
+          m.doAction(Actions.moveNode(root.getId(), anchor.getId(), dir, 0))
+        }
       }
     }
   }
