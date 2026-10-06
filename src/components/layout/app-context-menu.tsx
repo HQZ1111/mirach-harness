@@ -48,13 +48,15 @@ import { CommandPalette, type PaletteCommand } from '@/components/assistant-ui/e
 
 import {
   columnFlagsOf,
+  leftPosLabel,
+  leftPosToggle,
   normalizeColumns,
+  panelsPosLabel,
+  panelsPosToggle,
   setLeftHidden,
   setPanelsHidden,
-  setPanelsPosition,
   setTabStripVisible,
   stripToggleInfoOf,
-  swapLeftPanels,
 } from './column-ops'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 
@@ -195,8 +197,9 @@ const flModel = (): Model | undefined => {
  * bare right-click on app chrome 的段结构 = hermes shellSections + 布局段：
  *   段1 [新建会话, 命令面板]
  *   段2 [隐藏/显示标签(落点分栏，无分栏缺席), 隐藏/打开左侧栏,
- *        隐藏/打开面板栏, 交换左栏与面板栏, 面板栏位置]（用户 2026-10-05：
- *        布局动词全量入应用菜单——唯一右键菜单，ZoneMenu 已裁）
+ *        隐藏/打开面板栏, 左侧栏位置, 面板栏位置]（用户 2026-10-05：
+ *        布局动词全量入应用菜单；2026-10-06 v7.2：互换废除，独立双位置
+ *        切换——左栏占端位、面板栏内/外位让位）
  *   段3 [切换状态栏, 设置]
  */
 export const buildShellMenuSections = (ctx: AppMenuContext = {}): readonly AppMenuSection[] => {
@@ -225,12 +228,10 @@ export const buildShellMenuSections = (ctx: AppMenuContext = {}): readonly AppMe
       id: 'shell-panels',
       label: flags.panelsHidden ? '打开面板栏' : '隐藏面板栏',
     },
-    { icon: 'arrow-both', id: 'shell-swap', label: '交换左栏与面板栏' },
-    {
-      icon: 'layout-panel',
-      id: 'shell-panels-pos',
-      label: flags.colOrder.indexOf('panels') === flags.colOrder.length - 1 ? '面板栏移到左栏旁' : '面板栏移到最右侧',
-    },
+    // v7.2：独立双位置切换（无交换）——左栏占端位、面板栏在内/外位之间
+    // 切换且永不跨到左栏的端（让位）；chat 自由填补剩余跨度
+    { icon: 'arrow-both', id: 'shell-left-pos', label: leftPosLabel() },
+    { icon: 'layout-panel', id: 'shell-panels-pos', label: panelsPosLabel() },
   )
   return [
     [
@@ -298,7 +299,7 @@ export const runShellAction = (id: string, ctx: AppMenuContext = {}): void => {
     case 'shell-tabstrip':
     case 'shell-left':
     case 'shell-panels':
-    case 'shell-swap':
+    case 'shell-left-pos':
     case 'shell-panels-pos': {
       if (id === 'shell-tabstrip') {
         const m = flModel()
@@ -317,11 +318,8 @@ export const runShellAction = (id: string, ctx: AppMenuContext = {}): void => {
       }
       if (id === 'shell-left') setLeftHidden(!columnFlagsOf().leftHidden)
       else if (id === 'shell-panels') setPanelsHidden(!columnFlagsOf().panelsHidden)
-      else if (id === 'shell-swap') swapLeftPanels()
-      else if (id === 'shell-panels-pos') {
-        const flags = columnFlagsOf()
-        setPanelsPosition(flags.colOrder.indexOf('panels') === flags.colOrder.length - 1 ? 'middle' : 'last')
-      }
+      else if (id === 'shell-left-pos') leftPosToggle()
+      else if (id === 'shell-panels-pos') panelsPosToggle()
       return
     }
     default:

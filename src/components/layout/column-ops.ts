@@ -229,73 +229,64 @@ const adopt = (json: LayoutJson): boolean => {
 
 // ── 动词 ─────────────────────────────────────────────────────────────────────
 
-/** 交换左栏与面板栏（两列槽位互换、chat 不动）。
- *  实现 = colOrder 记录交换 + **在场列对齐到新投影**（alignVisibleToOrder，
- *  moveNode 整列移动零卸载；缺席方子树不动）——双在场/任一缺席统一一条
- *  路径，且对任意状态恒等回放（再点一次换回、对齐归位）。旧"两次
- *  moveNode 锚 chat"写法在 [L,P,C] 类序上不回位（[L,P,C]→[P,C,L]→
- *  [L,C,P]，双击不还原）且破坏 colOrder 投影一致性（全量矩阵实锤）。 */
-export const swapLeftPanels = (): void => {
+// ── 位置切换（v7.2：独立双切换，无交换——用户定稿"只切换左侧栏，只切换
+//    面板栏"）────────────────────────────────────────────────────────────────
+// 状态 = colOrder ∈ 4 种排列，**left 恒占一端**（[L,C,P] [L,P,C] [P,C,L]
+// [C,P,L]；[P,L,C]/[C,L,P] 非法）。面板栏位置 = 紧挨左栏（内）或远端
+// （外），**永不跨到左栏的端**（让位）；chat 自由填补剩余跨度（面板栏在
+// 内位时 chat 自然靠边——"对话栏不用一直在中间"）。
+// 切换 = colOrder 条目移动 + 在场列对齐投影；**隐藏列切换 = 纯记录**
+// （可见投影不变，物理不动——面板栏不因隐藏的左栏切边而跳端）。
+
+/** 左栏位置切换：colOrder 里 left 条目移到另一端（其余条目相对序不动，
+ *  可见投影两种方向都不变）。`[L,C,P]→[C,P,L]`（左栏到面板栏右边，
+ *  用户原话）`[L,P,C]→[P,C,L]`；反向同理。 */
+export const leftPosToggle = (): void => {
   const m = model()
   if (!m) return
   const flags = columnFlagsOf()
   const order = [...flags.colOrder]
-  const a = order.indexOf('left')
-  const b = order.indexOf('panels')
-  if (a < 0 || b < 0) {
-    console.error('[column-ops] colOrder 缺列——互换放弃', order)
+  const li = order.indexOf('left')
+  if (li < 0) {
+    console.error('[column-ops] colOrder 缺 left——位置切换放弃', order)
     return
   }
-  ;[order[a], order[b]] = [order[b], order[a]]
+  order.splice(li, 1)
+  if (li === 0) order.push('left')
+  else order.unshift('left')
   setFlags({ ...flags, colOrder: order })
-  alignVisibleToOrder(m)
+  // 左栏在场 = 物理兑现（对齐投影）；缺席 = 纯记录（重开按新位插回）
+  if (colIndexOf(m, 'left') >= 0) alignVisibleToOrder(m)
 }
 
-/** 面板栏位置：'middle' = 左栏右边（chat 前）；'last' = 最右（根行末位）。
- *  面板栏在场 = 单次 moveNode 整列移动（零卸载）；**缺席 = 纯逻辑**（docs
- *  v7.0 §3：只改 colOrder——打开面板栏按此位重建）。 */
-export const setPanelsPosition = (pos: 'middle' | 'last'): void => {
+/** 面板栏位置切换：colOrder 里 panels 与 chat 条目换位（= 跨过 chat 到
+ *  另一侧，**不跨 left**——让位）。`[L,C,P]↔[L,P,C]`、`[P,C,L]↔[C,P,L]`。 */
+export const panelsPosToggle = (): void => {
   const m = model()
   if (!m) return
-  const pi = colIndexOf(m, 'panels')
-  if (pi < 0) {
-    // **缺席态 = 纯逻辑**：只改 colOrder（colOrder 恒 3 项——根面板的
-    // 逻辑位置记录），树不动
-    const flags = columnFlagsOf()
-    const order: ColRegion[] = flags.colOrder.filter((r) => r !== 'panels')
-    const ci = order.indexOf('chat')
-    order.splice(pos === 'middle' ? Math.max(ci, 0) : order.length, 0, 'panels')
-    setFlags({ ...flags, colOrder: order })
+  const flags = columnFlagsOf()
+  const order = [...flags.colOrder]
+  const pi = order.indexOf('panels')
+  const ci = order.indexOf('chat')
+  if (pi < 0 || ci < 0) {
+    console.error('[column-ops] colOrder 缺列——面板栏位置切换放弃', order)
     return
   }
-  const panelsId = colNodeIdAt(m, pi)
-  if (!panelsId) {
-    console.error('[column-ops] 列节点缺失——位置切换放弃')
-    return
-  }
-  const kids = rootKidsOf(m)
-  if (pos === 'middle') {
-    // 锚 = chat 列本体：插到 chat 前（左栏右边）
-    const ci = colIndexOf(m, 'chat')
-    const chatId = colNodeIdAt(m, ci)
-    if (!chatId) {
-      console.error('[column-ops] chat 列缺失——位置切换放弃')
-      return
-    }
-    m.doAction(Actions.moveNode(panelsId, chatId, DockLocation.LEFT, 0))
-  } else {
-    // 最右 = 根行末位：已末位零动作；否则插到当前末位列 RIGHT（互换后
-    // 左栏在末位——锚 chat 会停在 chat 后导致 [chat,panels,left]）
-    const lastIdx = kids.length - 1
-    if (pi === lastIdx) {
-      setFlagsColOrder(m)
-      return
-    }
-    const lastId = colNodeIdAt(m, lastIdx)
-    if (!lastId) return
-    m.doAction(Actions.moveNode(panelsId, lastId, DockLocation.RIGHT, 0))
-  }
-  setFlagsColOrder(m)
+  ;[order[pi], order[ci]] = [order[ci], order[pi]]
+  setFlags({ ...flags, colOrder: order })
+  if (colIndexOf(m, 'panels') >= 0) alignVisibleToOrder(m)
+}
+
+/** 菜单文案（v7.2 两行位置切换的自描述标签）。 */
+export const leftPosLabel = (): string =>
+  columnFlagsOf().colOrder.indexOf('left') === 0 ? '左侧栏移到最右侧' : '左侧栏移到最左侧'
+
+export const panelsPosLabel = (): string => {
+  const { colOrder } = columnFlagsOf()
+  const inner = Math.abs(colOrder.indexOf('panels') - colOrder.indexOf('left')) === 1
+  // 内位（紧挨左栏）→ 目标 = 远端；外位 → 目标 = 左栏旁
+  if (!inner) return '面板栏移到左栏旁'
+  return colOrder.indexOf('left') === 0 ? '面板栏移到最右侧' : '面板栏移到最左侧'
 }
 
 /** 隐藏/打开左侧栏（单次重采纳：JSON 摘除/拼回；adopt 成功才提交旗标与
