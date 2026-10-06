@@ -59,6 +59,7 @@ import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-open
 import { TerminalPane } from '@/components/panes/terminal-pane'
 import { ReviewPane } from '@/components/panes/review-pane'
 import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
+import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { OpenPage, type OpenPageKind } from '@/components/panes/open-page'
@@ -70,7 +71,6 @@ import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 const COMPONENTS: Record<string, React.ComponentType<{ tabName?: string }>> = {
   leftrail: LeftRailPane,
   workspace: AssistantThreadPane,
-  session: AssistantThreadPane,
   open: OpenPage as unknown as React.ComponentType<{ tabName?: string }>,
   files: HermesFileTreePane,
   review: ReviewPane,
@@ -158,12 +158,8 @@ export function FlexLayoutShell() {
       persist(m)
       bumpLayoutRev()
       if (action?.type === Actions.SELECT_TAB) {
-        const id = (action.data as { tabNode?: string }).tabNode ?? ''
-        if (paneTypeOf(id) === 'session') {
-          const tab = m.getNodeById(id)
-          const threadId = tab instanceof TabNode ? (tab.getConfig() as { threadId?: string } | undefined)?.threadId : undefined
-          if (threadId) switchSessionThreadBridge(threadId)
-        }
+        // 会话页签自持静态投影（v7.3 双对话分栏）：激活页签不再切运行时
+        // 线程——"切主会话"只走侧栏行点击（switchSessionThreadBridge）
         return
       }
       if (
@@ -292,10 +288,11 @@ export function FlexLayoutShell() {
 
   // ── 会话页签（多标签，§5/§8） ──────────────────────────────────────────────
   /** 开出/激活某会话的页签：同会话已有页签 → 置前（同会话不重复开签）；
-   *  否则落到目标分栏（须 region=chat，缺省 = 主会话所在分栏），激活并
-   *  切 runtime 到该会话。thread-list 的会话行拖拽经 bridge 调这里。 */
+   *  否则落到目标分栏（须 region=chat，缺省 = 主会话所在分栏）激活。
+   *  beforeTabId = 悬停页签的槽位（hermes slotBefore——插到它前面，null =
+   *  追加条尾）。thread-list 的会话行拖拽经 bridge 调这里。 */
   const openSessionTab = useCallback(
-    (threadId: string, targetTabsetId?: string) => {
+    (threadId: string, targetTabsetId?: string, beforeTabId?: string | null) => {
       const m = modelRef.current
       let existing: string | null = null
       m.visitNodes((n) => {
@@ -306,7 +303,6 @@ export function FlexLayoutShell() {
         }
       })
       if (existing) {
-        // 激活即切换：selectTab 经 onModelChange 的 SELECT_TAB 分支走 bridge
         m.doAction(Actions.selectTab(existing))
         persist(m)
         bumpLayoutRev()
@@ -332,12 +328,14 @@ export function FlexLayoutShell() {
       const id = nextInstanceId(m, 'session')
       const entry = sessionCatalog.getState().entries[threadId]
       const name = entry ? sessionDisplayName(entry) : '会话'
+      // 槽位精度（hermes slotBefore）：插到悬停页签前；目标签不在场 = 条尾
+      const index = beforeTabId ? host.getChildren().findIndex((t) => t.getId() === beforeTabId) : -1
       m.doAction(
         Actions.addNode(
           { type: 'tab', id, component: 'session', name, enableClose: true, config: { threadId } },
           host.getId(),
           DockLocation.CENTER,
-          host.getChildren().length,
+          index >= 0 ? index : host.getChildren().length,
           true,
         ),
       )
@@ -538,6 +536,11 @@ export function FlexLayoutShell() {
         )
       } else if (componentName === 'open') {
         content = <OpenPage onOpen={openPanelsAction} />
+      } else if (componentName === 'session') {
+        // 会话窗格 = 自持投影（v7.3 双对话分栏各显各的会话）：threadId 从
+        // 页签 config 取，threadId === 活动会话时翻 live
+        const cfg = node.getConfig() as { threadId?: string } | undefined
+        content = <SessionThreadPane threadId={cfg?.threadId ?? ''} tabName={node.getName()} />
       } else {
         const Comp = COMPONENTS[componentName]
         content = Comp ? (

@@ -50,7 +50,7 @@ SingleTabStretch（v6.0 关——对话栏页签条恒显）。
 action 数据键不统一（node/nodeId/tabNode/fromNode），写拦截器必须逐个
 对照工厂签名；③行元素没有 data-layout-path——对行的 DOM 查询一律用
 后代 tabset 的 union rect。
-## 布局逻辑规范（2026-10-06 v7.2 · 代码已对齐，v7.2 矩阵 350 checks 全绿）
+## 布局逻辑规范（2026-10-06 v7.3 · 代码已对齐——v7.3 E2E 7/7 + 矩阵 350 + fourverb 19/19 + closecol 3/3 全绿）
 
 **唯一规范 = `docs/layout-design.md`（v7.2）**。**v7.2 独立双位置切换
 （2026-10-06，用户定稿"没有交换位置了"）**：交换动词废除，布局段两行
@@ -172,15 +172,24 @@ allowRecreate（boot normalize）路径开放。open 签 enableDrag:false（不
   （workspace/session-N）只进对话栏；面板栏页签进面板栏+对话栏；打开页
   钉死面板栏（不可关不可拖出）；左栏拒收一切。上下限 =
   verticalRowCount(列)<2 才许 top/bottom 投放。
-- **会话多标签（hermes 语义）**：主会话页签（workspace）恒在不可关；
-  左栏会话行拖到对话栏页签条 = 开会话页签（session-N，tab.config 带
-  threadId，同会话不重复开→置前）；拖到主页签/点击行 = 切主会话；
-  条隐藏（单签缺省）时主页签按钮不存在 → 行拖入无处落 = 无法多开。
-  **页签激活切线程的拦截挂在 onModelChange 的 SELECT_TAB 分支**
-  （onAction 拦不住程序化路径；ADD_TAB 会自动选中新签——探针/测试里
-  点已选中签不再派发 SELECT_TAB）。bridge = session-tab-bridge.ts
-  （openSessionTabBridge 由 flex-layout 注册给 thread-list，
-  setSessionThreadSwitcher 由 runtime 注册给 flex-layout）。
+- **会话多标签（v7.3 hermes 投放语言）**：主会话页签（workspace）恒在
+  不可关；左栏会话行拖到对话栏**页签条**（条带矩形覆盖页签按钮——拖到
+  主对话页签上=拖到条上）= 在悬停页签的**槽位前堆叠**会话页签（hermes
+  slotBefore 精度；session-N，tab.config 带 threadId，同会话不重复开→
+  置前）；**条隐藏 = 无法拖入**（用户定稿；hermes snapshotStrips 来自
+  DOM 同果）。切主会话只走侧栏行点击。**会话窗格自持投影（v7.3 并排
+  双对话分栏各显各的会话）**：`SessionThreadPane` = threadId ≠ 目录
+  activeId → 静态只读投影（`pi_get_session_messages(path)` Rust 叶链读
+  会话文件 → `hydratePiMessages`（已抽到 pi-hydrate.ts 模块级）→ 简化
+  渲染）；= activeId → live 全管线。"设为主会话"钮 = 翻 live。SELECT_TAB
+  不再切运行时线程（拦截分支已删）。bridge = session-tab-bridge.ts
+  （openSessionTabBridge 带 beforeTabId；setSessionThreadSwitcher 供
+  侧栏行）。
+- **页签条显隐 ladder（v7.3 全量对齐 hermes）**：搁浅 > 手动 stripMode >
+  ≥2 签 > **siblingMainZone**（孤 workspace 页签 + 另一根对话分栏在场 →
+  条在位——`siblingMainZoneOf` 现算，`stripVisibleOf` 第 4 参）。
+  **条隐藏分栏 = 拖拽目标缺席**：`hiddenStripZoneIds` 快照期过滤
+  （drag-session.ts），中心/边缘/条带全不亮。
 - **拖拽引擎（drag-session.ts v6 瘦身）**：单目标解析（先条带插入符后
   zone 径向），FancyZones 多区高亮/Shift 合并/多签块/track 拒绝全删；
   跟手克隆件/机械层保留。**工厂 body 右键面 = PaneBodyMenu**

@@ -1,4 +1,4 @@
-# MIRACH 布局方案 v7.0（2026-10-05 · 语义归属 + 根面板）
+# MIRACH 布局方案 v7.3（2026-10-06 · 语义归属 + 根面板 + 独立双位置切换 + hermes 条显隐/会话拖放对齐）
 
 > 本文档是布局的**唯一规范**：实现与文档冲突时，以文档为准改代码。
 > v7.0 回答两个结构问题：①页签的身份与约束跟随**语义**（面板页签拖到
@@ -105,7 +105,9 @@
 | 对话栏页签（workspace/session-N） | **只能在对话栏内**：条内重排、拖出分栏（左右不限/上下第 2 行）；拖入左栏/面板栏被拒 |
 | 面板栏页签（files/review/terminal/preview/external） | **对话栏 + 面板栏**均可（无限制） |
 | 打开页（open） | **不可拖出**（enableDrag:false——根面板钉死） |
-| 会话行（左栏列表） | 拖到对话栏页签条 = 开会话页签；拖到主会话页签 = 切主会话；其余拒绝 |
+| 会话行（左栏列表） | 拖到对话栏**页签条**（条带矩形覆盖页签按钮——拖到主对话页签上 =
+  拖到条上）= 在悬停页签的**槽位前堆叠**会话页签（hermes slotBefore 槽位
+  精度）；**条隐藏 = 无法拖入**；其余拒绝 |
 
 - 拖拽引擎单目标解析（先条带插入符后 zone 径向）；**edge 分栏的新 tabset
   盖被拖页签的语义戳**（v7.0：不再预戳目标列 region）。
@@ -124,12 +126,21 @@
   **chat 语义列**，panels 语义列按记忆宽托底（rebalance）。
 - 每行最小高度 = 标题条；终端行默认 20vh。
 
-## 6. 页签条显隐（v6.0 不变）
+## 6. 页签条显隐（v7.3：ladder 全量对齐 hermes + 条隐藏拒拖入）
 
-hermes strip-visibility ladder：搁浅优先（孤可关签的 ✕ 只在条上）；
-手动 `stripMode`（always/never，应用菜单「隐藏/显示标签」行，按落点栏）；
-缺省自动（单签隐藏、≥2 签显示）。左栏恒无条。下发在
-constraints-sync（`stripVisibleOf`）。
+hermes strip-visibility ladder（strip-visibility.ts 逐条）：**搁浅优先**
+（孤可关签的 ✕ 只在条上，压过手动 never）；手动 `stripMode`（always/
+never，应用菜单「隐藏/显示标签」行，按落点栏）次之；缺省自动（单签隐藏、
+≥2 签显示）；**孤主会话页签 + 另一根对话分栏在场 → 条在位**
+（hermes siblingMainZone——lone-chat-sibling-zone：双对话分栏各需条上
+把手，"拖第二个会话出去后主对话条消失"回归）。左栏恒无条。下发在
+constraints-sync（`stripVisibleOf`，sibling 由 `siblingMainZoneOf` 现算）。
+
+**条隐藏 = 无法拖入**（用户定稿，hermes 同果）：页签条隐藏的分栏不是
+拖拽目标——快照期过滤（`hiddenStripZoneIds`），中心/边缘/条带全不亮。
+会话行拖入同理（hermes snapshotStrips 来自 DOM：条不渲染即无堆叠目标）。
+恢复路径 = 应用菜单「显示标签」（hermes：restoring never depends on the
+strip）。
 
 ## 7. 混合栈的语义边界
 
@@ -186,7 +197,12 @@ SingleTabStretch/ZoneMenu 体系/显示标签眼钮/标题栏齿轮）之外，v
 
 ## 11. 边界与待跟进
 
-- 并排两个对话分栏各显各的会话：v1 不支持（单投影）。
+- ~~并排两个对话分栏各显各的会话~~ **v7.3 已支持**：会话窗格自持投影
+  （`SessionThreadPane`，threadId ≠ 活动会话 = 静态只读投影
+  `pi_get_session_messages(path)` 叶链读历史；= 活动会话 → live 全管线）。
+  **已知边界**：静态投影只读（hermes 瓦片各有 composer——升级需运行时
+  多流/按 threadId 路由 AG-UI 事件，L2 架构位，记录待跟进）；静态渲染用
+  react-markdown 简化管线（非 thread.aui 全管线）。
 - 检查面板仍为占位；打开文件/网页/子智能体（external）走 OS 拖入占位，
   语义已归 panels。
 - 页签溢出：原生溢出按钮 + 总览菜单。

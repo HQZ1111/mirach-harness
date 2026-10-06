@@ -37,7 +37,7 @@ import { reorderCommitHaptic, reorderStepHaptic } from '@/lib/reorder'
 
 import type { DropHint, DropPosition } from '@/store/layout-store'
 import { useLayoutStore } from '@/store/layout-store'
-import { PANE_TYPES, paneTypeOf, zoneConfigOf, type Region } from './pane-registry'
+import { PANE_TYPES, paneTypeOf, siblingMainZoneOf, stripVisibleOf, zoneConfigOf, type Region } from './pane-registry'
 
 const DRAG_THRESHOLD_PX = 4
 
@@ -49,6 +49,23 @@ const CENTER_RADIUS = 0.62
 /** How far (px) the pointer may stray from the strip before a tab drag stops
  *  being a reorder and becomes a zone move (browser-tab tear-off feel). */
 const TEAR_OFF_SLACK_PX = 18
+
+/**
+ * 页签条隐藏的分栏 id 集（hermes 语义：隐藏标签后**无法拖入**——条是堆叠
+ * 目标、中心是入栈目标，条没了这两条都不该亮）。快照一次（拖拽中布局不
+ * 重组），zone 解析前过滤。左栏恒无条但本就被 allowedRegions 拒收，不在
+ * 此列重复设防。 */
+export function hiddenStripZoneIds(model: Model): Set<string> {
+  const hidden = new Set<string>()
+  const sibling = siblingMainZoneOf(model)
+  model.visitNodes((node) => {
+    if (!(node instanceof TabSetNode)) return
+    const region = zoneConfigOf(node)?.region
+    if (!region || region === 'left') return
+    if (!stripVisibleOf(node, region, undefined, sibling)) hidden.add(node.getId())
+  })
+  return hidden
+}
 
 // ---------------------------------------------------------------------------
 // 快照（拖拽中不重组，一次抓取，全程纯数学）
@@ -546,6 +563,9 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
   let strips: StripSnapshot[] = []
   let mode: 'reorder' | 'zone' | null = null
   const dimmed: HTMLElement[] = []
+  // 条隐藏分栏（拖拽起手快照一次——布局中程不重组）
+  const hiddenZones = hiddenStripZoneIds(model)
+  const visibleZones = () => snapshotZones(model).filter((z) => !hiddenZones.has(z.id))
 
   const markSource = () => {
     // The dragged tab dims for the drag's life — the divider says where it
@@ -563,7 +583,7 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
   const enterZoneMode = () => {
     mode = 'zone'
     // The layout never restructures mid-drag, so zone/strip rects are stable.
-    zones = snapshotZones(model)
+    zones = visibleZones()
     strips = snapshotStrips(model)
     if (dragGeometry) dragGeometry.mode = 'zone'
     markSource()
@@ -606,7 +626,7 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
       const hr = host?.getBoundingClientRect()
       dragGeometry = {
         hostOffset: { x: hr?.left ?? 0, y: hr?.top ?? 0 },
-        zones: snapshotZones(model),
+        zones: visibleZones(),
         strips: snapshotStrips(model),
         moving: [paneId],
         mode: 'reorder',

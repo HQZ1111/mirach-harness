@@ -139,11 +139,11 @@ interface SessionListCtxValue {
    *  这里读，行组件不再各自订阅 threadItems）。 */
   meta?: SessionRowMeta;
   commitListMove(sessionId: string, group: SessionRowGroup, beforeId: string | null): void;
-  commitMainTab(sessionId: string): void;
-  /** 跨面拖拽落对话栏页签条（docs/layout-design.md v6.0 §6）——在该分栏
-   *  开出该会话的页签（多标签模式；已开 → 置前）。实现经 session-tab-bridge
-   *  由 flex-layout 注册。 */
-  commitOpenTab(tabsetId: string, sessionId: string): void;
+  /** 跨面拖拽落对话栏页签条（docs/layout-design.md §6，hermes session-drag
+   *  投放语言）：在该分栏开出该会话的页签，beforeTabId = 悬停页签的槽位
+   *  （插到它前面；null = 追加条尾）。实现经 session-tab-bridge 由
+   *  flex-layout 注册。 */
+  commitOpenTab(tabsetId: string, sessionId: string, beforeTabId: string | null): void;
 }
 
 const SessionListContext = createContext<SessionListCtxValue | null>(null);
@@ -1225,11 +1225,8 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         );
         sidebarViewStore.getState().claimManual();
       },
-      commitMainTab: (sessionId) => {
-        void aui.threads.switchToThread(sessionId);
-      },
-      commitOpenTab: (tabsetId, sessionId) => {
-        openSessionTabBridge(sessionId, tabsetId);
+      commitOpenTab: (tabsetId, sessionId, beforeTabId) => {
+        openSessionTabBridge(sessionId, tabsetId, beforeTabId);
       },
     }),
     [aui, display, mode],
@@ -1744,8 +1741,7 @@ export const ThreadListItem: FC = () => {
             startSessionRowDrag(e, {
               sessionId: threadId,
               title: title ?? "New Chat",
-              onCommitMainTab: () => ctx.commitMainTab(threadId),
-              onCommitOpenTab: (tabsetId) => ctx.commitOpenTab(tabsetId, threadId),
+              onCommitOpenTab: (tabsetId, beforeTabId) => ctx.commitOpenTab(tabsetId, threadId, beforeTabId),
             });
             sortable?.dragHandleProps.onPointerDown?.(e);
           }}

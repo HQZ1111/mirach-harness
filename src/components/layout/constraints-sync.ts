@@ -1,5 +1,5 @@
 import { Actions, Model, Orientation, RowNode, TabNode, TabSetNode, type Node as FLNode, type Node } from 'flexlayout-react'
-import { PANE_TYPES, REGION_LIMITS, paneTypeOf, stripVisibleOf, zoneConfigOf } from './pane-registry'
+import { PANE_TYPES, REGION_LIMITS, paneTypeOf, siblingMainZoneOf, stripVisibleOf, zoneConfigOf } from './pane-registry'
 import { syncOpenAnchor } from './column-ops'
 import { rootAvailPx } from './constraints'
 
@@ -113,9 +113,10 @@ export const syncTabsetConstraints = (m: Model) => {
     // 位置写 config——stripMode 随戳更新时由 syncSemanticStamps 保留。
 
     // 页签条显隐（hermes strip-visibility ladder）：左栏恒无条；搁浅（孤
-    // 可关签）强制在位；手动 stripMode 次之；缺省自动。测试替身的原型
-    // 方法会因缺内部字段抛错——抛错等同"读不到"，不算差异。
-    const stripOn = stripVisibleOf(node, region)
+    // 可关签）强制在位；手动 stripMode 次之；缺省自动；孤主会话页签在另
+    // 一根对话分栏在场时条在位（siblingMainZone——双对话分栏各需把手）。
+    // 测试替身的原型方法会因缺内部字段抛错——抛错等同"读不到"，不算差异。
+    const stripOn = stripVisibleOf(node, region, undefined, siblingMainZoneOf(m))
     let stripNow: boolean | undefined
     try {
       stripNow = (node as unknown as { isEnableTabStrip?: () => boolean }).isEnableTabStrip?.()

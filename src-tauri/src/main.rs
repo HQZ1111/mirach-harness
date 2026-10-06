@@ -128,6 +128,59 @@ fn pi_get_messages(
     state.engine.messages()
 }
 
+/// 按会话文件路径读历史（**不切活动会话**——双对话分栏的静态投影面板用，
+/// 并排各显各的会话）。pi 会话文件 = 追加式 JSONL：条目带 id/parentId 成
+/// 链，当前叶 = 最新条目（pi 只在叶后追加）。沿叶回溯取当前分支上
+/// type=="message" 条目的 message 值——形状与 pi_get_messages 一致（前端
+/// hydratePiMessages 直用）。活动会话的文件可能带锁（SessionPersistence），
+/// 读失败原样报错（错误可见，规矩 12）——静态面板只展示非活动会话，正常
+/// 不触锁。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_get_session_messages(path: String) -> Result<serde_json::Value, String> {
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("会话文件读取失败 {path}: {e}"))?;
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        // 半行（崩溃尾）跳过——append-only 日志的合法尾部形态
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
+            entries.push(v);
+        }
+    }
+    let leaf_id = entries
+        .last()
+        .and_then(|e| e.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(id) = e.get("id").and_then(|v| v.as_str()) {
+            by_id.insert(id, i);
+        }
+    }
+    let mut chain: Vec<&serde_json::Value> = Vec::new();
+    let mut cur = leaf_id;
+    while let Some(id) = cur {
+        match by_id.get(id.as_str()) {
+            Some(&i) => {
+                let e = &entries[i];
+                chain.push(e);
+                cur = e.get("parentId").and_then(|v| v.as_str()).map(String::from);
+            }
+            None => break,
+        }
+    }
+    chain.reverse();
+    let msgs: Vec<serde_json::Value> = chain
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) == Some("message"))
+        .filter_map(|e| e.get("message").cloned())
+        .collect();
+    Ok(serde_json::Value::Array(msgs))
+}
+
 /// 机器人预设会话（左栏「机器人」窗格启动钮）：system_prompt + model +
 /// working_directory 一次性透传 SessionOptions（pi_session.rs
 /// create_bot_session）。创建成功后以 bot 名重命名该会话（rename_session
@@ -504,6 +557,7 @@ fn main() {
             get_agui_endpoint,
             pi_get_state,
             pi_get_messages,
+            pi_get_session_messages,
             pi_set_model,
             pi_set_thinking_level,
             pi_interrupt,

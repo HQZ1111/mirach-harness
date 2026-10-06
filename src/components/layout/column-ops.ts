@@ -16,7 +16,7 @@
  */
 import { Actions, DockLocation, Model, Orientation, RowNode, TabNode, TabSetNode, type Node as FLNode } from 'flexlayout-react'
 
-import { PANE_TYPES, paneTypeOf, stripVisibleOf, zoneConfigOf } from './pane-registry'
+import { PANE_TYPES, paneTypeOf, siblingMainZoneOf, stripVisibleOf, zoneConfigOf } from './pane-registry'
 
 export type ColRegion = 'left' | 'chat' | 'panels'
 
@@ -586,7 +586,8 @@ export const stripToggleInfoOf = (
   const region = zoneConfigOf(set)?.region
   if (!region || region === 'left') return undefined
   if (set.getChildren().length === 0) return undefined
-  return { visible: stripVisibleOf(set, region), noOp: stripVisibleOf(set, region, 'never') }
+  const sibling = siblingMainZoneOf(m)
+  return { visible: stripVisibleOf(set, region, undefined, sibling), noOp: stripVisibleOf(set, region, 'never', sibling) }
 }
 
 /** 面板栏列子树 depth-first 第一个 tabset 的 id（锚宿主）。 */

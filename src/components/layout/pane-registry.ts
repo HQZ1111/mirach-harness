@@ -120,8 +120,16 @@ export const zoneConfigOf = (node: FLNode | undefined): ZoneConfig | undefined =
  *  docs/layout-design.md §1）：左栏恒无条；**搁浅优先**——唯一可关页签的
  *  ✕ 只住在条上（孤终端/孤文件树等），条强制在位、压过手动 never
  *  （"隐藏标签"永远不能让一个面失去所有把手）；手动 stripMode 次之；
- *  缺省自动 = ≥2 页签显示、单签隐藏。override = 菜单行的预演判定。 */
-export const stripVisibleOf = (node: TabSetNode, region: Region, override?: 'always' | 'never'): boolean => {
+ *  缺省自动 = ≥2 页签显示；孤主会话页签在**另一根对话分栏在场**时条在位
+ *  （hermes siblingMainZone：lone-chat-sibling-zone——双对话分栏各需条上
+ *  把手），压过缺省隐藏、**不压过手动 never**。override = 菜单行的预演
+ *  判定。siblingMain = 模型里存在另一根有页签的对话分栏（调用方现算）。 */
+export const stripVisibleOf = (
+  node: TabSetNode,
+  region: Region,
+  override?: 'always' | 'never',
+  siblingMain = false,
+): boolean => {
   if (region === 'left') return false
   const kids = node.getChildren().filter((c): c is TabNode => c instanceof TabNode)
   if (kids.length === 0) return false
@@ -132,7 +140,19 @@ export const stripVisibleOf = (node: TabSetNode, region: Region, override?: 'alw
   }
   const mode = override ?? zoneConfigOf(node)?.stripMode
   if (mode) return mode === 'always'
-  return kids.length > 1
+  if (kids.length > 1) return true
+  if (siblingMain && paneTypeOf(kids[0].getId()) === 'workspace') return true
+  return false
+}
+
+/** 模型里"另一根对话分栏在场"判定（hermes siblingMainZone 的输入）：
+ *  chat 语义、有页签的 tabset 数 > 1。 */
+export const siblingMainZoneOf = (m: Model): boolean => {
+  let count = 0
+  m.visitNodes((n) => {
+    if (n instanceof TabSetNode && zoneConfigOf(n)?.region === 'chat' && n.getChildren().length > 0) count++
+  })
+  return count > 1
 }
 
 /** 分栏成员的类型集合（跨类型混合的 zone 以第一个窗格的类型为准判 region） */
