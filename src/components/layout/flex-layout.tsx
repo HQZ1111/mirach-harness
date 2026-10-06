@@ -211,6 +211,10 @@ export function FlexLayoutShell() {
         applyRootWeights(next)
         modelRef.current = next
         setModel(next)
+        // **同步刷 __flModel**：setModel 的 effect 要等重渲染——adopter 的
+        // 调用方（隐藏/打开后的对齐等）在同一个同步栈里取模型，拿到旧引用
+        // 就是对着死模型对齐（U2 实锤）
+        ;(window as { __flModel?: Model }).__flModel = next
         persist(next)
         bumpLayoutRev()
         scheduleRebalance()

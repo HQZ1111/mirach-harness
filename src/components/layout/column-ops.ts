@@ -383,6 +383,10 @@ export const setPanelsHidden = (hidden: boolean): void => {
       const nextFlags: ColumnFlags = { ...flags, panelsHidden: false }
       if (!adopt({ layout: { ...json.layout, children: nextKids } })) return
       setFlags(nextFlags)
+      // 跨度归位——**必须用重采纳后的新模型**（adopt 已 setModel，入参 m
+      // 是被换掉的旧引用，对齐会落在死模型上——U2 实锤）
+      const nm = model()
+      if (nm) alignVisibleToOrder(nm)
       return
     }
     const nextKids = [...kids]
@@ -399,6 +403,9 @@ export const setPanelsHidden = (hidden: boolean): void => {
     if (!adopt({ layout: { ...json.layout, children: nextKids } })) return
     saveStashSafe(nextStash)
     setFlags(nextFlags)
+    // 跨度归位——同上，用重采纳后的新模型
+    const nm = model()
+    if (nm) alignVisibleToOrder(nm)
   }
 }
 
@@ -606,45 +613,50 @@ const firstPanelsTabsetId = (m: Model): string | undefined => {
   return undefined
 }
 
-/** 在场列按 colOrder（去隐藏）物理对齐——**根面板唯一**（v7.3.1，用户
- *  定稿）：动词只作用于根面板那一根列（打开页宿主），用户拖出的子栏是
- *  独立分栏、不跟动词走。面板槽位 = 根面板列；left 槽位 = 左栏列；chat
- *  的位置由前两者的槽位自然补出（complement），永不需要显式移动。
- *  方向：curIdx > target → LEFT of 目标位kid；curIdx < target → RIGHT of
- *  末位 kid（"最右" = 全部列之后）。 */
+/** 在场列按 colOrder 物理归位（v7.3.2）——两条独立规则：
+ *  ①**左栏恒在物理端**（colOrder 首位 → 物理第一根之前；末位 → 最后一根
+ *  之后）——导航栏必须贴边，子栏存在时也不破例；
+ *  ②**根面板贴住 chat 跨度边界**（colOrder 里 panels 在 chat 前 → 根面板
+ *  紧贴第一根 chat 列之前；在后 → 紧贴最后一根 chat 列之后）——根面板
+ *  唯一、动词只动它；子栏（拖出的 panels 语义列）是用户独立分栏，不被动
+ *  归位（紧贴时保持，被跨过时让位）。chat 列位置由①②补出。 */
 const alignVisibleToOrder = (m: Model): void => {
   const flags = columnFlagsOf()
-  const isVisible = (r: ColRegion): boolean =>
-    r === 'left' ? !flags.leftHidden : r === 'panels' ? !flags.panelsHidden : true
-  const moveRegionToSlot = (region: ColRegion): void => {
-    let target = -1
-    let at = 0
-    for (const slot of flags.colOrder) {
-      if (slot === region) {
-        target = at
-        break
+  if (!flags.leftHidden) {
+    const kid = rootKidsOf(m).find((k) => regionOfColumn(k) === 'left')
+    if (kid) {
+      const kids = rootKidsOf(m)
+      const leftFirst = flags.colOrder.indexOf('left') === 0
+      const idx = kids.indexOf(kid)
+      const atEdge = leftFirst ? idx === 0 : idx === kids.length - 1
+      if (!atEdge) {
+        const anchor = leftFirst ? kids[0] : kids[kids.length - 1]
+        if (anchor && anchor !== kid) {
+          m.doAction(
+            Actions.moveNode(kid.getId(), anchor.getId(), leftFirst ? DockLocation.LEFT : DockLocation.RIGHT, 0),
+          )
+        }
       }
-      if (isVisible(slot)) at++
-    }
-    if (target < 0) return
-    const kid = region === 'panels' ? rootPanelColumnKid(m) : rootKidsOf(m).find((k) => regionOfColumn(k) === region)
-    if (!kid) return
-    const kids = rootKidsOf(m)
-    const curIdx = kids.indexOf(kid)
-    if (curIdx === target) return
-    if (curIdx > target) {
-      const anchor = kids[target]
-      if (!anchor || anchor === kid) return
-      m.doAction(Actions.moveNode(kid.getId(), anchor.getId(), DockLocation.LEFT, 0))
-    } else {
-      // 右移：插到目标位 kid 之后（槽位精确——RIGHT of 末位会越过目标槽）
-      const anchor = kids[target]
-      if (!anchor || anchor === kid) return
-      m.doAction(Actions.moveNode(kid.getId(), anchor.getId(), DockLocation.RIGHT, 0))
     }
   }
-  moveRegionToSlot('left')
-  moveRegionToSlot('panels')
+  if (!flags.panelsHidden) {
+    const root = rootPanelColumnKid(m)
+    const kids = rootKidsOf(m)
+    const chatKids = kids.filter((k) => regionOfColumn(k) === 'chat')
+    if (root && chatKids.length > 0) {
+      const before = flags.colOrder.indexOf('panels') < flags.colOrder.indexOf('chat')
+      const curIdx = kids.indexOf(root)
+      const first = chatKids[0]
+      const last = chatKids[chatKids.length - 1]
+      const settled = before ? kids[curIdx + 1] === first : kids[curIdx - 1] === last
+      if (!settled) {
+        const anchor = before ? first : last
+        m.doAction(
+          Actions.moveNode(root.getId(), anchor.getId(), before ? DockLocation.LEFT : DockLocation.RIGHT, 0),
+        )
+      }
+    }
+  }
 }
 
 /** 根面板列（**唯一**，docs §2）：子树里含 enableDeleteWhenEmpty=false 锚
