@@ -228,6 +228,48 @@ export function FlexLayoutShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [persist, scheduleRebalance])
 
+  // 对话栏贴软件边缘留白（用户 2026-10-06：对话栏直接到软件边缘时该侧
+  // 留 20px 空白）：贴边的对话语义分栏打标记类。**标记打在 tab 元素上**
+  // ——flexlayout 0.11 的 .flexlayout__tab 平铺在 layout 根层绝对定位
+  // （不在 tabset 子树里，tabset 上打类管不到内容）；tab 路径 =
+  // tabset 路径 + '/序号'，按前缀映射。依赖 layoutRev——普通动作原地改
+  // 模型不触发重渲染，只有 rev bump 能带动本 effect 重跑。
+  const layoutRev = useLayoutStore((s) => s.layoutRev)
+  useEffect(() => {
+    // 双 rAF：flexlayout 对模型动作的重渲染（tab 元素重建）在同一轮提交
+    // 之后——立刻查 DOM 会拿到旧元素，类打上去就丢
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const m = modelRef.current
+        if (!m) return
+        const first = (n: import('flexlayout-react').Node): TabSetNode | undefined =>
+          n instanceof TabSetNode ? n : (n.getChildren().map((c) => first(c)).find(Boolean) as TabSetNode | undefined)
+        const kids = m.getRootRow()?.getChildren() ?? []
+        const lastIdx = kids.length - 1
+        const tabs = [...document.querySelectorAll<HTMLElement>('.flexlayout__tab')]
+        const setEdge = (tabset: TabSetNode, cls: string, on: boolean) => {
+          const prefix = `${tabset.getPath()}/`
+          for (const t of tabs) {
+            const p = t.getAttribute('data-layout-path') ?? ''
+            if (p.startsWith(prefix)) t.classList.toggle(cls, on)
+          }
+        }
+        kids.forEach((kid, i) => {
+          const ts = first(kid)
+          if (!ts) return
+          const isChat = zoneConfigOf(ts)?.region === 'chat'
+          setEdge(ts, 'fl-edge-start', isChat && i === 0)
+          setEdge(ts, 'fl-edge-end', isChat && i === lastIdx)
+        })
+      })
+    })
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+    }
+  }, [model, layoutRev])
+
   // ── 启动自愈（boot）：栏旗标收敛（隐藏/位置脱同步）→ 约束按 region 修正
   // （旧档防御）→ 富余兜底。absorb 必须等 flexlayout 首次布局（calcMinMaxSize/
   // DOM 量测）之后——同步跑会拿到 0 量测（2026-09-26 实测踩过，右侧空白的

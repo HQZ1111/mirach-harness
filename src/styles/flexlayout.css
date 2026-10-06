@@ -757,3 +757,16 @@
   margin-top: 1px;
   pointer-events: auto; /* 锚层整体 none——放行悬停 title（用户 2026-10-05） */
 }
+
+/* ── 对话栏贴软件边缘留白（用户 2026-10-06）：对话语义分栏直接到软件
+   边缘时，贴边一侧的内容内缩 20px。标记类由 flex-layout 布局 effect 打在
+   **tab 元素**上（flexlayout 0.11 的 tab 平铺在 layout 根层绝对定位、不在
+   tabset 子树里，按 data-layout-path 前缀映射），只标对话语义列。 ── */
+.flexlayout-host .flexlayout__tab.fl-edge-start {
+  padding-left: 20px;
+}
+
+.flexlayout-host .flexlayout__tab.fl-edge-end {
+  padding-right: 20px;
+}
+
