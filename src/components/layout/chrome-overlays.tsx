@@ -132,7 +132,10 @@ export function ChatLabelOverlay({ model }: { model: Model }) {
         setRect(null)
         return
       }
-      setRect({ left: r.left - hr.left, top: r.top - hr.top, width: r.width })
+      // 贴边内缩（v7.3.4）：对话栏直接到软件边缘的一侧，标题层与内容/颜色层同步
+      const edgeL = el.classList.contains('fl-edge-start') ? 20 : 0
+      const edgeR = el.classList.contains('fl-edge-end') ? 20 : 0
+      setRect({ left: r.left - hr.left + edgeL, top: r.top - hr.top, width: r.width - edgeL - edgeR })
     }
     measure()
     window.addEventListener('resize', measure)
