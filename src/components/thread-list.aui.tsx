@@ -524,7 +524,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
               <span>分组</span>
               <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-                {grouping === "date" ? "更新时间" : grouping === "project" ? "项目" : "状态"}
+                {grouping === "date" ? "更新时间" : grouping === "project" ? "工作区" : "状态"}
                 <ChevronRightIcon className="size-3" />
               </span>
             </DropdownMenuPrimitive.SubTrigger>
@@ -560,7 +560,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                       <span aria-hidden className="bg-current size-1.5 rounded-full" />
                     </DropdownMenuPrimitive.ItemIndicator>
                   </ViewIndicatorSlot>
-                  <ViewOptionRow icon={FolderIcon} label="项目" />
+                  <ViewOptionRow icon={FolderIcon} label="工作区" />
                 </DropdownMenuPrimitive.RadioItem>
                 <DropdownMenuPrimitive.RadioItem
                   className={VIEW_MENU_ITEM_BASE}
@@ -831,7 +831,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           {projectChoices.length > 1 && (
             <DropdownMenuPrimitive.Sub>
               <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-                <ViewOptionRow icon={FolderIcon} label="项目" />
+                <ViewOptionRow icon={FolderIcon} label="工作区" />
                 <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
                   {projectFilter ? workspaceGroupLabel(projectFilter) : "全部"}
                   <ChevronRightIcon className="size-3" />
@@ -976,6 +976,8 @@ function useThreadVisibleMetas(): SessionRowMeta[] {
 }
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
+// 2026-10-06 用户定稿：**组头文字不显示**（已置顶/会话小标题删除）——
+// SectionHeader 保留为动作位（+ 新建/选项钮）与折叠态机载体，label 不渲染。
 
 const SectionHeader: FC<{
   headerKey: string;
@@ -986,10 +988,8 @@ const SectionHeader: FC<{
 }> = ({ headerKey, label, collapsed, collapsible = true, action }) => {
   const body = (
     <>
-      {/* 组头（用户定稿 2026-10-02 二轮）：15px 品牌色加粗——已置顶/会话/
-          状态三种组头同形制（tokens --side-group-size）；工作区头独立 18px
-          （--side-workspace-size）。 */}
-      <span className="text-(--fl-accent) text-(length:--side-group-size) font-normal">{label}</span>
+      {/* 组头文字已删（用户 2026-10-06）——label 仅作 title 提示保留 */}
+      <span className="sr-only">{label}</span>
       {collapsible && (
         <ChevronDownIcon
           aria-hidden

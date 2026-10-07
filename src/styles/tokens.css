@@ -68,9 +68,10 @@
   --body-size: 15px; --body-weight: 400;
   --sub-size: 15px;  --sub-color: #5a5a5a;
 
-  /* ── 会话页签条 logo/文字（leading 注入，用户定稿） ────────── */
-  --logo-size: 50px;                          /* logo 图 50px */
-  --logo-text-size: 35px;                     /* MIRACH 文字 30 */
+  /* ── 会话页签条 logo/文字（leading 注入；2026-10-06 定稿：logo 40 圆、
+     文字 30、hover 用品牌色淡化不再黑） ────────── */
+  --logo-size: 40px;                          /* logo 图 40（圆） */
+  --logo-text-size: 30px;                     /* MIRACH 文字 30 */
   --logo-text-weight: 900;                    /* black */
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */
@@ -256,7 +257,7 @@
   --side-group-size: 15px;                    /* 组头字号（已置顶/会话/状态，品牌色加粗；二轮定稿 15px） */
   --side-workspace-size: 16px;                /* 工作区头字号（六轮定稿：与入口条同字号） */
   --side-text: #4C4C4C;                       /* 侧栏正文色（工作区头/会话行/入口条共用，五轮定稿 4C4C4C） */
-  --chat-tab-workspace-size: 30px;            /* 对话标签工作区字号（用户定稿十轮） */
+  --chat-tab-workspace-size: 25px;            /* 对话标签工作区字号（2026-10-06 用户定稿：30→25） */
   --chat-tab-workspace-color: #303030;        /* 对话标签工作区颜色（用户定稿十轮） */
   --chat-tab-session-size: 15px;              /* 对话标签会话名字号（用户定稿十轮） */
   --chat-tab-session-color: #5A5A5A;          /* 对话标签会话名颜色（用户定稿十轮） */
@@ -272,7 +273,7 @@
   --left-rail-view-size: 12px;                /* 顶带当前视图指示字号 */
   --left-rail-view-color: var(--text-3);      /* 指示文字色 */
   --left-rail-view-active-color: var(--brand);/* 机器人视图指示色 */
-  --logo-word-btn-hover-color: #303030;       /* Mirach 文字 hover 色 */
+  --logo-word-btn-hover-color: color-mix(in srgb, #006fff 70%, transparent); /* Mirach 文字 hover 色（品牌色淡化——用户 2026-10-06：不再黑） */
   --logo-word-btn-active-opacity: 0.55;       /* Mirach 文字按压透明度 */
 }
 
