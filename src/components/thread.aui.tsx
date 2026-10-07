@@ -194,6 +194,9 @@ const taskAwareGroupBy = (
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
   autoFocus?: boolean | undefined;
+  /** 会话分栏（v7.4）：跳过主会话管理 chrome（检查点/谱系/队列/成本/
+   *  中断横幅——桥为主会话单例），消息/composer/思考指示照常。 */
+  scoped?: boolean | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -961,19 +964,21 @@ const EmptyStateWelcome: FC = () => {
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
+  scoped = false,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} />
+      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} scoped={scoped} />
     </ThreadComponentsContext.Provider>
   );
 };
 
-const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
+const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> = ({
   isEmpty,
   autoFocus,
+  scoped,
 }) => {
   // Welcome 默认 = 官方 empty-state 元素（Greeting + 起步建议 + 罐头
   // composer）；消费者仍可经 ThreadComponents.Welcome 整体替换
@@ -1022,6 +1027,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
   // 发布 --dsh-chat-user-width / --dsh-conversation-column-width，供手柄
   // 拖拽与 CSS 宽度轴消费
   const widthAxis = useConversationWidthAxis();
+  // scoped（v7.4 会话分栏）：跳过主会话管理 chrome——检查点/会话线谱系/
+  // 队列/成本/中断横幅的桥是主会话单例（分栏各自会话不投影）；消息/
+  // composer/思考指示/建议全部照常（分栏是完整 chat）。错误横幅同跳
+  // （error-bridge 主会话单例；分栏 run 失败经消息流 Stop 行可见）。
 
   return (
     // asChild：Thread 不渲染自己的 div，行为合并到我们传入的容器上
@@ -1061,13 +1070,17 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
             <ThreadHistorySkeleton />
           </AuiIf>
 
-          {/* 检查点工具条（pi checkpoint/rewind 命令面）：打点 / 回退面板
-              入口，消息区顶部工具位（SessionLineBar 旁） */}
-          <CheckpointBar />
+          {!scoped && (
+            <>
+              {/* 检查点工具条（pi checkpoint/rewind 命令面）：打点 / 回退面板
+                  入口，消息区顶部工具位（SessionLineBar 旁） */}
+              <CheckpointBar />
 
-          {/* 会话线谱系条（会话级 fork 语义）：仅当前会话是 fork 子会话时
-              渲染；消息级变体走助手消息 footer 的 MessageVariantPicker */}
-          <SessionLineBar />
+              {/* 会话线谱系条（会话级 fork 语义）：仅当前会话是 fork 子会话时
+                  渲染；消息级变体走助手消息 footer 的 MessageVariantPicker */}
+              <SessionLineBar />
+            </>
+          )}
 
           {/* 压缩横幅（官方 guardrail-notice 元素）：CUSTOM name=compaction
               经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
@@ -1095,14 +1108,18 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean }> = ({
                 （正文未到时）显示"正在思考/正在使用 <tool>" + 耗时——
                 放 composer 上方（用户视线处），正文流出即消失 */}
             <ThreadThinkingIndicator />
-            <RunErrorBar />
-            <StoppedRunBanner />
-            <ApprovalCards />
-            {/* 运行成本（cost-meter）与排队消息（message-queue）：composer
-                上方、ApprovalCards 之下——非运行态显示成本、运行态显示
-                排队（二者不同时渲染，消息密度最低的挂点） */}
-            <CostMeterWired />
-            <MessageQueueWired />
+            {!scoped && (
+              <>
+                <RunErrorBar />
+                <StoppedRunBanner />
+                <ApprovalCards />
+                {/* 运行成本（cost-meter）与排队消息（message-queue）：composer
+                    上方、ApprovalCards 之下——非运行态显示成本、运行态显示
+                    排队（二者不同时渲染，消息密度最低的挂点） */}
+                <CostMeterWired />
+                <MessageQueueWired />
+              </>
+            )}
             <ComposerWired />
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />

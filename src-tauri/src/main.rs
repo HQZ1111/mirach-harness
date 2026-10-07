@@ -314,12 +314,14 @@ fn pi_export_session_html(
 }
 
 /// 前端挂载时取缓冲最新 seq 作为 EventSource 的 lastEventId 起点
-/// （跳过历史重放——会话历史经 pi_get_messages 水合）。
+/// （跳过历史重放——会话历史经 pi_get_messages 水合）。thread 可选：
+/// 缺省 "main"（工作区流）；会话分栏按自己的线程键查（v7.4 双对话分栏）。
 #[tauri::command(async)]
 fn pi_stream_cursor(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    thread: Option<String>,
 ) -> Result<u64, String> {
-    Ok(state.latest_seq("main"))
+    Ok(state.latest_seq(thread.as_deref().unwrap_or("main")))
 }
 
 #[tauri::command(rename_all = "camelCase", async)]

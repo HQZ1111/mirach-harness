@@ -23,7 +23,7 @@ import { useActorRef, useSelector } from '@xstate/react'
 import { useStore } from 'zustand'
 
 import { turnMachine, type TurnContext, type TurnMessage, type TurnUsage } from './turn-actor'
-import { hydratePiMessages } from './pi-hydrate'
+import { convertTurnMessage, hydratePiMessages } from './pi-hydrate'
 import { approvalBridge } from './approval-bridge'
 import {
   branchBridge,
@@ -58,7 +58,7 @@ const autoNamedSessions = new Set<string>()
 
 /** 朗读适配器（read-aloud）：speechSynthesis 不存在的环境不注册（核心
  * capabilities.speech=false → UI 钮隐藏），console.info 一次 */
-const speechAdapter: SpeechSynthesisAdapter | undefined =
+export const speechAdapter: SpeechSynthesisAdapter | undefined =
   ensureSpeechSupportLogged() ? new BoundarySpeechSynthesisAdapter() : undefined
 
 /** 排队消息 id 序列（同毫秒双提交不得撞 id） */
@@ -85,14 +85,14 @@ const isAutoTitleEnabled = async (): Promise<boolean> => {
 const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 /** POST body images[] 条目（纯 base64，不带 data: 前缀） */
-interface PiImagePayload {
+export interface PiImagePayload {
   data: string
   mimeType: string
 }
 
 /** data URL → {data: 纯 base64, mimeType}；白名单外/形状不符返回 null，
- * 调用方 console.error 后跳过（渲染选择非吞错） */
-const parseImageDataUrl = (url: string): PiImagePayload | null => {
+ * 调用方 console.error 后跳过（渲染选择非吞错）——会话分栏运行时复用 */
+export const parseImageDataUrl = (url: string): PiImagePayload | null => {
   const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.+)$/.exec(url)
   return m ? { mimeType: m[1]!, data: m[2]! } : null
 }
@@ -104,7 +104,7 @@ class PiImageAttachmentAdapter extends SimpleImageAttachmentAdapter {
 }
 
 /** 模块级单例：adapter 实例稳定，避免 runtime 每次渲染重建 */
-const imageAttachmentAdapter: AttachmentAdapter = new PiImageAttachmentAdapter()
+export const imageAttachmentAdapter: AttachmentAdapter = new PiImageAttachmentAdapter()
 
 /** pi SessionIndex 行（pi_list_sessions 返回，字段对齐上游 SessionMeta） */
 interface PiSessionMeta {
@@ -425,6 +425,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       body: JSON.stringify({
         threadId: THREAD,
         message,
+        // v7.4 双对话分栏：会话分栏发送会把引擎切到它自己的会话——工作区
+        // 的每次发送都带上自己会话的 path，引擎切回工作区会话再跑（缺
+        // path = 尚未落盘的新会话，ensure 按需创建不变）
+        ...(sessionCatalog.getState().entries[currentThreadIdRef.current ?? '']?.path
+          ? { sessionPath: sessionCatalog.getState().entries[currentThreadIdRef.current ?? '']!.path }
+          : {}),
         ...(images && images.length > 0 ? { images } : {}),
       }),
     })
@@ -1069,26 +1075,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     state: { compaction, interrupted },
     // TurnPart 与 ThreadMessageLike 的 tool-call 形状对齐；args 的
     // Record<string, unknown> 运行时即 JSON 对象（pi arguments Value），断言
-    convertMessage: (m) => ({
-      id: m.id,
-      role: m.role,
-      // createdAt 透传（TurnMessage.createdAt：run 段/乐观消息为本地时刻，
-      // hydrate 为 pi timestamp）——day-separator 消费
-      ...(m.createdAt ? { createdAt: m.createdAt } : {}),
-      content:
-        typeof m.content === 'string'
-          ? m.content
-          : m.content.map((p) => {
-              if (p.type === 'tool-call')
-                return { ...p, args: p.args as never, result: p.result as never }
-              // thinking part 出口转 reasoning——ThreadMessageLike 的
-              // ReasoningMessagePart 要求 type:"reasoning"（Reasoning 组件
-              // 消费，§2.2 thinking 流式）；TurnPart 内部保持 thinking
-              if (p.type === 'thinking') return { type: 'reasoning' as const, text: p.text }
-              // text / image part 形状与 ThreadMessageLike 一致，原样透传
-              return p
-            }),
-    }),
+    convertMessage: convertTurnMessage,
     messages,
     isRunning,
     onNew: async (m) => {

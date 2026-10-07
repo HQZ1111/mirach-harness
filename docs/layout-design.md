@@ -204,12 +204,18 @@ SingleTabStretch/ZoneMenu 体系/显示标签眼钮/标题栏齿轮）之外，v
 
 ## 11. 边界与待跟进
 
-- ~~并排两个对话分栏各显各的会话~~ **v7.3 已支持**：会话窗格自持投影
-  （`SessionThreadPane`，threadId ≠ 活动会话 = 静态只读投影
-  `pi_get_session_messages(path)` 叶链读历史；= 活动会话 → live 全管线）。
-  **已知边界**：静态投影只读（hermes 瓦片各有 composer——升级需运行时
-  多流/按 threadId 路由 AG-UI 事件，L2 架构位，记录待跟进）；静态渲染用
-  react-markdown 简化管线（非 thread.aui 全管线）。
+- ~~并排两个对话分栏各显各的会话~~ **v7.4 完整版（用户定稿：禁止简化
+  版）**：会话分栏 = **独立完整聊天运行时**（`session-runtime.ts`
+  useThreadChatRuntime）——自己的轮次机 + per-thread SSE 流
+  （`GET ?thread=<sessionId>`，引擎 ThreadBuffers 本就按线程分桶）+
+  自己的 composer（thread.aui `scoped`：跳过主会话管理 chrome，消息/
+  composer/思考指示/建议照常）+ 发送 POST 带 sessionPath（引擎 flush
+  当前会话切到分栏会话再跑，事件落本线程 buffer）；工作区 postRun 同样
+  带 path（跨分栏发送后切回）。水合 = pi_get_session_messages(path)。
+  threadId === 活动会话 → live 复用工作区（buffer 单消费约束）。
+  **已知边界**：引擎单 handle——两个分栏不能同时流式（后发等先发收尾，
+  prompt 持锁跨整个 run）；分栏内本会话 run 进行中再发 = fail loud
+  （排队面板是主会话功能）。
 - 检查面板仍为占位；打开文件/网页/子智能体（external）走 OS 拖入占位，
   语义已归 panels。
 - 页签溢出：原生溢出按钮 + 总览菜单。

@@ -2,6 +2,7 @@
  * pi 会话历史 → 聊天投影的纯映射（runtime 与会话静态投影面板共用的
  * 数据面——无 React、无状态）。
  */
+import type { ThreadMessageLike } from '@assistant-ui/react'
 import type { TurnMessage, TurnPart } from './turn-actor'
 
 const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
@@ -126,4 +127,27 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
     }
   }
   return out
+}
+
+/** TurnMessage → ThreadMessageLike（ExternalStore convertMessage 的纯映射，
+ *  主 runtime 与会话分栏运行时共用——单源防漂移）：
+ *  - tool-call：args/result 断言为运行时 JSON 形状（pi arguments Value）；
+ *  - thinking → reasoning（ThreadMessageLike 的 ReasoningMessagePart，
+ *    §2.2 thinking 流式；TurnPart 内部保持 thinking）；
+ *  - text / image 原样透传；createdAt 透传（day-separator 消费）。 */
+export function convertTurnMessage(m: TurnMessage): ThreadMessageLike {
+  return {
+    id: m.id,
+    role: m.role,
+    ...(m.createdAt ? { createdAt: m.createdAt } : {}),
+    content:
+      typeof m.content === 'string'
+        ? m.content
+        : m.content.map((p) => {
+            if (p.type === 'tool-call')
+              return { ...p, args: p.args as never, result: p.result as never }
+            if (p.type === 'thinking') return { type: 'reasoning' as const, text: p.text }
+            return p
+          }),
+  }
 }

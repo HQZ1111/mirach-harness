@@ -410,6 +410,12 @@ async fn agui_run(
                 .into_response()
         }
     };
+    // 目标会话文件（可选，v7.4 双对话分栏）：带 sessionPath = 该消息发给
+    // 指定会话（分栏各自收发）——引擎 flush 当前会话后切换到它再跑；
+    // 不带 = 沿用活跃会话（ensure 按需创建，工作区原语义）。切换在
+    // pi-create 大栈线程里做（flush 深递归同源）；引擎单 handle，切换
+    // 与在跑的 run 经 handle mutex 天然串行（run 持锁跨整个 prompt）。
+    let session_path = body["sessionPath"].as_str().map(String::from);
     // 会话按需创建（§7-3）：已有活跃会话时原样复用（多轮上下文保持），
     // 无才创建——【关键】不能每次 POST 都 create（否则每条消息换新会话，
     // 上下文全丢）。flush/create 的深递归 future 不能在 tokio worker 栈上
@@ -421,9 +427,16 @@ async fn agui_run(
             .name("pi-create".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                st_create
-                    .engine
-                    .ensure_session(Some(st_create.ui_bridge(&thread_bridge)))
+                if let Some(path) = &session_path {
+                    st_create
+                        .engine
+                        .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
+                        .map(|_| ())
+                } else {
+                    st_create
+                        .engine
+                        .ensure_session(Some(st_create.ui_bridge(&thread_bridge)))
+                }
             })
             .expect("spawn pi-create thread")
             .join()

@@ -180,11 +180,15 @@ allowRecreate（boot normalize）路径开放。open 签 enableDrag:false（不
   主对话页签上=拖到条上）= 在悬停页签的**槽位前堆叠**会话页签（hermes
   slotBefore 精度；session-N，tab.config 带 threadId，同会话不重复开→
   置前）；**条隐藏 = 无法拖入**（用户定稿；hermes snapshotStrips 来自
-  DOM 同果）。切主会话只走侧栏行点击。**会话窗格自持投影（v7.3 并排
-  双对话分栏各显各的会话）**：`SessionThreadPane` = threadId ≠ 目录
-  activeId → 静态只读投影（`pi_get_session_messages(path)` Rust 叶链读
-  会话文件 → `hydratePiMessages`（已抽到 pi-hydrate.ts 模块级）→ 简化
-  渲染）；= activeId → live 全管线。"设为主会话"钮 = 翻 live。SELECT_TAB
+  DOM 同果）。切主会话只走侧栏行点击。**会话窗格自持完整聊天运行时
+  （v7.4 并排双对话分栏，用户定稿：禁止简化版）**：`SessionThreadPane` =
+  threadId ≠ 目录 activeId → **独立完整聊天**（`session-runtime.ts`
+  useThreadChatRuntime：自己的轮次机 + per-thread SSE 流
+  `?thread=<sessionId>` + composer + 发送 POST 带 sessionPath 引擎切
+  会话 + 水合 pi_get_session_messages；thread.aui `scoped` 跳过主会话
+  管理 chrome）；= activeId → live 复用工作区（buffer 单消费）。
+  工作区 postRun 同样带 path（跨分栏发送后切回）。已知边界：引擎单
+  handle，两分栏不能同时流式；分栏 run 中再发 = fail loud。SELECT_TAB
   不再切运行时线程（拦截分支已删）。bridge = session-tab-bridge.ts
   （openSessionTabBridge 带 beforeTabId；setSessionThreadSwitcher 供
   侧栏行）。
