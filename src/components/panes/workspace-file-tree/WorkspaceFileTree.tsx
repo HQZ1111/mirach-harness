@@ -55,6 +55,25 @@ export function WorkspaceFileTree({
   onPickFolder,
 }: WorkspaceFileTreeProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // 滚动位置保持（v7.4.6）：adopter（隐藏/打开/切位）换 Model 时窗格卸载
+  // 重挂——scrollTop 归零 = 内容跳一下。per-path 键存 sessionStorage，
+  // 挂载即恢复（unmount 前由滚动监听持续写入）。
+  const treeScrollKey = `fl-tree-scroll:${typeof workspacePath === 'string' ? workspacePath : ''}`
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const saved = sessionStorage.getItem(treeScrollKey)
+    if (saved) el.scrollTop = Number(saved) || 0
+    const onScroll = () => {
+      try {
+        sessionStorage.setItem(treeScrollKey, String(el.scrollTop))
+      } catch {
+        // 配额满 = 不持久化（非功能兜底——滚动记忆只是体验优化）
+      }
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [treeScrollKey])
   const listRef = useRef<HTMLDivElement | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [showScrollBottomMask, setShowScrollBottomMask] = useState(false);

@@ -56,10 +56,29 @@ function useTabsetRect(model: Model, tabIds: string[]) {
   const dragRev = useLayoutStore(s => s.dragRev)
   const [rect, setRect] = useState<{ left: number; top: number; width: number; height: number; stripH: number } | null>(null)
   useEffect(() => {
-    const measure = () => setRect(tabsetRectOf(model, tabIds))
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
+    // 双 rAF：flexlayout 对模型动作的重渲染（tab DOM 重建）在同一轮提交
+    // 之后——同步量测拿到旧几何，overlay 跳到旧位再跳回 = 闪烁来源
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => setRect(tabsetRectOf(model, tabIds)))
+    })
+    const onResize = () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+      const r1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => setRect(tabsetRectOf(model, tabIds)))
+      })
+      // resize 的 raf 句柄复用外层清理
+      cleanupRef.current = () => { cancelAnimationFrame(r1); cancelAnimationFrame(raf2) }
+    }
+    const cleanupRef = { current: () => {} }
+    window.addEventListener('resize', onResize)
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+      cleanupRef.current()
+      window.removeEventListener('resize', onResize)
+    }
     // tabIds 由调用方常量传入
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, layoutRev, dragRev])
@@ -102,9 +121,9 @@ export function ChatLabelOverlay({ model }: { model: Model }) {
   const dragRev = useLayoutStore(s => s.dragRev)
   const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null)
   useEffect(() => {
+    // 找**选中态**的对话页签（跨 tabset 找；折叠在 border 的不算——
+    // 折叠页签不可见，顶带无空间承载）
     const measure = () => {
-      // 找**选中态**的对话页签（跨 tabset 找；折叠在 border 的不算——
-      // 折叠页签不可见，顶带无空间承载）
       let setPath: string | null = null
       model.visitNodes((n) => {
         if (setPath || !(n instanceof TabNode)) return
@@ -137,9 +156,23 @@ export function ChatLabelOverlay({ model }: { model: Model }) {
       const edgeR = el.classList.contains('fl-edge-end') ? 20 : 0
       setRect({ left: r.left - hr.left + edgeL, top: r.top - hr.top, width: r.width - edgeL - edgeR })
     }
-    measure()
-    window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
+    // 双 rAF：同步量测拿到旧几何 = overlay 闪烁来源
+    let raf1 = 0
+    let raf2 = 0
+    const schedule = () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+      raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(measure)
+      })
+    }
+    schedule()
+    window.addEventListener('resize', schedule)
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+      window.removeEventListener('resize', schedule)
+    }
   }, [model, layoutRev, dragRev])
   if (!rect) return null
   return (
