@@ -176,11 +176,13 @@ export function StripHiddenTitleOverlay({ model }: { model: Model }) {
         if (!el) return
         const hidden = n.isEnableTabStrip() === false
         el.setAttribute('data-strip-hidden', hidden && cfg.region !== 'left' ? 'true' : 'false')
-        // 对话区标记：**激活页签是对话页签**的 tabset 才标（顶带 chrome
-        // 跟随激活页签——双行块/列宽中线的 CSS 钩子随之切换，用户
-        // 2026-10-05 定稿"哪个标签激活显示哪个"）
-        const sel = n.getSelectedNode()
-        const chatHere = !!sel && (sel.getId() === 'workspace' || paneTypeOf(sel.getId()) === 'session')
+        // 对话区标记：tabset 含对话语义页签（workspace/session-N）即标——
+        // 页签条的排列方式是**列级属性**，不跟随激活页签切换（v7.4.1
+        // 主窗格优先后，files 排前面不改变这根列是对话栏的事实）
+        const chatHere = n.getChildren().some((c) => {
+          const t = paneTypeOf(c.getId())
+          return t === 'workspace' || t === 'session'
+        })
         el.setAttribute('data-chat-zone', chatHere ? 'true' : 'false')
       })
     }
