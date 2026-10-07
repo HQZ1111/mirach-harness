@@ -563,9 +563,9 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
   let strips: StripSnapshot[] = []
   let mode: 'reorder' | 'zone' | null = null
   const dimmed: HTMLElement[] = []
-  // 条隐藏分栏（拖拽起手快照一次——布局中程不重组）
-  const hiddenZones = hiddenStripZoneIds(model)
-  const visibleZones = () => snapshotZones(model).filter((z) => !hiddenZones.has(z.id))
+  // 条隐藏分栏的**条带**不可用（snapshotStrips 天然不捕获——bar 不在 DOM），
+  // 但 zone 本身仍是拖拽目标（中心=堆叠 / 边缘=分栏——hermes 同语义：
+  // 条只是精确定位手段，不是区域准入门槛）。不做 zone 级排除。
 
   const markSource = () => {
     // The dragged tab dims for the drag's life — the divider says where it
@@ -583,7 +583,7 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
   const enterZoneMode = () => {
     mode = 'zone'
     // The layout never restructures mid-drag, so zone/strip rects are stable.
-    zones = visibleZones()
+    zones = snapshotZones(model)
     strips = snapshotStrips(model)
     if (dragGeometry) dragGeometry.mode = 'zone'
     markSource()
@@ -626,7 +626,7 @@ export function startPaneDrag(model: Model, paneId: string, e: ReactPointerEvent
       const hr = host?.getBoundingClientRect()
       dragGeometry = {
         hostOffset: { x: hr?.left ?? 0, y: hr?.top ?? 0 },
-        zones: visibleZones(),
+        zones: snapshotZones(model),
         strips: snapshotStrips(model),
         moving: [paneId],
         mode: 'reorder',
