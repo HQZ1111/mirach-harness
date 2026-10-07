@@ -983,7 +983,9 @@ const SectionHeader: FC<{
   collapsed: boolean;
   collapsible?: boolean;
   action?: ReactNode;
-}> = ({ headerKey, label, collapsed, collapsible = true, action }) => {
+  /** 外层追加类（置顶/会话组头间距等按实例微调用） */
+  className?: string;
+}> = ({ headerKey, label, collapsed, collapsible = true, action, className }) => {
   const body = (
     <>
       {/* 组头（用户定稿 2026-10-02 二轮）：15px 品牌色——已置顶/会话/
@@ -1002,7 +1004,10 @@ const SectionHeader: FC<{
   );
   return (
     <div
-      className="group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-[var(--tl-head-pt,1.5rem)]"
+      className={cn(
+        "group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-[var(--tl-head-pt,1.5rem)]",
+        className,
+      )}
       data-slot="aui_thread-list-section-header"
     >
       {collapsible ? (
@@ -1312,11 +1317,14 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   return (
     <SessionListContext.Provider value={ctxValue}>
       {/* 已置顶区（恒在；空态教 ⇧+点击；组内拖排 = pinned 数组序——
-          hermes：置顶区一个 ReorderableList，与会话区互不越组） */}
+          hermes：置顶区一个 ReorderableList，与会话区互不越组）。
+          2026-10-06：文案「已置顶→置顶」；置顶/会话两组头间距加大
+          （--tl-head-pinned-gap，默认 2.5rem——原 1.5rem 同款）。 */}
       <SectionHeader
+        className="pb-[var(--tl-head-pinned-gap,2.5rem)]"
         collapsed={collapsedPinned}
         headerKey="pinned"
-        label="已置顶"
+        label="置顶"
       />
       {!collapsedPinned &&
         (pinnedIds.length > 0 ? (
