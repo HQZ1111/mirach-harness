@@ -68,10 +68,10 @@
   --body-size: 15px; --body-weight: 400;
   --sub-size: 15px;  --sub-color: #5a5a5a;
 
-  /* ── 会话页签条 logo/文字（leading 注入；2026-10-06 定稿：logo 40 圆、
-     文字 30、hover 用品牌色淡化不再黑） ────────── */
-  --logo-size: 40px;                          /* logo 图 40（圆） */
-  --logo-text-size: 30px;                     /* MIRACH 文字 30 */
+  /* ── 会话页签条 logo/文字（leading 注入；2026-10-06 二轮定稿：logo 45 圆、
+     文字 32、hover 用品牌色淡化不再黑） ────────── */
+  --logo-size: 45px;                          /* logo 图 45（圆） */
+  --logo-text-size: 32px;                     /* MIRACH 文字 32 */
   --logo-text-weight: 900;                    /* black */
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */

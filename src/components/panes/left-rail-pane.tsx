@@ -3,6 +3,8 @@
  * 无页签条。顶带 = logo + **Mirach 文字**；点击 Mirach 文字切换两视图
  * （文字 hover 变色/按压效果，与页签"文字即按钮"范式同款）。
  * v5.0 以前 sessions/bots 是两个独立页签；v5.0 起合为一个窗格内切换。
+ * 2026-10-06：**视图指示字删除**（logo 行右下的「会话/机器人」小字）——
+ * Mirach 文字是唯一切换钮，指示字冗余（用户截图定稿）。
  */
 import { useState } from 'react'
 
@@ -21,10 +23,6 @@ export function LeftRailPane() {
           wordTitle="点击切换 会话 / 机器人"
           onWordClick={() => setView((v) => (v === 'sessions' ? 'bots' : 'sessions'))}
         />
-        {/* 当前视图指示（Mirach 文字是唯一切换钮；指示字只读） */}
-        <span className="left-rail-view-name" data-view={view}>
-          {view === 'sessions' ? '会话' : '机器人'}
-        </span>
       </div>
       <div className="left-rail-body">
         {view === 'sessions' ? <AssistantSessionsPane /> : <BotsPane />}

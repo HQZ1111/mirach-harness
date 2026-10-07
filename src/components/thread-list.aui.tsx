@@ -976,8 +976,6 @@ function useThreadVisibleMetas(): SessionRowMeta[] {
 }
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
-// 2026-10-06 用户定稿：**组头文字不显示**（已置顶/会话小标题删除）——
-// SectionHeader 保留为动作位（+ 新建/选项钮）与折叠态机载体，label 不渲染。
 
 const SectionHeader: FC<{
   headerKey: string;
@@ -988,8 +986,9 @@ const SectionHeader: FC<{
 }> = ({ headerKey, label, collapsed, collapsible = true, action }) => {
   const body = (
     <>
-      {/* 组头文字已删（用户 2026-10-06）——label 仅作 title 提示保留 */}
-      <span className="sr-only">{label}</span>
+      {/* 组头（用户定稿 2026-10-02 二轮）：15px 品牌色——已置顶/会话/
+          状态三种组头同形制（tokens --side-group-size） */}
+      <span className="text-(--fl-accent) text-(length:--side-group-size) font-normal">{label}</span>
       {collapsible && (
         <ChevronDownIcon
           aria-hidden
