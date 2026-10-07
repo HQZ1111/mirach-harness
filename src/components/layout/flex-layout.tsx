@@ -158,8 +158,11 @@ export function FlexLayoutShell() {
       persist(m)
       bumpLayoutRev()
       if (action?.type === Actions.SELECT_TAB) {
-        // 会话页签自持静态投影（v7.3 双对话分栏）：激活页签不再切运行时
-        // 线程——"切主会话"只走侧栏行点击（switchSessionThreadBridge）
+        // 会话页签自持完整聊天运行时（v7.4 双对话分栏）：激活页签不再切运行时
+        // 线程——"切主会话"只走侧栏行点击（switchSessionThreadBridge）。
+        // 页签切换后恢复约束 + 记忆宽度（flexlayout 重渲染可能微调列宽）
+        syncTabsetConstraints(m)
+        applyRootWeights(m)
         return
       }
       if (
