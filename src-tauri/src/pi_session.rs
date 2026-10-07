@@ -24,6 +24,7 @@
 //!   caller-polled 路径，不 panic 不 UB（loan 协议，WorkerSlot::Loaned）。
 //!   签名 block_on<F: Future> 无 'static 约束，故 messages() 可借 &handle。
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -123,6 +124,18 @@ impl Drop for PromptGuard<'_> {
 #[derive(Clone)]
 pub struct PiEngine {
     shared: Arc<EngineShared>,
+    /// 会话分栏的独立柄（v7.4 多柄并发）：key = 分栏线程键（sessionId）。
+    /// 每柄独立锁——分栏 prompt 只锁自己的柄，与主柄/其他分栏并行；
+    /// 同一路径全引擎只能有一个柄（主柄或子柄，open 时互斥驱逐）。
+    side_engines: Arc<Mutex<HashMap<String, Arc<SideEngine>>>>,
+}
+
+/// 分栏独立柄：打开时从 session_path 装填，自己的 abort 槽/run 代号。
+struct SideEngine {
+    path: String,
+    handle: Mutex<AgentSessionHandle>,
+    abort: Mutex<Option<AbortSlot>>,
+    run_counter: AtomicU64,
 }
 
 /// 扩展 UI 请求的宿主桥柄（§4.4）：handler 收到请求时先登记再推
@@ -194,6 +207,7 @@ impl PiEngine {
                 run_counter: AtomicU64::new(0),
                 approvals: Arc::new(ApprovalRegistry::default()),
             }),
+            side_engines: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -368,6 +382,34 @@ impl PiEngine {
         path: &str,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
+        // 同路径子柄驱逐（v7.4 多柄）：工作区切换到某会话 → 该路径的分栏
+        // 柄必须先 flush+移除（同一路径全引擎只能有一个柄——双柄双写同
+        // jsonl = 追加交错损坏）。分栏侧的流连接由前端 unmount 关闭。
+        {
+            let mut map = self
+                .side_engines
+                .lock()
+                .map_err(|_| "pi side engines mutex poisoned".to_string())?;
+            let evict: Vec<String> = map
+                .iter()
+                .filter(|(_, se)| se.path == path)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in evict {
+                if let Some(se) = map.remove(&key) {
+                    let flush = se.handle.lock().map_err(|_| "pi side handle mutex poisoned".to_string());
+                    match flush {
+                        Ok(mut guard) => {
+                            let _ = self
+                                .shared
+                                .runtime
+                                .block_on(async { guard.session_mut().save_and_index().await });
+                        }
+                        Err(_) => return Err("pi side handle mutex poisoned".to_string()),
+                    }
+                }
+            }
+        }
         self.create_session_opts(
             None,
             None,
@@ -425,6 +467,177 @@ impl PiEngine {
                 .block_on(async { handle.session_mut().save_and_index().await })
                 .map_err(|e| format!("会话 flush 失败: {e}"))
         })?
+    }
+
+    // ── 会话分栏独立柄（v7.4 多柄并发）────────────────────────────────────
+    // 每个分栏线程键一个 SideEngine：自己的柄/锁/abort 槽。分栏 prompt 只
+    // 锁自己的柄——与主柄、与其他分栏**并行**（hermes 会话瓦片语义）。
+
+    /// 取或建分栏柄（on_big_stack：create 深递归）。同线程键换绑不同路径
+    /// → flush 旧柄后替换；同路径已开 → 幂等 Ok。同一路径全引擎唯一：
+    /// 工作区 open_session 会驱逐同路径子柄。
+    pub fn side_open(
+        &self,
+        thread: &str,
+        path: &str,
+        ui_bridge: UiBridgeHandle,
+    ) -> Result<(), String> {
+        let thread = thread.to_string();
+        let path = path.to_string();
+        let side_engines = Arc::clone(&self.side_engines);
+        let shared_outer = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut map = side_engines
+                .lock()
+                .map_err(|_| "pi side engines mutex poisoned".to_string())?;
+            // 旧柄检查：Arc 克隆出条目（不留 map 借用——flush 后要 remove）
+            let existing = map.get(&thread).map(Arc::clone);
+            match existing {
+                Some(se) if se.path == path => return Ok(()), // 幂等：已按此路径打开
+                Some(se) => {
+                    // 换绑：flush 旧柄（落盘）后移除
+                    let mut guard = se
+                        .handle
+                        .lock()
+                        .map_err(|_| "pi side handle mutex poisoned".to_string())?;
+                    let _ = shared_outer
+                        .runtime
+                        .block_on(async { guard.session_mut().save_and_index().await });
+                    map.remove(&thread);
+                }
+                None => {}
+            }
+            let session_path = Some(std::path::PathBuf::from(&path));
+            let options = SessionOptions {
+                provider: None,
+                model: None,
+                system_prompt: None,
+                extension_ui_handler: Some(Arc::new(HostUiBridge { handle: ui_bridge })
+                    as Arc<dyn pi::sdk::ExtensionUiHandler>),
+                no_session: false,
+                session_path,
+                workspace_trusted: false,
+                working_directory: None,
+                persist_extension_permissions: false,
+                ..SessionOptions::default()
+            };
+            let handle: AgentSessionHandle = on_big_stack(move || {
+                shared_outer.runtime.block_on(async { create_agent_session(options).await })
+            })?
+            .map_err(|e| e.to_string())?;
+            map.insert(
+                thread,
+                Arc::new(SideEngine {
+                    path,
+                    handle: Mutex::new(handle),
+                    abort: Mutex::new(None),
+                    run_counter: AtomicU64::new(0),
+                }),
+            );
+            Ok(())
+        })?
+    }
+
+pub fn side_prompt(
+        &self,
+        thread: &str,
+        text: &str,
+        images: &[AguiImage],
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+        on_start: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        if asupersync::runtime::Runtime::current_handle().is_some() {
+            return Err(
+                "re-entrant prompt rejected: on_event 回调里禁止发起新 prompt（会死锁）".into(),
+            );
+        }
+        let shared = Arc::clone(&self.shared);
+        let side_engines = Arc::clone(&self.side_engines);
+        let thread = thread.to_string();
+        let text = text.to_string();
+        let images = images.to_vec();
+        on_big_stack(move || {
+            let se = {
+                let map = side_engines
+                    .lock()
+                    .map_err(|_| "pi side engines mutex poisoned".to_string())?;
+                Arc::clone(map.get(&thread).ok_or("no side session for thread")?)
+            };
+            // 只锁自己柄（与其他分栏/主柄并行）；guard 持锁跨 block_on 同主柄语义
+            let mut guard = se
+                .handle
+                .lock()
+                .map_err(|_| "pi side handle mutex poisoned".to_string())?;
+            let handle = &mut *guard;
+            let run = se.run_counter.fetch_add(1, Ordering::SeqCst);
+            let (abort_handle, abort_signal) = pi::sdk::AbortHandle::new();
+            *se
+                .abort
+                .lock()
+                .map_err(|_| "pi side abort mutex poisoned".to_string())? =
+                Some(AbortSlot { run, handle: abort_handle });
+            on_start();
+            // 内容块组装：Text 在前、Image 随后（上游同序；mime 白名单在
+            // POST 层校验过）
+            let mut content = Vec::with_capacity(images.len() + 1);
+            if !text.is_empty() {
+                content.push(ContentBlock::Text(TextContent::new(text.clone())));
+            }
+            for img in &images {
+                content.push(ContentBlock::Image(ImageContent {
+                    data: img.data.clone(),
+                    mime_type: img.mime_type.clone(),
+                }));
+            }
+            let has_images = !images.is_empty();
+            if has_images {
+                shared
+                    .runtime
+                    .block_on(async { handle.sync_extension_mcp_registrations().await });
+            }
+            let result = shared.runtime.block_on(async move {
+                if has_images {
+                    let session = handle.session_mut();
+                    session
+                        .run_with_content_with_abort(content, Some(abort_signal), on_event)
+                        .await
+                } else {
+                    handle
+                        .prompt_with_abort(text, abort_signal, on_event)
+                        .await
+                }
+            });
+            // run 收尾 flush（per-handle save_and_index——分栏不切会话，
+            // 不 flush 则本会话的流式消息永远不落盘/不进索引）
+            let handle2 = &mut *guard;
+            if let Err(e) = shared
+                .runtime
+                .block_on(async { handle2.session_mut().save_and_index().await })
+            {
+                let _ = e; // flush 失败不吞 run 结果——错误经下一次 flush 补救
+            }
+            result.map(|_| ()).map_err(|e| e.to_string())
+        })?
+    }
+
+    /// 定向中断：thread 键下的分栏 run 置 abort（不打断主柄/其他分栏）。
+    pub fn side_interrupt(&self, thread: &str) -> Result<(), String> {
+        let map = self
+            .side_engines
+            .lock()
+            .map_err(|_| "pi side engines mutex poisoned".to_string())?;
+        let se = map.get(thread).ok_or("no side session for thread")?;
+        let guard = se
+            .abort
+            .lock()
+            .map_err(|_| "pi side abort mutex poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(h) => {
+                h.handle.abort();
+                Ok(())
+            }
+            None => Err("no active run".into()),
+        }
     }
 
     /// 列出会话（pi SessionIndex sqlite 索引，`~/.pi/agent/sessions/`）。

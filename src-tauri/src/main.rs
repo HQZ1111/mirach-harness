@@ -225,9 +225,19 @@ fn pi_set_thinking_level(
     state.engine.set_thinking_level(&level)
 }
 
+/// 中断 run（thread 可选）：缺省 "main"（工作区 run）；会话分栏传自己的
+/// 线程键——side_interrupt 定向 abort 该分栏的 run（不打断主柄/其他分栏）。
 #[tauri::command(async)]
-fn pi_interrupt(state: tauri::State<std::sync::Arc<agui::AguiState>>) -> Result<(), String> {
-    state.engine.interrupt()
+fn pi_interrupt(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    thread: Option<String>,
+) -> Result<(), String> {
+    let thread = thread.as_deref().unwrap_or("main");
+    if thread == "main" {
+        state.engine.interrupt()
+    } else {
+        state.engine.side_interrupt(thread)
+    }
 }
 
 #[tauri::command(async)]

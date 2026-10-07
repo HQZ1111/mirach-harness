@@ -185,17 +185,17 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
     [actorRef, postRun],
   )
 
-  // 中断：pi_interrupt 是引擎级（单 run）——仅本会话确实在跑时才允许
-  // （不打断别的分栏/工作区的 run）。
+  // 中断：pi_interrupt 带 thread 参数——side_interrupt 定向 abort 本分栏
+  // 的 run（不打断主柄/其他分栏）。仅本会话确实在跑时才允许。
   const onCancel = useCallback(async () => {
     if (!actorRef.getSnapshot().matches('streaming')) return
     try {
-      await invoke('pi_interrupt')
+      await invoke('pi_interrupt', { thread: threadId })
       actorRef.send({ type: 'CANCEL_MARK' })
     } catch (e) {
       console.error('[session-chat] interrupt 失败', e)
     }
-  }, [actorRef])
+  }, [actorRef, threadId])
 
   const runtime = useExternalStoreRuntime({
     // adapter 面 = 主 runtime 同款（attachments 白名单/朗读；模型目录是

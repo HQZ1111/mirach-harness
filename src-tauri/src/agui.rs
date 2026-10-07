@@ -411,11 +411,29 @@ async fn agui_run(
         }
     };
     // 目标会话文件（可选，v7.4 双对话分栏）：带 sessionPath = 该消息发给
-    // 指定会话（分栏各自收发）——引擎 flush 当前会话后切换到它再跑；
-    // 不带 = 沿用活跃会话（ensure 按需创建，工作区原语义）。切换在
-    // pi-create 大栈线程里做（flush 深递归同源）；引擎单 handle，切换
-    // 与在跑的 run 经 handle mutex 天然串行（run 持锁跨整个 prompt）。
-    let session_path = body["sessionPath"].as_str().map(String::from);
+    // 指定会话（分栏各自收发）。路由（v7.4 多柄）：
+    // - thread == "main" → 主柄路径：sessionPath 在场 = 引擎切回工作区会话
+    //   （open_session），否则 ensure 按需创建；
+    // - thread != "main" → 分栏柄：side_open 按 sessionPath 取/建独立柄
+    //   （每柄独立锁——与主柄/其他分栏**并行**，多 run 同时流式）。
+    // flush/create 的深递归 future 不能在 tokio worker 栈上 block_on——
+    // 16MiB 大栈线程承载（engine 经 Arc 共享）。
+    let is_main_thread = thread == "main";
+    let session_path = if is_main_thread {
+        body["sessionPath"].as_str().map(String::from)
+    } else {
+        // 分栏消息必须有 sessionPath（无 path = 水合不可能，无法定位会话文件）
+        match body["sessionPath"].as_str() {
+            Some(p) if !p.is_empty() => Some(p.to_string()),
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "sessionPath required for non-main thread" })),
+                )
+                    .into_response()
+            }
+        }
+    };
     // 会话按需创建（§7-3）：已有活跃会话时原样复用（多轮上下文保持），
     // 无才创建——【关键】不能每次 POST 都 create（否则每条消息换新会话，
     // 上下文全丢）。flush/create 的深递归 future 不能在 tokio worker 栈上
@@ -427,15 +445,23 @@ async fn agui_run(
             .name("pi-create".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                if let Some(path) = &session_path {
-                    st_create
-                        .engine
-                        .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
-                        .map(|_| ())
+                if is_main_thread {
+                    if let Some(path) = &session_path {
+                        st_create
+                            .engine
+                            .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
+                            .map(|_| ())
+                    } else {
+                        st_create
+                            .engine
+                            .ensure_session(Some(st_create.ui_bridge(&thread_bridge)))
+                    }
                 } else {
-                    st_create
-                        .engine
-                        .ensure_session(Some(st_create.ui_bridge(&thread_bridge)))
+                    st_create.engine.side_open(
+                        &thread_bridge,
+                        session_path.as_deref().expect("sessionPath checked"),
+                        st_create.ui_bridge(&thread_bridge),
+                    )
                 }
             })
             .expect("spawn pi-create thread")
@@ -508,12 +534,18 @@ async fn agui_run(
                         sink2.push(&thread3, v);
                     }
                 };
-                // 无图 = 纯文本原路径（SDK prompt_with_abort 包装不变）；
-                // 有图 = prompt_with_content（同一锁/on_start/AbortSlot 内核）
-                if images.is_empty() {
-                    st2.engine.prompt(&message, on_event, on_start)
+                // 多柄路由（v7.4）：thread != main → side_prompt（分栏独立柄，
+                // 只锁自己柄——与主柄/其他分栏并行）；thread == main → 主柄
+                // prompt（原路径不变）。无图 = 纯文本原路径；有图 =
+                // prompt_with_content（同一锁/on_start/AbortSlot 内核）。
+                if is_main_thread {
+                    if images.is_empty() {
+                        st2.engine.prompt(&message, on_event, on_start)
+                    } else {
+                        st2.engine.prompt_with_content(&message, &images, on_event, on_start)
+                    }
                 } else {
-                    st2.engine.prompt_with_content(&message, &images, on_event, on_start)
+                    st2.engine.side_prompt(&thread2, &message, &images, on_event, on_start)
                 }
             };
             if let Err(e) = result {

@@ -212,7 +212,7 @@ SingleTabStretch/ZoneMenu 体系/显示标签眼钮/标题栏齿轮）之外，v
   composer/思考指示/建议照常）+ 发送 POST 带 sessionPath（引擎 flush
   当前会话切到分栏会话再跑，事件落本线程 buffer）；工作区 postRun 同样
   带 path（跨分栏发送后切回）。水合 = pi_get_session_messages(path)。
-  threadId === 活动会话 → live 复用工作区（buffer 单消费约束）。
+  threadId === 活动会话 → live 复用工作区（buffer 单消费约束）。**多柄并发（v7.5）**：引擎 side_engines 表——分栏线程键 → 独立 SideEngine（自己的柄/锁/abort 槽），分栏 prompt 只锁自己柄，与主柄/其他分栏并行；side_open 幂等换绑、工作区 open 驱逐同路径子柄、side_prompt 收尾显式 flush；pi_interrupt 按 thread 定向 abort。
   **已知边界**：引擎单 handle——两个分栏不能同时流式（后发等先发收尾，
   prompt 持锁跨整个 run）；分栏内本会话 run 进行中再发 = fail loud
   （排队面板是主会话功能）。
