@@ -17,13 +17,22 @@ import { rootAvailPx } from './constraints'
  *  external（打开文件/网页/子智能体占位）→ panels；无语义页签 → 保留
  *  现戳；无戳 → 'chat'（吸收者兜底）。 */
 const semanticStampOf = (set: TabSetNode): 'left' | 'chat' | 'panels' => {
+  // **主窗格优先**（v7.4.1）：workspace/leftrail/open 是不可关的常驻锚——
+  // 它们在场即定区域，非主窗格（files 等）排在前面不翻戳（用户实锤：
+  // 面板页签拖到对话栏 → files 排 workspace 前 → 整栏被改戳 panels →
+  // 宽度塌缩+对齐搬列）
+  let fallback: 'left' | 'chat' | 'panels' | undefined
   for (const c of set.getChildren()) {
     if (!(c instanceof TabNode)) continue
     const t = paneTypeOf(c.getId())
-    if (t) return PANE_TYPES[t].region
-    if (c.getComponent?.() === 'external') return 'panels'
+    if (!t) {
+      if (c.getComponent?.() === 'external') fallback ??= 'panels'
+      continue
+    }
+    if (PANE_TYPES[t].primary) return PANE_TYPES[t].region
+    fallback ??= PANE_TYPES[t].region
   }
-  return zoneConfigOf(set)?.region ?? 'chat'
+  return fallback ?? zoneConfigOf(set)?.region ?? 'chat'
 }
 
 /** 语义戳重算（结构动作后同步跑 + sync 兜底；diff 门控——不在遍历中改
