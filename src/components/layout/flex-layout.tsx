@@ -261,6 +261,12 @@ export function FlexLayoutShell() {
           const isChat = zoneConfigOf(ts)?.region === 'chat'
           setEdge(ts, 'fl-edge-start', isChat && i === 0)
           setEdge(ts, 'fl-edge-end', isChat && i === lastIdx)
+          // tabset 元素同步标记（MainTint/页签条内缩的载体）
+          const setEl = document.querySelector(
+            `.flexlayout__tabset[data-layout-path="${ts.getPath()}"]`,
+          )
+          setEl?.classList.toggle('fl-edge-start', isChat && i === 0)
+          setEl?.classList.toggle('fl-edge-end', isChat && i === lastIdx)
         })
       })
     })

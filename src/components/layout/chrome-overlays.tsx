@@ -37,7 +37,11 @@ function tabsetRectOf(
           // 64px 不铺色，标签看着像悬在错位）
           const bar = el.querySelector('.flexlayout__tabset_tabbar_outer')
           const stripH = bar ? bar.getBoundingClientRect().height : 0
-          return { left: r.left - hr.left, top: r.top - hr.top, width: r.width, height: r.height, stripH }
+          // 贴边内缩（v7.3.4）：对话栏直接到软件边缘的一侧，颜色层与内容
+          // 同步内缩 20px（标记类由 flex-layout 布局 effect 打在 tabset 上）
+          const edgeL = el.classList.contains('fl-edge-start') ? 20 : 0
+          const edgeR = el.classList.contains('fl-edge-end') ? 20 : 0
+          return { left: r.left - hr.left + edgeL, top: r.top - hr.top, width: r.width - edgeL - edgeR, height: r.height, stripH }
         }
       }
     }

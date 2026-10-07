@@ -770,3 +770,11 @@
   padding-right: 20px;
 }
 
+.flexlayout-host .flexlayout__tabset.fl-edge-start .flexlayout__tabset_tabbar_outer {
+  padding-left: 20px;
+}
+
+.flexlayout-host .flexlayout__tabset.fl-edge-end .flexlayout__tabset_tabbar_outer {
+  padding-right: 20px;
+}
+
