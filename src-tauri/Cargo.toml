@@ -5,12 +5,16 @@ description = "Mirach harness — layout testbed Tauri shell"
 edition = "2021"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "3.0.0-alpha.3", features = [] }
 
 [dependencies]
-tauri-plugin-dialog = "2"
+tauri-plugin-dialog = "3.0.0-alpha.3"
 # features 与主工程一致（unstable），最大化复用 cargo 缓存
-tauri = { version = "2", features = ["unstable", "tray-icon"] }
+tauri = { version = "3.0.0-alpha.4", features = ["unstable", "tray-icon"] }
+# v3 alpha：webview 后端外置成 runtime crate——Builder 必须显式选运行时
+# （默认 DynRuntime 无属性即 RuntimeNotConfigured）。M3 换 tauri-runtime-cef
+# 时改这一行 + .runtime(...) 参数（官方 CEF runtime crate 已在 crates.io）。
+tauri-runtime-wry = "3.0.0-alpha.4"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 

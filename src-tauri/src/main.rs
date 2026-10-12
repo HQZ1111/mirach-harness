@@ -614,6 +614,9 @@ fn main() {
             session_meta::session_meta_set
         ])
         .manage(session_meta::SessionMetaPath(std::sync::Mutex::new(None)))
+        // v3 alpha：显式选 webview 运行时（默认 DynRuntime 无属性即 panic
+        // RuntimeNotConfigured）；M3 换 tauri_runtime_cef::Cef::default()
+        .runtime(tauri_runtime_wry::Wry::default())
         .run(tauri::generate_context!())
         .expect("error while running mirach-harness");
 }
