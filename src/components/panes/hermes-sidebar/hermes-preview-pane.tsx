@@ -1,13 +1,10 @@
 /**
- * 文件预览页签（右侧栏标签，不占文件树）：flexlayout factory 特例渲染，
- * 内容从节点 config.filePath 现读 fs_read_data_url（≤16MB）。
+ * 文件预览页签（v8.0 dockview 版）：内容从 params.filePath 现读 fs_read_data_url（≤16MB）。
  * 图片直显；html 沙箱 iframe 渲染成网页；代码/文本文件按扩展名分流——
  * 在语言映射表内走 CodePreview（Shiki 高亮 + 行号，超预算诚实降级纯文本），
  * 未知扩展名纯文本 pre（不猜语言）；二进制提示；读失败错误可见。
  */
 import { useEffect, useState } from 'react'
-import type { TabNode } from 'flexlayout-react'
-
 import { CodePreview } from '@/components/preview/code-preview'
 import { shikiLanguageForFilename } from '@/components/preview/code-language'
 import { fsReadDataUrl } from '@/lib/fs'
@@ -16,9 +13,7 @@ import { cn } from '@/lib/utils'
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp'])
 const HTML_EXTS = new Set(['html', 'htm'])
 
-export function HermesPreviewPane({ node }: { node: TabNode }) {
-  const cfg = node.getConfig() as { filePath?: string } | undefined
-  const filePath = cfg?.filePath ?? ''
+export function HermesPreviewPane({ filePath }: { filePath: string }) {
   const name = filePath.split('/').pop() ?? filePath
   const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
   const language = shikiLanguageForFilename(filePath)

@@ -73,7 +73,6 @@ import {
   type SessionActionId,
 } from "@/components/panes/session-manage/session-actions";
 import { DeleteSessionDialog, RenameSessionDialog } from "@/components/panes/session-manage/session-dialogs";
-import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
 import { openSessionTabBridge } from "@/components/panes/session-manage/session-tab-bridge";
 import { VIRTUALIZE_THRESHOLD, VirtualSessionList } from "@/components/panes/session-manage/virtual-session-list";
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
@@ -139,11 +138,6 @@ interface SessionListCtxValue {
    *  这里读，行组件不再各自订阅 threadItems）。 */
   meta?: SessionRowMeta;
   commitListMove(sessionId: string, group: SessionRowGroup, beforeId: string | null): void;
-  /** 跨面拖拽落对话栏页签条（docs/layout-design.md §6，hermes session-drag
-   *  投放语言）：在该分栏开出该会话的页签，beforeTabId = 悬停页签的槽位
-   *  （插到它前面；null = 追加条尾）。实现经 session-tab-bridge 由
-   *  flex-layout 注册。 */
-  commitOpenTab(tabsetId: string, sessionId: string, beforeTabId: string | null): void;
 }
 
 const SessionListContext = createContext<SessionListCtxValue | null>(null);
@@ -1229,9 +1223,6 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         );
         sidebarViewStore.getState().claimManual();
       },
-      commitOpenTab: (tabsetId, sessionId, beforeTabId) => {
-        openSessionTabBridge(sessionId, tabsetId, beforeTabId);
-      },
     }),
     [aui, display, mode],
   );
@@ -1745,11 +1736,6 @@ export const ThreadListItem: FC = () => {
             // 合法区就谁提交。把手/⋯ 动作簇自带监听，行壳不重复起拖
             // （hermes :385 同款豁免选择器）。
             if ((e.target as HTMLElement).closest("[data-reorder-handle], [data-row-actions]")) return;
-            startSessionRowDrag(e, {
-              sessionId: threadId,
-              title: title ?? "New Chat",
-              onCommitOpenTab: (tabsetId, beforeTabId) => ctx.commitOpenTab(tabsetId, threadId, beforeTabId),
-            });
             sortable?.dragHandleProps.onPointerDown?.(e);
           }}
         >

@@ -5,8 +5,8 @@
  *   - ?win=hud   → app/hud/（骨架已建，待接）
  */
 
-import { FlexLayoutShell } from '@/components/layout/flex-layout'
+import { DockviewShell } from '@/components/layout/dockview-shell'
 
 export function App() {
-  return <FlexLayoutShell />
+  return <DockviewShell />
 }

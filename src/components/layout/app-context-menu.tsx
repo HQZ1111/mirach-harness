@@ -36,7 +36,6 @@
  * - 布局段图标 = @vscode/codicons src/icons/*.svg path 逐字（raw 下载，
  *   layout-sidebar-left/right、arrow-both、layout-panel）。
  */
-import type { Model } from 'flexlayout-react'
 import { DropdownMenu as DropdownMenuPrimitive } from 'radix-ui'
 import { useEffect, useState, type FC } from 'react'
 import { createPortal } from 'react-dom'
@@ -50,14 +49,11 @@ import {
   columnFlagsOf,
   leftPosLabel,
   leftPosToggle,
-  normalizeColumns,
   panelsPosLabel,
   panelsPosToggle,
   setLeftHidden,
   setPanelsHidden,
-  setTabStripVisible,
-  stripToggleInfoOf,
-} from './column-ops'
+} from './dockview-column-ops'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 
 // ── store（hermes store.ts 的 $contextMenu 同构：单份菜单，两个菜单永不
@@ -179,44 +175,26 @@ export interface AppMenuItemSpec {
 
 export type AppMenuSection = readonly AppMenuItemSpec[]
 
-/** 菜单打开时刻的上下文（"resolved when the menu OPENS" 契约）：布局行
- *  的显隐标签/禁用态在 open 时刻从活动模型现读。 */
+/** 菜单打开时刻的上下文（"resolved when the menu OPENS" 契约）：v8.0 布局
+ *  行全部从栏旗标现读，上下文载荷已清空（保留扩展位）。 */
 export interface AppMenuContext {
+  /** 预留：未来按落点分栏定制的行（v7.x 的 tabsetId 随「隐藏标签」行废除）。 */
   tabsetId?: string
-}
-
-const flModel = (): Model | undefined => {
-  // globalThis 读（flex-layout 挂的是 window.__flModel=globalThis 同一槽）；
-  // node 测试环境无 window，globalThis 直读不炸
-  const m = (globalThis as { __flModel?: Model }).__flModel
-  if (!m) console.error('[app-context-menu] 活动布局模型不在场（__flModel 未挂载）')
-  return m
 }
 
 /**
  * bare right-click on app chrome 的段结构 = hermes shellSections + 布局段：
  *   段1 [新建会话, 命令面板]
- *   段2 [隐藏/显示标签(落点分栏，无分栏缺席), 隐藏/打开左侧栏,
- *        隐藏/打开面板栏, 左侧栏位置, 面板栏位置]（用户 2026-10-05：
- *        布局动词全量入应用菜单；2026-10-06 v7.2：互换废除，独立双位置
- *        切换——左栏占端位、面板栏内/外位让位）
+ *   段2 [隐藏/打开左侧栏, 隐藏/打开面板栏, 左侧栏位置, 面板栏位置]
+ *        （2026-10-06 v7.2：互换废除，独立双位置切换——左栏占端位、面板栏
+ *        内/外位让位；v8.0 dockview：「隐藏标签」行废除——左/主栏组
+ *        hideHeader 恒无条，面板栏组唯一条恒显）
  *   段3 [切换状态栏, 设置]
  */
-export const buildShellMenuSections = (ctx: AppMenuContext = {}): readonly AppMenuSection[] => {
-  // 栏显隐/互换/位置的行文案来自栏旗标（localStorage），不需要模型；
-  // 「隐藏标签」行需要 live 模型（条显隐 ladder 现读），模型缺席时行缺席。
+export const buildShellMenuSections = (_ctx: AppMenuContext = {}): readonly AppMenuSection[] => {
+  // 栏显隐/位置的行文案来自栏旗标（localStorage），不需要布局 api。
   const layout: AppMenuItemSpec[] = []
   const flags = columnFlagsOf()
-  const m = flModel()
-  const strip = ctx.tabsetId && m ? stripToggleInfoOf(m, ctx.tabsetId) : undefined
-  if (strip) {
-    layout.push({
-      icon: 'layout-menubar',
-      id: 'shell-tabstrip',
-      label: strip.visible ? '隐藏标签' : '显示标签',
-      disabled: strip.visible && strip.noOp,
-    })
-  }
   layout.push(
     {
       icon: 'layout-sidebar-left',
@@ -280,9 +258,9 @@ const triggerNewChat = (): void => {
   trigger.click()
 }
 
-/** Shell 菜单动作路由。布局动作（v6.0：column-ops——栏显隐/互换/位置/
- *  页签条开关）经 __flModel 通道直提模型。 */
-export const runShellAction = (id: string, ctx: AppMenuContext = {}): void => {
+/** Shell 菜单动作路由。布局动作（v8.0：dockview-column-ops——栏显隐/
+ *  位置切换）经 __dvApi 通道直提布局。 */
+export const runShellAction = (id: string, _ctx: AppMenuContext = {}): void => {
   switch (id) {
     case 'shell-new-chat':
       triggerNewChat()
@@ -296,32 +274,18 @@ export const runShellAction = (id: string, ctx: AppMenuContext = {}): void => {
     case 'shell-settings':
       openSettingsOverlay()
       return
-    case 'shell-tabstrip':
     case 'shell-left':
-    case 'shell-panels':
-    case 'shell-left-pos':
-    case 'shell-panels-pos': {
-      if (id === 'shell-tabstrip') {
-        const m = flModel()
-        if (!m) return
-        if (!ctx.tabsetId) {
-          console.error('[app-context-menu] 无目标分栏——页签条开关放弃')
-          return
-        }
-        const strip = stripToggleInfoOf(m, ctx.tabsetId)
-        if (!strip) {
-          console.error('[app-context-menu] 目标分栏不可开关页签条', ctx.tabsetId)
-          return
-        }
-        setTabStripVisible(m, ctx.tabsetId, !strip.visible)
-        return
-      }
-      if (id === 'shell-left') setLeftHidden(!columnFlagsOf().leftHidden)
-      else if (id === 'shell-panels') setPanelsHidden(!columnFlagsOf().panelsHidden)
-      else if (id === 'shell-left-pos') leftPosToggle()
-      else if (id === 'shell-panels-pos') panelsPosToggle()
+      setLeftHidden(!columnFlagsOf().leftHidden)
       return
-    }
+    case 'shell-panels':
+      setPanelsHidden(!columnFlagsOf().panelsHidden)
+      return
+    case 'shell-left-pos':
+      leftPosToggle()
+      return
+    case 'shell-panels-pos':
+      panelsPosToggle()
+      return
     default:
       console.error('[app-context-menu] unknown menu item', id)
   }

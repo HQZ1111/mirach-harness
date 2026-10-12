@@ -45,20 +45,9 @@ window.addEventListener(
     if (!(event.target instanceof Element)) return
     if (resolveContextMenuScope(event.target) !== 'app') return
     event.preventDefault()
-    if (event.target.closest('.flexlayout__border, .flexlayout__popup_menu_container')) return
-    let tabsetId: string | undefined
-    const setEl = event.target.closest('.flexlayout__tabset')
-    if (setEl) {
-      const model = (window as { __flModel?: import('flexlayout-react').Model }).__flModel
-      const path = setEl.getAttribute('data-layout-path')
-      let found: { getId(): string } | undefined
-      model?.visitNodes((n) => {
-        if (!found && n.getType && n.getType() === 'tabset' && n.getPath() === path) found = n
-      })
-      tabsetId = found?.getId()
-      if (tabsetId === undefined) console.error('[context-menu] 落点分栏不在当前模型', path)
-    }
-    openAppContextMenu(event.clientX, event.clientY, tabsetId)
+    // v8.0 dockview：右键落点分栏解析已随「隐藏标签」行废除（左/主栏组
+    // 恒无条、面板栏条恒显）——菜单布局行全部从栏旗标现读。
+    openAppContextMenu(event.clientX, event.clientY)
   },
   true,
 )
