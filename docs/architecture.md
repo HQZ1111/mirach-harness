@@ -1,32 +1,26 @@
-# MIRACH 架构方案 v8.0（2026-10-06 · 换栈设计：Tauri 3 + CEF + dockview）
+# MIRACH 架构方案 v8.0（2026-10-06 · 换栈设计：Tauri 最新版 + CEF + dockview）
 
 > **状态**：设计定稿，代码未迁移。本文取代 layout-design.md（v7.x flexlayout
 > 时代）成为架构主文档——v7.x 的语义模型（三栏/根面板/colOrder/多柄引擎）
-> 全部平移，实现载体层换栈。迁移期间 AGENTS.md 保留 flexlayout 规则作
-> 回退参考。
+> 全部平移，实现载体层换栈。 
 
 ## 0. 换栈决定（用户 2026-10-06）
 
 | 层 | 现状（v7.x） | 目标（v8.0） | 动机 |
 |----|------|------|------|
-| 壳 | Tauri 2 + wry(WebView2) | **Tauri 3 + CEF** | WebView2 行为绑定 Windows/Edge 版本；CEF 自带全量 Chromium，跨端一致、协议可控 |
+| 壳 | Tauri + wry(WebView2) | **Tauri 最新版 + CEF** | WebView2 行为绑定 Windows/Edge 版本；CEF 自带全量 Chromium，跨端一致、协议可控 |
 | 布局 | flexlayout-react 0.11 | **dockview-react** | flexlayout 语义补丁越打越多（语义戳/根面板/跨度归位全是外挂）；dockview 原生支持 docking/分组/序列化/受控布局 |
 | 引擎 | pi_session.rs 多柄（v7.5） | **不变**（平移） | 多柄并发/定向中断/按路径路由已是栈无关设计 |
 
-**红线（不可回退的既成事实）**：多柄引擎、会话分栏独立运行时、条显隐
-ladder、语义归属——这些是产品语义，换栈只换实现载体。
+## 1. Tauri + CEF：现状与路径
 
-## 1. Tauri 3 + CEF：现状与路径
+### 1.1 Tauri
 
-### 1.1 Tauri 3
-
-- **现状**：按最新发布版设计（升级时以 crates.io 实际版本为准），
-  2.x 分支保留作回退。
-- 3.0 的变化点与本工程相关：权限系统重构延续 2.x 的 capabilities 模型；
+- **现状**：按最新发布版设计（升级时以 crates.io 实际版本为准）。
+  权限系统沿用 capabilities 模型；
   IPC 层重写（自定义协议 → 更快的 JSON/二进制通道）；插件 API 稳定化。
-- **本工程用到的 2.x 面**（迁移清单）：tauri::Manager（窗口/托盘）、
-  plugin-dialog、plugin-opener、自定义命令 18+、EventSource 自定义协议流
-  （/ag-ui/stream 走 HTTP 不走 Tauri channel ✓ 不受影响）。
+- **本工程的迁移清单**：tauri::Manager（窗口/托盘）、
+  自定义命令 18+（走 Tauri invoke 原生通道——见 §3.5）。
 
 ### 1.2 CEF（本换栈最大风险项）
 
@@ -116,27 +110,77 @@ pi_session.rs 多柄（v7.5）与 Tauri/CEF/dockview 全解耦，逐项：
 - pi_stream_cursor thread 参数：**不变**
 - pi_get_session_messages 按路径水合：**不变**
 
-Rust 侧唯一换栈影响：Tauri 2→3 的 command 宏/State 注入 API 变化 +
 CEF 窗下 invoke 通道走 CEF 的 V8 绑定（cef-rs 的 CefV8Handler 桥接
 Tauri command——或保持 HTTP invoke 走 axum，V8 只做 window.invoke 薄壳）。
 **推荐后者**：invoke 走 HTTP（与 SSE 同源同鉴权），CEF 侧零桥接成本。
+
+## 3.5 L2 原生 IPC 化（Tauri 3 双通道：axum 整层废除）
+
+**Tauri 3 的 IPC 双通道**（invoke 请求-响应 + Channel 双向流）取代 axum
+HTTP+SSE 桥——L2 从"自建 HTTP 服务器 + token 鉴权 + 端点发现"瘦身为
+**纯 Tauri command 调用**。
+
+### 废除清单（axum 桥的全部面）
+
+| v7.x（axum 桥） | v8.0（Tauri 原生） | 删除的代码 |
+|------|------|------|
+| POST /ag-ui?token=… {threadId,sessionPath,message} | `invoke('agui_run', { threadId, sessionPath, message })` | HTTP fetch + token 拼接 |
+| GET /ag-ui/stream?thread=X&lastEventId=N（SSE EventSource） | `Channel<Message>` 传入 command，Rust 端逐事件推送 | EventSource + lastEventId 游标 + 断线重连逻辑（Channel 由 Tauri 管理生命周期） |
+| get_agui_endpoint（端口/token 发现） | **废除**（无 HTTP 层即无端点） | 整个命令 |
+| token 鉴权（check_token / 401 路径） | **废除**（Tauri IPC origin 隔离，无 token 需求） | 鉴权面 |
+| ThreadBuffers 环形缓冲（per-thread 分桶 + seq） | **视场景保留或直推**（见下） | 视断线重连需求裁定 |
+| 1430 端口 axum 路由表 | **废除**（axum 依赖整体移除） | agui.rs 的 HTTP 层 ~200 行 |
+
+### 保留/改造清单
+
+| 组件 | 处置 |
+|------|------|
+| PiEngine 多柄（side_engines / side_open / side_prompt / side_interrupt） | **不变**（Tauri command 直接调引擎方法） |
+| 映射器 AgentEvent → AG-UI | **不变**（事件形状是前端轮次机契约） |
+| RUN_STARTED on_start 回调 | **不变**（语义：STARTED 在真实起跑前推） |
+| sessionPath 路由（POST 切会话） | **不变**（command 参数直传） |
+| ThreadBuffers 环形缓冲 | **两案择一**：A) 保留——断线重连时 Channel 重发 replay（多柄柄存活期事件不丢）；B) 废除——Channel 直推、断线靠前端重水合（pi_get_session_messages 已按路径水合 ✓）。**推荐 B**：水合路径已覆盖状态恢复，环形缓冲的唯一价值（HTTP 断线续传）在原生 IPC 下不存在 |
+| token/endpoint | **废除** |
+
+### 新命令面（Tauri invoke）
+
+```rust
+#[tauri::command] async fn agui_run(
+    thread: String, session_path: Option<String>,
+    message: String, images: Vec<AguiImage>,
+    on_event: Channel<serde_json::Value>,   // Tauri 3 Channel 双向流
+) -> Result<RunId, String>
+#[tauri::command] async fn agui_interrupt(thread: String) -> Result<(), String>
+```
+
+前端：`invoke('agui_run', { ..., onEvent: new Channel() })`——Channel 回调
+逐事件喂轮次机（替代 EventSource onMessage）。多柄并发 = 每分栏一个
+Channel 实例（Tauri 原生支持多 Channel 并行 ✓）。
+
+### 净收益
+
+- **删除**：axum 依赖、HTTP 层 ~200 行、token 鉴权、端点发现、
+  EventSource 生命周期管理、lastEventId 游标逻辑
+- **消除**：端口占用/冲突、CEF 下的 HTTP 桥接成本（§1.2 的"推荐后者"
+  不再需要——invoke 走 Tauri 原生通道，CEF 只需桥接 Tauri invoke 一个口）
+- **简化**：Rust 侧 agui.rs 从 HTTP 服务器瘦身为纯命令处理；CEF 迁移
+  难度骤降（M3 只剩 webview 渲染层的 CEF 化，IPC 已原生）
 
 ## 4. 迁移阶段（每阶段独立可验证）
 
 | 阶段 | 内容 | 验证 |
 |------|------|------|
 | M1 | 布局库替换：flexlayout → dockview（语义全平移，Tauri/CEF 不动） | 现有全部 E2E（v73c/v73b/v73/v74b + 矩阵 350）改写后全绿 |
-| M2 | Tauri 2 → 3（wry 不变） | 现有 E2E 全绿 + 托盘/对话框冒烟 |
+| M2 | Tauri 升级至最新版（wry 不变） | 现有 E2E 全绿 + 托盘/对话框冒烟 |
 | M3 | wry 分叉加 CEF 后端（Windows 先行） | CEF 窗加载 1430 + invoke/SSE 全链 + CDP 9223 |
 | M4 | 生产构建 + 打包（CEF 二进制分发） | 安装包冒烟 |
 
-每阶段独立提交、独立可回退（2.x 分支保留）。
+每阶段独立提交。
 
 ## 5. 风险登记
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| Tauri 3 alpha API 变动 | 中 | 2.x 分支保留；M2 最后做 |
 | wry CEF 后端维护成本 | 高 | 只实现本工程用到的面（navigate/invoke/custom scheme）；上游 wry 定期 rebase |
 | dockview 布局守卫不如 flexlayout 细 | 中 | onWillLayoutChange + 语义校验器自建（§2.3） |
 | CEF 打包体积 +100MB | 低 | 产品级 CEF 分发是成熟做法（Steam/Spotify/Notion 同栈） |
