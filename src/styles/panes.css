@@ -384,7 +384,12 @@
   color: var(--text);
 }
 
-/* 文案占满中段（图标列已删）；快捷键标注 ml-auto 推到行尾（KbdGroup ml-auto） */
+.hub-entry-icon {
+  color: inherit;
+  flex: none;
+}
+
+/* 文案占满中段；快捷键标注 ml-auto 推到行尾（KbdGroup ml-auto） */
 .hub-entry-label {
   flex: 1 1 auto;
   min-width: 0;
