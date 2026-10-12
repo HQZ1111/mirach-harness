@@ -1,5 +1,15 @@
 # mirach-harness 交接文档（2026-10-02 · 会话管理/对标轮后）
 
+> **【2026-10-12 更新】v8.0 换栈已开工**：架构定稿（Tauri 最新 + CEF +
+> dockview，`docs/architecture.md` + `docs/layout-v8.md`，无 Tauri2 退路）；
+> **M1 骨架已提交（fbcef54）**——`src/components/layout/dockview-shell.tsx`
+> 出厂三栏 [左|主|面板] + 打开页三按钮 CDP 全链通（`window.__dvApi` 调试
+> 句柄；`hideHeader:true` = 左/主栏无标签；壳级 AssistantRuntime 必包）。
+> 挂载仍 flexlayout，M1 语义平移（分栏/会话指派/根面板守卫/colOrder 动词
+> → dockview api）完成时切 `app/index.tsx`。dockview 8.5.1 类型事实与踩坑
+> 见 dockview-shell.tsx 头注释。本文其余部分为 2026-10-02 快照，状态行已
+> 过时。
+
 > 本文是**会话交接快照**：新会话从这里接手。工程规矩/历史踩坑的
 > 唯一规范仍是 `AGENTS.md`（必读——最新两大节：「elements 接线轮」、
 > 「会话管理/对标轮」）；pi 集成架构规范 `docs/pi-integration.md`；
