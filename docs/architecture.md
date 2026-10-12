@@ -16,7 +16,10 @@
 
 ### 1.1 Tauri
 
-- **现状**：按最新发布版设计（升级时以 crates.io 实际版本为准）。
+- **现状**（2026-10-12 查实）：crates.io tauri = **3.0.0-alpha.4**（Rust 核
+  心最新 alpha）；npm @tauri-apps/api = 3.0.0-alpha.2（alpha 线最新——npm 侧
+  版本线独立于 Rust 侧，alpha 期核心跑在 npm 包前面）。M2 配对 = 核心
+  alpha.4 + npm alpha.2（最新各自侧）。
   权限系统沿用 capabilities 模型；
   IPC 层重写（自定义协议 → 更快的 JSON/二进制通道）；插件 API 稳定化。
 - **本工程的迁移清单**：tauri::Manager（窗口/托盘）、
