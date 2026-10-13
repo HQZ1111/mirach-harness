@@ -25,30 +25,42 @@
 - **本工程的迁移清单**：tauri::Manager（窗口/托盘）、
   自定义命令 18+（走 Tauri invoke 原生通道——见 §3.5）。
 
-### 1.2 CEF（本换栈最大风险项）
+### 1.2 CEF（2026-10-13 实做：官方 runtime crate，**非** wry 分叉）
 
-- **wry 不支持 CEF**：wry 在 Windows 用 WebView2，macOS/Linux 用 WKWebView/
-  WebKitGTK。CEF 需要自建后端。
-- **三条路径**（按代价排序）：
-  1. **wry 分叉加 CEF 后端**（推荐）：实现 wry 的 WebView trait 的 CEF
-     变体（cef-rs 绑定），Tauri 其余层（IPC/插件/权限）原样保留。代价 =
-     维护一个 wry fork；收益 = Tauri 生态全保留。
-  2. **Tauri 3 的 webview 抽象**（若 3.0 提供多引擎支持则走此路，跟踪
-     tauri-apps/tauri roadmap）。
-  3. **弃 Tauri 壳改自绘**（cef-rs + 自写 IPC/托盘/对话框）——最后手段，
-     代价最大。
-- **CEF 侧细节**：CEF 需要独立子进程架构（browser/render/gpu 多进程），
-  打包体积 +~100MB；CSP/调试端口（本工程 9222/9223 冒烟依赖）走 CEF 的
-  remote-debugging-port 同名开关 ✓；Tauri 自定义协议（ipc://）换成 CEF 的
-  CefRequestHandler 路由。
-- **分阶段**：先 wry 分叉跑通 CEF 最小窗（加载 1430 dev server），再逐个
-  对齐 Tauri IPC 面（invoke/custom scheme/dialog），最后切生产构建。
+- **v3 alpha 的后端选择面**：tauri 主 crate 不含 wry/tao——webview 后端
+  外置成 **runtime crate**，Builder 必须显式 `.runtime(attrs)` 选，默认
+  DynRuntime 无属性即 panic `RuntimeNotConfigured`（M2 实测）。
+- **官方已有 CEF 运行时**：`tauri-runtime-cef` 3.0.0-alpha.5（crates.io，
+  与 tauri-runtime-wry 3.0.0-alpha.4 同级）。`Cef` 实现 `RuntimeInitAttrs`、
+  `CefRuntime` 实现 `Runtime<T>`——**与 wry API 对称**，换栈 = 换依赖名 +
+  一个构建器参数。**本文原定「wry 分叉加 CEF 后端」方案作废。**
+- **构建工具链前置**：`cef-dll-sys` 构建脚本用 CMake 下载并构建 CEF
+  152.3.0，需要 **cmake + ninja + MSVC C++**。本机解法 = Miniconda 通道
+  装 cmake 4.3.1 + ninja 1.13.2 + VS2026 BuildTools MSVC 14.51。
+  **坑：cargo 必须与 cmake 同一 shell（同 PATH）**——构建脚本直接
+  `running: "cmake"`，PATH 不含即 abort（本机踩过两次）。
+- **运行期前置**：CEF 二进制（libcef.dll / chrome_elf.dll / icudtl.dat /
+  v8_context_snapshot.bin / …）必须**与 exe 同目录**（或命中 CEF 搜索
+  路径），否则 `STATUS_DLL_NOT_FOUND (0xc0000135)`。dev 态 = 从
+  `target/debug/build/cef-dll-sys/*/out/cef_windows_x86_64/` 拷进
+  `target/debug/`；生产 = 打进安装包（M4 打包项）。
+- **入口宏**：CEF 多进程（renderer/GPU 子进程）靠
+  `#[tauri_runtime_cef::cef_entry_point]` 标注 main 分派。
+- **CDP 冒烟**：`tauri.conf` 的 `additionalBrowserArgs` 是 **wry 参数、
+  CEF 下无效**；CEF 走 `Cef::default().command_line_arg("remote-
+  debugging-port", Some("9223"))`（CEF 原生同名开关）——E2E 脚本零改动。
+- **CEF 沙箱**：上游注明 Windows 当前**一律无沙箱**运行（CEF 要 sandbox
+  broker，而 Tauri 应用不是 CEF 自带 bootstrap.exe 宿主）——Windows 本就
+  无应用沙箱语义，Linux 才需留意。
+- **并行能力与渲染后端无关**：多会话并发在 Rust 引擎层（`side_engines`
+  按 thread 分柄）+ 前端分栏层（各 panel 自己的 runtime），换 wry/CEF
+  只换渲染壳。v7.5 的多柄并发 E2E 在两个后端下都成立。
 
 ### 1.3 迁移期间的开发态
 
 vite 1430 dev server 不变（CEF 窗与 WebView2 窗都加载同一 dev server）；
-CDP 冒烟脚本（9222/9223）在 CEF 下走 remote-debugging-port=9223 同名参数
-（CEF 原生支持）——E2E 脚本零改动。
+CDP 冒烟脚本（9222/9223）在 CEF 下经 `Cef::command_line_arg` 下发同名
+参数——E2E 脚本零改动。
 
 ## 2. 布局层：dockview（语义文档 = layout-v8.md）
 
@@ -174,17 +186,17 @@ Channel 实例（Tauri 原生支持多 Channel 并行 ✓）。
 | 阶段 | 内容 | 验证 |
 |------|------|------|
 | M1 | 布局库替换：flexlayout → dockview（语义全平移，Tauri/CEF 不动） | 现有全部 E2E（v73c/v73b/v73/v74b + 矩阵 350）改写后全绿 |
-| M2 | Tauri 升级至最新版（wry 不变） | 现有 E2E 全绿 + 托盘/对话框冒烟 |
-| M3 | wry 分叉加 CEF 后端（Windows 先行） | CEF 窗加载 1430 + invoke/SSE 全链 + CDP 9223 |
-| M4 | 生产构建 + 打包（CEF 二进制分发） | 安装包冒烟 |
+| M2 | Tauri 2.11 → 3.0.0-alpha.4（显式 `.runtime(Wry)`；JS 面零改动） | ✅ 5d8c3e7：窗口/invoke 冒烟全绿 |
+| M3 | 官方 `tauri-runtime-cef` alpha.5（CEF 152.3.0；Miniconda cmake+ninja；CDP 经 `Cef::command_line_arg`） | CEF 窗 + invoke/SSE 全链 + CDP 9223 |
+| M4 | 生产构建 + 打包（CEF 二进制随 exe 同目录分发） | 安装包冒烟 |
 
-每阶段独立提交。
+每阶段独立提交。M2/M3 实测结论（以 crates.io 实际版本为准，不钉死）。
 
 ## 5. 风险登记
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| wry CEF 后端维护成本 | 高 | 只实现本工程用到的面（navigate/invoke/custom scheme）；上游 wry 定期 rebase |
+| wry CEF 后端维护成本 | ~~高~~ **已消解** | 官方 `tauri-runtime-cef` crate——无需维护分叉，M3 实接跑通 |
 | dockview 布局守卫不如 flexlayout 细 | 中 | onWillLayoutChange + 语义校验器自建（§2.3） |
 | CEF 打包体积 +100MB | 低 | 产品级 CEF 分发是成熟做法（Steam/Spotify/Notion 同栈） |
 | asupersync 并发 block_on（多柄已用） | 已验证 | v7.5 E2E 实测并行流式 ✓ |

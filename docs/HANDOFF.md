@@ -1,5 +1,15 @@
 # mirach-harness 交接文档（2026-10-02 · 会话管理/对标轮后）
 
+> **【2026-10-13 更新】M1+M2+M3 长任务完成**：
+> M1 dockview 语义全量平移（9d3baa4，物理序 8/8 + 生命周期 + 持久化 v9）；
+> M2 Tauri 3.0.0-alpha.4（5d8c3e7，显式 `.runtime()` + 冒烟全绿）；
+> M3 **官方 tauri-runtime-cef 真切成功**——Miniconda 通道
+> （cmake 4.3.1 + ninja 1.13.2 + VS2026 MSVC 14.51）修好构建链，
+> CEF 窗跑起来了（CDP 9223 + invoke 全通 + 侧栏 15 行）。CEF 二进制
+> 每次 clean 后要从 build 目录拷到 exe 旁（STATUS_DLL_NOT_FOUND 见
+> architecture.md §1.2）；cargo 必须跟 cmake 同 PATH。下步 = M4 打包
+> （CEF 二进制进安装包）。本文其余部分为 2026-10-02 快照，状态行已过时。
+
 > **【2026-10-12 更新】v8.0 换栈已开工**：架构定稿（Tauri 最新 + CEF +
 > dockview，`docs/architecture.md` + `docs/layout-v8.md`，无 Tauri2 退路）；
 > **M1 骨架已提交（fbcef54）**——`src/components/layout/dockview-shell.tsx`

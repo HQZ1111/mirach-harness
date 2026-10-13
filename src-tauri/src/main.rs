@@ -464,6 +464,7 @@ fn pi_switch_branch(
     state.engine.switch_branch(&leaf_id)
 }
 
+#[tauri_runtime_cef::cef_entry_point]
 fn main() {
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
     // 删除立即可见；默认 balanced 是定时 autosave，列表会延迟出现且
@@ -614,9 +615,21 @@ fn main() {
             session_meta::session_meta_set
         ])
         .manage(session_meta::SessionMetaPath(std::sync::Mutex::new(None)))
-        // v3 alpha：显式选 webview 运行时（默认 DynRuntime 无属性即 panic
-        // RuntimeNotConfigured）；M3 换 tauri_runtime_cef::Cef::default()
-        .runtime(tauri_runtime_wry::Wry::default())
+        // CEF 运行时（用户定稿目标）：.runtime 参数与 wry 对称。
+        // tauri.conf 的 additionalBrowserArgs 是 wry 参数、CEF 下无效——
+        // dev 态 CDP 9223 经 Cef::command_line_arg("remote-debugging-port",
+        // Some("9223")) 下发（CEF 原生同名开关，E2E 脚本零改动）。
+        .runtime({
+            #[cfg(debug_assertions)]
+            {
+                tauri_runtime_cef::Cef::default()
+                    .command_line_arg("remote-debugging-port", Some("9223"))
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                tauri_runtime_cef::Cef::default()
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running mirach-harness");
 }
