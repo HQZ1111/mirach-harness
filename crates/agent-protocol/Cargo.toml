@@ -1,0 +1,20 @@
+[package]
+name = "agent-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "L3.5 协议层：前后端事件契约的单一来源（docs/architecture.md §9）"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+
+# 纪律（§9 铁律）：零 IO、不引用 pi（nightly 污染不外泄）、无 tokio/async。
+# 依赖面只有 serde 一族 + uuid + thiserror——多一个都要先问"协议层需要吗"。
+[lints.rust]
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+unsafe_code = "forbid"
