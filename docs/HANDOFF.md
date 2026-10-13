@@ -1,5 +1,12 @@
 # mirach-harness 交接文档（2026-10-02 · 会话管理/对标轮后）
 
+> **【2026-10-14 更新】架构 v9.0 定稿**（Agent-Native：§7-§14 全部入档
+> `docs/architecture.md`——协议层 agent-protocol / 真相源总表 L1-L5 /
+> 双通道 InFlightMap+SeqTracker/时序固化 / Sink 三 trait+契约测试 /
+> 落地顺序 N1-N7）。**§3.5 的 agui_run 二命令面是指草稿，已被 §10.3
+> 四模块命令面取代**（文档内已标 ⚠️）。下步 = N1 agent-protocol crate
+> 落地（代码）。本文其余部分为 2026-10-02 快照，状态行已过时。
+
 > **【2026-10-13 更新】M1+M2+M3 长任务完成**：
 > M1 dockview 语义全量平移（9d3baa4，物理序 8/8 + 生命周期 + 持久化 v9）；
 > M2 Tauri 3.0.0-alpha.4（5d8c3e7，显式 `.runtime()` + 冒烟全绿）；

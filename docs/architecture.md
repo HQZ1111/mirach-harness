@@ -1,16 +1,20 @@
-# MIRACH 架构方案 v8.0（2026-10-06 · 换栈设计：Tauri 最新版 + CEF + dockview）
+# MIRACH 架构方案 v9.0（2026-10-14 · Agent-Native：唯一真相源 + Tauri 3 原生双通道）
 
-> **状态**：设计定稿，代码未迁移。本文取代 layout-design.md（v7.x flexlayout
-> 时代）成为架构主文档——v7.x 的语义模型（三栏/根面板/colOrder/多柄引擎）
-> 全部平移，实现载体层换栈。 
+> **状态**：换栈（M1/M2/M3）已落地——dockview 布局、Tauri 3.0.0-alpha.4、
+> 官方 tauri-runtime-cef（CEF 152.3.0）窗口实跑（§0-§6）。**§7-§14 是
+> 本轮新增的 Agent-Native 架构**（协议层 agent-protocol / 真相源分层 /
+> 双通道与 SeqTracker / Sink 契约 / 移动端），代码未动，按此逐项移植。
+> 本文取代 layout-design.md（v7.x flexlayout 时代）成为架构主文档。
 
 ## 0. 换栈决定（用户 2026-10-06）
 
-| 层 | 现状（v7.x） | 目标（v8.0） | 动机 |
+| 层 | 现状（v7.x） | 目标（v9.0） | 动机 |
 |----|------|------|------|
-| 壳 | Tauri + wry(WebView2) | **Tauri 最新版 + CEF** | WebView2 行为绑定 Windows/Edge 版本；CEF 自带全量 Chromium，跨端一致、协议可控 |
-| 布局 | flexlayout-react 0.11 | **dockview-react** | flexlayout 语义补丁越打越多（语义戳/根面板/跨度归位全是外挂）；dockview 原生支持 docking/分组/序列化/受控布局 |
-| 引擎 | pi_session.rs 多柄（v7.5） | **不变**（平移） | 多柄并发/定向中断/按路径路由已是栈无关设计 |
+| 壳 | Tauri + wry(WebView2) | **Tauri 3.0.0-alpha.4 + 官方 CEF runtime** | WebView2 行为绑定 Windows/Edge 版本；CEF 自带全量 Chromium，跨端一致、协议可控（§1） |
+| 布局 | flexlayout-react 0.11 | **dockview-react 8.5.1** | flexlayout 语义补丁越打越多；dockview 原生 docking/分组/序列化（§2） |
+| 引擎 | pi_session.rs 多柄（v7.5） | **不变**（平移） | 多柄并发/定向中断/按路径路由已是栈无关设计（§3） |
+| 传输 | axum HTTP+SSE 桥 + token 鉴权 | **Tauri 原生双通道**（invoke + Channel） | HTTP 桥是自建中间层；原生通道去掉端口/token/端点发现（§8） |
+| 协议 | 事件形状内联在 agui.rs | **agent-protocol crate（L3.5）** | 类型系统强制 `tool_call_id`、序列号、协议版本；nightly 污染不外泄（§9） |
 
 ## 1. Tauri + CEF：现状与路径
 
@@ -131,6 +135,11 @@ Tauri command——或保持 HTTP invoke 走 axum，V8 只做 window.invoke 薄�
 
 ## 3.5 L2 原生 IPC 化（Tauri 3 双通道：axum 整层废除）
 
+> **本节是 2026-10-12 的初步裁定（agui_run 两命令面）。2026-10-14
+> Agent-Native 定稿后，命令面以 §10（四模块拆分 + InFlightMap + Channel
+> 按 run 分实例 + SeqTracker/时序固化 §11）为准**——本节只保留"废除什么"
+> 的清单依据，不再定义新面。
+
 **Tauri 3 的 IPC 双通道**（invoke 请求-响应 + Channel 双向流）取代 axum
 HTTP+SSE 桥——L2 从"自建 HTTP 服务器 + token 鉴权 + 端点发现"瘦身为
 **纯 Tauri command 调用**。
@@ -157,13 +166,17 @@ HTTP+SSE 桥——L2 从"自建 HTTP 服务器 + token 鉴权 + 端点发现"瘦
 | ThreadBuffers 环形缓冲 | **两案择一**：A) 保留——断线重连时 Channel 重发 replay（多柄柄存活期事件不丢）；B) 废除——Channel 直推、断线靠前端重水合（pi_get_session_messages 已按路径水合 ✓）。**推荐 B**：水合路径已覆盖状态恢复，环形缓冲的唯一价值（HTTP 断线续传）在原生 IPC 下不存在 |
 | token/endpoint | **废除** |
 
-### 新命令面（Tauri invoke）
+### 新命令面（初稿，已被 §10.3 取代）
 
 ```rust
+// ⚠️ 2026-10-14：此二命令面是初稿。Agent-Native 定稿的命令面 =
+// §10.3 的四模块（actions/sync/config/ctrl），事件流走
+// start_agent_event_stream + ResumeOutcome + SeqTracker（§10.3/§11），
+// 不是"每 run 一个 Channel 绑在 run 命令参数上"。本段仅留作对照。
 #[tauri::command] async fn agui_run(
     thread: String, session_path: Option<String>,
     message: String, images: Vec<AguiImage>,
-    on_event: Channel<serde_json::Value>,   // Tauri 3 Channel 双向流
+    on_event: Channel<serde_json::Value>,
 ) -> Result<RunId, String>
 #[tauri::command] async fn agui_interrupt(thread: String) -> Result<(), String>
 ```
@@ -201,14 +214,214 @@ Channel 实例（Tauri 原生支持多 Channel 并行 ✓）。
 | CEF 打包体积 +100MB | 低 | 产品级 CEF 分发是成熟做法（Steam/Spotify/Notion 同栈） |
 | asupersync 并发 block_on（多柄已用） | 已验证 | v7.5 E2E 实测并行流式 ✓ |
 
-## 6. 载体对照（v7.x → v8.0 文件映射）
+## 6. 载体对照（v7.x → v9.0 文件映射）
 
-| v7.x（flexlayout） | v8.0（dockview） |
+| v7.x（flexlayout） | v9.0（dockview） |
 |------|------|
 | flex-layout.tsx（Layout 壳/工厂/onModelChange） | dockview-shell.tsx（DockviewReact 壳/onReady/onWillLayoutChange） |
-| layout-presets.ts（出厂树） | layout-default.ts（dockview JSON） |
-| constraints.ts / constraints-sync.ts | dockview-constraints.ts（min/max/语义戳校验） |
-| column-ops.ts（栏动词/colOrder/根面板） | dockview-column-ops.ts（api.moveGroup 路由） |
-| drag-session.ts（指针拖拽接管） | dockview 原生 DnD + 自定义 drop overlay（保留 20px 留白逻辑） |
+| layout-presets.ts（出厂树） | dockview-shell.tsx 内 FACTORY_LAYOUT（dockview JSON） |
+| constraints.ts / constraints-sync.ts | panel 级 minimumWidth/maximumWidth（组约束回落活动 panel） |
+| column-ops.ts（栏动词/colOrder/根面板） | dockview-column-ops.ts（serialize 手术 + groupApi.moveTo） |
+| drag-session.ts（指针拖拽接管） | dockview 原生 DnD（onWillDragPanel 准入拦截） |
 | session-runtime.ts / session-thread-pane.tsx | **不变** |
-| pi_session.rs 多柄 / agui.rs | **不变** |
+| pi_session.rs 多柄 / agui.rs | **不变**（agui.rs 的 HTTP 层在 §8 迁移中废除） |
+
+---
+
+# 第二部分：Agent-Native 架构（v9.0 新增，代码未动）
+
+## 7. 分层总图（L1 → L5）
+
+```
+L1 前端（React+TS，纯投影）
+  Dockview（布局容器）· assistant-ui（Thread/Composer/ToolCard/Thinking）
+  shadcn/ui（vendor 单一源码，业务改动走 wrapper）
+  状态层（分层消费 · 单向派生）：
+    Zustand = UI 真相 ⭐        TanStack Query = 缓存（非真相）
+    XState actor = run 生命周期投影（tool call 生命周期 / 审批镜像 /
+      extension UI 请求；写入路径 channel.ts → SeqTracker → 派发）
+    ExternalStoreRuntime 喂 assistant-ui → TokenStream Store（纯 append +
+      按 runId/toolCallId 索引；AgentEventKind 类型系统强制；run end 清空）
+  API 封装层：ipc.ts（InFlightMap）· channel.ts（SeqTracker + onmessage 分流）
+L2 桥接层（Tauri 3 原生双通道）
+  ① invoke（请求-响应，InFlightMap 去重）  ② Channel（按 run 分实例，保序）
+L3.5 Protocol 层（agent-protocol crate）
+  AgentEvent{runId, seq} · ResumeOutcome · ExtensionUi/控制帧 · capability flag
+L3 Rust 应用层（src-tauri）
+  commands/{actions,sync,config,ctrl} + middleware(InFlightMap)
+  ActionRegistry · ApprovalRegistry(审批真相⭐) · AppContext(Arc<ArcSwap>)
+  Channel 句柄表(DashMap<runId,Ch>+AttachState) · AgentDelegate 队列(≤10)
+  event-bridge(RunBuffer 8MB/run · 128MB 全局) · Snapshot/EventSink/Replayable
+  SQLx（业务数据真相⭐）· pi-adapter（nightly 隔离层）
+L4 Pi SDK（pi_agent_rust）—— 会话真相⭐（JSONL/segmented store）
+L5 移动端（feature flag mobile）—— MobileSink（无 Replayable）
+```
+
+## 8. 唯一真相源总表（每类数据恰一个权威持有者）
+
+| 真相 | 持有者 | 其余皆是投影 |
+|------|------|------|
+| UI 状态 | Zustand（唯一 store） | 组件 selector 订阅，禁止旁路写 |
+| run / tool call 生命周期 | XState actor（唯一事件消费者） | channel.ts 只派发，state 拒绝重复 |
+| 会话消息/分支/compaction | **Pi SDK（JSONL / segmented store）** | 前端 hydrate 只读（pi_get_session_messages） |
+| 业务数据 | Rust SQLx（app_data_dir/agent.db） | TanStack Query 缓存 invalidate |
+| 审批态 | ApprovalRegistry（Rust） | 前端卡片是镜像，重放流不复活已应答卡 |
+| Agent 事件传输序 | agent-protocol 的 `seq`（per-run 单调） | TokenStream 按序 append，乱序走 SeqTracker |
+| AppContext | AppState（Arc<ArcSwap<Ctx>>） | 前端 sync_app_context 推送副本 |
+| 布局 | dockview JSON（存储键 v9）+ colflags.v1 | toJSON 快照，非真相 |
+
+**判定规则**：任何字段出现两个写入者 = 违反本表，改设计不改实现。
+
+## 9. L3.5 Protocol 层：agent-protocol crate（新建）
+
+**职责**：前后端事件契约的单一来源。纯类型 + 序列化，**零 IO**（可单测）、
+**不引用 pi**（nightly 污染不外泄，pi-adapter 做转换）。
+
+```rust
+// 核心类型（骨架；字段名以实现为准，类型约束必须保住）
+pub struct AgentEvent { pub run_id: RunId, pub seq: u64, pub kind: AgentEventKind }
+
+pub enum AgentEventKind {
+    /// 模型文本输出。无 tool_call_id —— 类型系统保证不会张冠李戴。
+    AssistantOutput { delta: String },
+    /// 工具流式输出。必有 tool_call_id ⭐ —— 编译期强制。
+    ToolOutput { tool_call_id: ToolCallId, delta: String },
+    // 生命周期/控制帧同枚举或独立 enum，实现时定：
+    // RUN_STARTED / RUN_FINISHED / RUN_ABORTED / RUN_ERROR
+    // SNAPSHOT_RESTORED / RUN_ENDED_ACK / RUN_GONE
+}
+
+pub enum ResumeOutcome { Replayed, SnapshotRequired, RunGone }
+
+pub struct ExtensionUiRequest { /* + protocolVersion */ }
+pub struct ExtensionUiResponse { /* + protocolVersion */ }
+```
+
+**铁律**：
+1. `ToolOutput` 必带 `tool_call_id`——构造时无 id 编译不过（pi-adapter
+   转换处漏 id = 编译错误，不是运行期丢事件）。
+2. `seq` per-run 单调递增，从 1 起；控制帧不占 seq（或独立序，实现时定）。
+3. `protocolVersion` 随 ExtensionUi 往返校验（前后端协议漂移 = 显式错误）。
+4. 移动端能力差异用 **capability flag** 表达（协议层声明，不做 cfg 散布）。
+5. serde 序列化形状 = L1 TypeScript 镜像类型的唯一依据（手工镜像或
+   ts-rs 生成，实现时定）。
+
+## 10. L2 双通道（Tauri 3 原生）与 L3 命令面
+
+### 10.1 通道分工
+
+| 通道 | 方向 | 语义 | 纪律 |
+|------|------|------|------|
+| invoke | 前端→Rust | 请求-响应（动作/同步/配置/控制） | **统一走 InFlightMap**（无黑名单） |
+| Channel | Rust→前端 | 事件流（按 run 分实例，独立 index 序列） | 保序；分级传输（§12） |
+
+### 10.2 InFlightMap（前端 ipc.ts 与 Rust middleware.rs 同构）
+
+- key = `method + ':' + hash(payload)` ⭐（approve_action 也走，key 含 payload hash）
+- 仅 **in-flight 去重**，无 response cache；容量 1000（并发上限），
+  打满 → `ERR_INFLIGHT_FULL`
+- 清理 TTL 用**完成时间** ⭐；后台每 30s 清理
+
+### 10.3 命令清单（按类拆模块）
+
+| 模块 | 命令 |
+|------|------|
+| commands/actions | call_action · delegate_to_agent · approve_action（payload=ExtensionUiResponse+protocolVersion） |
+| commands/sync | sync_app_context |
+| commands/config | set_model · set_thinking_level · set_compaction_settings |
+| commands/ctrl | **start_agent_event_stream**⭐ `{runId, lastSequence: Option<Seq>} → ResumeOutcome`（InFlightMap key=runId，lastSequence 作 payload 校验）· snapshot_applied · run_ended_ack · issue_token · get_agui_endpoint · 窗口控制 |
+
+### 10.4 L3 组件职责
+
+- **ApprovalRegistry**：审批真相 ⭐。`resolve(response)`：
+  is_valid_response → protocolVersion 校验 → 类型驱动反序列化 →
+  终态幂等兜底（已 resolved → AlreadyResolved）→ resolve oneshot。
+- **AgentDelegate 队列**：上限 10，满 → `ERR_QUEUE_FULL`（前端 UI 提示
+  + 重试）；FIFO（MVP）；统一走 InFlightMap。
+- **event-bridge**：按 runId 写 Channel + RunBuffer（环形缓冲重放：
+  8 MB/run，128 MB 全局；`latest_seq` 溢出后继续推进、events 清空、
+  send() 不塞、replay() 无论 from 必返回 `SnapshotRequired`）。
+- **Sink 三 trait**：`EventSink(send)` · `SnapshotSource(snapshot：
+  缓存命中→JSONL 重建→RunGone)` · `Replayable(replay)`。
+  **ChannelSink（desktop）impl 全部 3 个**；**MobileSink（feature flag）
+  只 impl 前 2 个**——能力探测变成类型约束（编译期即知移动端不可重放）。
+- **AppContext**：`Arc<ArcSwap<Ctx>>`（高频读低频写，读者无锁）；
+  Channel 句柄表 `DashMap<runId, Channel>+AttachState`（防同 runId 重复 attach）。
+- **pi-adapter**：唯一碰 pi 的 nightly 层。PiAgent(impl Agent) ·
+  events 转换器（pi::AgentEvent → agent_protocol，ToolOutput 漏
+  tool_call_id = 编译错误 + tracing::warn! 兜底）· session/lifecycle/tools ·
+  extension_ui_handler（请求→event-bridge→Channel；响应←ApprovalRegistry）·
+  pi_session_indexer（只读 header 更新 SQLx 索引：幂等/增量重建(mtime)/
+  崩溃后重建/index_version）。
+
+## 11. L1 状态层与事件时序（channel.ts / ipc.ts）
+
+### 11.1 状态层纪律（lint 可查）
+
+| 状态库 | 角色 | 纪律 |
+|------|------|------|
+| Zustand | UI 真相 ⭐ | 组件只经 Zustand 读 UI 态 |
+| TanStack Query | 缓存 | 组件中**禁止直接 useQuery**（经封装层） |
+| XState actor | run 生命周期投影 | 组件中**禁止直接 useActor**（经 selector/封装） |
+| TokenStream Store | 轻量 ExternalStore | 纯 append + 按 runId/toolCallId 索引；run end 清空（无 orphan/attached） |
+
+### 11.2 SeqTracker（channel.ts，⭐核心）
+
+- `maxSeq` = 连续收到的最大 seq；`pendingBuffer: Map<seq, event>` 接乱序窗口
+- 收到 `seq == maxSeq+1`：接受 + flushPending
+- 收到 `seq > maxSeq+1`：入 pendingBuffer + 触发 `attachStream(maxSeq)`
+- 收到 `seq <= maxSeq`：丢弃
+- onmessage 分流：①SeqTracker 处理 → ②token/思考/stdout → TokenStream →
+  ③tool 生命周期/审批/run → XState（send 语义，state 拒绝重复）
+
+### 11.3 时序固化（每次 run）
+
+```
+1. 生成 runId
+2. 创建 Channel + onmessage
+3. attachStream(runId, null)（maxSeq=0）→ ResumeOutcome：
+   ├ Replayed         → 等 Channel 推重放事件
+   ├ SnapshotRequired → 起 5s 提示超时（不判 RunGone ⭐），等 Rust 推
+   │                    SNAPSHOT_RESTORED 或 RUN_GONE ⭐
+   └ RunGone          → 清 Store
+4. SNAPSHOT_RESTORED → 立即替换状态 + 恢复渲染 + 异步发显式 ack
+   （指数退避 2s→4s→8s→16s + 抖动，maxAttempts=4，总 ~30s）
+5. 触发 call_action / delegate
+6. RUN_ENDED / RUN_ABORTED → 标记 ENDING → 清 Store/XState/订阅 →
+   RUN_ENDED_ACK（超时 3s → 直接释放；超时后 ACK → 幂等忽略 + 日志）
+```
+
+## 12. 分级传输（TransferPolicy，Channel 内）
+
+| 大小 | 通道 | 附加 |
+|------|------|------|
+| <4KB | JSON → webview.eval（已转义，防注入） | 阈值可配置（桌面/移动不同） |
+| <64KB | Uint8Array | — |
+| >64KB | IPC Queue + fetch | token 绑定 (runId, payloadId) + 30s 仅限首次使用 + 主路径 Rust 推 `TOKEN_ISSUED` ⭐ + 兜底 issue_token（response 带 token） |
+
+## 13. L4/L5 与契约测试
+
+- **L4 Pi SDK**：`create_agent_session · AgentSessionHandle::prompt ·
+  AgentEvent 流 · ToolRegistry · 生命周期（Mutex 串行）·
+  ExtensionUiRequest（confirm/select/input/editor/notify）·
+  ExtensionUiResponse（Confirmed|Value|Cancelled）· **会话真相 ⭐**。
+- **L5 移动端**：`#[cfg(feature="mobile")]` 隔离。MobileSink
+  （EventSink+SnapshotSource）：send=有序 IPC+前端批量合并；
+  snapshot=从 pi_session_snapshots 恢复（共享 schema，每会话 ≤3 快照，
+  淘汰最老+保留最近 run 边界；snapshot_version 不匹配→JSONL 重建；
+  缓存+JSONL 都失败→RunGone ⭐）。**不 impl Replayable**。
+- **契约测试 ⭐**：
+  - EventSink + SnapshotSource 契约测试：跑在 ChannelSink **和** MobileSink
+  - Replayable 契约测试：只跑在 ChannelSink
+
+## 14. Agent-Native 落地顺序（每步独立可验证）
+
+| 步 | 内容 | 验证 |
+|----|------|------|
+| N1 | agent-protocol crate（§9 类型 + 单测：seq/tool_call_id/serde 往返） | cargo test |
+| N2 | pi-adapter 转换器切换到 agent-protocol 类型（agui.rs 映射器逐行迁移） | 现有 30 Rust 用例 + 映射单测 |
+| N3 | L2 双通道切换：agui_run(invoke) + Channel 替代 axum HTTP+SSE（§8 废除清单执行，ThreadBuffers 按推荐 B 废除） | CDP 冒烟：发消息→流式渲染→中断→重水合 |
+| N4 | channel.ts SeqTracker + ipc.ts InFlightMap + XState 接线（§11） | vitest：乱序/跳变/时序固化单测 |
+| N5 | event-bridge RunBuffer + start_agent_event_stream/ResumeOutcome（§10.4） | 重放/溢出→SnapshotRequired 单测 |
+| N6 | 审批/审批注册表/protocolVersion 校验（§10.4） | 审批卡 E2E |
+| N7 | MobileSink + 契约测试（§13，M4 后） | cargo test 双 sink |
