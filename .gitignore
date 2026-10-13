@@ -5,6 +5,7 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/schemas/
+crates/*/target/
 
 # 日志与临时文件
 *.log
