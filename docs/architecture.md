@@ -262,15 +262,21 @@ L5 移动端（feature flag mobile）—— MobileSink（无 Replayable）
 | 真相 | 持有者 | 其余皆是投影 |
 |------|------|------|
 | UI 状态 | Zustand（唯一 store） | 组件 selector 订阅，禁止旁路写 |
-| run / tool call 生命周期 | XState actor（唯一事件消费者） | channel.ts 只派发，state 拒绝重复 |
+| run / tool call 生命周期 | XState actor（唯一事件消费者） | channel.ts 只派发（经 SeqTracker），state 拒绝重复（XState 守护） |
 | 会话消息/分支/compaction | **Pi SDK（JSONL / segmented store）** | 前端 hydrate 只读（pi_get_session_messages） |
-| 业务数据 | Rust SQLx（app_data_dir/agent.db） | TanStack Query 缓存 invalidate |
-| 审批态 | ApprovalRegistry（Rust） | 前端卡片是镜像，重放流不复活已应答卡 |
+| 业务数据 | SQLx + in-memory cache（Usage/token 等） | TanStack Query 缓存 invalidate |
+| 审批态 | ApprovalRegistry（Rust，有 list/respond/cleanup） | 前端卡片是镜像，重放流不复活已应答卡 |
 | Agent 事件传输序 | agent-protocol 的 `seq`（per-run 单调） | TokenStream 按序 append，乱序走 SeqTracker |
+| **流游标（lastEventId）** | **Rust 缓冲（pi_stream_cursor）** | 前端只作 attach 起点读一次，不是自己的真相 |
 | AppContext | AppState（Arc<ArcSwap<Ctx>>） | 前端 sync_app_context 推送副本 |
 | 布局 | dockview JSON（存储键 v9）+ colflags.v1 | toJSON 快照，非真相 |
 
-**判定规则**：任何字段出现两个写入者 = 违反本表，改设计不改实现。
+**判定规则**：
+1. 任何字段出现两个写入者 = 违反本表，改设计不改实现。
+2. **投影可重建**：非真相层必须能用真相层重算出来（hydrate/水合路径覆盖全字段）。
+3. **游标不归前端**：断点续传句柄（lastEventId/seq）的权威在 Rust 缓冲，前端
+   只在 attach 时读一次并作为校验参数，不持有推进权（现码 `pi_stream_cursor`
+   符合；N3 迁移后改 `start_agent_event_stream(lastSequence)` 同语义）。
 
 ## 9. L3.5 Protocol 层：agent-protocol crate（新建）
 
@@ -367,12 +373,22 @@ pub struct ExtensionUiResponse { /* + protocolVersion */ }
 
 ### 11.2 SeqTracker（channel.ts，⭐核心）
 
-- `maxSeq` = 连续收到的最大 seq；`pendingBuffer: Map<seq, event>` 接乱序窗口
-- 收到 `seq == maxSeq+1`：接受 + flushPending
-- 收到 `seq > maxSeq+1`：入 pendingBuffer + 触发 `attachStream(maxSeq)`
-- 收到 `seq <= maxSeq`：丢弃
-- onmessage 分流：①SeqTracker 处理 → ②token/思考/stdout → TokenStream →
-  ③tool 生命周期/审批/run → XState（send 语义，state 拒绝重复）
+**职责收窄（R3 源码核实后的修正）**：Tauri `Channel` **自带按序投递**——
+每条消息带 index，JS 端内部缓冲乱序、missing 时不触发 onmessage（§12 源码
+实锤）。因此 SeqTracker **不再负责"每条消息的乱序窗口"**，只负责
+**跨 attach 边界的续接**：
+
+| 场景 | 谁负责 |
+|------|--------|
+| 同一次 attach 内的乱序/丢包 | **Tauri Channel 内部**（index + JS 端缓冲） |
+| 重连/重新 attach 后的 `lastSequence` 续接 | **SeqTracker**（前端，§11.3 第 3 步） |
+| 重放流 replay(from) 的起点裁定 | **Rust RunBuffer**（`latest_seq` 为权威，§10.4） |
+
+- `maxSeq` = 本 attach 生命周期内已连续收到的最大 seq（用于续接起点上报）
+- attach 返回 `SnapshotRequired` / 出现窗口空洞 → 触发一次
+  `attachStream(maxSeq)`（Rust 按 `RunBuffer.latest_seq` 裁 replay 起点）
+- onmessage 分流：①TokenStream（token/思考/stdout，runId+toolCallId 索引）
+  → ②XState（tool 生命周期/审批/run 控制帧，send 语义、state 拒绝重复）
 
 ### 11.3 时序固化（每次 run）
 
@@ -395,9 +411,20 @@ pub struct ExtensionUiResponse { /* + protocolVersion */ }
 
 | 大小 | 通道 | 附加 |
 |------|------|------|
-| <4KB | JSON → webview.eval（已转义，防注入） | 阈值可配置（桌面/移动不同） |
-| <64KB | Uint8Array | — |
-| >64KB | IPC Queue + fetch | token 绑定 (runId, payloadId) + 30s 仅限首次使用 + 主路径 Rust 推 `TOKEN_ISSUED` ⭐ + 兜底 issue_token（response 带 token） |
+| <8192B (≈8KB) JSON | JSON → webview.eval（已转义，防注入） | 默认阈值；可通过构建器参数覆盖 |
+| <1024B (≈1KB) Raw  | Uint8Array → webview.eval | 默认阈值；可通过构建器参数覆盖 |
+| ≥阈值          | IPC Queue + fetch（走 fetch API） | token 绑定 (runId, payloadId) + 主路径 Rust 推 `TOKEN_ISSUED` ⭐ + 兜底 issue_token（response 带 token） |
+
+**发送机制**（源码实锤）：
+- 每条 `Channel::send(data)` 携带本条 **index**（单调递增，从 0 起）。
+- JavaScript 端按 index 排序缓存乱序窗口，missing 时不触发 onmessage；
+- `on_drop` 时 Channel 自动 close，JS 端解绑回调。
+- 未捕获的异常会通过 `window.__TAURI_INTERNALS__.runCallback(..., { error })` 上报前端。
+
+**与先前假设的区别**：
+- 原文档假设 4KB/64KB/>64KB 分级——实际更宽松（8KB/1KB），因 Tauri 原生实现 eval 更快。
+- 原文档假设 Channel 自带 `on_drop` 时前端清 Store——实为 JS 端自动解绑回调；前端 Store 清空走 `RUN_ENDED_ACK`（§11）。
+- 原文档假设 Channel 需要手动管理 pendingBuffer——实为 `ChannelDataIpcQueue` 封装好的 pendingBuffer（内部 HashMap）。
 
 ## 13. L4/L5 与契约测试
 
