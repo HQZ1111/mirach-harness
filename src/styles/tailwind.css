@@ -1,5 +1,10 @@
 @import "tailwindcss";
 @import "tw-shimmer";
+/* animate-in/out 系工具类定义源（Tailwind v4 版 tailwindcss-animate；
+   2026-10-14 实锤：全树 68 处 animate-in 类此前**无定义源、静默失效**
+   ——Radix popover/dialog/sheet/tooltip 进出场全在跳变。此导入修复根因；
+   下方 --tw-animation 时长/曲线再用 beUI 值覆盖默认。 */
+@import "tw-animate-css";
 
 /* assistant-ui registry 组件（shadcn 形态）所需的主题令牌（浅色）。
    Tailwind v4 CSS-first：@theme 内的 --color-* 生成 bg-* / text-* 等工具类。
@@ -32,6 +37,14 @@
   --sidebar-accent-foreground: hsl(240 5.9% 10%);
   --sidebar-border: hsl(220 13% 91%);
   --sidebar-ring: hsl(217.2 91.2% 59.8%);
+
+  /* animate-in/out 系全局默认（tw-animate-css 的钩子）：曲线/时长换 beUI
+     值（2026-10-14）——EASE_OUT=0.16/1/0.3/1（beUI 库级默认，原话"默认
+     ease 太弱"）；时长 0.18s = beUI 标准入场（--beui-dur-enter）。组件处
+     显式 duration-*/ease-* 工具类仍可覆盖（--tw-duration/--tw-ease 就近
+     作用域优先）。 */
+  --tw-ease: var(--beui-ease-out);
+  --tw-duration: var(--beui-dur-enter);
 }
 
 @theme inline {
@@ -86,6 +99,26 @@
 @custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
 
 @custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/* ── animate-in/out 的 beUI 曲线/时长覆盖（2026-10-14）──
+   机制：tw-animate-css 把 animate-in 烘焙为
+   `enter var(--tw-duration,.15s) var(--tw-ease,ease)`——裸 `@theme` 重声明
+   在此链上不生效（实测 0.15s/ease 仍赢，Tailwind 主题合并语义从 @import 的
+   源序取定义）。故此处直接补两个规则改**默认值**：消费处显式的
+   duration 与 ease 工具类仍优先（它们写 --tw-duration 与 --tw-ease 局部
+   变量，本规则 var() 链先读这两个）。曲线 = beUI EASE_OUT=0.16/1/0.3/1
+   （库级默认）；时长 = 入场 0.18s / 退场 0.12s（--beui-dur-enter/exit）。
+   注意：本注释不得出现「星斜」连写（会提前闭合注释——踩过），需要时
+   用空格隔开或改写措辞。 */
+.animate-in {
+  animation-duration: var(--tw-duration, var(--beui-dur-enter, 0.18s));
+  animation-timing-function: var(--tw-ease, var(--beui-ease-out, cubic-bezier(0.16, 1, 0.3, 1)));
+}
+
+.animate-out {
+  animation-duration: var(--tw-duration, var(--beui-dur-exit, 0.12s));
+  animation-timing-function: var(--tw-ease, var(--beui-ease-out, cubic-bezier(0.16, 1, 0.3, 1)));
+}
 
 .dark {
   --sidebar: hsl(240 5.9% 10%);
