@@ -300,91 +300,38 @@
   --openpage-hint-size: 12px;                 /* 提示文字字号 */
 }
 
-/* ── beUI 动效令牌（2026-10-14；来源 beui.dev motion 组件样式值提取）──
-   beUI 把动效当设计规范管理（原话："Shared motion tokens"）——本段收纳
-   其全部样式值，供未来组件开发取数。命名一律 --beui-* 前缀，**不覆盖**
-   现有令牌；JS 侧 spring 常量（motion 库消费）镜像在 src/lib/ease.ts，
-   来源与数值与本段一一对应。16 组件：Bouncy Accordion / Theme Toggle
-   (Blinds) / Animated Toast Stack / Number Animation / Popover / Tooltip /
-   Animated Context Menu / File Tree / Shared Layout Background / Select /
-   Input / Tabs / Animated Breadcrumb / Date Range Picker / Animated Alert /
-   Color Picker。 */
+/* ── beUI 动效令牌（2026-10-14；来源 beui.dev motion 组件样式值）──
+   **唯一源头原则**：beUI 组件的 JS 动效常量（src/lib/ease.ts）改为从
+   本段 CSS 变量运行时读取——此处是唯一数据源，ease.ts 不再硬编码。
+   段内两类值：
+   ①**CSS 侧直接消费**（tailwind.css 的 animate-in/out 覆盖、theme-toggle）；
+   ②**JS 侧读取**（spring 数值三元组，ease.ts 解析后喂 motion 库）。
+   未列出的组件级时序（toast 4.2s/tooltip 120ms 等）**不抄**——那些是
+   beUI 组件自带行为，用了组件就自带，不用组件无消费者（用户 2026-10-14
+   定稿：组件效果不重复进令牌；确需共享时再提取）。 */
 :root {
-  /* Ease 曲线（注释原话：默认 ease-in/ease-out 太弱） */
+  /* Ease 曲线 */
   --beui-ease-out: cubic-bezier(0.16, 1, 0.3, 1);      /* 库级默认：几乎全部进出场 */
   --beui-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1); /* 大幅位移/抽屉 */
   --beui-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);  /* 抽屉专用 */
-  --beui-ease-material: cubic-bezier(0.4, 0, 0.2, 1);  /* Theme Toggle circle 变体 */
-  /* Spring（数值登记；motion 库用 JS 形式，见 lib/ease.ts）
-     press 500/30/0.6 · swap 460/30/0.55 · panel 420/40/0.5 ·
-     layout 360/32/0.6 · mouse 200/15/0.3 · glide 700/50/0.5（临界阻尼）
-     Tabs 指示器 245/36/1.2（刻意无过冲——可滚动容器防抖动）·
-     Toast 堆叠 420/34/0.75 */
 
-  /* 时长体系（规律：入场 0.18–0.28s；退场更快 0.10–0.18s；微交互 0.08–0.12s） */
-  --beui-dur-micro: 0.08s;  /* 条目级切换 */
+  /* 时长（animate-in/out 默认值消费） */
   --beui-dur-exit: 0.12s;   /* 标准退场 */
   --beui-dur-enter: 0.18s;  /* 标准入场 */
-  --beui-dur-quick: 0.2s;   /* 快切/Select 开合 */
-  --beui-dur-morph: 0.26s;  /* overlay morph 进场（spring duration 近似） */
 
-  /* 组件级时序 */
-  --beui-toast-dismiss: 4200ms;   /* 自动消失 */
-  --beui-toast-drag-dismiss: 72px;/* 拖拽关闭位移阈值（速度阈值 520px/s） */
-  --beui-toast-max-visible: 4;    /* 堆叠上限 */
-  --beui-tooltip-delay: 120ms;    /* 悬停开启 */
-  --beui-tooltip-skip: 300ms;     /* 关闭后 skip 窗口（其它 tooltip 秒开） */
-  --beui-longpress: 520ms;        /* 触屏长按（容忍位移 10px） */
-  --beui-toggle-vt: 700ms;        /* Theme Toggle view-transition */
-  --beui-toggle-vt-rect: 400ms;   /* rect 变体 */
-  --beui-count: 1.2s;             /* Number Animation 计数 */
-  --beui-ticker: 0.9s;            /* number-ticker 逐位滚动（stagger 0.04s） */
-  --beui-digit-swap: 0.18s;       /* digit-swap（stagger 0.006s） */
+  /* Spring 数值三元组（JS 读取源：ease.ts 拼成 motion 的
+     { type:'spring', stiffness, damping, mass }——数值改这里，组件全跟） */
+  --beui-spring-press-s: 500;    --beui-spring-press-d: 30;    --beui-spring-press-m: 0.6;
+  --beui-spring-swap-s: 460;     --beui-spring-swap-d: 30;     --beui-spring-swap-m: 0.55;
+  --beui-spring-panel-s: 420;    --beui-spring-panel-d: 40;    --beui-spring-panel-m: 0.5;
+  --beui-spring-layout-s: 360;   --beui-spring-layout-d: 32;   --beui-spring-layout-m: 0.6;
+  --beui-spring-mouse-s: 200;    --beui-spring-mouse-d: 15;    --beui-spring-mouse-m: 0.3;
+  --beui-spring-glide-s: 700;    --beui-spring-glide-d: 50;    --beui-spring-glide-m: 0.5;
+  --beui-spring-tabs-s: 245;     --beui-spring-tabs-d: 36;     --beui-spring-tabs-m: 1.2;   /* 刻意无过冲 */
+  --beui-spring-toast-s: 420;    --beui-spring-toast-d: 34;    --beui-spring-toast-m: 0.75;
 
-  /* Theme Toggle — Blinds 几何（mask-size 72px 钉住"两端落干净"） */
-  --beui-vt-slat: 72px;       /* 板条宽 */
-  --beui-vt-slat-soft: 20px;  /* 软化边宽 */
-  --beui-vt-slat-from: -20px; /* 起始偏移 */
-
-  /* 组件几何（跨组件复用面） */
-  --beui-filetree-indent: 18px; /* File Tree 缩进步长（padL 8 + depth×18；枝线 16+(depth-1)×18） */
-  --beui-filetree-row-h: 36px;  /* 行高 */
-  --beui-tabs-fade: 40px;       /* Tabs 边缘渐隐遮罩 */
-  --beui-num-slot: 1.1em;       /* 数字槽高（ticker/digit-swap） */
-  --beui-accordion-radius: 28px;/* Bouncy Accordion 组角（borderTopRadius 动画） */
-
-  /* 色板补遗（beUI 基调；实现其组件时取用，不覆盖现有值） */
-  --beui-primary: #0285f7;                  /* beUI primary（近品牌 #006fff） */
-  --beui-accent: oklch(72% 0.18 195);       /* 青 */
-  --beui-neon: oklch(80% 0.22 145);         /* 荧光绿 */
-  --beui-violet: oklch(68% 0.22 295);
-  --beui-danger: oklch(62% 0.22 25);
-  --beui-success: oklch(70% 0.18 155);
-  --beui-warning: oklch(78% 0.18 75);
-  --beui-border-strong: oklch(15% 0 0 / 0.12);
-  --beui-highlight-row: color-mix(in srgb, var(--text) 6.5%, transparent);   /* 菜单活动行 */
-  --beui-highlight-range: color-mix(in srgb, var(--text) 8%, transparent);   /* 日历范围带 */
-
-  /* 玻璃（.glass 系） */
-  --beui-glass-bg: oklch(99% 0 0 / 0.55);
-  --beui-glass-border: oklch(15% 0 0 / 0.08);
-  --beui-glass-strong-bg: rgb(255 255 255 / 0.7);
-  --beui-glass-thin-bg: rgb(255 255 255 / 0.45);
-  --beui-glass-blur: 20px;         /* .glass：blur(20px) saturate(160%) */
-  --beui-glass-strong-blur: 16px;
-  --beui-glass-thin-blur: 12px;
-  --beui-glass-saturate: 160%;
-
-  /* 阴影（Popup 系；context-menu/popover-morph 原用 filter: drop-shadow） */
-  --beui-shadow-menu: 0 18px 28px rgb(0 0 0 / 0.2);   /* Context Menu */
-  --beui-shadow-morph: 0 10px 18px rgb(0 0 0 / 0.14); /* Popover-Morph */
-  --beui-shadow-glass: inset 0 1px 0 0 rgb(255 255 255 / 0.06), 0 24px 60px -24px rgb(0 0 0 / 0.45);
-  --beui-shadow-thumb: 0 0 0 1px rgb(0 0 0 / 0.12), 0 2px 6px rgb(0 0 0 / 0.25); /* Color Picker 拇指 */
-
-  /* 动效模糊值（motion filter，非 backdrop） */
-  --beui-blur-pop: 6px;    /* pill/周边元素 */
-  --beui-blur-swap: 8px;   /* 文本交换 */
-  --beui-blur-settle: 10px;/* toast/ticker 进场起始 */
+  /* Theme Toggle Blinds 几何（mask-size 72px 钉住"两端落干净"） */
+  --beui-vt-slat: 72px;       /* 板条宽（theme-toggle.tsx 消费） */
 }
 
 /* ── beUI 关键帧（唯一非规则的例外：关键帧是**定义**不是规则）──
