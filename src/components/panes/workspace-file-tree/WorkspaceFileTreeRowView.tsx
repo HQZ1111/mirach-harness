@@ -101,12 +101,12 @@ export function WorkspaceFileTreeRowView({
       aria-expanded={isDirectory ? row.expanded : undefined}
       tabIndex={0}
       className={cn(
-        "group/file-tree-row relative flex h-7 w-full min-w-0 items-center gap-1.5 rounded-lg border pr-2 py-1 text-left text-(--filetree-row-font-size) text-(--text) outline-none transition-[background-color,border-color,box-shadow]",
+        "group/file-tree-row relative flex h-7 w-full min-w-0 items-center gap-1.5 rounded-lg border pr-2 py-1 text-left text-(--filetree-row-font-size) text-(--text) outline-none transition-[border-color,box-shadow]",
         "cursor-pointer",
         "pl-[calc(var(--workspace-file-tree-depth)*0.75rem+0.5rem)]",
-        selected
-          ? "border-(--fl-accent) bg-transparent hover:bg-(--hover-wash)"
-          : "border-transparent hover:bg-(--hover-wash)",
+        // 行背景保持透明：hover 指示由 FileTreeHoverPill 滑动块承担
+        // （2026-10-14 纯视觉层接线，行自身洗底移除防瞬时双层）。
+        selected ? "border-(--fl-accent) bg-transparent" : "border-transparent",
         "focus-visible:border-(--fl-accent)",
       )}
       title={relativePath}

@@ -757,3 +757,19 @@
   font-size: var(--openpage-hint-size);
   margin-left: auto;
 }
+
+/* ── 文件树悬停滑动指示块（beUI SharedLayoutBg 样式语义移植，2026-10-14）──
+   纯视觉层：DOM 在树容器首子节点（行集是虚拟化 absolute 定位叠加），
+   pointer-events:none 不截胡行交互。行自身 hover 洗底已移除防瞬时双层。
+   top/透明度过渡 = 行间滑行 + 离开淡出（beUI EASE_OUT_CSS 近似
+   SPRING_LAYOUT=360/32/0.6；JS 侧见 FileTreeHoverPill.tsx）。z 层级：
+   行为后续兄弟节点，同 z 层后绘制在上——pill 在行盒子之下、容器背景之上。 */
+.file-tree-hover-pill {
+  background: var(--hover-wash);
+  border-radius: 8px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: 0;
+}

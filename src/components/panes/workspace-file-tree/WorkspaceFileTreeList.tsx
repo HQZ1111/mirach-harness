@@ -11,6 +11,7 @@ import {
 } from "@/components/panes/workspace-file-tree/model";
 import { WorkspaceFileTreeNotice } from "@/components/panes/workspace-file-tree/WorkspaceFileTreeNotice";
 import { WorkspaceFileTreeRowView } from "@/components/panes/workspace-file-tree/WorkspaceFileTreeRowView";
+import { FileTreeHoverPill } from "@/components/panes/workspace-file-tree/FileTreeHoverPill";
 import { WORKSPACE_FILE_TREE_VIRTUAL_ROW_HEIGHT_PX } from "@/components/panes/workspace-file-tree/constants";
 import type { FileTreeVirtualItem } from "@/components/panes/workspace-file-tree/useFileTreeVirtualizer";
 
@@ -122,6 +123,10 @@ export function WorkspaceFileTreeList({
       role="tree"
       aria-label={workspaceTitle}
     >
+      {/* 悬停滑动指示块（纯视觉层：事件委托 + 绝对定位，2026-10-14——
+          虚拟化/点击/右键全不动）。必须首子节点：DOM 序在行之下（行是
+          absolute 定位叠加），z 由 CSS 约束在行内容之下、行背景之上。 */}
+      <FileTreeHoverPill />
       {virtualItems.map((virtualItem) => {
         const row = rows[virtualItem.index];
         if (!row) {
