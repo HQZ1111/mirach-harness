@@ -6,6 +6,18 @@
    下方 --tw-animation 时长/曲线再用 beUI 值覆盖默认。 */
 @import "tw-animate-css";
 
+/* ── shadcn 标准 base（2026-10-14 补）──
+   Tailwind v4 的 `border` 工具类默认色 = currentColor（近黑）——shadcn
+   体系靠这条 base 规则把全站默认边框色改成主题 --border（用户实锤：
+   "弹窗黑边"= 此规则缺失，所有 border 浮层黑描边）。同样补 outline
+   的 ring 色默认。 */
+@layer base {
+  * {
+    border-color: var(--border);
+    outline-color: var(--ring);
+  }
+}
+
 /* assistant-ui registry 组件（shadcn 形态）所需的主题令牌（浅色）。
    Tailwind v4 CSS-first：@theme 内的 --color-* 生成 bg-* / text-* 等工具类。
    这些令牌只服务 CLI 拉来的组件，布局引擎样式仍走 tokens.css 体系。 */

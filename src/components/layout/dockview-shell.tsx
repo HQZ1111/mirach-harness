@@ -112,7 +112,21 @@ const loadLayout = (): SerializedDockview | null => {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as SerializedDockview
+    const parsed = JSON.parse(raw) as SerializedDockview
+    // 坏档防御（2026-10-14 实锤）：曾出现 views:[] 的空 leaf 存档——
+    // 分栏手术中途状态被持久化后，后续启动递归恶化（手术找不到左栏 leaf
+    // → 报"不在场"→ 树越掏越空）。**凡根行有 leaf.views 为空数组的
+    // 存档判废**，回出厂布局（错误可见，不静默吞）。
+    const root = (parsed as unknown as { grid?: { root?: { data?: { data?: { views?: unknown } }[] } } })
+      .grid?.root
+    const kids = root?.data ?? []
+    const badIdx = kids.findIndex((k) => Array.isArray(k?.data?.views) && k.data!.views!.length === 0)
+    if (badIdx >= 0 || kids.length === 0) {
+      console.error('[dv-shell] 布局存档含空 leaf（坏档）——判废回出厂布局', { badIdx, kids: kids.length })
+      localStorage.removeItem(LAYOUT_KEY)
+      return null
+    }
+    return parsed
   } catch (e) {
     console.error('[dv-shell] 布局存档解析失败——出厂布局', e)
     return null

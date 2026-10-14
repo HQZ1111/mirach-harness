@@ -38,6 +38,28 @@
   overflow: hidden;
 }
 
+/* 主对话栏 = 定位宿主（MainTint 调色层以它为参照铺满）。
+   isolation:isolate 关键：dockview 的 .dv-groupview 有不透明白底，
+   tint 的 z-index:-1 会掉到该白底**之下**不可见——isolate 建立本层
+   stacking context，tint 困在 pane 内、白底之上、内容之下（2026-10-14
+   实锤："颜色层没了"根因）。 */
+.assistant-thread-pane {
+  position: relative;
+  isolation: isolate;
+}
+
+/* MainTint dockview 变体（2026-10-14 回迁）：面板内绝对定位——顶带
+   （--logo-strip-h 85）之下起画；左右贴边让位用与内容一致的 30px 内容线
+   （--rail-gutter）；圆角/色走 .main-tint 本体。z-index:-1 垫在内容下。 */
+.main-tint--dockview {
+  top: var(--logo-strip-h);
+  left: var(--rail-gutter);
+  right: var(--rail-gutter);
+  bottom: 0;
+  width: auto;
+  height: auto;
+}
+
 /* ── 代码预览（code-preview.tsx；Shiki 高亮 + 行号槽，
      hermes styles.css 的 .preview-source-code 规则同构） ── */
 

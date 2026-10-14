@@ -157,6 +157,17 @@
    **关键：它不带基础 tab_button 类**——字号/内边距必须在这里单独接
    令牌，否则 主区/检查/文件/终端 这些单页签 zone 的标签是 16px 默认字
    （"终端的标签样式没统一"的根源）。 */
+/* ── dockview 组样式（v8.0 M1 起，2026-10-14 补）── */
+
+/* 面板栏标签条：**不顶到窗口顶**——条容器下移到顶带（--logo-strip-h=85）
+   之下，位置在顶栏（Titlebar 浮层/拖窗带）下面（用户 2026-10-14 定稿）。
+   选择器只命中「有可见标签条的组」：hideHeader 组的 bar 是 display:none，
+   面板栏组是 display:flex（实测）。窗口圆点浮层在右上角（.app-titlebar），
+   条下移后窗控制不再和标签重叠。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) {
+  margin-top: var(--logo-strip-h);
+}
+
 /* ── 会话页签条 leading：logo 50 + MIRACH 30/black/#006fff/字距2
    （用户定稿），位于条顶；页签行沉底（条 100 = leading 区 + 页签行）──
    高度 = 条高（占满）：条容器是 flex-end 沉底链，70 高的块会被压到条底
