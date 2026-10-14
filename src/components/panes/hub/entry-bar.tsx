@@ -34,6 +34,8 @@ import {
   XIcon,
 } from 'lucide-react'
 
+import { SharedLayoutBg } from '@/components/motion/shared-layout-bg'
+
 import { openResourcesDialog } from './pi-resources-dialog'
 
 /** 入口的动作回调（newThread 由 runtime 通道注入——sessions-pane.tsx）。 */
@@ -112,38 +114,43 @@ export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
 
   return (
     <div className="hub-entry-bar">
-      {ITEMS.map((item) => {
-        return (
-          <button
-            aria-label={item.label}
-            className="hub-entry-row"
-            data-entry-id={item.id}
-            key={item.id}
-            onClick={() => {
-              if (!item.available) {
-                setNotice(
-                  `「${item.label}」需要 pi 扩展支撑，尚未实现——pi 当前没有对等的插件能力。`,
-                )
-                return
-              }
-              setNotice(null)
-              item.act(callbacks)
-            }}
-            title={item.label}
-            type="button"
-          >
-            {/* 图标（2026-10-06 用户定稿加回——hermes :1590 同位：文字前
-                16px 槽位，图标 inherit 色随行 hover） */}
-            <item.icon aria-hidden className="hub-entry-icon" size={16} />
-            <span className="hub-entry-label">{item.label}</span>
-            {/* 快捷键标注（hermes 仅新建会话带 KbdGroup 标注：1603-1609）；
-                harness 无 keybinds 系统——静态 Ctrl+N 注释注明（见文件头） */}
-            {item.kbd && (
-              <span className="hub-kbd">{item.kbd.join('+')}</span>
-            )}
-          </button>
-        )
-      })}
+      {/* 悬停指示 = beUI SharedLayoutBg 滑动 pill（2026-10-14 接线）：
+          行间滑动比逐行洗底更有方向感；行自身 CSS hover 洗底已移除防
+          双层背景。inset=0 = pill 与行同宽（行即按钮本体）。 */}
+      <SharedLayoutBg className="hub-entry-rows" inset={0} pillClassName="rounded-[6px] bg-(--hover-wash)">
+        {ITEMS.map((item) => {
+          return (
+            <button
+              aria-label={item.label}
+              className="hub-entry-row"
+              data-entry-id={item.id}
+              key={item.id}
+              onClick={() => {
+                if (!item.available) {
+                  setNotice(
+                    `「${item.label}」需要 pi 扩展支撑，尚未实现——pi 当前没有对等的插件能力。`,
+                  )
+                  return
+                }
+                setNotice(null)
+                item.act(callbacks)
+              }}
+              title={item.label}
+              type="button"
+            >
+              {/* 图标（2026-10-06 用户定稿加回——hermes :1590 同位：文字前
+                  16px 槽位，图标 inherit 色随行 hover） */}
+              <item.icon aria-hidden className="hub-entry-icon" size={16} />
+              <span className="hub-entry-label">{item.label}</span>
+              {/* 快捷键标注（hermes 仅新建会话带 KbdGroup 标注：1603-1609）；
+                  harness 无 keybinds 系统——静态 Ctrl+N 注释注明（见文件头） */}
+              {item.kbd && (
+                <span className="hub-kbd">{item.kbd.join('+')}</span>
+              )}
+            </button>
+          )
+        })}
+      </SharedLayoutBg>
       {notice && (
         <div className="hub-entry-notice" role="status">
           <span className="hub-entry-notice-text">{notice}</span>

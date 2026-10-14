@@ -380,8 +380,24 @@
   width: 100%;
 }
 
+/* 行内间距（SharedLayoutBg 内层容器——原 .hub-entry-bar 的 gap 移入） */
+.hub-entry-rows {
+  gap: var(--hub-bar-gap);
+}
+
+/* SharedLayoutBg 把行内容包进 div.relative.z-10——该 wrapper 要继承行的
+   flex 布局（否则图标/文字裸堆叠：2026-10-14 实锤重叠根因）。直接子
+   wrapper 拉满 + 复刻行的 flex 排列。 */
+.hub-entry-row > .relative {
+  align-items: center;
+  display: flex;
+  gap: var(--hub-row-gap);
+  width: 100%;
+}
+
+/* hover 背景 = SharedLayoutBg 滑动 pill（DOM 在行下方、z-10 内容之下），
+   行自身只做前景色反馈防双层背景（2026-10-14 接线） */
 .hub-entry-row:hover {
-  background: var(--hover-wash);
   color: var(--text);
 }
 
