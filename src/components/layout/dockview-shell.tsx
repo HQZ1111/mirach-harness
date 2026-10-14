@@ -30,6 +30,10 @@ import {
 import { Orientation } from 'dockview-core'
 import { useCallback, useEffect, useRef } from 'react'
 
+import { Titlebar } from '@/app/shell/titlebar'
+import { StatusBar } from '@/app/shell/statusbar'
+import { ResizeHandles } from './resize-handles'
+import { inTauri, appWindow } from '@/lib/tauri-window'
 import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
 import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { LeftRailPane } from '@/components/panes/left-rail-pane'
@@ -355,20 +359,60 @@ export function DockviewShell() {
     [handlePanelAdded, handlePanelRemoved, restoreOpenAnchor],
   )
 
+  // ── 窗口拖动（M1 漏迁后从 flex-layout 原样回迁，2026-10-14）──────────────
+  // window 捕获段按命中面分派：顶带（--logo-strip-h=85）内非交互面拖窗口、
+  // 双击最大化；绝不改用绝对定位盖层——盖层会截胡顶带内页签 pointerdown
+  //（2026-09-29 定稿）。
+  useEffect(() => {
+    if (!inTauri || !appWindow) return
+    const win = appWindow
+    const onWinPointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      const t = e.target as Element | null
+      if (!t) return
+      // 交互面/专用面归原主：按钮/输入、分隔条、resize 手柄
+      if (t.closest('button, input, textarea, select, a, .dv-sash, .win-resize-handle')) return
+      // 页签整钮归 dockview（拖页签不是拖窗）
+      if (t.closest('.dv-tab')) return
+      // 顶带（窗口顶部 85px）的面空白才拖窗
+      if (e.clientY > 85) return
+      const onBandSurface =
+        t.closest('.app-shell, .rail-logo-leading, .left-rail-logo-row, .app-titlebar') !== null
+      if (!onBandSurface) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.detail === 2) {
+        void win.toggleMaximize().catch(() => {})
+        return
+      }
+      void win.startDragging().catch(() => {})
+    }
+    window.addEventListener('pointerdown', onWinPointerDown, true)
+    return () => window.removeEventListener('pointerdown', onWinPointerDown, true)
+  }, [])
+
   // ── 渲染 ────────────────────────────────────────────────────────────────────
-  // AssistantRuntime 包壳（flex-layout 同款）：左栏 useAui / Thread 的
-  // AuiIf 都依赖壳级 runtime provider——不包则 AuiProvider 错误整树卸载。
+  // 壳层结构（flex-layout 原版恢复——M1 换壳时漏迁了窗口框架，
+  // .app-shell/Titlebar/StatusBar/ResizeHandles 全丢，2026-10-14 实锤补回）：
+  // AssistantRuntime 包壳（左栏 useAui / AuiIf 依赖壳级 runtime provider）→
+  // .app-shell（白底圆角窗）→ ResizeHandles + Titlebar（圆点浮层）+
+  // .app-main（dockview 主区）+ StatusBar（底栏）。
   return (
     <AssistantRuntime>
-      <div className="dockview-host" style={{ height: '100%' }}>
-        <DockviewReact
-          // open 必须在注册表内（FACTORY 引用 contentComponent 'open'——缺键 =
-          // ReactPart 抛 "Only React.memo..." → fromJSON 整体回退空布局）
-          components={{ ...components, open: () => <OpenPage onOpen={onOpen} /> }}
-          tabComponents={{ openTab: OpenTabHeader }}
-          onReady={onReady}
-          className="dockview-theme-light"
-        />
+      <div className="app-shell">
+        <ResizeHandles />
+        <Titlebar />
+        <div className="app-main dockview-host" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          <DockviewReact
+            // open 必须在注册表内（FACTORY 引用 contentComponent 'open'——缺键 =
+            // ReactPart 抛 "Only React.memo..." → fromJSON 整体回退空布局）
+            components={{ ...components, open: () => <OpenPage onOpen={onOpen} /> }}
+            tabComponents={{ openTab: OpenTabHeader }}
+            onReady={onReady}
+            className="dockview-theme-light"
+          />
+        </div>
+        <StatusBar />
       </div>
     </AssistantRuntime>
   )
