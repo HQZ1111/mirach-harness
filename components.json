@@ -19,6 +19,7 @@
   },
   "iconLibrary": "lucide",
   "registries": {
-    "@assistant-ui": "https://r.assistant-ui.com/{name}.json"
+    "@assistant-ui": "https://r.assistant-ui.com/{name}.json",
+    "@beui": "https://beui.dev/r/{name}.json"
   }
 }
