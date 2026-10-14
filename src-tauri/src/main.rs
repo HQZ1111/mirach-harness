@@ -85,14 +85,23 @@ fn force_hide(window: &tauri::WebviewWindow) {
 
 /// 双屏分辨率不一致：窗口落到装不下它的屏幕时，把尺寸钳制到该屏工作区。
 /// 不强制最大化——用户把窗口拖到小屏可能只是临时放一下。
+///
+/// **最大化态守卫（2026-10-14 实锤修复）**：最大化窗口尺寸 ≈ 工作区
+/// （屏高-任务栏），恒大于 `工作区 - EDGE` 阈值 → 旧逻辑在最大化后
+/// 250ms 防抖触发 set_size 把窗口缩小 = 用户看到的"最大化后闪烁回来"。
+/// 最大化态直接跳过钳制（它不是"放不下"，它就是工作区本身）；同时
+/// 校准阈值 = 工作区本身，普通窗口仅在工作区外才钳。
 fn fit_to_monitor(window: &tauri::WebviewWindow) {
+    if window.is_maximized().unwrap_or(false) {
+        return;
+    }
     let monitor = match window.current_monitor() {
         Ok(Some(m)) => m,
         _ => return,
     };
     let scale = monitor.scale_factor();
-    let work_w = monitor.size().width as f64 / scale - EDGE;
-    let work_h = monitor.size().height as f64 / scale - TASKBAR_H - EDGE;
+    let work_w = monitor.size().width as f64 / scale;
+    let work_h = monitor.size().height as f64 / scale - TASKBAR_H;
     let Ok(inner) = window.inner_size() else { return };
     let cur_w = inner.width as f64 / scale;
     let cur_h = inner.height as f64 / scale;
@@ -616,19 +625,21 @@ fn main() {
         ])
         .manage(session_meta::SessionMetaPath(std::sync::Mutex::new(None)))
         // CEF 运行时（用户定稿目标）：.runtime 参数与 wry 对称。
-        // tauri.conf 的 additionalBrowserArgs 是 wry 参数、CEF 下无效——
-        // dev 态 CDP 9223 经 Cef::command_line_arg("remote-debugging-port",
-        // Some("9223")) 下发（CEF 原生同名开关，E2E 脚本零改动）。
+        //
+        // CDP 9223：**必须走 Cef::remote_debugging(RemoteDebugging::Port)**，
+        // 只传 `command_line_arg("remote-debugging-port", …)` 在 release 下
+        // 无效——CEF 的 RemoteDebugging 默认 Disabled 且会把
+        // `devtools.remote_debugging.allowed` preference 一并钉死，命令行
+        // 开关被拒（2026-10-14 实锤：dev 开、release 关）。allowed_origins
+        // 留空 = 只允许 localhost（本机冒烟足够）。
+        // dev/released 均开：M4 验收后按需收紧（生产要收就删这段）。
         .runtime({
-            #[cfg(debug_assertions)]
-            {
-                tauri_runtime_cef::Cef::default()
-                    .command_line_arg("remote-debugging-port", Some("9223"))
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                tauri_runtime_cef::Cef::default()
-            }
+            tauri_runtime_cef::Cef::default().remote_debugging(
+                tauri_runtime_cef::RemoteDebugging::Port {
+                    port: 9223,
+                    allowed_origins: vec![],
+                },
+            )
         })
         .run(tauri::generate_context!())
         .expect("error while running mirach-harness");

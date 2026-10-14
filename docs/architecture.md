@@ -51,8 +51,12 @@
 - **入口宏**：CEF 多进程（renderer/GPU 子进程）靠
   `#[tauri_runtime_cef::cef_entry_point]` 标注 main 分派。
 - **CDP 冒烟**：`tauri.conf` 的 `additionalBrowserArgs` 是 **wry 参数、
-  CEF 下无效**；CEF 走 `Cef::default().command_line_arg("remote-
-  debugging-port", Some("9223"))`（CEF 原生同名开关）——E2E 脚本零改动。
+  CEF 下无效**；CEF 走 **`Cef::default().remote_debugging(
+  RemoteDebugging::Port { port: 9223, allowed_origins: vec![] })`**。
+  **坑（2026-10-14 实锤）：只传 `command_line_arg("remote-debugging-port",…)`
+  在 release 下无效**——CEF 的 `RemoteDebugging` 默认 `Disabled` 且会把
+  Chromium 的 `devtools.remote_debugging.allowed` preference 一并钉死，
+  命令行开关被拒（dev 恰好能用纯属 debug 宽容）。E2E 脚本零改动。
 - **CEF 沙箱**：上游注明 Windows 当前**一律无沙箱**运行（CEF 要 sandbox
   broker，而 Tauri 应用不是 CEF 自带 bootstrap.exe 宿主）——Windows 本就
   无应用沙箱语义，Linux 才需留意。
