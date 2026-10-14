@@ -21,8 +21,10 @@ export default defineConfig({
     // src-tauri 的编译产物（target/**）不归前端 watcher 管——cargo 链接
     // 锁住 mirach_harness.exe 时 chokidar 会 EBUSY 整个 vite 死掉
     // （规矩 8 的 tauri dev 形态），tauri dev 的 Rust 重编由 CLI 自己管。
+    // crates/** 同理：N1 的 agent-protocol 有自己的 target/**，cargo 锁
+    // build_script_build-*.exe 时同样 EBUSY 杀死 vite（2026-10-14 实锤）。
     watch: {
-      ignored: ['**/src-tauri/**']
+      ignored: ['**/src-tauri/**', '**/crates/**']
     }
   }
 })

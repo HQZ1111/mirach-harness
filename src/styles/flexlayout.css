@@ -162,8 +162,11 @@
    高度 = 条高（占满）：条容器是 flex-end 沉底链，70 高的块会被压到条底
    （实测 logo 顶距条顶 44）——占满后 padding 即 logo 的真实上/左间距
    （用户 2026-09-27：上/左各 20）。竖轨形态内容顶带同用（.rail-pane-
-   railform 内高度一致，窗格内容从条高之下开始，与横向形态对齐）。 */
-.flexlayout-host .rail-logo-leading {
+   railform 内高度一致，窗格内容从条高之下开始，与横向形态对齐）。
+   v8.0：宿主域 .flexlayout-host → .dockview-host（左栏现在是 dockview
+   group 的 panel 内容，logo 渲染在 panel 内——M4 实锤 logo 曾 350px 无
+   圆角：全部规则挂在死掉的 .flexlayout-host 域下从未命中）。 */
+.dockview-host .rail-logo-leading {
   align-items: flex-start; /* 顶对齐：logo 上间距 = padding-top（居中会被余量压低） */
   box-sizing: border-box;
   display: flex;
@@ -171,23 +174,11 @@
   height: var(--logo-strip-h);
   padding: var(--logo-leading-pad) 0 0 var(--logo-leading-pad);
 }
-/* 条内 = 条顶满宽带（绝对定位脱离页签行流）：页签行不再被 logo 顶到右
-   边（用户 2026-09-27：会话标签要左对齐）；pointer-events 放行点击。
-   **flexlayout 的包裹层** .flexlayout__tabset_leading 才是 tabbar_outer
-   的直接子级（绝对定位与放行都打在它上面）。竖轨形态内容顶带
-   （.rail-pane-railform 内）保持普通流布局。 */
-.flexlayout-host .flexlayout__tabset_tabbar_outer > .flexlayout__tabset_leading:has(> .rail-logo-leading) {
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
-  top: 0;
-}
-.flexlayout-host .rail-logo-leading .rail-logo-word {
-  line-height: var(--logo-size); /* 文字与 50px logo 互相对中 */
+.dockview-host .rail-logo-leading .rail-logo-word {
+  line-height: var(--logo-size); /* 文字与 45px logo 互相对中 */
 }
 
-.flexlayout-host .rail-logo-leading .rail-logo-mark {
+.dockview-host .rail-logo-leading .rail-logo-mark {
   border-radius: 50%;
   flex: none;
   height: var(--logo-size);
@@ -195,7 +186,7 @@
   width: var(--logo-size);
 }
 
-.flexlayout-host .rail-logo-leading .rail-logo-word {
+.dockview-host .rail-logo-leading .rail-logo-word {
   color: var(--logo-text-color);
   font-size: var(--logo-text-size);
   font-weight: var(--logo-text-weight);

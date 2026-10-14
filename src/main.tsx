@@ -8,6 +8,10 @@ import { resolveContextMenuScope } from './components/panes/session-manage/conte
 // HarmonyOS Sans SC webfont（用户定稿：全局字体）——切片 woff2 + CSS
 // （包 exports 只开放 default=dist/index.css，子路径导入会被 vite 拦）
 import 'harmonyos-sans-sc-webfont-splitted'
+// dockview 官方样式（v8.0 换栈）：**必须**在自有样式之前——.dv-* 的
+// 定位/尺寸/overflow 规则全在此表；漏掉它布局渲染成堆叠裸 div（M4 实锤：
+// "内容全错位"根因 = M1 写壳时忘了这条 import）。
+import 'dockview-react/dist/styles/dockview.css'
 // 样式分层（见 src/styles/tokens.css 头注释）：令牌 → 壳 → flexlayout
 // → 窗格 → 编辑器 → 叠片。规则文件里禁止写字面值，取值一律进 tokens.css。
 import './styles/tokens.css'
