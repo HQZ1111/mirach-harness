@@ -159,17 +159,16 @@ export const ThreadList: FC = () => {
 
   return (
     <ThreadListRoot className="flex h-full min-h-0 flex-col bg-(--surface)" data-density={density}>
-      <div className="shrink-0 px-3 pb-1 pt-1">
+      <div className="shrink-0 pb-1 pt-1" style={{ paddingLeft: 'var(--rail-search-inset)', paddingRight: 'var(--rail-search-inset)' }}>
         <ThreadListSearch aria-label="搜索会话" onValueChange={setSearch} value={search} />
       </div>
-      {/* 左右边距 20px（用户定稿）：容器 px-3 + 行 px-2 合成文字线 20 ——
-          hermes SidebarContent px-2.5 的同款分层 */}
-      {/* 左右边距 20px（用户定稿）：容器 px-3 + 行 px-2 合成文字线 20 ——
-          hermes SidebarContent px-2.5 的同款分层。data-sortable-scroll-
-          container = 边缘自动滚的容器标记（拖拽中指针近上/下缘按帧滚动，
-          浏览器钳在真实边界——到顶/到底自动停）。 */}
+      {/* 左右边距 30px（用户 2026-10-14 改定）：容器槽位 = 30 − 行触发器
+          内距 7.5px，行内文字线合成 30 —— hermes SidebarContent 同款分层。
+          数据-可排序滚动容器 = 拖拽边缘自动滚的容器标记（拖拽中指针近
+          上/下缘按帧滚动，浏览器钳在真实边界——到顶/到底自动停）。 */}
       <ThreadListItems
-        className="min-h-0 flex-1 overflow-y-auto px-3 pb-2"
+        className="min-h-0 flex-1 overflow-y-auto pb-2"
+        style={{ paddingLeft: 'var(--rail-list-inset)', paddingRight: 'var(--rail-list-inset)' }}
         data-sortable-scroll-container=""
         dndSensors={dndSensors}
         searchQuery={search}

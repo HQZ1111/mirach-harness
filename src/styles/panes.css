@@ -358,7 +358,8 @@
   flex: none;
   flex-direction: column;
   gap: var(--hub-bar-gap);
-  padding: var(--hub-bar-pad-y) var(--hub-row-pad-x);
+  /* 30px 内容线（用户 2026-10-14）：容器槽位 = 30 − 行内距 8 − 1px 透明边 */
+  padding: var(--hub-bar-pad-y) var(--rail-row-inset);
 }
 
 .hub-entry-row {
@@ -455,7 +456,7 @@
   gap: var(--hub-bar-gap);
   min-height: 0;
   overflow-y: auto;
-  padding: var(--hub-bar-pad-y) var(--hub-row-pad-x);
+  padding: var(--hub-bar-pad-y) var(--rail-row-inset);
 }
 
 .hub-section-label {
