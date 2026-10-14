@@ -299,6 +299,36 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
 
 ## 已知的环境陷阱
 
+- **v8.0 换栈后的新坑（2026-10-14，全部有实锤）**：
+  1. **dockview 官方 CSS 必须显式 import**（`main.tsx`：
+     `import 'dockview-react/dist/styles/dockview.css'`）——漏掉则
+     `.dv-*` 定位规则全缺，三组渲染成垂直堆叠裸 div（"内容全错位"根因）。
+  2. **样式域 .flexlayout-host → .dockview-host**：flexlayout 时代的
+     宿主域规则（rail-logo 等）在 dockview 下全部静默失效（logo 350px
+     无圆角实锤）——改规则或改域名，别只在旧域加新规则。
+  3. **vite watch 必须排除 `crates/**`**：N1 的 agent-protocol 有独立
+     `target/`，cargo 锁 `build_script_build-*.exe` 时 chokidar EBUSY
+     杀死 vite → CEF 窗 ERR_CONNECTION_REFUSED（vite.config.ts 已配）。
+  4. **CEF 的 CDP 端口走 `Cef::remote_debugging(RemoteDebugging::Port)`**
+     ——只传 `command_line_arg("remote-debugging-port")` 在 release 下
+     无效；且 **`Local State` 文件持久化 `devtools.remote_debugging.
+     allowed`**——历史 Disabled 态跑过再改 Port 会被持久值挡住，删
+     `%LOCALAPPDATA%\com.mirach.harness\cef\Local State` 即恢复。
+  5. **CEF 二进制必须与 exe 同目录**：dev = 从
+     `%LOCALAPPDATA%\tauri-cef\<ver>\cef_windows_x86_64\` 拷进
+     `target/debug/`（清过 build cache 后必补，否则 "Invalid file
+     descriptor to ICU data"）；**打包 = tauri-cli 3 自带 CEF 集成
+     自动处理**（cli bin 内含 "failed to copy CEF file for NSIS bundle"
+     逻辑），**不要**再手动 resources 拷 cef-bundle（双重冗余实锤）。
+  6. **cargo 必须与 cmake 同 PATH**（cef-dll-sys 构建脚本直接找 cmake）：
+     `set "PATH=%USERPROFILE%\miniconda3-mirach\Library\bin;%PATH%"` 后
+     再跑 npm run tauri build/dev。
+  7. **窗口最大化"闪烁回来"的根因是自家 `fit_to_monitor`**：最大化窗
+     高≈工作区恒大于旧阈值（工作区-EDGE），250ms 防抖后 set_size 缩回。
+     已加 `is_maximized` 守卫（main.rs）；**不是** Tauri3/CEF 的问题。
+  8. **前端窗口命令的权限面**：capabilities/default.json 列 white-list
+     ——`maximize`/`unmaximize` 未授权（`toggleMaximize` 已授权），
+     报错形如 "window.maximize not allowed"；加命令先加权限。
 - **dev 模式的"慢"是编译位置问题**：设置页是动态 import（115 文件 /
   ~1.1MB 源码），vite 按需编译 → 每次重启后**第一次**打开要现场转换整个
   子图（数十秒，React-Compiler 的 babel pass 会放大每个文件的成本），
