@@ -1,5 +1,18 @@
 # mirach-harness 交接文档（2026-10-02 · 会话管理/对标轮后）
 
+> **【2026-10-14 更新·晚】N1+L2 前端落地 + 修复轮**：
+> N1 agent-protocol crate（crates/agent-protocol，58 测试全绿）+
+> L2 前端封装（src/lib/ipc.ts InFlightMap / channel.ts SeqTracker，
+> 43 测试全绿，提交 11a9c48）。**修复轮实锤**（6aeba15/42a7203/004d231）：
+> ①dockview CSS 忘 import = "内容全错位"根因；②logo 域 .flexlayout-host
+> 死了；③vite watch 未排除 crates/** → EBUSY 杀 vite；④最大化"闪烁
+> 回来"真凶 = 自家 fit_to_monitor 边界 bug（非 Tauri3），已修+实证
+> PASS；⑤**tauri-cli 3 自带 CEF 打包**（撤手动 cef-bundle 双冗余）；
+> ⑥CEF 二进制 dev 态需手工补到 target/debug（清 build cache 后必补）。
+> **当前是开发环境**（M4 打包只验证过 CEF 随包分发，离发布远）。
+> 下步 = N2（pi-adapter 转换器切 agent-protocol 类型）。
+> 新会话先读 AGENTS.md「已知的环境陷阱」v8.0 换栈 8 条（全部实锤）。
+
 > **【2026-10-14 更新】架构 v9.0 定稿**（Agent-Native：§7-§14 全部入档
 > `docs/architecture.md`——协议层 agent-protocol / 真相源总表 L1-L5 /
 > 双通道 InFlightMap+SeqTracker/时序固化 / Sink 三 trait+契约测试 /
