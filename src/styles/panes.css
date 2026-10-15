@@ -890,10 +890,16 @@
   z-index: 0;
 }
 
-/* ── 会话行选中态 = 文字效果（用户 2026-10-15："点击会话……都是文字
-   点击效果"；原整行 data-active 底色横条已从行类移除）──
-   标题文字品牌色 + 字重中等——与"置顶"组头（text-(--fl-accent)）同族
-   观感。特异性 (0,2,1) 压过行内联的 hover 工具类（0,2,0）。 */
+/* ── 会话行选中态（用户 2026-10-15 二轮定稿）：**行底色高亮 + 标题文字
+   态并存**——原话"置顶、会话的文字态保留，下面的会话条恢复之前的高亮
+   选中"（首轮把整行底色一并删了；纠偏：行条本身的选中底要回来）。行底
+   = accent 10% 混透明（75b61f8 前 data-active 行类的迁移版，回归旧观感，
+   但改挂 CSS 规则避免与 hover 工具类打特异性官司）；标题文字品牌色 +
+   字重中等（75b61f8 文字态规则保留，与"置顶"组头同族）。 */
+[data-slot='aui_thread-list-item'][data-active] {
+  background: color-mix(in srgb, var(--fl-accent) 10%, transparent);
+}
+
 [data-slot='aui_thread-list-item'][data-active] [data-slot='aui_thread-list-item-title'] {
   color: var(--fl-accent);
   font-weight: 500;

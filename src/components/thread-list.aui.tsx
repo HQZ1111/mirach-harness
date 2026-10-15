@@ -1745,11 +1745,12 @@ export const ThreadListItem: FC = () => {
             // 的合法区就谁提交。把手/⋯ 动作簇自带监听，行壳不重复起拖
             // （hermes :385 同款豁免选择器）。
             if ((e.target as HTMLElement).closest("[data-reorder-handle], [data-row-actions]")) return;
-            // 跨面拖拽（v8.1 恢复）：拖出到对话栏内容区松手 → 开该会话分栏
-            // （session-drag.ts 的 dockview 版；openSessionTabBridge = shell
-            // 注册的 addPanel direction right）。
+            // 跨面拖拽（v8.1 恢复；2026-10-15 落点感知）：拖出到对话栏内容区
+            // 松手 → 按落点开该会话分栏（session-drag.ts 的 dockview 版；
+            // openSessionTabBridge 带 { referenceGroup, direction } = shell
+            // 侧 addPanel 落位——center=堆叠进该组、四边=向该边分栏）。
             startSessionRowDrag(e, {
-              onCommitOpenTab: () => openSessionTabBridge(threadId),
+              onCommitOpenTab: (position) => openSessionTabBridge(threadId, position),
             });
             sortable?.dragHandleProps.onPointerDown?.(e);
           }}

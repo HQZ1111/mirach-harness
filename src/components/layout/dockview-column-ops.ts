@@ -7,11 +7,14 @@
  * - 隐藏/恢复 = **序列化手术**：toJSON 摘除/拼回组 leaf + panels 记录条目
  *   → fromJSON（一帧完成；dockview 无整树 moveNode，fromJSON 是唯一
  *   整列搬运路径——panel 组件重挂，与 flexlayout adopt 同代价）；
+ * - 复位 = fromJSON(出厂)（2026-10-16：右键菜单「默认布局」动词——见
+ *   resetLayoutToFactory）；
  * - colOrder 恒 3 项（含隐藏列）、colstash 快照、adopt 失败整体放弃——
  *   语义与旗标存储键（colflags.v1/colstash.v1）原样保留；
  * - v8 简化（用户定稿"布局去除多余的语义"）：页签条开关/搁浅 ladder
  *   不再存在——左/主栏组 hideHeader 恒无条，面板栏组唯一条恒显。
  */
+import { Orientation } from 'dockview-core'
 import type { DockviewApi, DockviewGroupPanel, SerializedDockview } from 'dockview-react'
 
 export type ColRegion = 'left' | 'chat' | 'panels'
@@ -21,6 +24,59 @@ export interface ColumnFlags {
   leftHidden: boolean
   panelsHidden: boolean
 }
+
+// ── 出厂布局（三栏）：[左栏 350 | 主栏 | 面板栏 350] ────────────────────────
+// 左/主组 hideHeader（无标签条）；组约束走**面板级** minimumWidth/
+// maximumWidth（GroupviewPanelState 字段，随序列化 round-trip——组的生效
+// 约束回落到活动 panel 的同名值；leaf data 的 constraints/initialWidth 在
+// 反序列化里被丢弃，实测勿用）。wrapper.size = 出厂列宽（px 值，fromJSON
+// 按比例归一——精确 px 由 boot 后 setSize 钉回）。面板栏出厂单签 open
+// （打开页宿主，tabComponent openTab = 无 ✕ 头，根面板不可关）。
+// 2026-10-16 自 dockview-shell 迁入（「默认布局」复位动词的同源消费方）。
+export const RAIL_W = 350
+
+export const FACTORY_LAYOUT: SerializedDockview = {
+  grid: {
+    root: {
+      type: 'branch',
+      data: [
+        { type: 'leaf', data: { id: 'g-left', views: ['leftrail'], hideHeader: true }, size: RAIL_W },
+        { type: 'leaf', data: { id: 'g-chat', views: ['workspace'], hideHeader: true }, size: 1100 },
+        { type: 'leaf', data: { id: 'g-panels', views: ['open'] }, size: RAIL_W },
+      ],
+    },
+    height: 1000,
+    width: 1800,
+    orientation: Orientation.HORIZONTAL,
+  },
+  panels: {
+    leftrail: {
+      id: 'leftrail',
+      contentComponent: 'leftrail',
+      title: '',
+      minimumWidth: 240,
+      maximumWidth: 420,
+      params: { region: 'left' },
+    },
+    workspace: {
+      id: 'workspace',
+      contentComponent: 'workspace',
+      title: '',
+      minimumWidth: 395,
+      params: { region: 'chat' },
+    },
+    open: {
+      id: 'open',
+      contentComponent: 'open',
+      title: '打开',
+      tabComponent: 'openTab',
+      minimumWidth: 240,
+      params: { region: 'panels' },
+    },
+  },
+}
+
+export const LAYOUT_KEY = 'mirach.harness.layout.v9'
 
 // ── 持久化（旗标 + 列快照——键与语义照 column-ops 原样） ─────────────────────
 
@@ -446,4 +502,54 @@ export const persistFlagsColOrder = (a: DockviewApi): void => {
   let vi = 0
   const order = prev.colOrder.map((r) => (firstIdx.has(r) ? visibleSorted[vi++]! : r))
   setFlags({ ...prev, colOrder: order })
+}
+
+// ── 复位（用户 2026-10-16：右键菜单「默认布局」）────────────────────────────
+
+/** 复位进行中护栏（shell 的面板生命周期 handler 消费）：fromJSON 内部先
+ *  clear（逐面板 onDidRemovePanel 同步外发）再重建——生命周期 handler 在
+ *  clear 阶段误判「末签关闭」去 restoreOpenAnchor，把 addPanel 打进半清
+ *  的空树（实锤：referencePanel 'workspace' does not exist + 树被搅成
+ *  空组+孤签）。复位期所有生命周期反应一律让位，fromJSON 完成后树即成品。 */
+let layoutResetDepth = 0
+
+export const layoutResetInProgress = (): boolean => layoutResetDepth > 0
+
+/** 布局回出厂形态：fromJSON(FACTORY_LAYOUT)（内部先 clear——会话分栏/
+ *  打开页全收，三栏 [左|主|面板] 重建，open 锚在场）+ 旗标复位（colOrder
+ *  出厂序、栏显隐归 false；旧 colstash 判废——隐藏期快照对复位后的树已无
+ *  意义）+ 双轨 350 两轮钉回（同 boot 出厂钉法：fromJSON 的 size 按比例
+ *  归一，不是 px）+ 出厂布局存档（覆盖 v9 键，reload 后不回旧形态）。挂载
+ *  页签的会话不丢：会话真相在 pi，重开走侧栏/列表。失败 = console.error
+ *  可见（规矩 12）。 */
+export const resetLayoutToFactory = (): void => {
+  const a = api()
+  if (!a) return
+  layoutResetDepth++
+  try {
+    a.fromJSON(FACTORY_LAYOUT)
+    // 旗标复位 + 快照判废（隐藏语义清零）
+    setFlags({ colOrder: ['left', 'chat', 'panels'], leftHidden: false, panelsHidden: false })
+    saveStashSafe({})
+    // 双轨钉回 350（两轮互挤后收敛——boot 出厂同款；rAF 后树已稳）。
+    // 钉宽放复位护栏之外：rAF/150ms 回调跑时 depth 已归零，不受让位影响。
+    const pin = () => {
+      const lg = groupsOfRegion(a, 'left')[0]
+      const pg = groupsOfRegion(a, 'panels')[0]
+      for (let i = 0; i < 3; i++) {
+        pg?.api.setSize({ width: RAIL_W })
+        lg?.api.setSize({ width: RAIL_W })
+      }
+    }
+    requestAnimationFrame(pin)
+    setTimeout(pin, 150)
+    // 出厂存档（onDidLayoutChange 防抖 250ms 也会写——这里先写一次
+    // 让持久化即时收敛，防 debounce 窗口内进程退出留下旧档）
+    safeSet(LAYOUT_KEY, JSON.stringify(FACTORY_LAYOUT))
+    console.info('[dv-column-ops] 布局已复位为出厂形态')
+  } catch (e) {
+    console.error('[dv-column-ops] 布局复位失败', e)
+  } finally {
+    layoutResetDepth--
+  }
 }

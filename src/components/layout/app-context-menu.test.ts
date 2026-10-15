@@ -28,6 +28,7 @@ describe('buildShellMenuSections', () => {
       'shell-panels',
       'shell-left-pos',
       'shell-panels-pos',
+      'shell-reset-layout',
     ])
     expect(sections[2].map((i) => i.id)).toEqual(['shell-statusbar', 'shell-settings'])
   })
@@ -43,6 +44,8 @@ describe('buildShellMenuSections', () => {
     // v7.2 独立双位置切换：出厂序 [L,C,P] → 面板栏在 chat 右侧
     expect(labels.get('shell-left-pos')).toBe('左侧栏移到最右侧')
     expect(labels.get('shell-panels-pos')).toBe('面板栏移到左侧')
+    // 2026-10-16 用户定稿：布局段第四个动词 = 一键复位
+    expect(labels.get('shell-reset-layout')).toBe('默认布局')
   })
 
   it('图标字形表齐全', () => {
@@ -56,13 +59,14 @@ describe('buildShellMenuSections', () => {
       'layout-sidebar-right',
       'arrow-both',
       'layout-panel',
+      'refresh',
       'layout-statusbar',
       'layout-menubar',
     ])
   })
 
   it('布局段图标在字形表内', () => {
-    for (const icon of ['layout-sidebar-left', 'layout-sidebar-right', 'arrow-both', 'layout-panel']) {
+    for (const icon of ['layout-sidebar-left', 'layout-sidebar-right', 'arrow-both', 'layout-panel', 'refresh']) {
       expect(CODICON_GLYPHS[icon].d.length).toBeGreaterThan(0)
     }
   })

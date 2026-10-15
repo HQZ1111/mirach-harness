@@ -1,33 +1,48 @@
 /**
- * 会话行跨面拖拽（v8.1 dockview 版，2026-10-14 恢复）——M1 换壳时随
- * flexlayout 版拆除（v7.4 语义：拖出侧栏 → 对话栏开该会话的分栏），本版
- * 按 dockview 目标面重写：
+ * 会话行跨面拖拽（v8.2 落点感知版，2026-10-15 重写）——用户两连报的修复：
+ * ①"没有落点遮罩"——旧版反馈 = 内容容器上的 inset box-shadow，被面板的
+ *    不透明内容盖住，实际不可见（CDP 实锤：boxShadow 写在 .dv-content-
+ *    container 上，但子内容铺满整层）。**改用 dockview 原生落点预览**
+ *    （group.model.contentDropTarget.showOverlay(position)，与面板标签
+ *    拖拽同一个 overlay 组件：半幅 sheet + accent 虚线框，CSS 变量已重映射
+ *    回旧设计）；方位判定走 drop-geometry.ts 径向几何（与 dropPosition-
+ *    Resolver 同一份，会话条不经过 dockview 的 DnD 管线所以手动算）。
+ * ②"无法拖拽出来在其他栏进行分栏"——旧版提交恒 addPanel right of
+ *    workspace（拖到左半边/上下半边也开右侧、拖到别的对话分栏也不落那）。
+ *    **落点感知提交**：悬停的组 + 径向方位 → openSessionTabBridge(threadId,
+ *    { referenceGroup, direction })，shell 侧 addPanel 按落点落位。
  *
- * - 目标 = **region=chat 各组的内容区**（.dv-content-container 矩形）——
- *   拖入高亮、松手经 openSessionTabBridge(threadId) 提交（shell 注册的实现
- *   = addPanel direction right 完整聊天分栏）；
- * - 其余区面（侧栏列表/标题栏/面板栏）= 拒绝区（no-drop，松手不提交）；
- * - 列表内排序仍归 dnd-kit（ReorderableList 不动）——双机器并行照抄 hermes
- *   （session-row.tsx:374-395）：同一 pointerdown 各起各的，各管各的区域、
- *   互不仲裁，释放落在谁的合法区就谁提交。
+ * 目标面 = **chat 域组的内容区**（regionOfGroup==='chat' 的组；含主栏
+ * workspace 与各 session 分栏）；其余区面（侧栏/面板栏/标题栏）拒绝。
+ * 拖入 = 原生 overlay 预览（center=堆叠进该组；四边=向该边分栏）。
  *
  * 机器形态沿用旧版（4px 阈值 / rAF 合帧 / pointer capture / Esc 顶层逃生
- * 层 / engaged 后吞合成 click），拖起视觉：源行压暗 0.45（hermes 实锤值）。
+ * 层 / engaged 后吞合成 click），源行压暗 0.45（hermes 实锤值）。
  */
 import type { PointerEvent as ReactPointerEvent } from 'react'
+import { positionToDirection, type DockviewApi, type DockviewGroupPanel, type Position } from 'dockview-react'
 
 import { regionOfGroup } from '@/components/layout/dockview-column-ops'
+import { ALL_DROP_ZONES, radialResolve } from '@/components/layout/drop-geometry'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
-import type { DockviewApi } from 'dockview-react'
+import type { SessionTabDropPosition } from './session-tab-bridge'
 
 const DRAG_THRESHOLD_PX = 4
 
 /** 拖起源行的压暗值（hermes session-drag.ts:120 逐字）。 */
 const SOURCE_DIM_OPACITY = '0.45'
 
+/** hideHeader 组（主栏 workspace）的可用方位 = 四边（无 center）：stack 进
+ *  无条组 = 不可见也不可切的隐形标签死结（壳的 denyStackIntoHeaderless
+ *  同款判据，面板标签拖拽走原生 DnD 由此守卫拦；本机器绕开 DnD 管线，
+ *  须自行排除——中心的径向判定在无 center 集下按主轴倒向四边，死区归零，
+ *  且正中点（dx=dy=0 → |dx|>=|dy| → dx 不 <0 → right）恰回旧版默认
+ *  「右侧分栏」语义）。 */
+const EDGE_ONLY_ZONES: ReadonlySet<Position> = new Set(['top', 'bottom', 'left', 'right'])
+
 export interface SessionRowDragSpec {
-  /** 松手在对话栏（region=chat）任一内容区上 → 开该会话的分栏。 */
-  onCommitOpenTab(): void
+  /** 松手在对话栏（region=chat）任一内容区上 → 按落点开该会话分栏。 */
+  onCommitOpenTab(position: SessionTabDropPosition): void
 }
 
 interface Rect {
@@ -49,7 +64,7 @@ const dvApi = (): DockviewApi | undefined => {
 }
 
 interface DragTarget {
-  el: HTMLElement
+  group: DockviewGroupPanel
   rect: Rect
 }
 
@@ -63,7 +78,7 @@ const chatTargets = (): DragTarget[] => {
     const el = document.getElementById(g.model.contentContainerId)
     if (!(el instanceof HTMLElement)) continue
     const r = el.getBoundingClientRect()
-    out.push({ el, rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } })
+    out.push({ group: g, rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } })
   }
   return out
 }
@@ -123,8 +138,9 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
 
   // engage 快照：对话栏内容区（拖拽中布局不重组，全程纯数学）
   let targets: DragTarget[] = []
-  // 当前悬停的高亮目标：null=拒绝区
-  let hover: DragTarget | null = null
+  // 当前悬停：目标 + 方位（null=拒绝区）。方位在悬停组内随指针变化，
+  // 同组换方位也要重画 overlay。
+  let hover: { target: DragTarget; position: Position } | null = null
 
   const setCursor = (value: string) => {
     if (cursor !== value) {
@@ -133,30 +149,31 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     }
   }
 
-  const setHighlight = (el: HTMLElement | null, on: boolean) => {
-    if (!el) return
-    if (on) el.style.boxShadow = 'inset 0 0 0 2px var(--fl-accent)'
-    else el.style.removeProperty('box-shadow')
-  }
-
-  const clearHover = () => {
+  const clearOverlay = () => {
     if (!hover) return
-    setHighlight(hover.el, false)
+    // 只清本机器画过的组（overlay 是组级单例——不碰别人的）
+    try {
+      hover.target.group.model.contentDropTarget.clearOverlay()
+    } catch (err) {
+      // 组已销毁（拖拽中布局重组）——清场失败不拦提交，记录可见
+      console.error('[session-drag] 落点预览清场失败', err)
+    }
     hover = null
   }
 
-  const publish = (next: DragTarget | 'deny' | null) => {
+  const publish = (next: { target: DragTarget; position: Position } | 'deny' | null) => {
     // 拒绝区：no-drop 光标，松手什么都不提交。光标每帧对齐（值变守卫）。
     setCursor(next && next !== 'deny' ? 'grabbing' : 'no-drop')
     if (next === 'deny') {
-      clearHover()
+      clearOverlay()
       return
     }
-    if (next && hover && next.el === hover.el) return
-    clearHover()
+    if (next && hover && next.target.group.id === hover.target.group.id && next.position === hover.position) return
+    clearOverlay()
     if (!next) return
     hover = next
-    setHighlight(hover.el, true)
+    // dockview 原生落点预览（半幅 sheet + 虚线框；CSS 变量已重映射旧设计）
+    next.target.group.model.contentDropTarget.showOverlay(next.position)
   }
 
   const engage = () => {
@@ -185,7 +202,22 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
       publish(null)
       return
     }
-    publish(hit)
+    // 径向几何（与面板标签拖拽同一份）：中心椭圆 = 堆叠，边缘 = 向该边分栏。
+    // 无条组（主栏 workspace，hideHeader）收 center = 隐形标签死结 → 只收
+    // 四边（EDGE_ONLY_ZONES，正中点自然倒向 right = 旧版默认分栏位）。
+    const zones = hit.group.model.header.hidden ? EDGE_ONLY_ZONES : ALL_DROP_ZONES
+    const position = radialResolve(
+      zones,
+      x - hit.rect.left,
+      y - hit.rect.top,
+      hit.rect.right - hit.rect.left,
+      hit.rect.bottom - hit.rect.top,
+    )
+    if (!position) {
+      publish('deny')
+      return
+    }
+    publish({ target: hit, position })
   }
 
   const processMove = (x: number, y: number) => {
@@ -243,8 +275,13 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     if (engaged) {
       suppressDragClick(commit)
 
-      if (commit && hover) spec.onCommitOpenTab()
-      clearHover()
+      if (commit && hover) {
+        spec.onCommitOpenTab({
+          referenceGroup: hover.target.group.id,
+          direction: positionToDirection(hover.position),
+        })
+      }
+      clearOverlay()
     }
   }
 

@@ -889,6 +889,35 @@
   outline-offset: 1px;
 }
 
+/* 标签条「+」号（leftHeaderActionsComponent 挂载 = 最后一个标签之后——
+   CDP 实测 DOM 序：pre-actions | tabs | left-actions | …；仅面板域组渲染，
+   见 tab-strip-new.tsx）。形制 = 标签总览钮同款 ghost 方盒（同一几何令牌，
+   两种钮一致观感）。 */
+.tab-new-trigger {
+  align-items: center;
+  align-self: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--zone-btn-radius);
+  color: var(--tab-text);
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  height: var(--zone-btn-size);
+  justify-content: center;
+  margin-left: var(--zone-btn-gap);
+  padding: 0;
+  width: var(--zone-btn-size);
+}
+.tab-new-trigger:hover {
+  background: var(--tab-hover-bg);
+  color: var(--tab-text-active);
+}
+.tab-new-trigger:focus-visible {
+  outline: 2px solid var(--tab-text-active);
+  outline-offset: 1px;
+}
+
 /* ── 标签条溢出：两端渐隐（beUI TabsList 语义，2026-10-15）──
    箭头钮（tab-strip-arrows.tsx）侦测溢出后向 .dv-tabs-and-actions-container
    写 data-strip-left/right 属性；本规则按属性给条容器画横向渐隐 mask

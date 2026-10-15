@@ -51,10 +51,12 @@ import {
   leftPosToggle,
   panelsPosLabel,
   panelsPosToggle,
+  resetLayoutToFactory,
   setLeftHidden,
   setPanelsHidden,
 } from './dockview-column-ops'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
+import { resetWindowToFactory } from '@/lib/window-reset'
 
 // ── store（hermes store.ts 的 $contextMenu 同构：单份菜单，两个菜单永不
 //    同开；open 载荷 = 坐标 + 右键落点所在分栏 id（「隐藏标签」行的目标，
@@ -146,6 +148,13 @@ export const CODICON_GLYPHS: Record<string, { viewBox: string; d: readonly strin
       'M15 12.5C15 13.881 13.881 15 12.5 15H3.5C2.119 15 1 13.881 1 12.5V3.5C1 2.119 2.119 1 3.5 1H12.5C13.881 1 15 2.119 15 3.5V12.5ZM2 10H14V3.5C14 2.672 13.328 2 12.5 2H3.5C2.672 2 2 2.672 2 3.5V10Z',
     ],
   },
+  // 「默认布局」图标（@vscode/codicons src/icons/refresh.svg path 逐字）
+  refresh: {
+    viewBox: '0 0 16 16',
+    d: [
+      'M4.681 3H2V2h3.5l.5.5V6H5V4a5 5 0 1 0 4.53-.761l.302-.954A6 6 0 1 1 4.681 3z',
+    ],
+  },
 }
 
 const CodiconGlyph: FC<{ className?: string; name: string }> = ({ className, name }) => {
@@ -210,6 +219,10 @@ export const buildShellMenuSections = (_ctx: AppMenuContext = {}): readonly AppM
     // 切换且永不跨到左栏的端（让位）；chat 自由填补剩余跨度
     { icon: 'arrow-both', id: 'shell-left-pos', label: leftPosLabel() },
     { icon: 'layout-panel', id: 'shell-panels-pos', label: panelsPosLabel() },
+    // 「默认布局」（用户 2026-10-16）：布局回出厂三栏 + 窗口 1800×1000
+    // 居中——一键从任何拖乱/隐藏/移位形态复位。图标 = codicons refresh
+    // （上游 src/icons/refresh.svg path 逐字）。
+    { icon: 'refresh', id: 'shell-reset-layout', label: '默认布局' },
   )
   return [
     [
@@ -285,6 +298,11 @@ export const runShellAction = (id: string, _ctx: AppMenuContext = {}): void => {
       return
     case 'shell-panels-pos':
       panelsPosToggle()
+      return
+    case 'shell-reset-layout':
+      // 布局回出厂 + 窗口 1800×1000 居中（两半各自错误可见——失败不吞）
+      resetLayoutToFactory()
+      void resetWindowToFactory()
       return
     default:
       console.error('[app-context-menu] unknown menu item', id)

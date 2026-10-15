@@ -27,7 +27,6 @@ import {
   type DockviewApi,
   type SerializedDockview,
 } from 'dockview-react'
-import { Orientation } from 'dockview-core'
 import { useCallback, useEffect, useRef } from 'react'
 
 import { Titlebar } from '@/app/shell/titlebar'
@@ -46,69 +45,29 @@ import { OpenPage, type OpenPageKind } from '@/components/panes/open-page'
 import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
 import {
   setSessionTabOpener,
+  type SessionTabDropPosition,
 } from '@/components/panes/session-manage/session-tab-bridge'
 import { TabStripLeftArrow, TabStripRightSide } from './tab-strip-arrows'
+import { TabStripNewButton } from './tab-strip-new'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 import {
   alignVisibleToOrder,
   columnFlagsOf,
+  FACTORY_LAYOUT,
+  LAYOUT_KEY,
+  layoutResetInProgress,
   normalizeColumns,
   persistFlagsColOrder,
+  RAIL_W,
   rootPanelsGroup,
 } from './dockview-column-ops'
+import { radialDropResolver } from './drop-geometry'
+import { openPagePanel, panelsDropPosition } from './open-page-actions'
 
 // ── 出厂布局（三栏）：[左栏 350 | 主栏 | 面板栏 350] ────────────────────────
-// 左/主组 hideHeader（无标签条）；组约束走**面板级** minimumWidth/
-// maximumWidth（GroupviewPanelState 字段，随序列化 round-trip——组的生效
-// 约束回落到活动 panel 的同名值；leaf data 的 constraints/initialWidth 在
-// 反序列化里被丢弃，实测勿用）。wrapper.size = 出厂列宽（px 值，fromJSON
-// 按比例归一——精确 px 由 boot 后 setSize 钉回）。面板栏出厂单签 open
-// （打开页宿主，tabComponent openTab = 无 ✕ 头，根面板不可关）。
-const RAIL_W = 350
-
-const FACTORY_LAYOUT: SerializedDockview = {
-  grid: {
-    root: {
-      type: 'branch',
-      data: [
-        { type: 'leaf', data: { id: 'g-left', views: ['leftrail'], hideHeader: true }, size: RAIL_W },
-        { type: 'leaf', data: { id: 'g-chat', views: ['workspace'], hideHeader: true }, size: 1100 },
-        { type: 'leaf', data: { id: 'g-panels', views: ['open'] }, size: RAIL_W },
-      ],
-    },
-    height: 1000,
-    width: 1800,
-    orientation: Orientation.HORIZONTAL,
-  },
-  panels: {
-    leftrail: {
-      id: 'leftrail',
-      contentComponent: 'leftrail',
-      title: '',
-      minimumWidth: 240,
-      maximumWidth: 420,
-      params: { region: 'left' },
-    },
-    workspace: {
-      id: 'workspace',
-      contentComponent: 'workspace',
-      title: '',
-      minimumWidth: 395,
-      params: { region: 'chat' },
-    },
-    open: {
-      id: 'open',
-      contentComponent: 'open',
-      title: '打开',
-      tabComponent: 'openTab',
-      minimumWidth: 240,
-      params: { region: 'panels' },
-    },
-  },
-}
-
-const LAYOUT_KEY = 'mirach.harness.layout.v9'
-
+// FACTORY_LAYOUT / RAIL_W / LAYOUT_KEY 已迁至 dockview-column-ops.ts
+// （2026-10-16：「默认布局」复位动词 = 第二消费方，单源防漂移）——本文件
+// 只消费：boot 灌布局 + 出厂双轨钉宽 + 持久化读写。
 const loadLayout = (): SerializedDockview | null => {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY)
@@ -143,28 +102,8 @@ const saveLayout = (json: SerializedDockview): void => {
 }
 
 // ── 打开页三按钮落点（预览 = HermesPreviewPane；检查占位 = review） ─────────
-const OPEN_KIND_PANEL: Record<OpenPageKind, { id: string; component: string; title: string }> = {
-  files: { id: 'files', component: 'files', title: '文件树' },
-  terminal: { id: 'terminal', component: 'terminal', title: '终端' },
-  preview: { id: 'preview', component: 'preview', title: '预览' },
-}
-
-/** 面板栏落点锚（2026-10-15 边界实测修复）：open 在场 → within open；
- *  锚缺席 = 面板列已有实签（生命周期：实签抵达即撤锚）——此时硬指向
- *  'open' 会被 dockview 抛 "referencePanel 'open' does not exist"。回退
- *  within 根面板组（regionOfGroup 找 panels 域组），组也找不到（极空态）
- *  才回退 workspace 右侧新建。 */
-const panelsDropPosition = (
-  a: DockviewApi,
-):
-  | { referencePanel: string; direction: 'within' }
-  | { referenceGroup: string; direction: 'within' }
-  | { referencePanel: string; direction: 'right' } => {
-  if (a.getPanel('open')) return { referencePanel: 'open', direction: 'within' }
-  const host = rootPanelsGroup(a)
-  if (host) return { referenceGroup: host.id, direction: 'within' }
-  return { referencePanel: 'workspace', direction: 'right' }
-}
+// OPEN_KIND_PANEL / panelsDropPosition 已抽至 open-page-actions.ts（面板栏
+// 标签条 + 号同源消费，2026-10-15）。
 
 /** open 页签头（根面板不可关：无 ✕ 的自定义 tab）。 */
 const OpenTabHeader = (props: IDockviewPanelHeaderProps) => (
@@ -230,6 +169,9 @@ export function DockviewShell() {
   const handlePanelAdded = useCallback(
     (a: DockviewApi, panelId: string) => {
       if (anchorBusyRef.current) return
+      // 复位进行中：锚生命周期整个让位（fromJSON 内部 clear+重建的自发
+      // 事件不是用户动作——见 dockview-column-ops layoutResetInProgress）
+      if (layoutResetInProgress()) return
       const panel = a.getPanel(panelId)
       if (!panel || panel.id === 'open') return
       if (panel.params?.region !== 'panels') return
@@ -249,6 +191,10 @@ export function DockviewShell() {
   const handlePanelRemoved = useCallback(
     (a: DockviewApi, panelId: string) => {
       if (anchorBusyRef.current) return
+      // 复位进行中：末签关闭的重建/anchor 复位是清场中间态，让位；
+      // fromJSON 完成即成品树（实锤：不复位护栏会把 addPanel 打进半清树，
+      // referencePanel 'workspace' does not exist）
+      if (layoutResetInProgress()) return
       const removed = /* 移除前 region 已不可考——用 id 判面板栏域 */ panelId === 'open' || panelId === 'files' || panelId === 'terminal' || panelId.startsWith('preview')
       if (!removed) return
       if (panelId === 'open') return
@@ -278,10 +224,13 @@ export function DockviewShell() {
     [restoreOpenAnchor],
   )
 
-  // ── 会话分栏（v7.4 完整聊天 dockview 版）：左栏动作开 session panel =
-  //   主栏分栏（direction right = 并排对话列）。同会话不重复开 → 置前。 ────
+  // ── 会话分栏（v7.4 完整聊天 dockview 版；2026-10-15 落点感知）：
+  //   左栏动作开 session panel = 主栏分栏（direction right = 并排对话列）。
+  //   跨面拖拽带落点（SessionTabDropPosition）：拖到哪个组、哪个方位就
+  //   开在哪儿——center = 堆叠进该组；四边 = 向该边分栏。同会话不重复开
+  //   → 置前。 ──────────────────────────────────────────────────────────
   useEffect(() => {
-    setSessionTabOpener((threadId) => {
+    setSessionTabOpener((threadId, drop?: SessionTabDropPosition) => {
       const a = apiRef.current
       if (!a) {
         console.error('[dv-shell] 布局 api 不在场——会话分栏放弃')
@@ -294,13 +243,22 @@ export function DockviewShell() {
         return
       }
       const tabName = sessionDisplayName(sessionCatalog.getState().entries[threadId])
+      // 落点组已被拖拽后的布局重组销毁 → 回退默认（right of workspace），
+      // 错误可见不静默（规矩 12）。
+      const referenceGroup = drop ? a.groups.find((g) => g.id === drop.referenceGroup) : undefined
+      if (drop && !referenceGroup) {
+        console.error(`[dv-shell] 落点组 ${drop.referenceGroup} 不在场——回退默认分栏位`)
+      }
       a.addPanel({
         id,
         component: 'session',
         title: tabName,
         minimumWidth: 395,
         params: { region: 'chat', threadId, tabName },
-        position: { referencePanel: 'workspace', direction: 'right' },
+        position:
+          drop && referenceGroup
+            ? { referenceGroup: referenceGroup.id, direction: drop.direction }
+            : { referencePanel: 'workspace', direction: 'right' },
       })
     })
     return () => setSessionTabOpener(null)
@@ -332,28 +290,11 @@ export function DockviewShell() {
     return () => setPreviewOpener(null)
   }, [])
 
-  // ── 打开页动作 ─────────────────────────────────────────────────────────────
+  // ── 打开页动作（open-page-actions.ts 单源；面板栏标签条 + 号同源） ────────
   const onOpen = useCallback((kind: OpenPageKind) => {
     const a = apiRef.current
     if (!a) return
-    const target = OPEN_KIND_PANEL[kind]
-    try {
-      const existing = a.getPanel(target.id)
-      if (existing) {
-        existing.api.setActive()
-        return
-      }
-      a.addPanel({
-        ...target,
-        minimumWidth: 240,
-        params: { region: 'panels' },
-        // 锚 open 所在组（组 id 由 fromJSON 归一，不依赖出厂命名）；
-        // 锚缺席（有实签）→ 根面板组（panelsDropPosition）
-        position: panelsDropPosition(a),
-      })
-    } catch (e) {
-      console.error('[dv-shell] 打开页动作失败', kind, e)
-    }
+    openPagePanel(a, kind)
   }, [])
 
   const components = {
@@ -513,8 +454,18 @@ export function DockviewShell() {
             // prefix、右与总览钮并排挂 right）；标签总览下拉（cmdk 检索 +
             // 关闭）保留为检索通道（>2 签出现）。
             disableTabsOverflowList
+            // 左动作位 = 标签条「+」（最后一个标签之后——DOM 序实测：
+            // pre-actions | tabs | left-actions | …；仅面板域组渲染）。
+            leftHeaderActionsComponent={TabStripNewButton}
             prefixHeaderActionsComponent={TabStripLeftArrow}
             rightHeaderActionsComponent={TabStripRightSide}
+            // 落点方位判定 = hermes radial 几何（drop-geometry.ts）：dockview
+            // 内置 quadrant 是固定 20% 带 + 先横后纵（左下角 (15%,90%) 判
+            // left），用户报「上下分栏判定不灵敏」的根因——换径向判定：
+            // 中心椭圆 = center，椭圆外按归一化主轴主导（角区沿对角线倒向
+            // 最近边）。组内容目标与整布局边缘目标同源消费（源码实证：
+            // 两者都读 host.options.dropPositionResolver）。
+            dropPositionResolver={radialDropResolver}
             onReady={onReady}
             className="dockview-theme-light"
           />
