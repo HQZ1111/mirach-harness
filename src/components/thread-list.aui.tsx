@@ -74,6 +74,8 @@ import {
 } from "@/components/panes/session-manage/session-actions";
 import { DeleteSessionDialog, RenameSessionDialog } from "@/components/panes/session-manage/session-dialogs";
 import { openSessionTabBridge } from "@/components/panes/session-manage/session-tab-bridge";
+import { startSessionRowDrag } from "@/components/panes/session-manage/session-drag";
+import { SessionListHoverPill } from "@/components/panes/session-manage/SessionListHoverPill";
 import { VIRTUALIZE_THRESHOLD, VirtualSessionList } from "@/components/panes/session-manage/virtual-session-list";
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
@@ -252,10 +254,14 @@ export const ThreadListItems: FC<
       // [&>*]:shrink-0（hermes sessions-section 分组头 shrink-0 同语义）：
       // scroll 容器是 flex col——子项默认 shrink 会先压扁再溢出，行多时
       // 表现为"全部行挤到 min-h 而不是滚动"。子项不收缩后长度由滚动承载。
-      className={cn("flex flex-col gap-px [&>*]:shrink-0", className)}
+      className={cn("relative flex flex-col gap-px [&>*]:shrink-0", className)}
       data-slot="aui_thread-list-items"
       {...props}
     >
+      {/* 悬停滑动指示块（纯视觉层；必须首子节点——DOM 序在行之前，行是
+          relative 定位、后绘制盖其上，pill 只作容器底色。挂滚动容器本身
+          → top 公式含 +scrollTop，见 SessionListHoverPill.tsx 头注）。 */}
+      <SessionListHoverPill />
       <AuiIf condition={(s) => s.threads.isLoading}>
         <ThreadListSkeleton />
       </AuiIf>
@@ -413,7 +419,8 @@ const useThreadDisplay = (searchQuery: string) => {
 const keepViewMenuOpen = (event: Event) => event.preventDefault();
 
 const VIEW_MENU_CONTENT_CLASS =
-  "bg-popover text-popover-foreground z-50 min-w-52 overflow-hidden rounded-xl border p-1.5 shadow-(--shadow-pop)";
+  // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-(--shadow-pop) 承担
+  "bg-popover text-popover-foreground z-50 min-w-52 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)";
 
 const VIEW_MENU_ITEM_BASE =
   "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-(--hover-wash)";
@@ -1308,10 +1315,10 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     <SessionListContext.Provider value={ctxValue}>
       {/* 已置顶区（恒在；空态教 ⇧+点击；组内拖排 = pinned 数组序——
           hermes：置顶区一个 ReorderableList，与会话区互不越组）。
-          2026-10-06：文案「已置顶→置顶」；置顶/会话两组头间距加大
-          （--tl-head-pinned-gap，默认 2.5rem——原 1.5rem 同款）。 */}
+          2026-10-06：文案「已置顶→置顶」；2026-10-14 用户定稿标签下距
+          （--tl-head-pinned-gap，舒适档 9px——原 37.5px 空白过大）。 */}
       <SectionHeader
-        className="pb-[var(--tl-head-pinned-gap,2.5rem)]"
+        className="pb-[var(--tl-head-pinned-gap,0.6rem)]"
         collapsed={collapsedPinned}
         headerKey="pinned"
         label="置顶"
@@ -1485,7 +1492,8 @@ function disarmMarquee(event: ReactPointerEvent<HTMLElement>) {
 }
 
 const MENU_CONTENT_CLASS =
-  "bg-popover text-popover-foreground z-50 w-40 overflow-hidden rounded-xl border p-1.5 shadow-(--shadow-pop)";
+  // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-(--shadow-pop) 承担
+  "bg-popover text-popover-foreground z-50 w-40 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)";
 
 const MENU_ITEM_BASE =
   "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
@@ -1689,16 +1697,14 @@ export const ThreadListItem: FC = () => {
         <ThreadListItemPrimitive.Root
           ref={sortable?.ref}
           className={cn(
-            "group/row hover:bg-(--hover-wash) data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-[var(--tl-row-min-h,1.625rem)] grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-[var(--tl-row-pad-y,0.25rem)] pr-2 transition-colors focus-visible:outline-none",
+            // hover 洗底已移除（v8.1 悬停滑动 pill 接管——行自身再画半透明底
+            // 会与 pill 叠成双层，2026-10-14）；data-active 选中态保留。
+            "group/row data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-[var(--tl-row-min-h,1.625rem)] grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-[var(--tl-row-pad-y,0.25rem)] pr-2 transition-colors focus-visible:outline-none",
             // 拖起态逐字 hermes session-row.tsx:369——lifted 行盖过下层
             // （z-10 + 不透明侧栏表面，「translucency let the rows below
             // bleed through」的解法）+ grabbing 光标；压暗 0.45 由跨面
             // pointer 机器 engage 时内联施加（session-drag.ts 实锤值）。
-            // hover:bg 也要同底色：拖起时指针必然悬在本行，基础的
-            // hover:bg-(--hover-wash)（半透明）会压过 bg-(--surface) 让下层
-            // 行渗出来（实测 computed bg rgba(0,0,0,.07)）——tailwind-merge
-            // 取后者，dragging 期间 hover 也不透。
-            sortable?.dragging && "z-10 cursor-grabbing bg-(--surface) hover:bg-(--surface)",
+            sortable?.dragging && "z-10 cursor-grabbing bg-(--surface)",
           )}
           data-slot="aui_thread-list-item"
           style={sortable?.style}
@@ -1731,10 +1737,16 @@ export const ThreadListItem: FC = () => {
             // 双机器并行（hermes session-row.tsx:374-395 实锤）：同一
             // pointerdown 同时起「跨面 pointer 会话」与「dnd-kit 列表排序」，
             // 各管各的区域、互不仲裁——侧栏上只有排序有目标（pointer 机器
-            // 拒绝区），主会话页签上只有 pointer 机器有目标。释放落在谁的
-            // 合法区就谁提交。把手/⋯ 动作簇自带监听，行壳不重复起拖
+            // 拒绝区），对话栏内容区上只有 pointer 机器有目标。释放落在谁
+            // 的合法区就谁提交。把手/⋯ 动作簇自带监听，行壳不重复起拖
             // （hermes :385 同款豁免选择器）。
             if ((e.target as HTMLElement).closest("[data-reorder-handle], [data-row-actions]")) return;
+            // 跨面拖拽（v8.1 恢复）：拖出到对话栏内容区松手 → 开该会话分栏
+            // （session-drag.ts 的 dockview 版；openSessionTabBridge = shell
+            // 注册的 addPanel direction right）。
+            startSessionRowDrag(e, {
+              onCommitOpenTab: () => openSessionTabBridge(threadId),
+            });
             sortable?.dragHandleProps.onPointerDown?.(e);
           }}
         >

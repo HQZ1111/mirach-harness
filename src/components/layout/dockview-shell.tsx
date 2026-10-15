@@ -47,6 +47,7 @@ import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-m
 import {
   setSessionTabOpener,
 } from '@/components/panes/session-manage/session-tab-bridge'
+import { TabOverviewButton } from './tab-overview-menu'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 import {
   alignVisibleToOrder,
@@ -325,10 +326,31 @@ export function DockviewShell() {
       apiRef.current = a
       // 调试句柄（__flModel 同惯例）：E2E/CDP 从 api 驱动，不猜 DOM
       ;(globalThis as { __dvApi?: DockviewApi }).__dvApi = a
-      // 语义归属准入（v8）：M1 全禁拖拽（左/主栏本就不可拖，面板栏页签的
-      // 跨区准入在拖拽平移轮按 params.region 放行）
-      a.onWillDragPanel((e) => e.nativeEvent.preventDefault())
-      a.onWillDragGroup((e) => e.nativeEvent.preventDefault())
+      // 语义归属准入（v8.1 拖拽平移轮，2026-10-14）：M1 的 onWillDragPanel/
+      // onWillDragGroup 全禁撤除——面板栏标签拖出分栏/浮动恢复原生（用户
+      // 原话："标签和会话条没法拖拽出来分栏了"）。左/主栏组 hideHeader 无
+      // 条 → 本就没有可拖的标签面，无需 per-panel 拦截。
+      // 唯一例外 = 根面板「打开」：它是面板列存在的锚（锚缺席 = 面板列无
+      // 宿主，v8.0 生命周期），拖走 = 不经旗标地拆列——整钮拦截。
+      a.onWillDragPanel((e) => {
+        if (e.panel.id === 'open') e.nativeEvent.preventDefault()
+      })
+      // 唯一的「非法面」= 内容区中心堆叠进 hideHeader 组：无条组收下第二
+      // 个标签后不可见也不可切（隐形标签死结）——onWillShowOverlay（拖拽
+      // 中不显示落点）+ onWillDrop（松手兜底拒绝）双缝拦。
+      // 分栏（top/bottom/left/right）与有条组的堆叠、浮动、整组拖拽全部
+      // 放行（dockview 原生行为）。
+      const denyStackIntoHeaderless = (kind: string, position: string, group: unknown): boolean => {
+        if (kind !== 'content' || position !== 'center') return false
+        const g = group as { model?: { header?: { hidden?: boolean } } } | undefined
+        return g?.model?.header?.hidden === true
+      }
+      a.onWillShowOverlay((e) => {
+        if (denyStackIntoHeaderless(e.kind, e.position, e.group)) e.preventDefault()
+      })
+      a.onWillDrop((e) => {
+        if (denyStackIntoHeaderless(e.kind, e.position, e.group)) e.preventDefault()
+      })
       // 打开页生命周期 + 持久化（先订阅再灌布局——boot 布局事件也要记账）
       a.onDidAddPanel((p) => handlePanelAdded(a, p.id))
       a.onDidRemovePanel((p) => handlePanelRemoved(a, p.id))
@@ -422,6 +444,9 @@ export function DockviewShell() {
             // ReactPart 抛 "Only React.memo..." → fromJSON 整体回退空布局）
             components={{ ...components, open: () => <OpenPage onOpen={onOpen} /> }}
             tabComponents={{ openTab: OpenTabHeader }}
+            // 标签总览下拉（v8.1 恢复）：组条右侧动作位——overflow 3 签起
+            // 出双 chevron 总览钮（左/主栏 hideHeader 组自动不渲染）。
+            rightHeaderActionsComponent={TabOverviewButton}
             onReady={onReady}
             className="dockview-theme-light"
           />
