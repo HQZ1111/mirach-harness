@@ -329,6 +329,14 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   8. **前端窗口命令的权限面**：capabilities/default.json 列 white-list
      ——`maximize`/`unmaximize` 未授权（`toggleMaximize` 已授权），
      报错形如 "window.maximize not allowed"；加命令先加权限。
+9. **CEF `setSize` 到相同尺寸是 no-op**（2026-10-14 实锤）：API 返回
+     成功、`innerSize()` 也报目标值，但 viewport 不发生实际 resize——
+     窗口曾被压小后想恢复原尺寸，单次 setSize 到"当前 API 所报值"无效
+     （viewport 卡在 1500×950 而 API 报 1800×1000）。**恢复路径 = 先设
+     一个不同值（如 1600×900）再设目标值**，强制触发 CEF resize。
+10. **最小化陷阱的观察值**：B 代理轮实测窗口被压到 160×28（同 AGENTS
+     既有的"minimized WebView2 reports 160×28"现象，CEF 下同样出现）；
+     遇此按上一条两步法恢复。
 - **dev 模式的"慢"是编译位置问题**：设置页是动态 import（115 文件 /
   ~1.1MB 源码），vite 按需编译 → 每次重启后**第一次**打开要现场转换整个
   子图（数十秒，React-Compiler 的 babel pass 会放大每个文件的成本），
