@@ -193,6 +193,17 @@
   --dv-separator-border: transparent;
   --dv-tabs-and-actions-container-background-color: transparent;
   --dv-tabs-and-actions-container-font-size: var(--tab-font-size);
+  /* 拖拽落点预览重映射（用户 2026-10-15："拖出标签进行分栏时候的遮罩、
+     虚线框，都没了"）——dockview 默认 = 灰块 rgba(83,89,93,.5) + 无边框
+     （--dv-drag-over-border: none），旧 flexlayout 设计 = 浅色 sheet +
+     accent 虚线框（.fl-drop-sheet 血统：28%~75% accent 虚线 + 5%~14%
+     accent 混白）。三个变量一次覆盖两条 drop-target 路径
+     （dropzone-selection 5-way 落点 + drop-target-anchor 整组锚）。 */
+  --dv-drag-over-background-color: color-mix(in srgb, var(--fl-accent) 8%, rgba(255, 255, 255, 0.55));
+  --dv-drag-over-border-color: color-mix(in srgb, var(--fl-accent) 65%, transparent);
+  --dv-drag-over-border: 1.5px dashed color-mix(in srgb, var(--fl-accent) 45%, transparent);
+  /* 窗口边缘 docking 指示器同源（默认 dodgerblue 系 rgba(56,139,253,.9)） */
+  --dv-edge-dock-indicator-color: var(--fl-accent);
 }
 
 /* 标签字重/字距接令牌（dockview 默认 400/normal，与页签系统同源声明） */
