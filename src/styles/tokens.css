@@ -92,6 +92,9 @@
   --main-tint-color: rgba(233, 238, 239, 0.4);
   --main-tint-radius: 30px;                   /* 主对话颜色层圆角（用户
                                    2026-10-05 定稿 30；原 40） */
+  --chat-edge-inset: 20px;                    /* 对话栏贴软件边缘时颜色层/列头的
+                                   内缩（v7.3.4 旧语义：仅该侧无相邻栏的贴边
+                                   侧内缩 20；两侧有栏 = 0 撑满） */
 
   /* ── 页签系统（用户定稿：14/regular，非选中 #242424，选中 #006fff） ──
      横向页签 / 拉伸头栏 / 左右轨道 / 主栏竖轨共用这一套——
@@ -253,7 +256,7 @@
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
   --hub-row-radius: 6px;                      /* hermes rounded-md */
-  --hub-bar-pad-y: 6px;                      /* 入口条上下内边距 */
+  --hub-bar-pad-y: 9px;                      /* 入口条上下内边距（用户 2026-10-14 定稿 6→9） */
   --hub-bar-gap: 1px;                         /* 行间距（hermes gap-px；二轮缩回） */
   --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
   --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */

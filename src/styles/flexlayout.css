@@ -168,6 +168,45 @@
   margin-top: var(--logo-strip-h);
 }
 
+/* ── dockview 主题变量重映射（任务：分隔线去除 + 面板栏标签令牌化）──
+   ①分隔线去除（用户："左侧栏，对话栏，面板栏的中间怎么有描边线"）：
+   dockview 在每个非首 split view 左缘画 1px ::before 发丝线
+   （background: var(--dv-separator-border)）——变量重映射 transparent
+   一处覆盖（light 主题定义在内层 dockview 根、abyss 定义在 dv-shell
+   外壳，两处都要盖；sash 本体色早已 transparent 无需动）。
+   ②面板栏标签接页签系统令牌（用户："面板栏的标签效果不对，没有用
+   令牌中的效果吗"）：字号/选中色/未选中色/底色全部重映射到
+   tokens.css 页签系统——14/regular、未选中 #242424、选中 #006fff；
+   标签条与标签底透明（默认 #f3f3f3 白灰底 + 白块去除，色层透出）。
+   组激活态四象限统一映射：选中=--tab-text-active，其余=--tab-text
+   （旧 flexlayout 语义无"活动组"维度，不引入）。 */
+.dockview-host .dockview-theme-light,
+.dockview-host .dockview-theme-abyss {
+  --dv-activegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-activegroup-hiddenpanel-tab-color: var(--tab-text);
+  --dv-activegroup-visiblepanel-tab-background-color: transparent;
+  --dv-activegroup-visiblepanel-tab-color: var(--tab-text-active);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--tab-text);
+  --dv-inactivegroup-visiblepanel-tab-background-color: transparent;
+  --dv-inactivegroup-visiblepanel-tab-color: var(--tab-text-active);
+  --dv-separator-border: transparent;
+  --dv-tabs-and-actions-container-background-color: transparent;
+  --dv-tabs-and-actions-container-font-size: var(--tab-font-size);
+}
+
+/* 标签字重/字距接令牌（dockview 默认 400/normal，与页签系统同源声明） */
+.dockview-host .dv-tab {
+  font-weight: var(--tab-font-weight);
+  letter-spacing: var(--tab-tracking);
+}
+
+/* 未选中 hover 变品牌色（旧 flexlayout 语义"文字即按钮"；特异性须压过
+   dockview 的组四象限色规则——后者 (0,6,0)，本规则 (0,6,0) 且加载在后） */
+.dockview-host .dv-groupview > .dv-tabs-and-actions-container .dv-tabs-container > .dv-tab:hover {
+  color: var(--tab-text-active);
+}
+
 /* ── 会话页签条 leading：logo 50 + MIRACH 30/black/#006fff/字距2
    （用户定稿），位于条顶；页签行沉底（条 100 = leading 区 + 页签行）──
    高度 = 条高（占满）：条容器是 flex-end 沉底链，70 高的块会被压到条底
@@ -712,60 +751,16 @@
   opacity: 1;
 }
 
-/* ── 对话标签双行 chip（onRenderTab leading 注入，用户定稿 2026-10-03
-   十一轮：参考左栏 logo 的 leading 形式放页签最左；原 tab 名 content
-   恢复显示——十轮的 content 替换方案废弃）。拉伸头栏 tab_button_stretch
-   是 align-items:flex-end 沉底布局，chip 用 align-self:stretch + 内部
-   justify-content:center 垂直居中（不被沉底压扁）；字号/颜色引 tokens。 */
-.chat-tab-label-anchor .chat-tab-label {
-  /* 双行块对齐（用户 2026-10-05 重申：项目名顶 = 左栏 logo **文字**顶；
-     会话名底 = 页签行底）：项目名盒顶 = --logo-leading-pad（20，与 logo
-     文字同一上缘——logo 文字盒顶实测 = leading-pad；glyph-drop 是 MIRACH
-     行盒内字形下沉补偿，不该加到项目名上，去除）；会话名盒底 =
-     条底 - --strip-pad-bottom（与页签行同底）。 */
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-start;
-  padding: var(--logo-leading-pad) var(--tab-pad-x) calc(var(--strip-pad-bottom) - 1px);
-  text-align: left;
-  overflow: hidden;
-}
-
-/* 字号/颜色规则（chip 唯一挂载点 = .chat-tab-label-anchor 宿主叠片——
-   旧 .flexlayout__tab_button 前缀在叠片化后不再匹配，字号回落默认）。 */
-.chat-tab-label__workspace {
-  font-size: var(--chat-tab-workspace-size);
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--chat-tab-workspace-color);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 50%; /* 栏宽的 50%（页签从同一条中线起排）——超宽省略 */
-}
-
-.chat-tab-label__session {
-  font-size: var(--chat-tab-session-size);
-  font-weight: 400;
-  line-height: 1.1;
-  color: var(--chat-tab-session-color);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 50%; /* 栏宽的 50%——会话名超宽省略，悬停看全名（title） */
-  margin-top: 1px;
-  pointer-events: auto; /* 锚层整体 none——放行悬停 title（用户 2026-10-05） */
-}
+/* ── 对话标签双行块：样式已随组件迁至 panes.css（v8.0 dockview 版——
+   列头 = 容器子元素，原 .chat-tab-label-anchor 宿主叠片方案退役）。
+   此处不留规则（双源会失同步）。 ── */
 
 /* ── 对话栏贴软件边缘留白（用户 2026-10-06）：对话语义分栏直接到软件
    边缘时，贴边一侧的内容内缩 20px。标记类由 flex-layout 布局 effect 打在
    **tab 元素**上（flexlayout 0.11 的 tab 平铺在 layout 根层绝对定位、不在
-   tabset 子树里，按 data-layout-path 前缀映射），只标对话语义列。 ── */
+   tabset 子树里，按 data-layout-path 前缀映射），只标对话语义列。
+   v8.0 注：本段为 flexlayout 时代死规则（.flexlayout-host 已不存在）；
+   dockview 版贴边语义在 panes.css（:has() 判定贴边侧）。 ── */
 .flexlayout-host .flexlayout__tab.fl-edge-start {
   padding-left: 20px;
 }
@@ -780,5 +775,91 @@
 
 .flexlayout-host .flexlayout__tabset.fl-edge-end .flexlayout__tabset_tabbar_outer {
   padding-right: 20px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ── dockview 标签指示条/滑动（agent C）──
+   （本段只加新选择器：活动标签指示条 + 总览触发钮；不改 .dv-tab 的
+   font-size/color/background——那些归页签令牌映射段。）
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* 活动标签底部指示条（用户 2026-10-14「面板栏的标签效果不对」；beUI Tabs
+   指示器视觉：2px 底线 + 圆角）。色彩走页签令牌（选中 = 品牌色）。
+   ::after 独立盒：不占布局（position:absolute；.dv-tab 已是 relative），
+   pointer-events:none 不截胡标签交互；出现时 scaleX 入场（0.6→1）——
+   CSS 无法在切换标签间做"滑行"（单盒跨标签需要 JS 量位），入场动画是
+   ::after 方案可给到的最小动效（keyframes 在伪元素创建时必然运行，
+   transition 不会——选择器开始命中时是新盒）。reduced-motion 关闭。 */
+.dockview-host .dv-tab.dv-active-tab::after {
+  animation: dv-tab-indicator-in 180ms var(--beui-ease-out);
+  background: var(--tab-text-active);
+  border-radius: 2px;
+  bottom: 0;
+  content: '';
+  height: 2px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: 5;
+}
+
+/* focus-visible 的 outline 盒是 dockview 自带的 ::after 规则——两者同占
+   ::after 槽位不能并存（聚焦框优先级更高）。本规则把槽位还原成聚焦盒：
+   覆盖指示条的全部视觉声明（outline/层级仍是 dockview 规则——它带
+   !important；本规则只负责把指示条画的那几笔抹掉）。 */
+.dockview-host .dv-tab.dv-active-tab:focus-visible::after,
+.dockview-host .dv-tab.dv-active-tab:has(:focus-visible)::after {
+  animation: none;
+  background: none;
+  border-radius: 0;
+  bottom: auto;
+  height: 100%;
+  left: 0;
+  right: auto;
+  top: 0;
+  width: 100%;
+}
+
+@keyframes dv-tab-indicator-in {
+  from {
+    transform: scaleX(0.6);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dockview-host .dv-tab.dv-active-tab::after {
+    animation: none;
+  }
+}
+
+/* 标签总览触发钮（rightHeaderActionsComponent 挂载；旧 ZCode 溢出钮的
+   形制——20×20 ghost 方盒，悬停浅底 + 品牌色，仅面板栏多签组出现）。 */
+.tab-overview-trigger {
+  align-items: center;
+  align-self: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--zone-btn-radius);
+  color: var(--tab-text);
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  height: var(--zone-btn-size);
+  justify-content: center;
+  margin-right: var(--zone-btn-gap);
+  padding: 0;
+  width: var(--zone-btn-size);
+}
+.tab-overview-trigger:hover {
+  background: var(--tab-hover-bg);
+  color: var(--tab-text-active);
+}
+.tab-overview-trigger:focus-visible {
+  outline: 2px solid var(--tab-text-active);
+  outline-offset: 1px;
 }
 

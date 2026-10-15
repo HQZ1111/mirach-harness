@@ -42,22 +42,99 @@
    isolation:isolate 关键：dockview 的 .dv-groupview 有不透明白底，
    tint 的 z-index:-1 会掉到该白底**之下**不可见——isolate 建立本层
    stacking context，tint 困在 pane 内、白底之上、内容之下（2026-10-14
-   实锤："颜色层没了"根因）。 */
+   实锤："颜色层没了"根因）。flex 纵排：列头（chat-tab-label）在上、
+   Thread 吃剩余高度（列头是容器子元素，v8 布局定稿语义）。 */
 .assistant-thread-pane {
-  position: relative;
+  display: flex;
+  flex-direction: column;
   isolation: isolate;
+  position: relative;
+}
+
+/* Thread 根吃剩余高度（列头占位后消息区不溢出容器） */
+.assistant-thread-pane > .aui-root {
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 /* MainTint dockview 变体（2026-10-14 回迁）：面板内绝对定位——顶带
-   （--logo-strip-h 85）之下起画；左右贴边让位用与内容一致的 30px 内容线
-   （--rail-gutter）；圆角/色走 .main-tint 本体。z-index:-1 垫在内容下。 */
+   （--logo-strip-h 85）之下起画。左右间距 = 贴边语义（用户原话：
+   "两侧有相邻栏 → 左右都不留间距；贴软件边缘的那侧留 20px"）：
+   默认 left:0; right:0 撑满；当 chat 组是 split 容器的第一个/最后一个
+   可见 view（该侧无相邻栏 = 贴软件边）该侧改 20px（--chat-edge-inset）。
+   :has() 查自身面板内容做组归属判定（view 容器是平铺的 flex 行，
+   first/last-child 即贴边位——CDP 实测：三栏 [left|chat|panels] 与
+   四列含 session 分栏两种形态均精确命中）。圆角/色走 .main-tint 本体，
+   z-index:-1 垫在内容下。 */
 .main-tint--dockview {
-  top: var(--logo-strip-h);
-  left: var(--rail-gutter);
-  right: var(--rail-gutter);
   bottom: 0;
+  left: 0;
+  right: 0;
+  top: var(--logo-strip-h);
   width: auto;
   height: auto;
+}
+
+/* 贴左/右软件边缘（该侧无相邻栏）→ 该侧内缩 20px */
+.dv-view-container > .dv-view:first-child:has(> .dv-groupview .main-tint--dockview) .main-tint--dockview {
+  left: var(--chat-edge-inset);
+}
+
+.dv-view-container > .dv-view:last-child:has(> .dv-groupview .main-tint--dockview) .main-tint--dockview {
+  right: var(--chat-edge-inset);
+}
+
+/* ── 对话栏列头（ChatTabLabel 双行块，v8 布局定稿"工作区名=容器子元素"
+   回迁；原 ChatLabelOverlay 宿主叠片随 M1 换壳丢失）：嵌在 85px 顶带
+   区域内（与左栏 logo 同高带），工作区名大/会话名小两行、上下分开
+   （justify-content:space-between——项目名顶对齐 logo 文字顶，会话名
+   沉条底）。字号/颜色走 --chat-tab-* 令牌（tokens.css）。 */
+.chat-tab-label {
+  align-items: flex-start;
+  box-sizing: border-box;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  height: var(--logo-strip-h);
+  justify-content: space-between;
+  overflow: hidden;
+  padding: var(--logo-leading-pad) var(--tab-pad-x) calc(var(--strip-pad-bottom) - 1px);
+  pointer-events: none;
+  text-align: left;
+}
+
+/* 贴软件边缘时列头随颜色层同侧内缩（与 v7.3.6 语义一致：标题层与
+   内容/颜色层同步） */
+.dv-view-container > .dv-view:first-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label {
+  padding-left: calc(var(--tab-pad-x) + var(--chat-edge-inset));
+}
+
+.dv-view-container > .dv-view:last-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label {
+  padding-right: calc(var(--tab-pad-x) + var(--chat-edge-inset));
+}
+
+.chat-tab-label__workspace {
+  color: var(--chat-tab-workspace-color);
+  font-size: var(--chat-tab-workspace-size);
+  font-weight: 700;
+  line-height: 1.1;
+  max-width: 50%; /* 栏宽的 50%——超宽省略（与旧叠片语义一致） */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-tab-label__session {
+  color: var(--chat-tab-session-color);
+  font-size: var(--chat-tab-session-size);
+  font-weight: 400;
+  line-height: 1.1;
+  margin-top: 1px;
+  max-width: 50%; /* 栏宽的 50%——会话名超宽省略，悬停看全名（title） */
+  overflow: hidden;
+  pointer-events: auto; /* 容器整体 none——放行悬停 title（用户 2026-10-05） */
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── 代码预览（code-preview.tsx；Shiki 高亮 + 行号槽，
@@ -73,7 +150,8 @@
 
 .cp-card {
   background: var(--code-bg);
-  border: 1px solid var(--code-border);
+  /* 去描边（用户 2026-10-14 全局去描边：代码卡不留描边线；与聊天代码卡
+     CodeCard「只有底色无边框」同族）。 */
   border-radius: var(--code-radius);
   flex: 1 1 0;
   margin: var(--code-pad-y) var(--code-pad-x) var(--code-pad-x);
@@ -343,7 +421,8 @@
   --tl-row-min-h: 1.625rem;
   --tl-div-pt: 0.5rem;
   --tl-row-pad-y: 0.25rem;                    /* 会话行纵向内距（行与行间距，用户定稿加大） */
-  --tl-head-pt: 1.5rem;                       /* 组头上距（已置顶/会话两区之间，五轮 12→16 视觉不可辨，六轮 24px） */
+  --tl-head-pt: 0.8rem;                       /* 组头上距（用户 2026-10-14 定稿：置顶→会话视觉 15px = 12px + 2px 居中差 + 1px 行缝） */
+  --tl-head-pinned-gap: 0.6rem;               /* 置顶标签下距（用户 2026-10-14 定稿 9px；原 37.5px 空白过大） */
   --tl-ws-pt: 1.5rem;                         /* 工作区分隔行上距（工作区组间距，五轮 24px） */
 }
 
@@ -351,7 +430,8 @@
   --tl-row-min-h: 1.25rem;
   --tl-div-pt: 0.375rem;                      /* 紧凑档：组头/工作区组间距均 8px（用户定稿九轮：会话与工作区之间显太大） */
   --tl-row-pad-y: 0.25rem;                    /* 行间紧凑档 = 4px（同舒适档） */
-  --tl-head-pt: 0.5rem;                       /* 组头上距紧凑 8px（舒适 24px，九轮回调） */
+  --tl-head-pt: 0.5rem;                       /* 组头上距紧凑 8px（舒适 15px，九轮回调） */
+  --tl-head-pinned-gap: 0.4rem;               /* 置顶标签下距紧凑 6px（舒适 9px） */
   --tl-ws-pt: 0.5rem;                         /* 工作区分隔行紧凑 8px（舒适 24px） */
 }
 
@@ -793,5 +873,19 @@
   pointer-events: none;
   position: absolute;
   right: 0;
+  z-index: 0;
+}
+
+/* ── 会话列表悬停滑动指示块（同款移植，2026-10-14）──
+   与文件树版的挂载差别：挂在**滚动容器本身**（ThreadListItems——已补
+   relative 类作定位参照），abs 子元素随内容滚动 → top 公式含
+   +scrollTop（JS 侧见 SessionListHoverPill.tsx 头注）。left/width/
+   height 由 JS 行矩形现测（行宽受 inset 边距影响、行高随收件箱样式
+   浮动）。行自身 hover 洗底已移除防双层（data-active 选中态保留）。 */
+.session-list-hover-pill {
+  background: var(--hover-wash);
+  border-radius: 8px;
+  pointer-events: none;
+  position: absolute;
   z-index: 0;
 }
