@@ -55,6 +55,9 @@ fn show_main(app: &tauri::AppHandle) {
             // 实测 2026-09-25）——Win32 SW_SHOW 兜底
             raw_show_window(h.0 as isize, SW_SHOW);
         }
+        // 托盘恢复路径显式重设圆角区域（Resized 兜底之外的双保险）
+        #[cfg(windows)]
+        win_shape::sync_round_region(&window);
     }
 }
 
@@ -80,6 +83,82 @@ fn raw_show_window(hwnd: isize, cmd: i32) {
 fn force_hide(window: &tauri::WebviewWindow) {
     if let Ok(h) = window.hwnd() {
         raw_show_window(h.0 as isize, SW_HIDE);
+    }
+}
+
+/// 窗口圆角物理裁剪（用户 2026-10-15 定稿："tauri壳圆角的地方有黑色的角"
+/// + "最底层有个黑的页面"）。根因实锤：CEF windowed 不支持透明绘制
+/// （tauri-runtime-cef webview.rs:161 原文——transparent painting exists
+/// only in off-screen rendering），页面画布恒不透明、基色 #1F1F1F（实测
+/// 四角像素 31,31,31；品红实验证明角落随 html/body 背景走 = 就是页面画布
+/// 本身，不是桌面也不是别的窗口）。html/body 必须透明（圆角技巧的前提，
+/// base.css 注释有史），所以这块黑永远垫在 .app-shell 底下从圆角外露出。
+/// 修复 = SetWindowRgn 物理裁圆（实测四角 31,31,31 → 桌面透出，移除即
+/// 复现）；区域必须跟随 resize/DPI；最大化清空（触屏边圆角无意义且会在
+/// 屏边露桌面角）；退化尺寸（最小化陷阱 160×28）清空。
+#[cfg(windows)]
+mod win_shape {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+        fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateRoundRectRgn(l: i32, t: i32, r: i32, b: i32, ew: i32, eh: i32) -> isize;
+        fn DeleteObject(obj: isize) -> i32;
+    }
+
+    /// 逻辑圆角半径——必须与 base.css `.app-shell { border-radius: 40px }`
+    /// 同值（CSS px = 窗口逻辑像素，1:1）。
+    const RADIUS_LOGICAL: f64 = 40.0;
+
+    fn clear_region(hwnd: isize) {
+        unsafe {
+            SetWindowRgn(hwnd, 0, 1);
+        }
+    }
+
+    /// 依当前窗口态重设圆角区域（幂等）：Resized / DPI 变化 / 托盘恢复均调。
+    pub fn sync_round_region(window: &tauri::WebviewWindow) {
+        let Ok(h) = window.hwnd() else { return };
+        let hwnd = h.0 as isize;
+        if window.is_maximized().unwrap_or(false) {
+            clear_region(hwnd);
+            return;
+        }
+        let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { GetWindowRect(hwnd, &mut r) } == 0 {
+            return;
+        }
+        let w = r.right - r.left;
+        let h = r.bottom - r.top;
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let dia = (RADIUS_LOGICAL * 2.0 * scale).round() as i32;
+        if w <= dia || h <= dia {
+            // 退化尺寸（最小化 160×28 陷阱等）——不裁，恢复尺寸时 Resized 重来
+            clear_region(hwnd);
+            return;
+        }
+        let rgn = unsafe { CreateRoundRectRgn(0, 0, w + 1, h + 1, dia, dia) };
+        if rgn == 0 {
+            return;
+        }
+        if unsafe { SetWindowRgn(hwnd, rgn, 1) } == 0 {
+            // 失败：区域所有权未转移，自行释放；成功则系统接管（勿删）
+            unsafe {
+                DeleteObject(rgn);
+            }
+        }
     }
 }
 
@@ -499,6 +578,9 @@ fn main() {
                     let _ = window.maximize();
                 }
             }
+            // 圆角区域初设（早于首次 show；最大化态由函数内守卫清空）
+            #[cfg(windows)]
+            win_shape::sync_round_region(&window);
             // 窗口事件：✕ 隐藏到托盘（ZCode closeToTrayOnWindows 语义）；
             // 双屏分辨率不一致：窗口 Moved/缩放变化（跨屏拖动）后 250ms 防抖，
             // 落点屏幕装不下当前尺寸 → 钳制到该屏工作区。
@@ -515,11 +597,27 @@ fn main() {
                     #[cfg(windows)]
                     force_hide(&win);
                 }
-                WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                WindowEvent::Resized(_) => {
+                    // 圆角区域跟尺寸（同步，微秒级；统一入口处理最大化/退化尺寸）
+                    #[cfg(windows)]
+                    win_shape::sync_round_region(&win);
+                }
+                WindowEvent::Moved(_) => {
                     let w = win.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(250));
                         fit_to_monitor(&w);
+                    });
+                }
+                WindowEvent::ScaleFactorChanged { .. } => {
+                    let w = win.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        fit_to_monitor(&w);
+                        // DPI 变了——圆角直径须跟新 scale 重算（Resized 先到
+                        // 时 scale_factor 可能还是旧值，此延迟调用兜底）
+                        #[cfg(windows)]
+                        win_shape::sync_round_region(&w);
                     });
                 }
                 _ => {}

@@ -39,6 +39,11 @@ export function WindowControls() {
       unlisten?.()
     }
   }, [])
+  // 最大化态同步到 DOM：CSS 圆角清零（base.css html[data-maximized='true']）
+  // 与 Rust 端 SetWindowRgn 区域清空（main.rs）同一状态源，两侧同步开/关。
+  useEffect(() => {
+    document.documentElement.dataset.maximized = maximized ? 'true' : 'false'
+  }, [maximized])
   if (!inTauri) return null
   return (
     <div className="win-dot-controls">

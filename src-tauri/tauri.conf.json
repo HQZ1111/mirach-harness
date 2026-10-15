@@ -22,7 +22,7 @@
         "dragDropEnabled": false,
         "decorations": false,
         "transparent": true,
-        "shadow": false,
+        "shadow": true,
         "additionalBrowserArgs": "--remote-debugging-port=9223"
       }
     ],

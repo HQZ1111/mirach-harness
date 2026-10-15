@@ -34,6 +34,12 @@ body {
   overflow: hidden;
 }
 
+/* 最大化态：窗角清零——与 Rust 端区域清空（main.rs win_shape::
+   sync_round_region 的 is_maximized 守卫）同一状态源（window-controls
+   写的 data-maximized），避免最大化时屏角露出圆角楔形（页面画布
+   #1F1F1F 或桌面）。 */
+html[data-maximized='true'] .app-shell { border-radius: 0; }
+
 /* 纯浏览器直开（无 Tauri）：无透明窗体差异，样式一致 */
 body.in-browser { background: var(--surface); }
 

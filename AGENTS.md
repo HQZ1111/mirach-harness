@@ -337,6 +337,23 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
 10. **最小化陷阱的观察值**：B 代理轮实测窗口被压到 160×28（同 AGENTS
      既有的"minimized WebView2 reports 160×28"现象，CEF 下同样出现）；
      遇此按上一条两步法恢复。
+11. **"最底层黑页面"/四角黑楔 = CEF 页面画布本身**（2026-10-15 品红实验
+     实锤）：CEF windowed 不支持透明绘制（tauri-runtime-cef webview.rs:161
+     原文——transparent painting exists only in off-screen rendering），
+     页面画布恒不透明、基色 #1F1F1F（像素 31,31,31）。html/body 必须透明
+     （.app-shell 圆角技巧前提），黑楔就从圆角外露出。**修复 = SetWindowRgn
+     物理裁圆**（main.rs win_shape 模块：CreateRoundRectRgn(0,0,W+1,H+1,80,80)
+     ——注意 +1，r=40 直径 80；Resized/ScaleFactorChanged/托盘恢复三处重设；
+     最大化清空（NULL region），配套 CSS `html[data-maximized='true']
+     .app-shell{border-radius:0}` 由 window-controls 写 dataset 联动）。
+     圆角半径与 base.css .app-shell 的 40px 同值，改一处必须改两处。
+     另有 winit undecorated shadow 激活后顶行 1px 深灰线（227,227,227）：
+     WM_NCCALCSIZE 的 rgba[0].top+=1 必然现象（winit 源码注释），非 bug。
+12. **dockview 布局存档按比例记宽**：窗口被 resize（哪怕外部 SetWindowPos）
+     存下的 size 是比例，恢复窗口尺寸后三栏不会回到 350/1100/350，而是
+     按存储比例铺——要恢复出厂布局就删 localStorage
+     `mirach.harness.layout.v9` 再 reload（布局存档只存 ratio 不存 px，
+     参考 fromJSON 后的归一行为）。
 - **dev 模式的"慢"是编译位置问题**：设置页是动态 import（115 文件 /
   ~1.1MB 源码），vite 按需编译 → 每次重启后**第一次**打开要现场转换整个
   子图（数十秒，React-Compiler 的 babel pass 会放大每个文件的成本），
