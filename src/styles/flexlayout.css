@@ -863,3 +863,25 @@
   outline-offset: 1px;
 }
 
+/* ── 标签条溢出：两端渐隐（beUI TabsList 语义，2026-10-15）──
+   箭头钮（tab-strip-arrows.tsx）侦测溢出后向 .dv-tabs-and-actions-container
+   写 data-strip-left/right 属性；本规则按属性给条容器画横向渐隐 mask
+   （beUI 40px 渐变带语义）。原生溢出下拉已关（disableTabsOverflowList），
+   滚动仍由 .dv-tabs-container 原生横滚承载（箭头 scrollBy 驱动）。 */
+.dv-tabs-and-actions-container[data-strip-left='1'] .dv-tabs-container {
+  mask-image: linear-gradient(to right, transparent, black 40px);
+}
+.dv-tabs-and-actions-container[data-strip-right='1'] .dv-tabs-container {
+  mask-image: linear-gradient(to left, transparent, black 40px);
+}
+.dv-tabs-and-actions-container[data-strip-left='1'][data-strip-right='1'] .dv-tabs-container {
+  mask-image: linear-gradient(to right, transparent, black 40px, black calc(100% - 40px), transparent);
+}
+/* 滚动条始终隐藏（箭头是滚动通道 UI；3px 原生细条与新设计语言冲突） */
+.dv-tabs-container {
+  scrollbar-width: none;
+}
+.dv-tabs-container::-webkit-scrollbar {
+  display: none;
+}
+

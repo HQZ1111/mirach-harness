@@ -47,7 +47,7 @@ import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-m
 import {
   setSessionTabOpener,
 } from '@/components/panes/session-manage/session-tab-bridge'
-import { TabOverviewButton } from './tab-overview-menu'
+import { TabStripLeftArrow, TabStripRightSide } from './tab-strip-arrows'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 import {
   alignVisibleToOrder,
@@ -149,6 +149,23 @@ const OPEN_KIND_PANEL: Record<OpenPageKind, { id: string; component: string; tit
   preview: { id: 'preview', component: 'preview', title: '预览' },
 }
 
+/** 面板栏落点锚（2026-10-15 边界实测修复）：open 在场 → within open；
+ *  锚缺席 = 面板列已有实签（生命周期：实签抵达即撤锚）——此时硬指向
+ *  'open' 会被 dockview 抛 "referencePanel 'open' does not exist"。回退
+ *  within 根面板组（regionOfGroup 找 panels 域组），组也找不到（极空态）
+ *  才回退 workspace 右侧新建。 */
+const panelsDropPosition = (
+  a: DockviewApi,
+):
+  | { referencePanel: string; direction: 'within' }
+  | { referenceGroup: string; direction: 'within' }
+  | { referencePanel: string; direction: 'right' } => {
+  if (a.getPanel('open')) return { referencePanel: 'open', direction: 'within' }
+  const host = rootPanelsGroup(a)
+  if (host) return { referenceGroup: host.id, direction: 'within' }
+  return { referencePanel: 'workspace', direction: 'right' }
+}
+
 /** open 页签头（根面板不可关：无 ✕ 的自定义 tab）。 */
 const OpenTabHeader = (props: IDockviewPanelHeaderProps) => (
   <div className="dv-open-tab">
@@ -162,6 +179,12 @@ export function DockviewShell() {
   const hydratingRef = useRef(false)
   /** 打开页生命周期重入护栏。 */
   const anchorBusyRef = useRef(false)
+  /** 栏宽快照（onWillMutateLayout kind=remove 时记，末签关组重建后钉回）。
+   *  背景（2026-10-15 实锤）：面板栏最后一签关闭 → dockview 把组收走 →
+   *  restoreOpenAnchor 回退分支新建组（referencePanel workspace 右侧），
+   *  网格三维重摊 350/1100/350 → 420/600/780（左栏顶到 max 420）。钉回 =
+   *  快照值 setSize 三连（同 boot 出厂钉法，两轮互挤后收敛）。 */
+  const colWidthSnapshotRef = useRef<{ left?: number; panels?: number } | null>(null)
 
   // ── 打开页生命周期（ZCode 空态逻辑，v7.3.1 语义 dockview 版） ─────────────
   // 实签抵达面板组 → 撤 open；最后一个实签关闭 → open 回来（根面板列打开
@@ -170,6 +193,14 @@ export function DockviewShell() {
     if (a.getPanel('open')) return
     const flags = columnFlagsOf()
     if (flags.panelsHidden) return
+    // 实签在场 → 锚不该回来（2026-10-15 实锤：组内 [文件树|终端] 只关
+    // 文件树时 didRemovePanel 路径把 open 误复活成 [打开|终端]，违背生命
+    // 周期"最后一个实签关闭 → open 回来"）。有实签 = 面板列有宿主，锚缺席
+    // 即正确态；锚只在面板列空置（末签收走组）或 boot 空列时兜底重建。
+    const hasRealPanels = a.panels.some(
+      (p) => p.id !== 'open' && p.params?.region === 'panels',
+    )
+    if (hasRealPanels) return
     const host = rootPanelsGroup(a)
     if (host) {
       a.addPanel({
@@ -224,6 +255,22 @@ export function DockviewShell() {
       anchorBusyRef.current = true
       try {
         restoreOpenAnchor(a)
+        // 栏宽钉回（2026-10-15）：组被收走重建后的重摊把 350/1100/350 打乱
+        // （实锤 420/600/780）——用 willMutate 快照把双轨钉回。rAF + 150ms
+        // 双拍（重建当帧树未稳，单次 setSize 会被后续布局步覆盖，CDP 实测）。
+        const snap = colWidthSnapshotRef.current
+        if (snap && (snap.left || snap.panels)) {
+          const pin = () => {
+            const lg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'left'))
+            const pg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'panels'))
+            for (let i = 0; i < 3; i++) {
+              if (pg && snap.panels) pg.api.setSize({ width: snap.panels })
+              if (lg && snap.left) lg.api.setSize({ width: snap.left })
+            }
+          }
+          requestAnimationFrame(pin)
+          setTimeout(pin, 150)
+        }
       } finally {
         anchorBusyRef.current = false
       }
@@ -279,7 +326,7 @@ export function DockviewShell() {
         title: fileName || '预览',
         minimumWidth: 240,
         params: { region: 'panels', filePath },
-        position: { referencePanel: 'open', direction: 'within' },
+        position: panelsDropPosition(a),
       })
     })
     return () => setPreviewOpener(null)
@@ -300,8 +347,9 @@ export function DockviewShell() {
         ...target,
         minimumWidth: 240,
         params: { region: 'panels' },
-        // 锚 open panel 所在组（组 id 由 fromJSON 归一，不依赖出厂命名）
-        position: { referencePanel: 'open', direction: 'within' },
+        // 锚 open 所在组（组 id 由 fromJSON 归一，不依赖出厂命名）；
+        // 锚缺席（有实签）→ 根面板组（panelsDropPosition）
+        position: panelsDropPosition(a),
       })
     } catch (e) {
       console.error('[dv-shell] 打开页动作失败', kind, e)
@@ -354,6 +402,20 @@ export function DockviewShell() {
       // 打开页生命周期 + 持久化（先订阅再灌布局——boot 布局事件也要记账）
       a.onDidAddPanel((p) => handlePanelAdded(a, p.id))
       a.onDidRemovePanel((p) => handlePanelRemoved(a, p.id))
+      // 栏宽快照（2026-10-15）：remove 突变前记左/面板双轨当前宽——末签
+      // 关组重建的几何重摊之后用来钉回（handlePanelRemoved 消费）。任何
+      // 时刻实时读 g.width，用户拖过 sash 也是最新值（非陈旧缓存）。
+      a.onWillMutateLayout((e) => {
+        if (e.kind !== 'remove') return
+        for (const g of a.groups) {
+          const region = g.panels[0]?.params?.region
+          if (region === 'left') {
+            colWidthSnapshotRef.current = { ...colWidthSnapshotRef.current, left: g.width }
+          } else if (region === 'panels') {
+            colWidthSnapshotRef.current = { ...colWidthSnapshotRef.current, panels: g.width }
+          }
+        }
+      })
       let persistTimer: ReturnType<typeof setTimeout> | null = null
       a.onDidLayoutChange(() => {
         if (hydratingRef.current) return
@@ -444,9 +506,15 @@ export function DockviewShell() {
             // ReactPart 抛 "Only React.memo..." → fromJSON 整体回退空布局）
             components={{ ...components, open: () => <OpenPage onOpen={onOpen} /> }}
             tabComponents={{ openTab: OpenTabHeader }}
-            // 标签总览下拉（v8.1 恢复）：组条右侧动作位——overflow 3 签起
-            // 出双 chevron 总览钮（左/主栏 hideHeader 组自动不渲染）。
-            rightHeaderActionsComponent={TabOverviewButton}
+            // 标签条溢出样式（用户 2026-10-15："面板栏的标签页样式不是 tabs
+            // 里的 overflow 样式吗，之前的下拉选标签页的组件也保留"）：
+            // 原生 ⋮N 下拉关闭（disableTabsOverflowList）→ beUI TabsList
+            // 语义 = 横滚 + 两端渐隐 + 左右箭头（tab-strip-arrows.tsx，左挂
+            // prefix、右与总览钮并排挂 right）；标签总览下拉（cmdk 检索 +
+            // 关闭）保留为检索通道（>2 签出现）。
+            disableTabsOverflowList
+            prefixHeaderActionsComponent={TabStripLeftArrow}
+            rightHeaderActionsComponent={TabStripRightSide}
             onReady={onReady}
             className="dockview-theme-light"
           />

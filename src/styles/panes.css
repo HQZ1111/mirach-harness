@@ -423,7 +423,7 @@
   --tl-row-pad-y: 0.25rem;                    /* 会话行纵向内距（行与行间距，用户定稿加大） */
   --tl-head-pt: 0.8rem;                       /* 组头上距（用户 2026-10-14 定稿：置顶→会话视觉 15px = 12px + 2px 居中差 + 1px 行缝） */
   --tl-head-pinned-gap: 0.6rem;               /* 置顶标签下距（用户 2026-10-14 定稿 9px；原 37.5px 空白过大） */
-  --tl-ws-pt: 1.5rem;                         /* 工作区分隔行上距（工作区组间距，五轮 24px） */
+  --tl-ws-pt: 0.6rem;                         /* 工作区分隔行上距（用户 2026-10-15：会话标签→文件夹名原 22.5px 太大；取"标签下 9px"同一节奏） */
 }
 
 [data-density='compact'] {
@@ -888,4 +888,13 @@
   pointer-events: none;
   position: absolute;
   z-index: 0;
+}
+
+/* ── 会话行选中态 = 文字效果（用户 2026-10-15："点击会话……都是文字
+   点击效果"；原整行 data-active 底色横条已从行类移除）──
+   标题文字品牌色 + 字重中等——与"置顶"组头（text-(--fl-accent)）同族
+   观感。特异性 (0,2,1) 压过行内联的 hover 工具类（0,2,0）。 */
+[data-slot='aui_thread-list-item'][data-active] [data-slot='aui_thread-list-item-title'] {
+  color: var(--fl-accent);
+  font-weight: 500;
 }

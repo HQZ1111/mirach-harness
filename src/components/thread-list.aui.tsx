@@ -1698,8 +1698,12 @@ export const ThreadListItem: FC = () => {
           ref={sortable?.ref}
           className={cn(
             // hover 洗底已移除（v8.1 悬停滑动 pill 接管——行自身再画半透明底
-            // 会与 pill 叠成双层，2026-10-14）；data-active 选中态保留。
-            "group/row data-active:bg-[color-mix(in_srgb,var(--fl-accent)_10%,transparent)] relative grid min-h-[var(--tl-row-min-h,1.625rem)] grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-[var(--tl-row-pad-y,0.25rem)] pr-2 transition-colors focus-visible:outline-none",
+            // 会与 pill 叠成双层，2026-10-14）；active 整行横条同样移除
+            // （2026-10-15 用户："为什么整个会话有个横条的高亮……都是文字
+            // 点击效果"）——选中态 = 标题文字品牌色，规则在 panes.css
+            // （[data-slot=...][data-active] title 规则，避免与 hover 工具类
+            // 的生成序打特异性官司）。
+            "group/row relative grid min-h-[var(--tl-row-min-h,1.625rem)] grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md py-[var(--tl-row-pad-y,0.25rem)] pr-2 transition-colors focus-visible:outline-none",
             // 拖起态逐字 hermes session-row.tsx:369——lifted 行盖过下层
             // （z-10 + 不透明侧栏表面，「translucency let the rows below
             // bleed through」的解法）+ grabbing 光标；压暗 0.45 由跨面
