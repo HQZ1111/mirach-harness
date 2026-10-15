@@ -231,7 +231,8 @@ function ContextDisplayContent({
       sideOffset={8}
       data-slot="context-display-popover"
       className={cn(
-        "bg-popover text-popover-foreground block w-56 border p-3 text-left [&_[data-slot=tooltip-arrow]]:hidden",
+        // 去描边（用户 2026-10-14 全局去描边）：浮层边界改由 shadow-md 承担
+        "bg-popover text-popover-foreground block w-56 p-3 text-left shadow-md [&_[data-slot=tooltip-arrow]]:hidden",
         className,
       )}
     >

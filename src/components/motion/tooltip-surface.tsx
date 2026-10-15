@@ -35,7 +35,8 @@ export function TooltipSurface({
       exit={{ ...closed, transition: { duration: 0.12, ease: EASE_OUT } }}
       style={{ transformOrigin: "var(--tooltip-origin, center)", ...style }}
       className={cn(
-        "block whitespace-nowrap rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground shadow-lg",
+        // 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由 shadow-lg 承担
+        "block whitespace-nowrap rounded-lg bg-background px-2.5 py-1 text-xs font-medium text-foreground shadow-lg",
         className,
       )}
       {...props}

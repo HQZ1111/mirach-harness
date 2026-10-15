@@ -106,7 +106,12 @@ export function WorkspaceFileTreeRowView({
         "pl-[calc(var(--workspace-file-tree-depth)*0.75rem+0.5rem)]",
         // 行背景保持透明：hover 指示由 FileTreeHoverPill 滑动块承担
         // （2026-10-14 纯视觉层接线，行自身洗底移除防瞬时双层）。
-        selected ? "border-(--fl-accent) bg-transparent" : "border-transparent",
+        // 选中态 = 底色高亮（用户 2026-10-14：点击标签要"高亮"不是描边线
+        // ——旧版 border-(--fl-accent) 蓝描边被当成 bug）；两种状态都显式
+        // border-transparent——行基类带 border，base 规则默认色 var(--border)
+        // 仍会画淡灰线。焦点可见性仍靠 focus-visible 的 accent 描边（键盘
+        // 可达性需要，保留；伪类选择器特异性高于本行覆盖）。
+        selected ? "border-transparent bg-(--tab-accent-wash)" : "border-transparent",
         "focus-visible:border-(--fl-accent)",
       )}
       title={relativePath}
@@ -161,7 +166,7 @@ export function WorkspaceFileTreeRowView({
       <ContextMenuRoot>
         <ContextMenuTrigger asChild>{rowElement}</ContextMenuTrigger>
         <ContextMenuPortal>
-          <ContextMenuContent className="z-50 w-52 rounded-lg border border-(--stroke) bg-(--surface) p-1 shadow-(--shadow-pop)">
+          <ContextMenuContent className="z-50 w-52 rounded-lg bg-(--surface) p-1 shadow-(--shadow-pop)">
             <ContextMenuItem
               className="cursor-pointer rounded-md px-2 py-1.5 text-(--filetree-row-font-size) text-(--text) outline-none data-[highlighted]:bg-(--hover-wash)"
               onSelect={handleOpenPrimary}

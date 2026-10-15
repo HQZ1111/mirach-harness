@@ -56,6 +56,8 @@ export function RegenerateMenu({
         <div
           className={cn(
             floating,
+            // 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由
+            // 消费方 wrapper 的 [&>*+*]:shadow-lg 承担（thread.aui.tsx）。
             "fade-in zoom-in-95 slide-in-from-top-1 animate-in flex flex-col gap-0.5 rounded-2xl p-1.5 duration-200",
           )}
         >

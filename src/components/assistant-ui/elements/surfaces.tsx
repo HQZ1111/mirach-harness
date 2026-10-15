@@ -4,9 +4,16 @@ import type { ComponentProps } from "react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
-export const paper = "bg-background border border-border/60 dark:bg-popover";
+// 去描边（用户 2026-10-14 全局去描边：卡片/弹窗不留描边线）——层次由既有阴影承担。
+// paper：聊天卡片面（白卡垫在浅色内容层上），补 shadow-sm 轻微抬升防"飘"。
+// floating：浮层容器（菜单/popover/命令面板）——阴影一律由消费处显式给
+// （shadow-(--shadow-pop) / 外层 wrapper 的 [&>*+*]:shadow-lg 等），这里
+// 不写 shadow 避免与外层同属性选择器打架（set 顺序不可依赖）。
+// 例外：ComposerBar / EmptyStateComposer（输入区容器）在自己的 className 里
+// 补回描边——用户口径"输入框（input/textarea）的边框不动"。
+export const paper = "bg-background shadow-sm dark:bg-popover";
 
-export const floating = "bg-background border border-border/60 dark:bg-popover";
+export const floating = "bg-background dark:bg-popover";
 
 export const field = "bg-foreground/[0.04] dark:bg-foreground/[0.06]";
 

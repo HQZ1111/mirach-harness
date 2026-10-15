@@ -528,7 +528,8 @@ export function ContextMenuContent({
         onKeyDown={onKeyDown}
         onContextMenu={(event) => event.preventDefault()}
         className={cn(
-          "min-w-56 overflow-hidden rounded-xl border border-border bg-card p-1.5 text-foreground outline-none",
+          // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——外层 wrapper 已有 drop-shadow
+          "min-w-56 overflow-hidden rounded-xl bg-card p-1.5 text-foreground outline-none",
           className,
         )}
       >

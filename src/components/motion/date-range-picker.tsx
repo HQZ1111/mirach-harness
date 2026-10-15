@@ -130,7 +130,10 @@ export function DateRangePickerCalendar({
       {...props}
       aria-label={props["aria-label"] ?? ctx.label}
       className={cn(
-        "w-80 max-w-full rounded-2xl border border-border bg-background p-3.5",
+        // 去描边（用户 2026-10-14 全局去描边：浮层卡片不留描边线）。本卡经
+        // MorphPopoverContent shadow={false} 承载定位（无外层阴影）——补回
+        // shadow-md 作为边界层次，防面片与白底融为一体。
+        "w-80 max-w-full rounded-2xl bg-background p-3.5 shadow-md",
         className,
       )}
     >

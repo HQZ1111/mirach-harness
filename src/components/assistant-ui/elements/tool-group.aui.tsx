@@ -23,9 +23,10 @@ const ANIMATION_DURATION = 200;
 const toolGroupVariants = cva("aui-tool-group-root group/tool-group w-full", {
   variants: {
     variant: {
-      outline: "rounded-lg border py-3",
+      // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）
+      outline: "rounded-lg py-3",
       ghost: "",
-      muted: "border-muted-foreground/30 bg-muted/30 rounded-lg border py-3",
+      muted: "bg-muted/30 rounded-lg py-3",
     },
   },
   defaultVariants: { variant: "outline" },

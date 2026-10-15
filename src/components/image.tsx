@@ -145,7 +145,8 @@ const imageVariants = cva(
   {
     variants: {
       variant: {
-        outline: "border-border border",
+        // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）
+        outline: "",
         ghost: "",
         muted: "bg-muted/50",
       },

@@ -409,8 +409,9 @@ const SettingsHost: FC = () => {
 
 // 视觉 = 工程现役菜单族（thread-list.aui.tsx VIEW_MENU_* 同令牌）：w-56 是
 // hermes app 菜单的内容宽（app-context-menu.tsx:704）。
+// 去描边（用户 2026-10-14 全局去描边）：菜单不留描边线，层次由 shadow-(--shadow-pop) 承担。
 const APP_MENU_CONTENT_CLASS =
-  'bg-popover text-popover-foreground z-50 w-56 overflow-hidden rounded-xl border p-1.5 shadow-(--shadow-pop)'
+  'bg-popover text-popover-foreground z-50 w-56 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)'
 const APP_MENU_ITEM_CLASS =
   'flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-(--hover-wash)'
 const APP_MENU_SEPARATOR_CLASS = 'bg-(--stroke-soft) mx-1 my-1 h-px'

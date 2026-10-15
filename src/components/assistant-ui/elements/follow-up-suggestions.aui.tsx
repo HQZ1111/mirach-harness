@@ -52,7 +52,8 @@ const FollowupSuggestionsRow: FC = () => {
         {suggestions.map((suggestion, idx) => (
           <ThreadPrimitive.Suggestion
             key={idx}
-            className="aui-thread-followup-suggestion border-foreground/10 hover:bg-foreground/[0.03] hover:border-foreground/25 rounded-md border px-2.5 py-1 text-sm whitespace-nowrap transition-colors ease-in motion-reduce:transition-none"
+            // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）——层次改浅洗底
+            className="aui-thread-followup-suggestion hover:bg-foreground/[0.07] rounded-md bg-foreground/[0.04] px-2.5 py-1 text-sm whitespace-nowrap transition-colors ease-in motion-reduce:transition-none"
             prompt={suggestion.prompt}
             send
           >

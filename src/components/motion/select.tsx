@@ -398,8 +398,9 @@ export function SelectContent({ className, children }: SelectContentProps) {
       }}
       // flush against the trigger, then separates into its own rounded pill;
       // sits above or below depending on available space
+      // 去描边（用户 2026-10-14 全局去描边：下拉不留描边线）——层次由 shadow-lg 承担
       className={cn(
-        "absolute left-0 right-0 z-20 overflow-hidden border border-border bg-background shadow-lg",
+        "absolute left-0 right-0 z-20 overflow-hidden bg-background shadow-lg",
         isTop ? "bottom-full" : "top-full",
         className,
       )}

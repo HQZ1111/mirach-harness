@@ -84,6 +84,10 @@ export function EmptyStateComposer({
       style={{ animationDelay: "360ms", ...style }}
       className={cn(
         paper,
+        /* 罐头输入框描边保留（与 ComposerBar 同族：输入框类不动；paper 已
+           全局去描边，这里补回保证输入框形状可见）。shadow-none 抵消
+           paper 新增的 shadow-sm，保持输入框与去描边前逐像素一致。 */
+        "border-border/60 border shadow-none",
         "fade-in slide-in-from-bottom-2 animate-in fill-mode-both flex h-13 w-full items-center justify-between rounded-full py-2 ps-5 pe-2.5 duration-500 motion-reduce:animate-none",
         className,
       )}

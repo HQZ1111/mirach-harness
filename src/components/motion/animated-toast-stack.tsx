@@ -381,7 +381,8 @@ const ToastItem = memo(function ToastItem({
     >
       <div
         className={cn(
-          "relative overflow-hidden rounded-2xl border border-border bg-card/95 p-3 shadow-2xl backdrop-blur-xl",
+          // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）——层次由 shadow-2xl 承担
+          "relative overflow-hidden rounded-2xl bg-card/95 p-3 shadow-2xl backdrop-blur-xl",
           classNames?.surface,
         )}
       >

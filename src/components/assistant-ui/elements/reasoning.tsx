@@ -25,7 +25,8 @@ const ReasoningPreviewContext = createContext(false);
 const reasoningVariants = cva("aui-reasoning-root mb-4 w-full", {
   variants: {
     variant: {
-      outline: "rounded-lg border px-3 py-2",
+      // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）
+      outline: "rounded-lg px-3 py-2",
       ghost: "",
       muted: "bg-muted/50 rounded-lg px-3 py-2",
     },

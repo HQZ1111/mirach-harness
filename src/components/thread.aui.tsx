@@ -252,7 +252,9 @@ const ConnectionBanner: FC = () => {
       phase={phase}
       attempt={phase === "reconnecting" ? reconnectAttempts : undefined}
       onRetry={phase === "dropped" ? requestReconnect : undefined}
-      className="w-full max-w-none rounded-none border-x-0 border-t-0"
+      // paper 全局去描边后原"仅底边"形态不再成立——显式补底边发丝线
+      // 保持全宽状态条的原有分隔观感（条是状态横幅非卡片，不走去描边）。
+      className="w-full max-w-none rounded-none border-b border-border/60 shadow-none"
     />
   );
 };
@@ -364,7 +366,8 @@ const SessionLineBar: FC = () => {
   return (
     <div
       data-slot="aui-session-line-bar"
-      className="mb-2 flex w-full items-center gap-2 rounded-(--composer-radius) border border-border/60 bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground"
+      // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）——bg-muted/40 底色承担层次
+      className="mb-2 flex w-full items-center gap-2 rounded-(--composer-radius) bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground"
     >
       <GitBranchIcon className="size-3.5 shrink-0" />
       <span className="min-w-0 truncate">会话分支 · 分叉自「{displayName}」</span>
@@ -604,7 +607,8 @@ const CheckpointBar: FC = () => {
           />
           <div
             data-slot="aui-checkpoint-panel"
-            className="bg-popover text-popover-foreground absolute top-full left-0 z-50 mt-1 flex w-80 flex-col gap-2 rounded-xl border p-3 shadow-lg"
+            // 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由 shadow-lg 承担
+            className="bg-popover text-popover-foreground absolute top-full left-0 z-50 mt-1 flex w-80 flex-col gap-2 rounded-xl p-3 shadow-lg"
           >
             <p className="text-muted-foreground px-1 text-xs">
               标记当前进度点，之后可回到此处。
@@ -1311,7 +1315,7 @@ const ThreadSuggestionItem: FC = () => {
 const MessageError: FC = () => {
   return (
     <MessagePrimitive.Error>
-      <ErrorPrimitive.Root className="aui-message-error-root border-destructive bg-destructive/10 text-destructive dark:bg-destructive/5 mt-2 rounded-md border p-3 text-sm dark:text-red-200">
+        <ErrorPrimitive.Root className="aui-message-error-root bg-destructive/10 text-destructive dark:bg-destructive/5 mt-2 rounded-md p-3 text-sm dark:text-red-200">
         <ErrorPrimitive.Message className="aui-message-error-message line-clamp-2" />
       </ErrorPrimitive.Root>
     </MessagePrimitive.Error>
@@ -1696,7 +1700,7 @@ const AssistantActionBar: FC<{
           side="bottom"
           align="start"
           sideOffset={6}
-          className="aui-action-bar-more-content bg-popover text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl border p-1.5"
+          className="aui-action-bar-more-content bg-popover text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)"
         >
           <ActionBarPrimitive.ExportMarkdown asChild>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">

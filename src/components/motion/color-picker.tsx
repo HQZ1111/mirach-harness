@@ -1208,9 +1208,10 @@ export function ColorPickerContent({ align = "start", className, children, ...pr
               )}
             >
               {/* The surface fades on its own layer so the morphing area is never faded with it. */}
+              {/* 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由既有阴影承担 */}
               <motion.div
                 aria-hidden="true"
-                className="absolute inset-0 -z-10 rounded-2xl border border-border bg-background shadow-[0_12px_32px_-8px_rgb(0_0_0/0.25)]"
+                className="absolute inset-0 -z-10 rounded-2xl bg-background shadow-[0_12px_32px_-8px_rgb(0_0_0/0.25)]"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}

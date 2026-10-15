@@ -86,7 +86,8 @@ export function CommandPalette({
       data-slot="command-palette"
       className={cn(
         floating,
-        "flex w-full max-w-sm flex-col overflow-hidden rounded-[20px]",
+        // 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由 shadow-pop 承担
+        "flex w-full max-w-sm flex-col overflow-hidden rounded-[20px] shadow-(--shadow-pop)",
         className,
       )}
 

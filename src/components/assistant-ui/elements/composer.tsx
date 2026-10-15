@@ -130,6 +130,10 @@ export function ComposerBar({
       data-drag-active={dragActive || undefined}
       className={cn(
         paper,
+        /* 输入区容器描边保留（用户口径：输入框类不动；paper 已全局去描边，
+           这里补回原 paper 的描边保证打字框可见性）；shadow-none 抵消
+           paper 新增的 shadow-sm，保持输入框与去描边前逐像素一致。 */
+        "border-border/60 border shadow-none",
         /* 圆角 20（用户 2026-10-05 定稿；kit 原值 24）——harness 侧对官方
            kit 的取值调整，编辑态 composer 的 --composer-radius 同步 */
         "flex w-full flex-col gap-2 rounded-[20px] p-2.5 transition-colors",
@@ -153,7 +157,8 @@ export function ComposerMenu({
       data-open={open || undefined}
       className={cn(
         floating,
-        "absolute bottom-full z-10 mb-2 flex w-72 flex-col gap-0.5 rounded-2xl p-1.5",
+        // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-pop 承担
+        "absolute bottom-full z-10 mb-2 flex w-72 flex-col gap-0.5 rounded-2xl p-1.5 shadow-(--shadow-pop)",
         align === "start"
           ? "start-0 origin-bottom-left"
           : "end-0 origin-bottom-right",
@@ -502,7 +507,8 @@ export function ComposerContext({
       <div
         className={cn(
           floating,
-          "absolute end-0 bottom-full z-10 mb-2 flex w-60 origin-bottom-right flex-col gap-3.5 rounded-2xl p-4",
+          // 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由 shadow-pop 承担
+          "absolute end-0 bottom-full z-10 mb-2 flex w-60 origin-bottom-right flex-col gap-3.5 rounded-2xl p-4 shadow-(--shadow-pop)",
           "transition-[opacity,scale] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
           "pointer-events-none scale-[0.97] opacity-0",
           "group-hover/ctx:pointer-events-auto group-hover/ctx:scale-100 group-hover/ctx:opacity-100",

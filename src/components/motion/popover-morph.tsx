@@ -406,7 +406,8 @@ function MorphPopoverSurface({
           overflowY: "auto",
         }}
         className={cn(
-          "overflow-hidden border border-border bg-background",
+          // 去描边（用户 2026-10-14 全局去描边：浮层不留描边线）——层次由外层 drop-shadow 承担
+          "overflow-hidden bg-background",
           className,
         )}
       >

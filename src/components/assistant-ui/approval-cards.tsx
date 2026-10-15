@@ -40,9 +40,11 @@ export function ApprovalCards() {
     <div className="mb-3 flex flex-col gap-2">
       {pending.map((req) => {
         const busy = busyId === req.id
+        // 去描边（用户 2026-10-14 全局去描边）：审批卡不留描边线——层次改阴影
+        // （白卡垫在消息区浅调色层上，去线后需轻微抬升防融为一体）
         return (
           <div
-            className="rounded-(--composer-radius) border border-(--stroke-soft) bg-(--surface) p-3"
+            className="rounded-(--composer-radius) bg-(--surface) p-3 shadow-sm"
             key={req.id}
           >
             <div className="mb-1 flex items-center gap-2 text-xs text-(--text-3)">
