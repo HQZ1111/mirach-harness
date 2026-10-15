@@ -159,13 +159,78 @@
    （"终端的标签样式没统一"的根源）。 */
 /* ── dockview 组样式（v8.0 M1 起，2026-10-14 补）── */
 
-/* 面板栏标签条：**不顶到窗口顶**——条容器下移到顶带（--logo-strip-h=85）
-   之下，位置在顶栏（Titlebar 浮层/拖窗带）下面（用户 2026-10-14 定稿）。
-   选择器只命中「有可见标签条的组」：hideHeader 组的 bar 是 display:none，
-   面板栏组是 display:flex（实测）。窗口圆点浮层在右上角（.app-titlebar），
-   条下移后窗控制不再和标签重叠。 */
+/* 面板栏标签条：**占满顶带**——条高 = --logo-strip-h(85)，从窗口顶起画，
+   标签底边与顶带底边（85 线）重合（用户 2026-10-15 定稿："面板栏的高度
+   调高，让面板栏标签页的底部和顶栏的底部重合"；原形态 = 35 高条下移到
+   顶带之下 85..120 的位置）。选择器只命中「有可见标签条的组」：hideHeader
+   组的 bar 是 display:none，面板栏组是 display:flex（实测）。窗控制圆点
+   浮层（.app-titlebar，z-index 50）在右上角压于其上，点按不受影响。 */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) {
-  margin-top: var(--logo-strip-h);
+  margin-top: 0;
+  height: var(--logo-strip-h);
+}
+
+/* 条内动作区对齐链（85 高条，2026-10-15）：dockview 的 .dv-react-part 壳是
+   block 盒——箭头钮/总览钮的 align-self 不生效、叠在条顶（实测箭头 0..15、
+   总览 21..41）。两层壳（动作容器 + react-part）改 flex 行：箭头钮的
+   self-stretch 接上（满条高、图标垂直居中）、总览钮 20×20 落条中线、
+   右动作区两国横向排布（原 block 流里 24px 宽壳会让它们纵排折叠）。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-pre-actions-container,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-left-actions-container,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-right-actions-container {
+  align-items: center;
+  display: flex;
+}
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-pre-actions-container > .dv-react-part,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-left-actions-container > .dv-react-part,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-right-actions-container > .dv-react-part {
+  align-items: center;
+  display: flex;
+}
+
+/* 条内标签 = beUI Tabs **pill 变体**（用户 2026-10-15："标签条要 beUI tabs
+   overflow 样式啊，现在是 underline 样式"——beui.dev 的 Overflow demo 即
+   pill：选中 = 品牌色实心胶囊 + 白字（bg-primary + text-primary-foreground），
+   未选中 = 素底文字）。dockview 的 .dv-tab 是 85 满高盒（命中面/拖拽面），
+   胶囊画在内层（.dv-default-tab 高度包内容、.dv-open-tab 同款）——底对齐
+   到 85 线内缘（留 4px 呼吸），✕ 钮随胶囊内联（dockview 只对 active 签
+   显示 ✕，不冲突）。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab {
+  align-items: flex-end;
+  display: flex;
+  padding: 0 2px 4px;
+}
+/* 自定义签（tabComponent: openTab）外层还有 dockview 的 .dv-react-part
+   block 壳——不改成 flex 的话胶囊被压顶（实测 open-tab 0..27 悬顶）。
+   react-part 拉伸满高 + flex-end 同 .dv-tab 底对齐链。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab > .dv-react-part {
+  align-items: flex-end;
+  display: flex;
+  height: 100%;
+}
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-default-tab,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-open-tab {
+  align-items: center;
+  border-radius: 9999px;
+  display: flex;
+  height: auto;
+  padding: 3px 10px;
+  width: auto;
+}
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-default-tab,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-open-tab {
+  background: var(--brand);
+  color: #fff;
+}
+/* 胶囊内 ✕ 同色系（dockview 默认继承 + --dv-icon-hover-background-color
+   灰底，在品牌色胶囊上不和谐——hover 换半透明白） */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-default-tab-action:hover {
+  background-color: color-mix(in srgb, #fff 22%, transparent);
+}
+/* 未选中 hover：素底微洗（beUI text-muted hover:text-foreground 的本地化） */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:not(.dv-active-tab) .dv-default-tab:hover,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:not(.dv-active-tab) .dv-open-tab:hover {
+  background: var(--hover-wash);
 }
 
 /* ── dockview 主题变量重映射（任务：分隔线去除 + 面板栏标签令牌化）──
@@ -789,63 +854,13 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   ── dockview 标签指示条/滑动（agent C）──
-   （本段只加新选择器：活动标签指示条 + 总览触发钮；不改 .dv-tab 的
-   font-size/color/background——那些归页签令牌映射段。）
+   ── 标签选中态：beUI pill（2026-10-15 替换 underline 指示条）──
+   原 2px 底线指示条（underline 变体）废弃——用户定稿 beUI Tabs 的
+   Overflow demo（pill 变体）：激活视觉 = 品牌色胶囊 + 白字，规则在
+   上文「条内标签 = beUI Tabs pill 变体」段。此处不再占用 ::after
+   （dockview 自带的 focus-visible outline 盒在全部标签上自然生效，
+   无需槽位还原规则）。
    ══════════════════════════════════════════════════════════════════════ */
-
-/* 活动标签底部指示条（用户 2026-10-14「面板栏的标签效果不对」；beUI Tabs
-   指示器视觉：2px 底线 + 圆角）。色彩走页签令牌（选中 = 品牌色）。
-   ::after 独立盒：不占布局（position:absolute；.dv-tab 已是 relative），
-   pointer-events:none 不截胡标签交互；出现时 scaleX 入场（0.6→1）——
-   CSS 无法在切换标签间做"滑行"（单盒跨标签需要 JS 量位），入场动画是
-   ::after 方案可给到的最小动效（keyframes 在伪元素创建时必然运行，
-   transition 不会——选择器开始命中时是新盒）。reduced-motion 关闭。 */
-.dockview-host .dv-tab.dv-active-tab::after {
-  animation: dv-tab-indicator-in 180ms var(--beui-ease-out);
-  background: var(--tab-text-active);
-  border-radius: 2px;
-  bottom: 0;
-  content: '';
-  height: 2px;
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
-  z-index: 5;
-}
-
-/* focus-visible 的 outline 盒是 dockview 自带的 ::after 规则——两者同占
-   ::after 槽位不能并存（聚焦框优先级更高）。本规则把槽位还原成聚焦盒：
-   覆盖指示条的全部视觉声明（outline/层级仍是 dockview 规则——它带
-   !important；本规则只负责把指示条画的那几笔抹掉）。 */
-.dockview-host .dv-tab.dv-active-tab:focus-visible::after,
-.dockview-host .dv-tab.dv-active-tab:has(:focus-visible)::after {
-  animation: none;
-  background: none;
-  border-radius: 0;
-  bottom: auto;
-  height: 100%;
-  left: 0;
-  right: auto;
-  top: 0;
-  width: 100%;
-}
-
-@keyframes dv-tab-indicator-in {
-  from {
-    transform: scaleX(0.6);
-  }
-  to {
-    transform: scaleX(1);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dockview-host .dv-tab.dv-active-tab::after {
-    animation: none;
-  }
-}
 
 /* 标签总览触发钮（rightHeaderActionsComponent 挂载；旧 ZCode 溢出钮的
    形制——20×20 ghost 方盒，悬停浅底 + 品牌色，仅面板栏多签组出现）。 */
