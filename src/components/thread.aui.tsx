@@ -55,7 +55,7 @@ import {
   speechProgressBridge,
   wordIndexAt,
 } from "@/components/assistant-ui/speech-adapter";
-import { EmptyState, EmptyStateComposer, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
+import { EmptyState, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
 import { ErrorState } from "@/components/assistant-ui/elements/error-state";
 import { GuardrailNotice } from "@/components/assistant-ui/elements/guardrail-notice";
 import { ConnectionState } from "@/components/assistant-ui/elements/connection-state";
@@ -931,9 +931,8 @@ const MessageWithDaySeparator: FC = () => {
 };
 
 // ── empty-state（官方元素，挂 Welcome 槽位）────────────────────────────
-// 起步建议 + 罐头 composer：EmptyStateComposer 是纯展示模板（无输入框，
-// onSend 即发），发送走 aui.thread.append = 现有发送通道（onNew → POST）。
-const STARTER_PROMPT = "帮我梳理这个仓库的模块结构";
+// 只有问候语 + 起步建议；发送走 aui.thread.append = 现有发送通道（onNew → POST）。
+// 2026-10-16：移除原挂的罐头 composer（见下方 EmptyStateWelcome 注释）。
 const STARTER_SUGGESTIONS = [
   "梳理这个仓库的模块结构",
   "总结我们当前的对话进度",
@@ -957,10 +956,14 @@ const EmptyStateWelcome: FC = () => {
           </EmptyStateSuggestion>
         ))}
       </EmptyStateSuggestions>
-      <EmptyStateComposer
-        placeholder={STARTER_PROMPT}
-        onSend={() => aui.thread.append(STARTER_PROMPT)}
-      />
+      {/* 2026-10-16 去重：此处原挂 <EmptyStateComposer>——它是上游给
+          "无底部 composer 场景"准备的**罐头输入框外观**（纯展示、onSend 即发），
+          与页面底部真正的 ComposerBar 叠成两个输入框（用户实测："上面怎么还有
+          一个输入框"）。
+          hermes 参考：其新会话页不放该元素（全仓无 EmptyStateComposer 引用），
+          只留底部 composer。故本处移除；组件本体在 elements/empty-state.tsx
+          原样保留（上游原件不动），仅停止消费。
+          起步提示仍由下方建议按钮承担（点击 append）。 */}
     </EmptyState>
   );
 };

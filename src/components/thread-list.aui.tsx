@@ -1794,7 +1794,18 @@ export const ThreadListItem: FC = () => {
           }}
         >
           <ThreadListItemPrimitive.Trigger
-            className="flex h-full min-w-0 items-center gap-1.5 self-stretch rounded-md py-0.5 pr-2 pl-2 text-start outline-none"
+            // 2026-10-16 方案 A-2：会话行对齐左栏文字列。
+            // 原 `pl-2`（根字号 15px 下 = 7.5px 半像素）+ 圆点槽 size-3.5(13px)
+            // + gap-1.5(5.625px) → 文字落 48；而组头/入口条文字在 54（= 30 gutter
+            // + 16 图标 + 8 gap）——**圆点槽 13 ≠ 图标 16** 是第三种宽度，导致对不齐。
+            // 改为：圆点槽宽 = --rail-icon(16)、gap = --rail-icon-gap(8)，
+            // 左内距 = gutter − list-inset（把容器已加的那段补回来），
+            // 于是 圆点 30 / 文字 30+16+8 = 54 与其余两列一致。
+            className="flex h-full min-w-0 items-center self-stretch rounded-md py-0.5 pr-2 text-start outline-none"
+            style={{
+              paddingLeft: "calc(var(--rail-gutter) - var(--rail-list-inset))",
+              gap: "var(--rail-icon-gap)",
+            }}
             data-slot="aui_thread-list-item-trigger"
           >
             {/* lead：状态圆点，hover 与拖拽把手互换（hermes SidebarRowGrab）。
@@ -1811,9 +1822,13 @@ export const ThreadListItem: FC = () => {
               aria-hidden={sortable ? undefined : true}
               aria-label={sortable ? `拖动排序 ${title ?? "New Chat"}` : undefined}
               className={cn(
-                "relative grid size-3.5 shrink-0 place-items-center overflow-hidden",
+                // 圆点槽宽 = --rail-icon(16)，与入口条图标同宽——会话行文字才能
+                // 落到与组头/入口条相同的 --rail-text-col(54)（2026-10-16 方案 A-2：
+                // 原 size-3.5 = 13px，是左栏的"第三种图标宽"）。
+                "relative grid shrink-0 place-items-center overflow-hidden",
                 sortable && "group/handle cursor-grab touch-none active:cursor-grabbing",
               )}
+              style={{ width: "var(--rail-icon)", height: "var(--rail-icon)" }}
               data-reorder-handle={sortable ? "" : undefined}
               data-slot="aui_thread-list-item-lead"
               onClick={sortable ? (e) => e.stopPropagation() : undefined}

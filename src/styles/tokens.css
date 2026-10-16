@@ -299,6 +299,17 @@
   --chat-tab-workspace-size: 25px;            /* 对话标签工作区字号（2026-10-06 用户定稿：30→25） */
   --chat-tab-workspace-color: #303030;        /* 对话标签工作区颜色（用户定稿十轮） */
   --chat-tab-session-size: 15px;              /* 对话标签会话名字号（用户定稿十轮） */
+  /* ── 主栏列头对齐（2026-10-16 用户定稿两条）──────────────────────
+     ①工作区名**字形顶** ↔ MIRACH 文字字形顶
+     ②会话名**中线**   ↔ 面板栏标签胶囊**中线**
+     实测（85px 顶带内）：
+       MIRACH      line-box top 28 · fs32/lh45 → 字形顶 ≈ 28 + (45−32)/2 = 34.5
+       工作区名    line-box top 28 · fs25/lh27.5 → 字形顶 ≈ 28 + (27.5−25)/2 = 29.3
+                   → 需下移 5.2 才与 MIRACH 字形顶齐
+       会话名      mid 78.8（top 70.5 h16.5）
+       面板标签胶囊 top 62 / bottom 89 / mid 75.5 → 会话名需上移 3.3 */
+  --chat-workspace-nudge: 5px;                /* 工作区名下移量（对齐 MIRACH 字形顶） */
+  --chat-session-nudge: -3px;                 /* 会话名上移量（对齐面板胶囊中线） */
   --chat-tab-session-color: #5A5A5A;          /* 对话标签会话名颜色（用户定稿十轮） */
   --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
