@@ -98,7 +98,10 @@
   height: var(--logo-strip-h);
   justify-content: space-between;
   overflow: hidden;
-  padding: var(--logo-leading-pad) var(--tab-pad-x) calc(var(--strip-pad-bottom) - 1px);
+  /* 2026-10-16 方案 A：左缘对齐三栏内容线——原 --tab-pad-x(10) 使工作区名/
+     会话名距栏左仅 10px，与左栏内容线(30)不齐（实测 10 vs 30）。改用
+     --rail-gutter 使三栏文字同起点；上下仍走 logo 带令牌。 */
+  padding: var(--logo-leading-pad) var(--rail-gutter) calc(var(--strip-pad-bottom) - 1px);
   pointer-events: none;
   text-align: left;
 }
@@ -106,11 +109,11 @@
 /* 贴软件边缘时列头随颜色层同侧内缩（与 v7.3.6 语义一致：标题层与
    内容/颜色层同步） */
 .dv-view-container > .dv-view:first-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label {
-  padding-left: calc(var(--tab-pad-x) + var(--chat-edge-inset));
+  padding-left: calc(var(--rail-gutter) + var(--chat-edge-inset));
 }
 
 .dv-view-container > .dv-view:last-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label {
-  padding-right: calc(var(--tab-pad-x) + var(--chat-edge-inset));
+  padding-right: calc(var(--rail-gutter) + var(--chat-edge-inset));
 }
 
 .chat-tab-label__workspace {

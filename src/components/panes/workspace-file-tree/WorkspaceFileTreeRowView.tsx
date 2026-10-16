@@ -103,7 +103,10 @@ export function WorkspaceFileTreeRowView({
       className={cn(
         "group/file-tree-row relative flex h-7 w-full min-w-0 items-center gap-1.5 rounded-lg border pr-2 py-1 text-left text-(--filetree-row-font-size) text-(--text) outline-none transition-[border-color,box-shadow]",
         "cursor-pointer",
-        "pl-[calc(var(--workspace-file-tree-depth)*0.75rem+0.5rem)]",
+        // 层级缩进走令牌（2026-10-16 方案 A：原任意值 calc(depth*0.75rem+0.5rem)
+        // 在根字号 15px 下算出 11.25/7.5px 半像素）。pr-2 保留——它是行内右内距，
+        // 不是栏内容线（栏内容线由容器 --filetree-pad-x 承担）。
+        "pl-[calc(var(--workspace-file-tree-depth)*var(--filetree-indent-step)+var(--filetree-indent-base))]",
         // 行背景保持透明：hover 指示由 FileTreeHoverPill 滑动块承担
         // （2026-10-14 纯视觉层接线，行自身洗底移除防瞬时双层）。
         // 选中态 = 底色高亮（用户 2026-10-14：点击标签要"高亮"不是描边线

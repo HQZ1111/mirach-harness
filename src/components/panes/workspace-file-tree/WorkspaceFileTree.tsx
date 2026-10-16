@@ -259,10 +259,20 @@ export function WorkspaceFileTree({
       className="flex h-full min-h-0 flex-col bg-(--surface) text-(--text)"
       data-testid="workspace-file-tree-panel"
     >
-      <div className="flex shrink-0 items-center px-2 pb-1.5 pt-2">
+      {/* 地址行（2026-10-16 方案 A：px-2→令牌，左右对称 30、上下接间距刻度）。
+          原 px-2 在根字号 15px 下算出 7.5px 半像素，且左右与左栏 30 不齐。 */}
+      <div
+        className="flex shrink-0 items-center"
+        style={{
+          paddingLeft: "var(--filetree-pad-x)",
+          paddingRight: "var(--filetree-pad-x)",
+          paddingTop: "var(--filetree-pad-y)",
+          paddingBottom: "var(--filetree-head-gap)",
+        }}
+      >
         <div className="flex min-w-0 flex-1 flex-col">
           <h3
-            className="min-w-0 truncate py-0.5 text-(--filetree-row-font-size) font-medium text-(color:--brand)"
+            className="min-w-0 truncate py-[var(--filetree-head-gap)] text-(--filetree-row-font-size) font-medium text-(color:--brand)"
             title={workspacePath}
           >
             {workspaceTitle}
@@ -330,10 +340,11 @@ export function WorkspaceFileTree({
         </div>
       ) : null}
       <div className="flex min-h-0 flex-1 flex-col">
+        {/* 列表滚动容器（2026-10-16 方案 A：px-2→令牌，与地址行同内容线 30） */}
         <div
           ref={scrollRef}
-          className="h-full min-h-0 overflow-auto px-2"
-          style={scrollContainerStyle}
+          className="h-full min-h-0 overflow-auto"
+          style={{ ...scrollContainerStyle, paddingLeft: "var(--filetree-pad-x)", paddingRight: "var(--filetree-pad-x)" }}
         >
           <WorkspaceFileTreeStickyFolders
             items={stickyFolderItems}

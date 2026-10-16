@@ -1017,6 +1017,18 @@ const SectionHeader: FC<{
       )}
     </>
   );
+  // ── 组头文字列对齐（2026-10-16 方案 A）────────────────────────
+  // 组头**无图标**，此前 padding 走 px-2（根字号 15px 下 = 7.5px×2），
+  // 文字落在 21px；而入口条**有图标**行文字在 54px（30 gutter + 16 图标
+  // + 8 gap）——两者不在同一列（实测 21 vs 54）。
+  // 修法：给组头一个**图标列等宽的前导内距**，令其文字左缘落到
+  // --rail-text-col(54)。
+  // **注意基数**：组头的父容器已带 --rail-list-inset(=gutter−8，本列表
+  // 的洗底槽位)，故这里只需补 (icon + gap) − 该 inset 的差额，否则两层
+  // 叠加会过冲（实测 padL:24 → 文字 46 而非 54；正解 = 24+8 = 32）。
+  // 表达式写成 calc 以自证来源，避免下次改 gutter 时又算错。
+  const ICON_COL_PS =
+    "ps-[calc(var(--rail-icon)+var(--rail-icon-gap)+var(--rail-gutter)-var(--rail-list-inset))]";
   return (
     <div
       className={cn(
@@ -1028,7 +1040,10 @@ const SectionHeader: FC<{
       {collapsible ? (
         <button
           aria-expanded={!collapsed}
-          className="group/section-label flex w-fit min-w-0 cursor-pointer items-center gap-1 rounded-md bg-transparent px-2 text-left leading-none"
+          className={cn(
+            "group/section-label flex w-fit min-w-0 cursor-pointer items-center gap-1 rounded-md bg-transparent text-left leading-none",
+            ICON_COL_PS,
+          )}
           onClick={() =>
             sessionCatalog.getState().setGroupCollapsed(headerKey, !collapsed)
           }
@@ -1038,7 +1053,7 @@ const SectionHeader: FC<{
           {body}
         </button>
       ) : (
-        <div className="flex w-fit min-w-0 items-center gap-1 px-2 leading-none">{body}</div>
+        <div className={cn("flex w-fit min-w-0 items-center gap-1 leading-none", ICON_COL_PS)}>{body}</div>
       )}
       {action}
     </div>
