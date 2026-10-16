@@ -14,11 +14,14 @@ import {
 import { cva, type VariantProps } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+// 2026-10-16 换 beUI goo 弹层（用户定稿"所有 panel 型浮层"）——原 Radix
+// ui/popover 的 API 面对位：方位/间距/圆角是 goo **根属性**（不是 content
+// 属性），子组件从 context 读；content 支持 onOpenAutoFocus（键盘焦点契约）。
 import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-} from "@/components/ui/popover";
+} from "@/components/motion/popover";
 import {
   Command,
   CommandEmpty,
@@ -170,6 +173,12 @@ export type ModelSelectorRootProps = {
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** 面板方位（goo 根属性——2026-10-16 换 beUI goo 弹层时从 content 上提）。 */
+  side?: "top" | "bottom";
+  /** 面板沿触发边对齐（同上）。 */
+  align?: "start" | "center" | "end";
+  /** 触发边与面板的间距 px（goo 的"脖子"长度；同上）。 */
+  sideOffset?: number;
   children: ReactNode;
 };
 
@@ -184,6 +193,9 @@ function ModelSelectorRoot({
   open: openProp,
   defaultOpen,
   onOpenChange,
+  side,
+  align,
+  sideOffset,
   children,
 }: ModelSelectorRootProps) {
   const [value, setValue] = useControllableState({
@@ -230,7 +242,14 @@ function ModelSelectorRoot({
 
   return (
     <ModelSelectorContext.Provider value={contextValue}>
-      <Popover open={open ?? false} onOpenChange={setOpen}>
+      {/* goo 根属性承载 方位/对齐/间距（beUI API；content 侧不再接受） */}
+      <Popover
+        align={align ?? "start"}
+        open={open ?? false}
+        onOpenChange={setOpen}
+        side={side ?? "bottom"}
+        sideOffset={sideOffset ?? 14}
+      >
         {children}
       </Popover>
     </ModelSelectorContext.Provider>
@@ -260,10 +279,13 @@ export const modelSelectorTriggerVariants = cva(
   },
 );
 
-export type ModelSelectorTriggerProps = ComponentPropsWithoutRef<
-  typeof PopoverTrigger
+export type ModelSelectorTriggerProps = Omit<
+  ComponentPropsWithoutRef<"button">,
+  "children"
 > &
-  VariantProps<typeof modelSelectorTriggerVariants>;
+  VariantProps<typeof modelSelectorTriggerVariants> & {
+    children?: ReactNode;
+  };
 
 function ModelSelectorTrigger({
   className,
@@ -275,15 +297,18 @@ function ModelSelectorTrigger({
 }: ModelSelectorTriggerProps) {
   const { setOpen } = useModelSelectorContext();
 
+  // goo PopoverTrigger 吃**单个元素子节点**（克隆载体）——子元素 = 裸
+  // 按钮壳，属性全走 PopoverTrigger 的 rest 合并（clone 里 cn("relative
+  // z-0", childProps.className, rest.className) 与 ...rest 展开）。
+  // 对位 Radix asChild 语义（原版直接塞多子节点，此处显式收进一个按钮）。
   return (
     <PopoverTrigger
-      data-slot="model-selector-trigger"
-      data-variant={variant ?? "outline"}
-      data-size={size ?? "default"}
-      role="combobox"
       aria-haspopup="listbox"
       className={cn(modelSelectorTriggerVariants({ variant, size }), className)}
-      onKeyDown={(e) => {
+      data-size={size ?? "default"}
+      data-slot="model-selector-trigger"
+      data-variant={variant ?? "outline"}
+      onKeyDown={(e: React.KeyboardEvent<HTMLButtonElement>) => {
         onKeyDown?.(e);
         if (e.defaultPrevented) return;
         // ARIA combobox: arrows open the listbox from a focused trigger.
@@ -293,10 +318,14 @@ function ModelSelectorTrigger({
           setOpen(true);
         }
       }}
+      role="combobox"
+      type="button"
       {...props}
     >
-      {children ?? <ModelSelectorValue />}
-      <ChevronDownIcon className="size-4 opacity-50" />
+      <button type="button">
+        {children ?? <ModelSelectorValue />}
+        <ChevronDownIcon className="size-4 opacity-50" />
+      </button>
     </PopoverTrigger>
   );
 }
@@ -368,48 +397,12 @@ function ModelSelectorValue({
 
 export type ModelSelectorContentProps = Omit<
   ComponentPropsWithoutRef<typeof PopoverContent>,
-  "side"
+  "children"
 > & {
-  /**
-   * Preferred side for the initial placement. Once the popover is open, the
-   * rendered side takes over until it closes, so the popup does not jump
-   * between sides while filtering resizes the list.
-   */
-  side?: ComponentPropsWithoutRef<typeof PopoverContent>["side"];
   searchable?: boolean;
+  /** 面板内容（缺省 = 内置 搜索/列表/Effort 组合）。 */
+  children?: ReactNode;
 };
-
-// The popover re-evaluates collision flipping whenever the popup resizes, so
-// filtering the list down flips the popup back to the preferred side
-// mid-interaction. Feed the rendered side back as the preferred side, making
-// the popup keep its side until it no longer fits.
-function useLazyFlipSide(): {
-  side: ModelSelectorContentProps["side"];
-  popupRef: (node: HTMLDivElement | null) => void;
-} {
-  const [side, setSide] = useState<ModelSelectorContentProps["side"]>();
-  const observerRef = useRef<MutationObserver | null>(null);
-  const popupRef = useCallback((node: HTMLDivElement | null) => {
-    observerRef.current?.disconnect();
-    observerRef.current = null;
-    if (!node) {
-      setSide(undefined);
-      return;
-    }
-    const sync = () => {
-      const rendered = node.getAttribute("data-side");
-      if (rendered) setSide(rendered as ModelSelectorContentProps["side"]);
-    };
-    sync();
-    const observer = new MutationObserver(sync);
-    observer.observe(node, {
-      attributes: true,
-      attributeFilter: ["data-side"],
-    });
-    observerRef.current = observer;
-  }, []);
-  return { side, popupRef };
-}
 
 /**
  * Hidden input that anchors cmdk's keyboard navigation, keeping the list
@@ -426,29 +419,30 @@ function ModelSelectorFocusAnchor() {
 
 function ModelSelectorContent({
   className,
-  align = "start",
-  side,
-  sideOffset = 6,
   searchable,
   children,
   ...props
 }: ModelSelectorContentProps) {
   const { value } = useModelSelectorContext();
-  const { side: renderedSide, popupRef } = useLazyFlipSide();
   const unfiltered =
     searchable === false || (!searchable && children === undefined);
 
   return (
     <PopoverContent
-      ref={popupRef}
       data-slot="model-selector-content"
-      align={align}
-      side={renderedSide ?? side ?? "bottom"}
-      sideOffset={sideOffset}
       className={cn(
-        "bg-popover w-72 min-w-(--radix-popover-trigger-width) overflow-hidden rounded-xl p-0",
+        // 宽度对位旧 Radix 版（w-72）；宽度变量退路保留（goo 无
+        // --radix-popover-trigger-width，回退 18rem）。
+        "bg-popover w-72 overflow-hidden rounded-xl p-0",
         className,
       )}
+      // 键盘可用性（对位原 Radix 默认开面板 autofocus）：焦点进 cmdk
+      // 输入框（searchable = 搜索框；否则 = sr-only readOnly 锚），
+      // ↑↓/Enter 才能驱动 cmdk。调用方传 onOpenAutoFocus 可整体接管
+      // （{...props} 在 JSX 序上覆盖此默认）。
+      onOpenAutoFocus={(el) => {
+        el.querySelector("input")?.focus();
+      }}
       {...props}
     >
       <Command
@@ -676,8 +670,9 @@ export type ModelSelectorProps = Omit<ModelSelectorRootProps, "children"> &
     /** Render a search input above the model list. */
     searchable?: boolean;
     /** Alignment of the dropdown relative to the trigger. Use `"end"` when the
-     * trigger sits at the right edge of its container. */
-    align?: ModelSelectorContentProps["align"];
+     * trigger sits at the right edge of its container.（goo 的 align 是根属性
+     * ——ModelSelectorImpl 透传给 Root） */
+    align?: ModelSelectorRootProps["align"];
     className?: string;
     contentClassName?: string;
   };

@@ -383,6 +383,16 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
      Tooltip **组件**当 DOM 节点克隆，菜单事件全丢。Tooltip 包
      SharedLayoutBg 的行（入口条）也不行：它按直接子元素 clone 注入 pill，
      行壳被包成 Tooltip 后 pill 不渲染——入口条保留原生 title=。
+17. **main.tsx 样式 import 必须先于 app 图 import**（2026-10-16 实锤）：
+     ESM 按 import 序深度优先求值——`import './styles/tokens.css'` 在
+     `import { App } from './app'` **之后**时，app 图（含 ease.ts 顶层的
+     getComputedStyle 令牌读取）先求值，此时 `<style>` 还没注入 → 全部
+     **静默回退内置值**（回退值与令牌同源，零可见症状；改 tokens.css
+     不生效 = 唯一实锤路径）。已修（样式 import 全部提到 app import 前、
+     相对顺序照旧）；ease.ts 令牌缺失现在 console.error 可见。**验证法**：
+     落盘改一个 --beui-spring-*-dur → reload → CDP 量动画时长是否随动
+     （勿用 Page.addScriptToEvaluateOnNewDocument 注入证明——document-start
+     注入绕过此序，会假 PASS）。
 - **dev 模式的"慢"是编译位置问题**：设置页是动态 import（115 文件 /
   ~1.1MB 源码），vite 按需编译 → 每次重启后**第一次**打开要现场转换整个
   子图（数十秒，React-Compiler 的 babel pass 会放大每个文件的成本），

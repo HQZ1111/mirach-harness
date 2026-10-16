@@ -27,7 +27,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { usePopoverPortalPosition } from "@/components/motion/popover-position";
-import { EASE_OUT } from "@/lib/ease";
+import { EASE_OUT, MORPH_ENTER } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
 type Side = "top" | "bottom";
@@ -210,7 +210,8 @@ export function MorphPopoverTrigger({ children }: MorphPopoverTriggerProps) {
 
 // Full-distance clip travel needs a shorter curve than SPRING_PANEL's slow
 // overdamped tail. A non-bouncing spring reaches its rest within 260 ms.
-const MORPH_ENTER = { type: "spring", duration: 0.26, bounce: 0 } as const;
+// MORPH_ENTER 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
+// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
 const MORPH_EXIT = { duration: 0.2, ease: EASE_OUT } as const;
 
 // Keep the panel and content at their final size. An inset clip reveals the

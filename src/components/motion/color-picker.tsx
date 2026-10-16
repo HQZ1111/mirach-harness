@@ -31,7 +31,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { EASE_OUT, SPRING_GLIDE, SPRING_LAYOUT, SPRING_PRESS } from "@/lib/ease";
+import { EASE_OUT, MAGNIFIER_RISE, SPRING_GLIDE, SPRING_LAYOUT, SPRING_PRESS } from "@/lib/ease";
 import { useDismiss } from "@/lib/hooks/use-dismiss";
 import { PresenceGate } from "@/lib/presence-gate";
 import { capturePointer, releasePointer, TOUCH_GESTURE_CLASS } from "@/lib/touch";
@@ -374,7 +374,9 @@ const CHECKERBOARD =
 
 // The loupe lifts with a visible overshoot so it reads as picked up, unlike
 // the critically damped glide the thumb itself rides on.
-const LOUPE_LIFT: Transition = { type: "spring", stiffness: 520, damping: 24, mass: 0.6 };
+// LOUPE_LIFT 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
+// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
+const LOUPE_LIFT: Transition = MAGNIFIER_RISE;
 const LOUPE_DROP: Transition = { duration: 0.12, ease: EASE_OUT };
 // Glide velocity in %/s mapped to a pendulum swing, so the loupe trails the drag.
 const LOUPE_TILT_INPUT = [-400, 400];

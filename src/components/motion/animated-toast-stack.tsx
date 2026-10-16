@@ -26,7 +26,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { EASE_OUT } from "@/lib/ease";
+import { EASE_OUT, SPRING_TOAST_STACK } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
 export type ToastStatus = "neutral" | "info" | "loading" | "success" | "error";
@@ -93,12 +93,9 @@ export interface UseAnimatedToastStackOptions {
   limit?: number;
 }
 
-const STACK_SPRING: Transition = {
-  type: "spring",
-  stiffness: 420,
-  damping: 34,
-  mass: 0.75,
-};
+// STACK_SPRING 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
+// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
+const STACK_SPRING: Transition = SPRING_TOAST_STACK;
 
 const CONTENT_TRANSITION = {
   duration: 0.28,

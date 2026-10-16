@@ -86,8 +86,13 @@ const ModelSelectorImpl = ({
   contentClassName,
   ...rootProps
 }: ModelSelectorProps) => {
+  // goo 根属性承载 align（2026-10-16 换 beUI goo 弹层——原 Radix 版挂在
+  // content 上；本组件从 rootProps 摘出 align 显式传给 Root）。
+  const { align: _align, ...rest } = rootProps as typeof rootProps & {
+    align?: "start" | "center" | "end";
+  };
   return (
-    <ModelSelectorRoot {...rootProps}>
+    <ModelSelectorRoot {...rest} align={align ?? _align}>
       <ModelSelectorModelContext />
       <ModelSelectorTrigger
         variant={variant}
@@ -95,7 +100,6 @@ const ModelSelectorImpl = ({
         className={className}
       />
       <ModelSelectorContent
-        {...(align !== undefined ? { align } : {})}
         className={contentClassName}
         searchable={searchable ?? false}
       />

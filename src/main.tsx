@@ -1,10 +1,12 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
-import { App } from './app'
-import { AppContextMenu, openAppContextMenu } from './components/layout/app-context-menu'
-import { inTauri } from './lib/tauri-window'
-import { resolveContextMenuScope } from './components/panes/session-manage/context-menu-scope'
+// ── 样式必须**先于** app 图求值导入（2026-10-16 实锤）──
+// ESM 按 import 序深度优先求值：CSS import 在前 → vite 先注入 <style>，
+// 之后的 ease.ts（模块顶层 getComputedStyle 读 --beui-spring-* 令牌）
+// 才读得到值。此前 app 图在前 → ease.ts 先于样式注入求值 → 全部静默回退
+// 内置值（回退值与令牌同源故无可见症状；改 tokens.css 不生效 = 实锤路径）。
+// 顺序约束照旧：dockview → 自有三层 → tailwind 最后。
 // HarmonyOS Sans SC webfont（用户定稿：全局字体）——切片 woff2 + CSS
 // （包 exports 只开放 default=dist/index.css，子路径导入会被 vite 拦）
 import 'harmonyos-sans-sc-webfont-splitted'
@@ -26,6 +28,12 @@ import './styles/ui-primitives.css'
 // Tailwind v4 + assistant-ui registry 组件主题（shadcn 令牌；最后导入，
 // 组件工具类可覆盖上方体系的同面规则）
 import './styles/tailwind.css'
+
+import { App } from './app'
+import { AppContextMenu, openAppContextMenu } from './components/layout/app-context-menu'
+import { inTauri } from './lib/tauri-window'
+import { resolveContextMenuScope } from './components/panes/session-manage/context-menu-scope'
+
 
 // 纯浏览器直开（无 Tauri 透明窗体）：铺满不圆角，见 base.css 窗体段
 if (!inTauri) document.body.classList.add('in-browser')

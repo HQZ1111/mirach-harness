@@ -1,5 +1,15 @@
 "use client";
 // beui.dev/components/motion/popover
+//
+// harness 适配（2026-10-16，接线到模型选择器/标签总览时做的两处扩展，
+// 其余与 beui.dev 注册表逐字一致）：
+// - PopoverTrigger：改 forwardRef + 多余 props 透传到子元素（原版只取
+//   children，外面包一层 Tooltip 时 ref/aria 线会丢——Tooltip 需要锚点
+//   ref 才挂得上）；className 合并；aria-haspopup 尊重子元素已有值
+//   （combobox 用 listbox，不被覆盖成 dialog）。
+// - PopoverContent：接受任意 div props（data-slot/aria 便于测试与无障碍）
+//   + onOpenAutoFocus（开面板/定位完成后回调，对应 Radix 的同名契约——
+//   cmdk 菜单的键盘可用性依赖它把焦点送进输入框）。
 
 import {
   animate,
@@ -11,7 +21,9 @@ import {
 import {
   cloneElement,
   createContext,
+  forwardRef,
   isValidElement,
+  type ComponentPropsWithoutRef,
   type ReactElement,
   type ReactNode,
   type Ref,
@@ -26,6 +38,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { usePopoverPortalPosition } from "@/components/motion/popover-position";
+import { POPOVER_GOO_CLOSE, POPOVER_GOO_OPEN } from "@/lib/ease";
 import { useDismiss } from "@/lib/hooks/use-dismiss";
 import {
   type HoverGesture,
@@ -40,16 +53,10 @@ type TriggerMode = "click" | "hover";
 
 // This morph needs less bounce than layout motion: too much overshoot makes
 // the liquid neck balloon past the final panel edges.
-const GOO_OPEN_SPRING = {
-  type: "spring",
-  visualDuration: 0.3,
-  bounce: 0.15,
-} as const;
-const GOO_CLOSE_SPRING = {
-  type: "spring",
-  visualDuration: 0.21,
-  bounce: 0.15,
-} as const;
+// GOO_*_SPRING 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
+// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
+const GOO_OPEN_SPRING = POPOVER_GOO_OPEN;
+const GOO_CLOSE_SPRING = POPOVER_GOO_CLOSE;
 const HOVER_CLOSE_DELAY = 120;
 const CIRCLE_KAPPA = 0.5523;
 
@@ -413,85 +420,117 @@ function mergeRefs<T>(...refs: Array<Ref<T> | undefined>) {
   };
 }
 
-export interface PopoverTriggerProps {
+export interface PopoverTriggerProps
+  extends Omit<ComponentPropsWithoutRef<"button">, "children"> {
   /** A single focusable element (e.g. a Button) that opens the popover. */
   children: ReactElement;
 }
 
-export function PopoverTrigger({ children }: PopoverTriggerProps) {
-  const ctx = usePopoverContext("PopoverTrigger");
-  // What the last gesture on the trigger was, and whether the panel was
-  // already open when it started. A click reports neither.
-  const tap = useTapGesture<boolean>();
+export const PopoverTrigger = forwardRef<HTMLElement, PopoverTriggerProps>(
+  function PopoverTrigger({ children, ...rest }, forwardedRef) {
+    const ctx = usePopoverContext("PopoverTrigger");
+    // What the last gesture on the trigger was, and whether the panel was
+    // already open when it started. A click reports neither.
+    const tap = useTapGesture<boolean>();
 
-  if (!isValidElement(children)) return children;
+    if (!isValidElement(children)) return children;
 
-  const child = children as ReactElement<Record<string, unknown>>;
-  const childProps = child.props;
-  const childRef = (childProps as { ref?: Ref<HTMLElement> }).ref;
+    const child = children as ReactElement<Record<string, unknown>>;
+    const childProps = child.props;
+    const childRef = (childProps as { ref?: Ref<HTMLElement> }).ref;
 
-  const compose =
-    <E extends { defaultPrevented?: boolean }>(
-      name: string,
-      handler: (event: E) => void,
-    ) =>
-    (event: E) => {
-      (childProps[name] as ((e: unknown) => void) | undefined)?.(event);
-      if (!event.defaultPrevented) handler(event);
-    };
+    const compose =
+      <E extends { defaultPrevented?: boolean }>(
+        name: string,
+        handler: (event: E) => void,
+      ) =>
+      (event: E) => {
+        (childProps[name] as ((e: unknown) => void) | undefined)?.(event);
+        (rest[name as keyof typeof rest] as ((e: unknown) => void) | undefined)?.(
+          event,
+        );
+        if (!event.defaultPrevented) handler(event);
+      };
 
-  // Observation, not action. `compose` steps aside for a child that handled
-  // the event itself, which is right for anything that *does* something — but
-  // a child preventing the pointerdown default (to hold focus, say) has not
-  // said the gesture didn't happen. Skipping the record there left the panel
-  // reading whatever the gesture before it had put in.
-  const observe =
-    <E,>(name: string, handler: (event: E) => void) =>
-    (event: E) => {
-      (childProps[name] as ((e: unknown) => void) | undefined)?.(event);
-      handler(event);
-    };
+    // Observation, not action. `compose` steps aside for a child that handled
+    // the event itself, which is right for anything that *does* something — but
+    // a child preventing the pointerdown default (to hold focus, say) has not
+    // said the gesture didn't happen. Skipping the record there left the panel
+    // reading whatever the gesture before it had put in.
+    const observe =
+      <E,>(name: string, handler: (event: E) => void) =>
+      (event: E) => {
+        (childProps[name] as ((e: unknown) => void) | undefined)?.(event);
+        (rest[name as keyof typeof rest] as ((e: unknown) => void) | undefined)?.(
+          event,
+        );
+        handler(event);
+      };
 
-  // The hover trigger keeps its hover path and *adds* a tap one, rather than
-  // swapping mode on a device that reports a touchscreen: a touchscreen laptop
-  // has both inputs and the mouse must keep working. A hovering pointer has
-  // already opened the panel on its way in, and a keyboard press arrives with
-  // no pointerdown behind it, so only a tap toggles here. Which panel state
-  // the tap acts on is read from the gesture's start, because a browser that
-  // focuses the trigger on contact would otherwise open it mid-gesture and let
-  // the click close it again.
-  const handlers: Record<string, unknown> =
-    ctx.triggerMode === "hover"
-      ? {
-          onFocus: compose("onFocus", ctx.openHover),
-          onBlur: compose("onBlur", ctx.scheduleClose),
-          onPointerDown: observe<React.PointerEvent>(
-            "onPointerDown",
-            (event) => tap.start(event, ctx.open),
-          ),
-          onPointerCancel: observe("onPointerCancel", tap.drop),
-          onKeyDown: observe("onKeyDown", tap.drop),
-          onClick: compose("onClick", () => {
-            const gesture = tap.take();
-            if (!gesture || gesture.pointerType === "mouse") return;
-            ctx.setOpen(!gesture.state);
-          }),
-        }
-      : { onClick: compose("onClick", ctx.toggle) };
+    // The hover trigger keeps its hover path and *adds* a tap one, rather than
+    // swapping mode on a device that reports a touchscreen: a touchscreen laptop
+    // has both inputs and the mouse must keep working. A hovering pointer has
+    // already opened the panel on its way in, and a keyboard press arrives with
+    // no pointerdown behind it, so only a tap toggles here. Which panel state
+    // the tap acts on is read from the gesture's start, because a browser that
+    // focuses the trigger on contact would otherwise open it mid-gesture and let
+    // the click close it again.
+    const handlers: Record<string, unknown> =
+      ctx.triggerMode === "hover"
+        ? {
+            onFocus: compose("onFocus", ctx.openHover),
+            onBlur: compose("onBlur", ctx.scheduleClose),
+            onPointerDown: observe<React.PointerEvent>(
+              "onPointerDown",
+              (event) => tap.start(event, ctx.open),
+            ),
+            onPointerCancel: observe("onPointerCancel", tap.drop),
+            onKeyDown: observe("onKeyDown", tap.drop),
+            onClick: compose("onClick", () => {
+              const gesture = tap.take();
+              if (!gesture || gesture.pointerType === "mouse") return;
+              ctx.setOpen(!gesture.state);
+            }),
+          }
+        : { onClick: compose("onClick", ctx.toggle) };
 
-  return cloneElement(child, {
-    ...handlers,
-    ref: mergeRefs(childRef, (node: HTMLElement | null) => {
-      ctx.triggerRef.current = node;
-    }),
-    // Above the goo layer (z-[-1]) so the neck reads behind it.
-    className: cn("relative z-0", childProps.className as string | undefined),
-    "aria-haspopup": "dialog",
-    "aria-expanded": ctx.open,
-    "aria-controls": ctx.open ? ctx.contentId : undefined,
-    "data-state": ctx.open ? "open" : "closed",
-  });
-}
+    // harness 扩展：调用方传入的 aria-*（如 combobox 的 listbox）不被覆盖。
+    const existingHaspopup = rest["aria-haspopup" as keyof typeof rest] as
+      | string
+      | undefined;
+
+    // `...rest` 先铺、`...handlers` 后盖：handlers 里的事件名（onClick /
+    // hover 模式全套）由 compose/observe 负责与 rest 同名 handler 串联，
+    // 所以不会被双重触发；其余 rest 键（data-slot/role/键盘 handler 等）
+    // 原样落到子元素。
+    return cloneElement(child, {
+      ...rest,
+      ...handlers,
+      ref: mergeRefs(
+        childRef,
+        (node: HTMLElement | null) => {
+          ctx.triggerRef.current = node;
+        },
+        (node: HTMLElement | null) => {
+          if (typeof forwardedRef === "function") forwardedRef(node);
+          else if (forwardedRef)
+            (forwardedRef as React.MutableRefObject<HTMLElement | null>).current =
+              node;
+        },
+      ),
+      // Above the goo layer (z-[-1]) so the neck reads behind it.
+      className: cn(
+        "relative z-0",
+        childProps.className as string | undefined,
+        rest.className,
+      ),
+      "aria-haspopup": existingHaspopup ?? "dialog",
+      "aria-expanded": ctx.open,
+      "aria-controls": ctx.open ? ctx.contentId : undefined,
+      "data-state": ctx.open ? "open" : "closed",
+    });
+  },
+);
 
 const ALIGN_ORIGIN: Record<Align, string> = {
   start: "left",
@@ -499,12 +538,21 @@ const ALIGN_ORIGIN: Record<Align, string> = {
   end: "right",
 };
 
-export interface PopoverContentProps {
+export interface PopoverContentProps
+  extends Omit<ComponentPropsWithoutRef<"div">, "children"> {
   children: ReactNode;
-  className?: string;
+  /** harness 扩展（Radix 同名契约）：面板定位完成、可见之后的回调——
+   *  cmdk 菜单键盘可用性依赖它把焦点送进输入框（Radix 的
+   *  onOpenAutoFocus 等位物）。 */
+  onOpenAutoFocus?: (content: HTMLDivElement) => void;
 }
 
-export function PopoverContent({ children, className }: PopoverContentProps) {
+export function PopoverContent({
+  children,
+  className,
+  onOpenAutoFocus,
+  ...rest
+}: PopoverContentProps) {
   const ctx = usePopoverContext("PopoverContent");
   const [portalReady, setPortalReady] = useState(false);
   const {
@@ -539,6 +587,39 @@ export function PopoverContent({ children, className }: PopoverContentProps) {
 
   useEffect(() => setPortalReady(true), []);
 
+  // harness 扩展：定位就绪且打开时回调一次（每次打开会话一次）。
+  const focusedOnOpen = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      focusedOnOpen.current = false;
+      return;
+    }
+    if (layout === null || focusedOnOpen.current || !contentRef.current) return;
+    focusedOnOpen.current = true;
+    onOpenAutoFocus?.(contentRef.current);
+  }, [open, layout, contentRef, onOpenAutoFocus]);
+
+  // harness 扩展（2026-10-16）：视口翻转/钳位——beUI 原版无碰撞处理
+  // （放不下就出屏）。对位 Radix 的 collision 行为：首选 side 装不下且
+  // 另一侧更宽裕 → 翻转；水平方向钳在 gutter 内。composer 的模型选择器
+  // 触发钮在窗口底部，依赖此逻辑自动翻到上方（换 goo 前由 Radix 提供）。
+  const gutter = 12;
+  const resolvedSide: Side = (() => {
+    if (!layout) return side;
+    const below =
+      window.innerHeight -
+      layout.trigger.top -
+      layout.trigger.height -
+      gap -
+      gutter;
+    const above = layout.trigger.top - gap - gutter;
+    const requested = side === "bottom" ? below : above;
+    const other = side === "bottom" ? above : below;
+    if (layout.content.height > requested && other > requested)
+      return side === "bottom" ? "top" : "bottom";
+    return side;
+  })();
+
   const geo = useMemo(
     () =>
       buildGeo(
@@ -546,12 +627,12 @@ export function PopoverContent({ children, className }: PopoverContentProps) {
         layout?.trigger.height ?? 0,
         layout?.content.width ?? 0,
         layout?.content.height ?? 0,
-        side,
+        resolvedSide,
         align,
         gap,
         panelRadius,
       ),
-    [layout, side, align, gap, panelRadius],
+    [layout, resolvedSide, align, gap, panelRadius],
   );
 
   // Morph the same clip on the goo body and the content, so the whole popover
@@ -596,6 +677,18 @@ export function PopoverContent({ children, className }: PopoverContentProps) {
       ? makeHoverHandlers(panelHover, openHover, scheduleClose)
       : {};
 
+  // harness 扩展：水平钳位——面板超出视口左右缘时整体平移补偿
+  // （beUI 原版无碰撞处理；对位 Radix 的 shift 行为）。
+  // 坐标：wrapper translate 到 trigger.left+clampX；面板相对 wrapper 的
+  // 左偏移 = geo.left + geo.panel.x（buildGeo 里 left=min(0,px)、
+  // panel.x=px-left，两项之和恒 = px——分 px≥0/px<0 两种情形均在案）。
+  const clampX = (() => {
+    if (!layout) return 0;
+    const preferred = layout.trigger.left + geo.left + geo.panel.x;
+    const maxX = window.innerWidth - layout.content.width - gutter;
+    return Math.max(gutter, Math.min(preferred, maxX)) - preferred;
+  })();
+
   // Match the server and first client render, then attach the portal after
   // hydration. This preserves SSR without regenerating the page on the client.
   if (!portalReady) return null;
@@ -606,7 +699,7 @@ export function PopoverContent({ children, className }: PopoverContentProps) {
       className="pointer-events-none fixed left-0 top-0 z-[9999] isolate size-0"
       style={{
         visibility: layout && !closedAtRest ? "visible" : "hidden",
-        transform: `translate3d(${layout?.trigger.left ?? 0}px, ${layout?.trigger.top ?? 0}px, 0)`,
+        transform: `translate3d(${(layout?.trigger.left ?? 0) + clampX}px, ${layout?.trigger.top ?? 0}px, 0)`,
       }}
     >
       {/* Goo filter: blur, sharpen the alpha back into solid shapes, then lay
@@ -688,6 +781,7 @@ export function PopoverContent({ children, className }: PopoverContentProps) {
             id={contentId}
             role="dialog"
             {...hoverHandlers}
+            {...rest}
             style={{
               position: "absolute",
               left: geo.panel.x,

@@ -700,15 +700,13 @@
   display: none;
 }
 
-/* 面板（PopoverContent w-72 bg-menu p-0 对应物） */
+/* 面板（2026-10-16 换 beUI goo 弹层：面板底色/圆角/投影由 goo 体
+   （.bg-popover blob + 弹簧 morph 的 clip）承担——原 background/border/
+   border-radius/box-shadow 会叠在 morph 上打架（无分层 CSS 压过工具类），
+   全部删除；w-72 类随组件走，保留宽度兜底）。 */
 .tab-overflow-menu {
-  background: var(--surface);
-  border: 1px solid var(--stroke);
-  border-radius: 8px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
   padding: 0;
   width: 288px;
-  z-index: 70;
 }
 
 /* cmdk 容器/输入框/列表/空态/分组（ZCode Command 体系对应物） */

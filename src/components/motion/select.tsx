@@ -24,18 +24,16 @@ import {
   useRef,
   useState,
 } from "react";
-import { EASE_OUT } from "@/lib/ease";
+import { EASE_OUT, SELECT_OPEN } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
 // One progress value drives the surface, gap, corners and chevron. This short
 // spring suits the full reveal distance; each reader clamps its small internal
 // overshoot, so all visible endpoints settle together. Rows share a short
 // reveal so long lists have no late entries.
-const UNFOLD_SPRING = {
-  type: "spring",
-  visualDuration: 0.2,
-  bounce: 0.12,
-} as const;
+// UNFOLD_SPRING 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
+// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
+const UNFOLD_SPRING = SELECT_OPEN;
 // Exits are faster than entrances: the panel folds back on a short ease.
 const UNFOLD_EXIT = { duration: 0.2, ease: EASE_OUT } as const;
 const RADIUS = 12;

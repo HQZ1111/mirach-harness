@@ -16,7 +16,6 @@
  * （open 根面板不可关——同页签头无 ✕ 的语义，不发关闭钮）。
  */
 import { useState, type FC } from 'react'
-import { Popover } from 'radix-ui'
 import { Command } from 'cmdk'
 import {
   ChevronDownIcon,
@@ -30,6 +29,11 @@ import {
 import type { IDockviewHeaderActionsProps, IDockviewPanel } from 'dockview-react'
 
 import { Tooltip } from '@/components/motion/tooltip'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/motion/popover'
 
 /** 类型图标（旧版 TYPE_ICONS 的 dockview 面板映射——按 panel id）。 */
 const PanelGlyph: FC<{ panel: IDockviewPanel }> = ({ panel }) => {
@@ -66,11 +70,14 @@ export const TabOverviewButton: FC<IDockviewHeaderActionsProps> = (props) => {
   const activeId = props.activePanel?.id
 
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
+    // 2026-10-16 换 beUI goo 弹层（用户定稿"所有 panel 型浮层"）——原
+    // Radix Popover 的 API 面对位：align/side/sideOffset 是 goo 根属性；
+    // 进出场动画由 goo 的弹簧 morph 自带（不再需要 animate-in 类）。
+    <Popover align="end" open={open} onOpenChange={setOpen} side="bottom" sideOffset={6}>
       {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——嵌套序
-          Tooltip 在外、Popover.Trigger 在内，两层 asChild 逐层克隆到 button） */}
+          Tooltip 在外、PopoverTrigger 在内，两层克隆逐层到 button） */}
       <Tooltip content="标签总览" side="bottom">
-        <Popover.Trigger asChild>
+        <PopoverTrigger>
           <button
             aria-label="标签总览"
             className="tab-overview-trigger"
@@ -79,73 +86,69 @@ export const TabOverviewButton: FC<IDockviewHeaderActionsProps> = (props) => {
           >
             <ChevronDownIcon className="size-3.5" />
           </button>
-        </Popover.Trigger>
+        </PopoverTrigger>
       </Tooltip>
-      <Popover.Portal>
-        <Popover.Content
-          align="end"
-          // 进出场动画（2026-10-16 用户："悬停显示的窗口动画怎么没有"）：
-          // 补 animate-in/out（曲线/时长走 tw-animate-css 的 beUI 令牌覆盖）
-          className="tab-overflow-menu origin-(--radix-popover-content-transform-origin) data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
-          collisionPadding={8}
-          side="bottom"
-          sideOffset={6}
-        >
-          <Command className="tab-overview-cmd" loop>
-            <Command.Input
-              autoFocus
-              className="tab-overview-input"
-              placeholder="搜索标签页..."
-            />
-            <Command.List className="tab-overview-list">
-              <Command.Empty className="tab-overview-empty">没有匹配的标签页</Command.Empty>
-              {/* 分组 heading 保留旧版文案；每次渲染现取 props.panels——
-                  dockview-react 桥在面板增删/激活变化时强制重渲。 */}
-              <Command.Group className="tab-overview-group" heading="打开的标签页">
-                {panels.map((panel) => {
-                  const title = TITLE_OF(panel)
-                  return (
-                    <Command.Item
-                      className={`tab-overview-item${panel.id === activeId ? ' active' : ''}`}
-                      key={panel.id}
-                      onSelect={() => {
-                        panel.api.setActive()
-                        setOpen(false)
-                      }}
-                      value={`${title} ${panel.id}`}
-                    >
-                      <span className="tab-overview-icon">
-                        <PanelGlyph panel={panel} />
-                      </span>
-                      <span className="tab-overview-name">{title}</span>
-                      {closable(panel) && (
-                        <button
-                          aria-label={`关闭 ${title}`}
-                          className="tab-overview-close"
-                          onClick={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            panel.api.close()
-                          }}
-                          onPointerDown={(e) => {
-                            // Radix/cmdk 的行选择在 pointerdown/up 链上——
-                            // 关闭钮独立动作，不让事件冒到行选择（旧版同款）。
-                            e.preventDefault()
-                            e.stopPropagation()
-                          }}
-                          type="button"
-                        >
-                          <XIcon size={12} />
-                        </button>
-                      )}
-                    </Command.Item>
-                  )
-                })}
-              </Command.Group>
-            </Command.List>
-          </Command>
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+      <PopoverContent
+        className="tab-overflow-menu w-72"
+        onOpenAutoFocus={(el) => {
+          // 对位原 Radix 行为（旧版 Command.Input autoFocus）：开面板后
+          // 焦点进搜索框，cmdk 键盘导航（↑↓/Enter）才能用。
+          el.querySelector('input')?.focus()
+        }}
+      >
+        <Command className="tab-overview-cmd" loop>
+          <Command.Input
+            className="tab-overview-input"
+            placeholder="搜索标签页..."
+          />
+          <Command.List className="tab-overview-list">
+            <Command.Empty className="tab-overview-empty">没有匹配的标签页</Command.Empty>
+            {/* 分组 heading 保留旧版文案；每次渲染现取 props.panels——
+                dockview-react 桥在面板增删/激活变化时强制重渲。 */}
+            <Command.Group className="tab-overview-group" heading="打开的标签页">
+              {panels.map((panel) => {
+                const title = TITLE_OF(panel)
+                return (
+                  <Command.Item
+                    className={`tab-overview-item${panel.id === activeId ? ' active' : ''}`}
+                    key={panel.id}
+                    onSelect={() => {
+                      panel.api.setActive()
+                      setOpen(false)
+                    }}
+                    value={`${title} ${panel.id}`}
+                  >
+                    <span className="tab-overview-icon">
+                      <PanelGlyph panel={panel} />
+                    </span>
+                    <span className="tab-overview-name">{title}</span>
+                    {closable(panel) && (
+                      <button
+                        aria-label={`关闭 ${title}`}
+                        className="tab-overview-close"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          panel.api.close()
+                        }}
+                        onPointerDown={(e) => {
+                          // cmdk 的行选择在 pointerdown/up 链上——关闭钮
+                          // 独立动作，不让事件冒到行选择（旧版同款）。
+                          e.preventDefault()
+                          e.stopPropagation()
+                        }}
+                        type="button"
+                      >
+                        <XIcon size={12} />
+                      </button>
+                    )}
+                  </Command.Item>
+                )
+              })}
+            </Command.Group>
+          </Command.List>
+        </Command>
+      </PopoverContent>
+    </Popover>
   )
 }

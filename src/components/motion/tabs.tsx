@@ -16,7 +16,7 @@ import {
   type HTMLAttributes,
   type ReactNode,
 } from "react";
-import { EASE_OUT } from "@/lib/ease";
+import { EASE_OUT, SPRING_TABS } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
 type Variant = "pill" | "underline" | "segment";
@@ -39,12 +39,9 @@ function useTabs() {
 // Settle without overshoot: a scrollable tab list would turn even a small
 // overshoot into a transient scrollbar and layout shift.
 // Scale stiffness and damping together for a quicker glide with the same feel.
-const transition: Transition = {
-  type: "spring",
-  stiffness: 245,
-  damping: 36,
-  mass: 1.2,
-};
+// SPRING_TABS 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
+// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
+const transition: Transition = SPRING_TABS;
 
 export function Tabs({
   defaultValue,

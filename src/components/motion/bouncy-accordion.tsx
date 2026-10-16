@@ -15,7 +15,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { EASE_OUT } from "@/lib/ease";
+import {
+  ACCORDION_CHEVRON,
+  ACCORDION_CLOSE,
+  ACCORDION_OPEN,
+  ACCORDION_ROW,
+  EASE_OUT,
+} from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
 export type BouncyAccordionItem = {
@@ -51,34 +57,20 @@ export interface BouncyAccordionProps {
 // avoiding scale projection on text-heavy row contents.
 // Gap spring: must not overshoot y — positive y overshoot drifts items below
 // their mt-3 resting point and briefly overlaps the next item.
-const ROW_TRANSITION: Transition = {
-  type: "spring",
-  duration: 0.55,
-  bounce: 0.38,
-};
+// 全部已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——原本地
+// 常量删除，import 自 @/lib/ease（数值唯一源头）。
+const ROW_TRANSITION: Transition = ACCORDION_ROW;
 
-const CONTENT_OPEN_TRANSITION: Transition = {
-  type: "spring",
-  duration: 0.58,
-  bounce: 0.32,
-};
+const CONTENT_OPEN_TRANSITION: Transition = ACCORDION_OPEN;
 
-const CONTENT_CLOSE_TRANSITION: Transition = {
-  type: "spring",
-  duration: 0.46,
-  bounce: 0.26,
-};
+const CONTENT_CLOSE_TRANSITION: Transition = ACCORDION_CLOSE;
 
 const DESCRIPTION_TRANSITION: Transition = {
   duration: 0.18,
   ease: EASE_OUT,
 };
 
-const CHEVRON_TRANSITION: Transition = {
-  type: "spring",
-  duration: 0.42,
-  bounce: 0.28,
-};
+const CHEVRON_TRANSITION: Transition = ACCORDION_CHEVRON;
 
 
 function useControllableAccordionValue({

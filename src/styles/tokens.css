@@ -332,6 +332,19 @@
   --beui-spring-glide-s: 700;    --beui-spring-glide-d: 50;    --beui-spring-glide-m: 0.5;
   --beui-spring-tabs-s: 245;     --beui-spring-tabs-d: 36;     --beui-spring-tabs-m: 1.2;   /* 刻意无过冲 */
   --beui-spring-toast-s: 420;    --beui-spring-toast-d: 34;    --beui-spring-toast-m: 0.75;
+  --beui-spring-loupe-s: 520;    --beui-spring-loupe-d: 24;    --beui-spring-loupe-m: 0.6;  /* 放大镜升起 */
+
+  /* Spring（duration 式：--dur 秒 + --bounce；ease.ts visualOf/durSpringOf 读取。
+     2026-10-16 令牌统一新增——goo/morph/unfold/accordion 四组组件弹簧原散落
+     在各 vendored 组件内，现全部收拢于此，组件改 import ease.ts） */
+  --beui-spring-goo-open-dur: 0.3;    --beui-spring-goo-open-bounce: 0.15;
+  --beui-spring-goo-close-dur: 0.21;  --beui-spring-goo-close-bounce: 0.15;
+  --beui-spring-unfold-dur: 0.2;      --beui-spring-unfold-bounce: 0.12;
+  --beui-spring-morph-dur: 0.26;      --beui-spring-morph-bounce: 0;
+  --beui-spring-accordion-row-dur: 0.55;     --beui-spring-accordion-row-bounce: 0.38;
+  --beui-spring-accordion-open-dur: 0.58;    --beui-spring-accordion-open-bounce: 0.32;
+  --beui-spring-accordion-close-dur: 0.46;   --beui-spring-accordion-close-bounce: 0.26;
+  --beui-spring-accordion-chevron-dur: 0.42; --beui-spring-accordion-chevron-bounce: 0.28;
 
   /* Theme Toggle Blinds 几何（mask-size 72px 钉住"两端落干净"） */
   --beui-vt-slat: 72px;       /* 板条宽（theme-toggle.tsx 消费） */
