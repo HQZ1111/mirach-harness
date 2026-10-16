@@ -161,14 +161,23 @@
   margin: 0;
 }
 
+/* 浮层关闭钮（settings-overlay / bots-dialog / pi-resources-dialog 共用）。
+   2026-10-16 阶段 3：原 `padding:4px` + 图标撑开 → **尺寸不定**（随图标
+   14/16px 漂），无法做圆形（50% 会渲成椭圆）。改为固定正方形 24×24 +
+   flex 居中，padding 归零（图标尺寸自有其类控制）。 */
 .set-close {
+  align-items: center;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-icon-btn);
   color: var(--text-3);
   cursor: pointer;
   display: flex;
-  padding: 4px;
+  flex: none;
+  height: var(--size-icon-btn);
+  justify-content: center;
+  padding: 0;
+  width: var(--size-icon-btn);
 }
 
 .set-close:hover {

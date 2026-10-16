@@ -515,7 +515,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               形态——常驻可见 70%，open 态点亮）。 */}
           <button
             aria-label="侧栏选项"
-            className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+            className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
             data-slot="aui_thread-list-view-menu-trigger"
             type="button"
           >
@@ -1438,7 +1438,7 @@ const ThreadListNewAria: FC = () => (
     <ThreadListPrimitive.New asChild>
       <button
         aria-label="新建会话"
-        className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
+        className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
         type="button"
       >
         <PlusIcon className="mx-auto size-3.5" />
@@ -1876,7 +1876,7 @@ export const ThreadListItem: FC = () => {
                 <button
                   aria-label="会话操作"
                   className={cn(
-                    "text-transparent group-hover/row:text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) focus-visible:bg-(--hover-wash) focus-visible:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 transition-colors duration-100",
+                    "text-transparent group-hover/row:text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) focus-visible:bg-(--hover-wash) focus-visible:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 transition-colors duration-100",
                     hasTrailing && "absolute right-0",
                   )}
                   data-slot="aui_thread-list-item-more"

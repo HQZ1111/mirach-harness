@@ -124,21 +124,24 @@ body.in-browser { background: var(--surface); }
 .win-dot[data-dot-role='minimize'] { --dot-color: var(--win-dot-minimize); }
 .win-dot[data-dot-role='sidebar'] { --dot-color: var(--win-dot-sidebar); }
 
-/* ── 标题栏工具钮（hermes TitlebarToolButton：icon ghost，opacity 表态） ── */
+/* ── 标题栏工具钮（hermes TitlebarToolButton：icon ghost，opacity 表态） ──
+   2026-10-16 阶段 3：矩形 26×24/5px → **正方形 24×24 圆形**（用户定稿"命中盒
+   改成正方形的，换成圆形"）。原 26 宽是为文字留量，但本钮只有图标——
+   非正方形时 50% 会渲成椭圆，故宽度归一到 --size-icon-btn。 */
 .tb-tool {
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-icon-btn);
   color: var(--text-2);
   cursor: pointer;
   display: flex;
-  height: 24px;
+  height: var(--size-icon-btn);
   justify-content: center;
   opacity: 0.6;
   padding: 0;
   transition: opacity 120ms;
-  width: 26px;
+  width: var(--size-icon-btn);
 }
 
 .tb-tool:hover { opacity: 1; }

@@ -40,6 +40,8 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  /* 圆角基准：原 0.625rem(10px) 系 shadcn 默认，2026-10-16 阶段 2 起由下方
+     @theme inline 的桥接覆盖为设计刻度（此处保留仅为 shadcn 令牌完整性）。 */
   --radius: 0.625rem;
   --sidebar: hsl(0 0% 98%);
   --sidebar-foreground: hsl(240 5.3% 26.1%);
@@ -53,8 +55,8 @@
   /* animate-in/out 系全局默认（tw-animate-css 的钩子）：曲线/时长换 beUI
      值（2026-10-14）——EASE_OUT=0.16/1/0.3/1（beUI 库级默认，原话"默认
      ease 太弱"）；时长 0.18s = beUI 标准入场（--beui-dur-enter）。组件处
-     显式 duration-*/ease-* 工具类仍可覆盖（--tw-duration/--tw-ease 就近
-     作用域优先）。 */
+     显式 duration- 与 ease- 工具类仍可覆盖（--tw-duration/--tw-ease 就近
+     作用域优先）。注意本注释内不得出现半角星号紧跟斜杠的连写。 */
   --tw-ease: var(--beui-ease-out);
   --tw-duration: var(--beui-dur-enter);
 }
@@ -78,10 +80,29 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  /* ── 圆角桥接（2026-10-16 阶段 2）──────────────────────────────
+     Tailwind 的 rounded-* 工具类由本表生成（实测用量：rounded-md 82 ·
+     rounded-lg 65 · rounded-2xl 63 · rounded-xl 56 · rounded 30 ·
+     rounded-sm 10 —— 26 种散落值的主源）。此前这些类名从 --radius:
+     0.625rem(10px) 派生，与 tokens.css 的布局体系**各自为政**（两套圆角）。
+     改为**指向设计刻度** —— 一行不动组件，185+ 处类名自动收敛到 5 档。
+     注意 @theme inline 会把这些值内联进生成的工具类；引用 var() 时
+     生成的声明仍带 var()，故运行期跟随 --scale-radius-* 变化。 */
+  --radius-sm: var(--scale-radius-xs);   /* 4  */
+  --radius-md: var(--scale-radius-sm);   /* 8  */
+  --radius-lg: var(--scale-radius-md);   /* 12 */
+  --radius-xl: var(--scale-radius-lg);   /* 16 */
+  /* rounded-2xl 无 shadcn 默认，补上指向 xl 档（24）——它是用量第 4 的类 */
+  --radius-2xl: var(--scale-radius-xl);  /* 24 */
+  /* 其余档位补齐（Tailwind v4 默认表自带 xs/3xl/4xl；不补则它们仍走
+     rem 派生 → 0.125rem×15px = 1.875px 这类半像素）。 */
+  --radius-xs: var(--scale-radius-xs);   /* 4  */
+  --radius-3xl: var(--scale-radius-xl);  /* 24 */
+  --radius-4xl: var(--scale-radius-xl);  /* 24 */
+  /* 裸 rounded（30 处）读的是 --radius 本身：原来 0.625rem(10px) 系
+     shadcn 值，现归入控件档 8。**根字号 15px 的坑**：rem 派生值会得到
+     0.5rem×15=7.5px 这类半像素，故这里一律写 px 令牌、不走 rem。 */
+  --radius: var(--scale-radius-sm);      /* 8  */
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

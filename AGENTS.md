@@ -393,6 +393,16 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
      落盘改一个 --beui-spring-*-dur → reload → CDP 量动画时长是否随动
      （勿用 Page.addScriptToEvaluateOnNewDocument 注入证明——document-start
      注入绕过此序，会假 PASS）。
+18. **CSS 注释里禁止半角「星号紧跟斜杠」连写**（2026-10-16 实锤，已踩两次）：
+     tokens.css 的 hub 段注释写了 `panes/hub/*，`——其中的 `/*` 在注释内部
+     **再次开启注释**（CSS 注释不嵌套）；tailwind.css 的 `duration-*/ease-*`
+     同理（`*/` 提前闭合）。后果极隐蔽：**整个 `:root` 块被解析器丢弃**，
+     表现为「tokens.css 第一个 :root 里的令牌全部 undefined」——本次实测
+     12 个 :root 只进 11 个，`--text/--surface/--brand/--stroke/--tab-font-size/
+     --tab-pad-x/--logo-strip-h` 全部失效（`var(--x, fallback)` 恒取 fallback）。
+     **排查法**：`var(--token, 777px)` 探针看是否恒为 777；或数 CSSOM 的
+     `:root` 条数 vs 文件里的 `/*` 配对。**替写法**：`panes/hub 目录`、
+     `duration- 与 ease- 工具类`。本会话加了脚本级自检（见手册"工具"段）。
 - **dev 模式的"慢"是编译位置问题**：设置页是动态 import（115 文件 /
   ~1.1MB 源码），vite 按需编译 → 每次重启后**第一次**打开要现场转换整个
   子图（数十秒，React-Compiler 的 babel pass 会放大每个文件的成本），

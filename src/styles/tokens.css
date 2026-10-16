@@ -15,6 +15,12 @@
  * 例外（2026-10-14）：本文件末尾的 beUI 段含 @property/@keyframes——
  * 它们是**定义**而非样式规则（动画的前提与本体），收在取值处保证
  * 「动效数值单点修改」。
+ * 设计刻度（2026-10-16 新增，文件末尾"设计刻度"段）：
+ * L1 --scale- 原始刻度（唯一字面值处）→ L2 语义别名（--radius- / --space- /
+ * --font- / --size- 四族）→ L3 组件级（--tab- 等）。现状散落值的量化与归一化
+ * 映射见该段注释；分阶段切换计划见 docs/ui-token-plan.md。
+ * 【注意】本注释内不得出现半角「星号紧跟斜杠」的连写（形如 --x- 星 斜 --y-
+ * 的写法会提前闭合注释，吞掉紧随其后的第一个 :root 块——2026-10-16 实锤踩过）。
  * ============================================================
  * 排版层级（用户 2026-09-26 定稿，字体 HarmonyOS Sans SC 全局）：
  *   一级标题 25/bold/#303030 · 二级标题 20/regular/#006fff
@@ -233,7 +239,8 @@
 
 /* ── 顶栏窗口圆点（用户定稿 2026-10-02：四钮改圆点，色值为用户指定字面值） ── */
 :root {
-  --win-dot-size: 15px;                       /* 圆点直径 */
+  --win-dot-size: var(--scale-size-icon-1);   /* 圆点直径（2026-10-16 阶段 3：
+                                   15 → 16 接图标钮刻度最小档） */
   --win-dot-gap: 20px;                        /* 圆点间距 */
   --win-dot-top: 25px;                        /* 圆点行距窗上边缘 */
   --win-dot-right: 50px;                      /* 距窗右边缘（避开 40px 圆角——壳圆角 50→40 后维持 50 有余量） */
@@ -244,7 +251,7 @@
   --win-dot-sidebar: #6EDCA2;                 /* 隐藏/打开右栏 */
 }
 
-/* ── hub：左栏入口条 + 机器人花名册（panes/hub/*，2026-10-02）──
+/* ── hub：左栏入口条 + 机器人花名册（panes/hub/ 目录，2026-10-02）──
    数值出处 = hermes：入口行 SidebarMenuButton（sidebar/index.tsx:1530-1545
    h-7 / 0.8125rem / font-medium / px-2 / gap-2 / rounded-md / 图标 72%）；
    bot 卡 lead 头像方块（bot-row.tsx:258-265 BotFace size=34）。颜色一律
@@ -405,3 +412,133 @@
   --beui-anim-marquee: 30s;
   --beui-anim-shimmer: 2.5s;
 }
+
+/* ============================================================
+ * 设计刻度（Scale Tokens）——阶段 1：纯新增，暂不改任何消费方
+ * ============================================================
+ * 目的：把散落的取值收敛成有限档位。**刻度值是"目标状态"，不是现状记录**
+ * （现状见下方"现状分布"注释——16 种圆角 / 17 种间距 / 8 种字号）。
+ *
+ * 三层规则（方案文档 docs/ui-token-plan.md §3）：
+ *   L1 Primitives  本段：唯一写字面值的地方
+ *   L2 Semantic    语义别名，指向 L1（第二段）
+ *   L3 Component   组件级，只在语义层不够用时新增（已有 --tab-* 等）
+ * 引用方向只能 L3 → L2 → L1，禁止反向，禁止 L1 被跳过直接写数值。
+ *
+ * 阶段 1 仅新增本段，**不动**任何现有令牌与规则——零风险，可单独提交验证。
+ * 后续阶段 2（tailwind 桥接）/3（圆钮）再逐项切换消费方。
+ * ============================================================ */
+
+/* ── L1 圆角刻度 ──────────────────────────────────────────────
+   现状分布（82 处 / 16 种）：20×17 · 6×17 · 4×11 · 5×8 · 8×8 · 12×4 ·
+   2×4 · 3×4 · 10×2 · 1/14/18/24/28/40/9999 各 1。
+   目标：收敛到 5 档 + full。归一化映射（阶段 2/3 执行）：
+     1/2/3 → xs(4)      4/5/6 → sm(8)     8/10 → md(12)
+     12/14/18 → lg(16)  20/24/28 → xl(24) 40 → shell 专用（见 --scale-radius-shell）
+   注意：20×17 是目前最大聚集（多为 tailwind rounded-[20px] 风格），
+   归到 xl(24) 会略放大；若你要保守，可把 xl 定义为 20——**待你定**。 */
+:root {
+  --scale-radius-xs: 4px;      /* 徽章/tiny 标记 */
+  --scale-radius-sm: 8px;      /* 控件：按钮/输入/行/小卡 */
+  --scale-radius-md: 12px;     /* 卡片/弹层/分组容器 */
+  --scale-radius-lg: 16px;     /* 大面板/抽屉 */
+  --scale-radius-xl: 24px;     /* 特大容器（对话栏 tint/大卡） */
+  --scale-radius-full: 9999px; /* 胶囊/圆形（正方形盒前提，见 --scale-size-*） */
+  /* 软件外壳圆角独立成档：它不参与"逐级递减"，与内容圆角是**同心**关系
+     （inner ≈ outer − inset，见方案 §8）。56 = 48(内层) + 8(内缩)。 */
+  --scale-radius-shell: 56px;
+  --scale-radius-shell-inner: 48px;
+}
+
+/* ── L1 间距刻度（4px 基准） ────────────────────────────────────
+   现状分布（162 处 / 17 种）：8×27 · 4×24 · 2×19 · 6×19 · 10×19 ·
+   3×13 · 16×9 · 20×8 · 12×7 · 1×6 · 5×4 · 其他各 1。
+   目标：4px 栅格。归一化映射：
+     1 → 4        2/3 → 4      5 → 4 或 8（就近）
+     6 → 8        8 → 8        10 → 12   12 → 12
+     14 → 16      16 → 16      20 → 20   50/70 → 见 L2（外壳留白专用）
+   **"多留白"落实点（用户要求）**：把内容区主档上调一档——
+     行内距 8→12、区块间距 12→16、面板内距 16→20/24（阶段 4 执行）。 */
+:root {
+  --scale-space-1: 4px;
+  --scale-space-2: 8px;
+  --scale-space-3: 12px;
+  --scale-space-4: 16px;
+  --scale-space-5: 20px;
+  --scale-space-6: 24px;
+  --scale-space-7: 32px;
+  --scale-space-8: 40px;
+  --scale-space-9: 48px;
+  --scale-space-10: 64px;
+}
+
+/* ── L1 字号刻度 ──────────────────────────────────────────────
+   现状分布（53 处 / 8 种）：12×23 · 11×9 · 13×7 · 14×4 · 11.5×4 ·
+   12.5×3 · 10×2 · 15×1（另有 tokens.css 顶层 --h1-size:25 等语义档）。
+   目标 6 档，消掉 11.5/12.5 半像素：
+     10 → caption(11)   11 → caption(11)
+     11.5/12/12.5 → body-sm(12)   13 → body(14)   ← 注意 13 归 14 会放大
+     14 → body(14)      15/16 → body-lg(16)
+   **13 → 14 是本刻度最大的观感变化**（7 处），若嫌大，可改为 body=13。
+   —— 待你定（见方案 §5 待确认项）。 */
+:root {
+  --scale-font-caption: 11px;
+  --scale-font-sm: 12px;
+  --scale-font-base: 14px;
+  --scale-font-lg: 16px;
+  --scale-font-title: 20px;
+  --scale-font-h1: 25px;
+}
+
+/* ── L1 图标钮正方形命中盒刻度 ──────────────────────────────────
+   用户定稿："按钮命中盒改成正方形的，换成圆形"——圆形（50%）的**前提**是
+   命中盒正方形（width === height），否则 50% 会渲成椭圆。
+   现状混杂：15(win-dot) / 20(+、总览、筛选) / 24·26(tb-tool) / 36(滚动箭头)，
+   且有若干"padding 撑开、尺寸不定"（.set-close / .term-add）——那些必须先
+   把盒钉成正方形才能改圆形（阶段 3 执行）。 */
+:root {
+  --scale-size-icon-1: 16px;   /* 窗口圆点（装饰性控制点） */
+  --scale-size-icon-2: 24px;   /* 常规图标钮（绝大多数） */
+  --scale-size-icon-3: 28px;   /* 大图标钮 */
+  --scale-size-icon-4: 32px;   /* 特大/主操作 */
+}
+
+/* ── L2 语义别名（组件只认这一层） ─────────────────────────────
+   阶段 1 先把语义名就位；阶段 2/3 起逐步把规则文件与组件切到这里。 */
+:root {
+  /* 圆角语义 */
+  --radius-control: var(--scale-radius-sm);   /* 按钮/输入/行 */
+  --radius-surface: var(--scale-radius-md);   /* 卡片/面板 */
+  --radius-overlay: var(--scale-radius-md);   /* 浮层/菜单 */
+  --radius-panel-lg: var(--scale-radius-lg);  /* 大面板 */
+  --radius-shell: var(--scale-radius-shell);  /* 软件外壳（Rust SetWindowRgn 同步） */
+  --radius-pill: var(--scale-radius-full);
+  --radius-circle: 50%;
+  --radius-icon-btn: var(--radius-circle);    /* 图标钮 = 圆形 */
+
+  /* 间距语义 */
+  --space-inline-xs: var(--scale-space-1);    /* 图标-文字小间距 */
+  --space-inline: var(--scale-space-2);       /* 常规内联间距 */
+  --space-stack-sm: var(--scale-space-3);     /* 同组元素纵距 */
+  --space-stack: var(--scale-space-4);        /* 区块间距 */
+  --space-panel: var(--scale-space-5);        /* 面板内距（"多留白"主档） */
+  --space-panel-lg: var(--scale-space-6);     /* 大面板内距 */
+  --space-section: var(--scale-space-7);      /* 大区块分段 */
+  /* 外壳留白（圆角避让：状态栏 padding、窗口圆点右距）——由同心几何派生，
+     阶段 7（方案 B）时与 --radius-shell 一起重算 */
+  --space-shell-x: var(--scale-space-8);
+
+  /* 字号语义 */
+  --font-caption: var(--scale-font-caption);
+  --font-sm: var(--scale-font-sm);
+  --font-body: var(--scale-font-base);
+  --font-body-lg: var(--scale-font-lg);
+  --font-title: var(--scale-font-title);
+
+  /* 图标钮语义 */
+  --size-icon-btn: var(--scale-size-icon-2);     /* 24 默认 */
+  --size-icon-btn-sm: var(--scale-size-icon-1);  /* 16 圆点档 */
+  --size-icon-btn-lg: var(--scale-size-icon-3);  /* 28 */
+  --size-icon-btn-xl: var(--scale-size-icon-4);  /* 32 */
+}
+

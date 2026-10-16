@@ -305,14 +305,23 @@
   color: var(--tab-close-color-hover);
 }
 
+/* 终端条「+」新建页签。2026-10-16 阶段 3：原 `padding:0 10px` + 字形撑开 →
+   尺寸不定，改**正方形 24×24 圆形**（与标签条「+」同款）。字号沿用
+   --zone-btn-font（图标字形，非文字标签）。 */
 .term-add {
+  align-items: center;
   background: none;
   border: none;
+  border-radius: var(--radius-icon-btn);
   color: var(--text-2);
   cursor: pointer;
+  display: flex;
   flex: none;
   font-size: var(--zone-btn-font);
-  padding: 0 var(--tab-pad-x);
+  height: var(--size-icon-btn);
+  justify-content: center;
+  padding: 0;
+  width: var(--size-icon-btn);
 }
 
 .term-add:hover {
