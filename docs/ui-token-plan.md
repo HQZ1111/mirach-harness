@@ -383,14 +383,60 @@ undefined**，`var(--x, fallback)` 恒取 fallback。之所以长期没暴露，
 **验证**：8 项全部实测为正方形且 `border-radius: 50%`；tsc 0；8 个 css 注释自检
 全 OK；reload 后 **console 错误 0**；截图渲染正常。
 
-### 待办（下一步）
+### 阶段 4 ✅ / 阶段 5 ✅ / 阶段 6 ✅（2026-10-16）
 
-- **阶段 7**：方案 B 同心内缩（壳 40 → 56，内容 inset 8，内层 48）——**未开始**
-  - ⚠️ 用户已确认选 B，但**本轮未动**：`.app-shell` 仍是 40px。
-  - 这是唯一会动布局几何的阶段（栏宽记忆 / 拖 sash 基准 / drop 落点平移）。
-- 阶段 4–6：规则 css 字面值 → 语义令牌 / 字号收敛 / 颜色统一——**未开始**
-- 拖拽：独立一轮。**hermes 是 Electron 40（非 CEF）**；其 `drag-session.ts` 用
-  pointer-capture 会话、明言 in-app 拖拽不走 HTML5 DnD——可照抄该思路。
+| 阶段 | 内容 | 数量 | 验证 |
+|---|---|---|---|
+| 4 | 规则 css 圆角字面值 → 语义令牌 | **42 处** | 全 5 文件，0 MISS |
+| 5 | 字号收敛到 6 档（10/11/11.5→11 · 12/12.5→12 · 13/14→14 · 15/16→16） | **48 处** | 0 MISS；实测状态栏 11px |
+| 6 | 灰阶统一 | **25 处** + 令牌 | stroke/border 同源 |
+
+**阶段 6 关键**：新增 `--scale-gray-a1..a6`（rgba 黑 α = 0.03/0.05/0.08/0.12/0.18/0.24），
+把 `--stroke`(原 0.10) / `--stroke-soft`(0.06) / `--hover-wash`(0.07) / `--tab-hover-bg` /
+`--tab-separator` 全部改指刻度；**并把 tailwind 的 `--border`/`--input` 从独立的
+`oklch(0.922 0 0)`（≈#e5e5e5）改为 `var(--stroke)`**——此前那是**两个不同的灰**，
+相邻元素并排会露差异（这是 v1 审计列的 P2 项）。
+
+### 阶段 7 ✅ 完成（2026-10-16）—— 方案 B 同心几何
+
+**做了什么**：
+
+```
+.app-shell          radius 56 (= --radius-shell)  + padding 8 (= --shell-inset)
+.app-main           radius 48 (= --radius-shell-inner) + overflow:hidden
+                    → 三栏由**内层**裁切（不再被壳直接裁）
+Rust main.rs        RADIUS_LOGICAL 40.0 → 56.0（SetWindowRgn 同步）
+resize-handles.tsx  四边手柄离角 45 → 56（圆角区在窗口 region 之外，压进去点不到）
+--win-dot-right     50 → calc(8 + 42) = 50（避圆角值随几何派生）
+--win-dot-left      35 → calc(8 + 27) = 35
+状态栏 padding       0 50px → 0 calc(8 + 42px) = 50px
+```
+
+**实测验证**：壳 radius 56 / padding 8；`.app-main` **48px** 圆角、位置 (8,8)、尺寸
+1784×964；`GetWindowRgn` 返回 **3 (COMPLEXREGION)** = 圆角区域已应用；
+右缘扫描 x=1792→`.app-shell`（内缩带）、x≥1794→`win-resize-handle`（对称）；
+底部 y=975..990→状态栏、y=995→手柄。**同心成立：56 = 48 + 8**。
+
+**连带项核查**：`RAIL_W=350` 用 `setSize({width})` 是**绝对值**，不受容器内缩影响，
+无需改；存档布局按**比例**归一，属预期行为。
+
+### ⚠️ 已知遗留（本轮未做）
+
+**TSX 里的 129 处任意值字号**（`text-[13px]`×63 · `text-[13.5px]`×50 · 其余零散），
+散在 **79 个文件**，几乎全在 `components/assistant-ui/elements/*`（上游 registry
+组件）。**本轮刻意不做**：
+
+1. 违背 AGENTS 的「照抄上游，不要自己做」——手改 129 处会让下次同步上游全冲突；
+2. 不在「默认布局」范围内——那些是弹窗/工具条等非首屏组件；
+3. 若要做，应作为独立一轮（写脚本批量 + 记录上游 diff）。
+
+### 全量回归（阶段 1–7 完成后）
+
+- `tsc --noEmit`：**0 错误**
+- `cargo check` / `cargo build`：**通过**（1 条 pre-existing warning，在 agui.rs）
+- `vitest run`：**34 文件 / 426 用例全过**
+- 8 个 css 注释配对自检：**全 OK**
+- 应用重跑（含 Rust 重建）：**console 错误 0**，截图正常
 
 ---
 

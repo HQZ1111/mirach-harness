@@ -52,9 +52,22 @@
   --h1-color: #303030;
   --h2-color: #006fff;
   --h3-color: #040415;
-  --stroke: rgba(0, 0, 0, 0.1);
-  --stroke-soft: rgba(0, 0, 0, 0.06);
-  --hover-wash: rgba(0, 0, 0, 0.07);
+  /* ── 灰阶 alpha 刻度（2026-10-16 阶段 6：把散落的 rgba(0,0,0,α) 收拢）──
+     现状实测：规则文件里手写了 α = 0.03/0.04/0.05/0.06/0.07/0.08/0.10/
+     0.12/0.14/0.16/0.18/0.20/0.24 共 13 档；tailwind 侧另有独立灰
+     --border: oklch(0.922 0 0)（≈#e5e5e5，不透明）。
+     本刻度以「黑 + alpha」统管描边/洗底/阴影（浅色主题的白底上，
+     alpha 黑等价于中性灰，且能自然叠色）。 */
+  --scale-gray-a1: rgba(0, 0, 0, 0.03);   /* 极轻洗底 */
+  --scale-gray-a2: rgba(0, 0, 0, 0.05);   /* 悬停洗底 */
+  --scale-gray-a3: rgba(0, 0, 0, 0.08);   /* 弱描边 */
+  --scale-gray-a4: rgba(0, 0, 0, 0.12);   /* 常规描边 */
+  --scale-gray-a5: rgba(0, 0, 0, 0.18);   /* 强调描边/虚线 */
+  --scale-gray-a6: rgba(0, 0, 0, 0.24);   /* 描边 hover */
+  /* 语义别名（既有名保留 → 消费方零改动；此处只把值改指刻度） */
+  --stroke: var(--scale-gray-a4);             /* 常规描边（原 0.10） */
+  --stroke-soft: var(--scale-gray-a3);        /* 弱分隔线（原 0.06） */
+  --hover-wash: var(--scale-gray-a2);         /* 悬停洗底（原 0.07） */
   --surface: #ffffff;
   --brand: #006fff;                           /* 品牌色/主题色（用户定稿） */
   --width-handle-glow: var(--brand);          /* 对话宽度手柄光条（用户定稿
@@ -115,8 +128,8 @@
   --tab-active-bg: var(--surface);            /* hermes 编辑器表面 */
   --tab-accent: var(--brand);
   --tab-accent-wash: rgba(0, 111, 255, 0.14); /* hermes TAB_SELECTED 14% */
-  --tab-hover-bg: rgba(0, 0, 0, 0.06);        /* hermes hover darken */
-  --tab-separator: rgba(0, 0, 0, 0.07);       /* hermes --ui-stroke-quaternary 系 */
+  --tab-hover-bg: var(--scale-gray-a2);       /* hermes hover darken（原 0.06） */
+  --tab-separator: var(--scale-gray-a3);      /* hermes --ui-stroke-quaternary 系（原 0.07） */
   --tab-dot-size: 5px;                        /* 横向多页签之间的分隔圆点（用户 2026-09-27） */
   --tab-dot-color: #bfc3cc;                   /* 圆点色 */
 
@@ -243,8 +256,9 @@
                                    15 → 16 接图标钮刻度最小档） */
   --win-dot-gap: 20px;                        /* 圆点间距 */
   --win-dot-top: 25px;                        /* 圆点行距窗上边缘 */
-  --win-dot-right: 50px;                      /* 距窗右边缘（避开 40px 圆角——壳圆角 50→40 后维持 50 有余量） */
-  --win-dot-left: 35px;                       /* 侧栏圆点距左边缘 */
+  --win-dot-right: calc(var(--scale-shell-inset) + 42px); /* 距窗右边缘：8(壳内缩)
+                                   + 42 —— 壳圆角 56 时（原 40 圆角对 50） */
+  --win-dot-left: calc(var(--scale-shell-inset) + 27px);  /* 侧栏圆点距左边缘（8+27） */
   --win-dot-close: #DC6E6E;                   /* 关闭 */
   --win-dot-maximize: #CBDC6E;                /* 最大化 */
   --win-dot-minimize: #6E97DC;                /* 最小化 */
@@ -448,6 +462,7 @@
      （inner ≈ outer − inset，见方案 §8）。56 = 48(内层) + 8(内缩)。 */
   --scale-radius-shell: 56px;
   --scale-radius-shell-inner: 48px;
+  --scale-shell-inset: 8px;   /* 壳内缩（同心环宽）；改壳圆角必须同步此值 */
 }
 
 /* ── L1 间距刻度（4px 基准） ────────────────────────────────────
@@ -512,6 +527,8 @@
   --radius-overlay: var(--scale-radius-md);   /* 浮层/菜单 */
   --radius-panel-lg: var(--scale-radius-lg);  /* 大面板 */
   --radius-shell: var(--scale-radius-shell);  /* 软件外壳（Rust SetWindowRgn 同步） */
+  --radius-shell-inner: var(--scale-radius-shell-inner); /* 同心内层（= 壳 − 内缩） */
+  --shell-inset: var(--scale-shell-inset);    /* 壳内缩（同心环宽，间距族） */
   --radius-pill: var(--scale-radius-full);
   --radius-circle: 50%;
   --radius-icon-btn: var(--radius-circle);    /* 图标钮 = 圆形 */

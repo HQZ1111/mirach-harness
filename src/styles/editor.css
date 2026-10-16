@@ -7,8 +7,8 @@
 /* ── 布局编辑面板（hermes TreeEditBar + LayoutPicker） ── */
 .ep-card {
   background: var(--surface);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 12px;
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-panel-lg);
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.18);
   display: flex;
   flex-direction: column;
@@ -39,23 +39,23 @@
 
 .ep-title {
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--font-body);
   font-weight: 600;
   margin: 0;
 }
 
 .ep-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-sm);
   margin: 2px 0 0;
 }
 
 .ep-kbd {
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 4px;
+  background: var(--scale-gray-a2);
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-control);
   font-family: Consolas, monospace;
-  font-size: 10px;
+  font-size: var(--font-caption);
   padding: 0 4px;
 }
 
@@ -69,17 +69,17 @@
 .ep-btn {
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text-2);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-sm);
   padding: 5px 10px;
 }
 
-.ep-btn:hover { background: rgba(0, 0, 0, 0.05); }
+.ep-btn:hover { background: var(--scale-gray-a2); }
 
-.ep-btn-outline { border: 1px solid rgba(0, 0, 0, 0.12); }
-.ep-btn-outline:hover { border-color: rgba(0, 0, 0, 0.24); }
+.ep-btn-outline { border: 1px solid var(--scale-gray-a4); }
+.ep-btn-outline:hover { border-color: var(--scale-gray-a6); }
 .ep-btn:disabled { cursor: default; opacity: 0.4; }
 
 .ep-body { padding: 0 16px 16px; }
@@ -98,7 +98,7 @@
 
 .ep-label {
   color: var(--text-4);
-  font-size: 0.6rem;
+  font-size: var(--font-caption);
   font-weight: 600;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -114,8 +114,8 @@
 
 .ep-preset-btn {
   background: transparent;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 8px;
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-surface);
   color: inherit;
   cursor: pointer;
   display: flex;
@@ -128,8 +128,8 @@
 }
 
 .ep-preset-btn:hover {
-  background: rgba(0, 0, 0, 0.03);
-  border-color: rgba(0, 0, 0, 0.24);
+  background: var(--scale-gray-a1);
+  border-color: var(--scale-gray-a6);
 }
 
 .ep-preset-active,
@@ -164,7 +164,7 @@
 }
 
 .ep-thumb-zone {
-  border-radius: 2px;
+  border-radius: var(--scale-radius-xs);
   flex: 1;
   min-height: 0;
   min-width: 0;
@@ -172,7 +172,7 @@
 
 .ep-preset-name {
   color: var(--text-3);
-  font-size: 0.68rem;
+  font-size: var(--font-caption);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -183,13 +183,13 @@
 
 .ep-preset-del {
   align-items: center;
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--scale-gray-a2);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text-3);
   cursor: pointer;
   display: grid;
-  font-size: 13px;
+  font-size: var(--font-body);
   height: 20px;
   justify-content: center;
   opacity: 0;
@@ -209,11 +209,11 @@
 
 .ep-new-grid {
   background: transparent;
-  border: 1px dashed rgba(0, 0, 0, 0.18);
-  border-radius: 8px;
+  border: 1px dashed var(--scale-gray-a5);
+  border-radius: var(--radius-surface);
   color: var(--text-3);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-sm);
   height: 32px;
   width: 100%;
 }
@@ -227,7 +227,7 @@
   color: var(--text-3);
   cursor: pointer;
   display: flex;
-  font-size: 12px;
+  font-size: var(--font-sm);
   gap: 6px;
   padding: 0;
 }
@@ -242,11 +242,11 @@
 
 .ep-input {
   background: var(--surface);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 6px;
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-control);
   color: var(--text);
   flex: 1;
-  font-size: 12px;
+  font-size: var(--font-sm);
   height: 28px;
   outline: none;
   padding: 0 8px;
@@ -269,8 +269,8 @@
 
 .ze-card {
   background: var(--surface);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 12px;
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-panel-lg);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
   display: flex;
   flex-direction: column;
@@ -289,7 +289,7 @@
 
 .ze-hint {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-sm);
   line-height: 1.6;
   margin: 0 0 10px;
 }
@@ -298,8 +298,8 @@
 
 .ze-canvas {
   background: #fafafb;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 8px;
+  border: 1px solid var(--scale-gray-a3);
+  border-radius: var(--radius-surface);
   flex: 1;
   min-height: 320px;
   overflow: auto;
@@ -334,8 +334,8 @@
 
 .ze-group {
   background: #f3f3f5;
-  border: 1px dashed rgba(0, 0, 0, 0.18);
-  border-radius: 6px;
+  border: 1px dashed var(--scale-gray-a5);
+  border-radius: var(--radius-control);
   display: flex;
   flex: 1;
   flex-wrap: wrap;
@@ -346,16 +346,16 @@
 
 .ze-empty {
   color: var(--text-4);
-  font-size: 11.5px;
+  font-size: var(--font-caption);
 }
 
 .ze-chip {
   align-items: center;
-  background: rgba(0, 0, 0, 0.06);
-  border-radius: 5px;
+  background: var(--scale-gray-a2);
+  border-radius: var(--radius-control);
   color: var(--text);
   display: inline-flex;
-  font-size: 12px;
+  font-size: var(--font-sm);
   gap: 6px;
   padding: 3px 8px;
 }
@@ -365,7 +365,7 @@
   border: none;
   color: var(--text-3);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--font-body);
   padding: 0;
 }
 
@@ -374,21 +374,21 @@
 .ze-add { flex-basis: 100%; }
 
 .ze-select {
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 5px;
+  background: var(--scale-gray-a2);
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-control);
   color: var(--text-2);
-  font-size: 11.5px;
+  font-size: var(--font-caption);
   padding: 2px 6px;
 }
 
 .ze-mini {
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 5px;
+  background: var(--scale-gray-a2);
+  border: 1px solid var(--scale-gray-a4);
+  border-radius: var(--radius-control);
   color: var(--text-2);
   cursor: pointer;
-  font-size: 11px;
+  font-size: var(--font-caption);
   padding: 3px 8px;
 }
 

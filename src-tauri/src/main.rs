@@ -118,9 +118,11 @@ mod win_shape {
         fn DeleteObject(obj: isize) -> i32;
     }
 
-    /// 逻辑圆角半径——必须与 base.css `.app-shell { border-radius: 40px }`
-    /// 同值（CSS px = 窗口逻辑像素，1:1）。
-    const RADIUS_LOGICAL: f64 = 40.0;
+    /// 逻辑圆角半径——必须与 base.css `.app-shell { border-radius: 56px }`
+    /// 同值（CSS px = 窗口逻辑像素，1:1）。**双处同步**：改这里必须同时改
+    /// tokens.css 的 --scale-radius-shell（2026-10-16 阶段 7 由 40 → 56，
+    /// 配合内容 inset 8 / 内层 48 的同心几何）。
+    const RADIUS_LOGICAL: f64 = 56.0;
 
     fn clear_region(hwnd: isize) {
         unsafe {

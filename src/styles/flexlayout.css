@@ -211,7 +211,7 @@
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-default-tab,
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-open-tab {
   align-items: center;
-  border-radius: 9999px;
+  border-radius: var(--radius-pill);
   display: flex;
   height: auto;
   padding: 3px 10px;
@@ -408,7 +408,7 @@
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--tab-close-color);
   cursor: pointer;
   display: flex;
@@ -467,7 +467,7 @@
   position: fixed;
   z-index: 9998;
   background: var(--surface);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
 }
 
 /* ── 三种轨道页签同一形态（用户定稿：文字横向直立、字号字重字距与横向
@@ -550,7 +550,7 @@
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--tab-text);
   cursor: pointer;
   display: flex;
@@ -583,7 +583,7 @@
 }
 .zone-rail-cell {
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   box-sizing: border-box;
   cursor: pointer;
   display: flex;
@@ -642,7 +642,7 @@
 .zone-add-menu {
   background: var(--surface);
   border: 1px solid var(--stroke);
-  border-radius: 8px;
+  border-radius: var(--radius-overlay);
   box-shadow: var(--shadow-pop);
   display: flex;
   flex-direction: column;
@@ -654,10 +654,10 @@
 .zone-add-item {
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--font-sm);
   padding: 6px 10px;
   text-align: left;
   white-space: nowrap;
@@ -722,7 +722,7 @@
   border-bottom: 1px solid var(--stroke-soft);
   color: var(--text);
   display: flex;
-  font-size: 13px;
+  font-size: var(--font-body);
   height: 32px;
   outline: none;
   padding: 0 12px;
@@ -750,13 +750,13 @@
 }
 .tab-overview-group > [cmdk-group-heading] {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-sm);
   font-weight: 500;
   padding: 8px 8px 4px;
 }
 .tab-overview-item {
   align-items: center;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text);
   cursor: pointer;
   display: flex;
@@ -788,7 +788,7 @@
 .tab-overview-name {
   color: var(--text);
   flex: 1 1 auto;
-  font-size: 13px;
+  font-size: var(--font-body);
   font-weight: 500;
   min-width: 0;
   overflow: hidden;
@@ -798,7 +798,7 @@
 .tab-overview-age {
   color: var(--text-3);
   flex: none;
-  font-size: 12px;
+  font-size: var(--font-sm);
   margin-right: 2px;
   white-space: nowrap;
 }
@@ -806,7 +806,7 @@
   align-items: center;
   background: transparent;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--text-3);
   cursor: pointer;
   display: inline-flex;

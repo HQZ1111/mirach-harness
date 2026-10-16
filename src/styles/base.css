@@ -23,14 +23,27 @@ body {
 
 .app-shell {
   background: var(--surface);
-  /* 描边已去（用户 2026-10-05："壳，所有栏的描边效果不要了"）——圆角
-     仍由 border-radius 裁切，边缘定义不再靠线。圆角 40（用户 2026-10-05
-     定稿；resize 手柄离角 50 仍大于圆角，无需改）。 */
-  border-radius: 40px;
+  /* ── 方案 B 同心圆角（2026-10-16 阶段 7）──────────────────────────
+     用户定稿：外壳圆角走"前沿大圆角"（50+），且内外要做成**同心**——
+     同心规则 = 内圆角 ≈ 外圆角 − 内缩。取值：
+       壳 56 (= --scale-radius-shell)
+       内缩 8 (= --shell-inset)
+       内层 48 (= --scale-radius-shell-inner，56 − 8)
+     实现：壳 padding 8 造出内缩，内层容器（.app-main）自带 48 圆角并
+     overflow:hidden——三栏由**内层**裁切，不再是壳直接裁（那样方块顶角
+     会顶到大圆角弧线上）。 */ 
+  border-radius: var(--radius-shell);
   color: var(--text);
   display: flex;
   flex-direction: column;
   height: 100%;
+  overflow: hidden;
+  padding: var(--shell-inset);
+}
+
+/* 内层容器（dockview 主区）获得同心内圆角：三栏在它里面被裁 */
+.app-main {
+  border-radius: var(--radius-shell-inner);
   overflow: hidden;
 }
 
@@ -81,16 +94,16 @@ body.in-browser { background: var(--surface); }
 }
 
 .app-titlebar-btn {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--scale-gray-a2);
   border: 1px solid var(--stroke);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   color: var(--text-2);
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: var(--font-caption);
   padding: 3px 10px;
 }
 
-.app-titlebar-btn:hover { background: rgba(0, 0, 0, 0.08); color: var(--text); }
+.app-titlebar-btn:hover { background: var(--scale-gray-a3); color: var(--text); }
 
 /* ── 自绘窗口控制圆点（用户定稿 2026-10-02：四钮改 20px 圆点） ──
    位置：绝对定位右上，距上缘 --win-dot-top(25)、右缘 --win-dot-right(50
@@ -165,7 +178,7 @@ body.in-browser { background: var(--surface); }
 .pane-menu-list {
   background: var(--surface);
   border: 1px solid var(--stroke);
-  border-radius: 8px;
+  border-radius: var(--radius-overlay);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
   display: flex;
   flex-direction: column;
@@ -181,18 +194,18 @@ body.in-browser { background: var(--surface); }
   align-items: center;
   background: transparent;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text);
   cursor: pointer;
   display: flex;
-  font-size: 12.5px;
+  font-size: var(--font-body);
   justify-content: space-between;
   gap: 12px;
   padding: 6px 10px;
 }
 
 .pane-menu-item:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
+  background: var(--scale-gray-a2);
   color: var(--text);
 }
 
@@ -203,26 +216,27 @@ body.in-browser { background: var(--surface); }
 
 .pane-menu-badge {
   color: var(--text-3);
-  font-size: 11px;
+  font-size: var(--font-caption);
 }
 
-/* ── 状态栏（用户：高度 20；内容左右 50 避开 40px 圆角区域——壳圆角
-   50→40 后维持 50 有余量；描边已去——用户 2026-10-05"底栏的描边还在"）── */
+/* ── 状态栏（用户：高度 20；内容左右避开圆角区——2026-10-16 阶段 7：
+   壳圆角 40→56 + 内缩 8，故留白 = 内缩 + 42 与原 50 同视觉余量）。
+   描边已去——用户 2026-10-05"底栏的描边还在" ── */
 .app-statusbar {
   align-items: center;
   background: transparent;
   color: var(--text-2);
   display: flex;
   flex: none;
-  font-size: 11.5px;
+  font-size: var(--font-caption);
   gap: 6px;
   height: 20px;
-  padding: 0 50px;
+  padding: 0 calc(var(--shell-inset) + 42px);
 }
 
 .statusbar-pill {
-  background: rgba(0, 0, 0, 0.05);
-  border-radius: 3px;
+  background: var(--scale-gray-a2);
+  border-radius: var(--scale-radius-xs);
   padding: 1px 8px;
 }
 

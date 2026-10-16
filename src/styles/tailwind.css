@@ -37,8 +37,13 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
+  /* ── 描边色统一（2026-10-16 阶段 6）──────────────────────────
+     shadcn 侧原来是独立的一套不透明灰（oklch(0.922 0 0) ≈ #e5e5e5），
+     与 tokens.css 的 --stroke: rgba(0,0,0,0.1) **是两个不同的灰**——相邻
+     元素并排时会露出差异。现统一指向 tokens.css 的灰阶 alpha 刻度，
+     全站描边同源（--border 是 shadcn 的 border 默认色，见 @layer base）。 */
+  --border: var(--stroke);
+  --input: var(--stroke);
   --ring: oklch(0.708 0 0);
   /* 圆角基准：原 0.625rem(10px) 系 shadcn 默认，2026-10-16 阶段 2 起由下方
      @theme inline 的桥接覆盖为设计刻度（此处保留仅为 shadcn 令牌完整性）。 */
