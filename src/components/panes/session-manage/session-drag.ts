@@ -25,6 +25,7 @@ import { positionToDirection, type DockviewApi, type DockviewGroupPanel, type Po
 import { regionOfGroup } from '@/components/layout/dockview-column-ops'
 import { ALL_DROP_ZONES, radialResolve } from '@/components/layout/drop-geometry'
 import { ESCAPE_PRIORITY, pushEscapeLayer } from '@/lib/escape-layers'
+import { createDragGhost, type DragGhost } from '@/lib/drag-ghost'
 import type { SessionTabDropPosition } from './session-tab-bridge'
 
 const DRAG_THRESHOLD_PX = 4
@@ -43,6 +44,10 @@ const EDGE_ONLY_ZONES: ReadonlySet<Position> = new Set(['top', 'bottom', 'left',
 export interface SessionRowDragSpec {
   /** 松手在对话栏（region=chat）任一内容区上 → 按落点开该会话分栏。 */
   onCommitOpenTab(position: SessionTabDropPosition): void
+  /** 指针跟随 chip 的标签（会话标题）——"鼠标上是空的"修复（2026-10-16，
+   *  hermes createDragGhost 语义：来源行不像页签那样被拎起，chip 承载
+   *  "手里拿着什么"）。 */
+  ghostLabel: string
 }
 
 interface Rect {
@@ -135,6 +140,9 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
   let cursor: string | null = null
   let raf = 0
   let pending: { x: number; y: number } | null = null
+  // 指针跟随 chip（engage 创建、finish 销毁——hermes drag-session 同款：
+  // 来源行不像页签那样被拎起，chip 是"手里拿着什么"的可供性）
+  let ghost: DragGhost | null = null
 
   // engage 快照：对话栏内容区（拖拽中布局不重组，全程纯数学）
   let targets: DragTarget[] = []
@@ -192,6 +200,10 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     restoreRowOpacity = handle.style.opacity
     handle.style.setProperty('opacity', SOURCE_DIM_OPACITY)
 
+    // 指针跟随 chip（hermes createDragGhost——「鼠标上是空的」修复）
+    ghost = createDragGhost(spec.ghostLabel)
+    ghost.moveTo(sx, sy)
+
     targets = chatTargets()
   }
 
@@ -240,6 +252,10 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
 
   const onMove = (ev: PointerEvent) => {
     pending = { x: ev.clientX, y: ev.clientY }
+    // chip 跟手（悬停目标变化下一帧处理；chip 每帧直贴指针——hermes
+    // drag-session 的 ghost.moveTo 在 processMove 里，但合帧后延迟可见，
+    // 直贴更跟手且写的是同一个 el）
+    ghost?.moveTo(ev.clientX, ev.clientY)
     raf ||= requestAnimationFrame(flushMove)
   }
 
@@ -258,6 +274,8 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     document.body.style.cursor = restoreCursor
     document.body.style.userSelect = restoreSelect
     handle.style.opacity = restoreRowOpacity
+    ghost?.destroy()
+    ghost = null
     releaseEscapeLayer?.()
     releaseEscapeLayer = null
 

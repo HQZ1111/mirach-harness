@@ -20,6 +20,7 @@ import { ChevronLeftIcon, ChevronRightIcon } from 'lucide-react'
 import type { IDockviewHeaderActionsProps } from 'dockview-react'
 
 import { cn } from '@/lib/utils'
+import { Tooltip } from '@/components/motion/tooltip'
 import { TabOverviewButton } from './tab-overview-menu'
 
 interface StripEdges {
@@ -96,23 +97,25 @@ const TabStripArrow: FC<{ side: 'left' | 'right' } & IDockviewHeaderActionsProps
 
   const canScroll = side === 'left' ? edges.left : edges.right
   return (
-    <button
-      aria-label={side === 'left' ? '向左滚动标签' : '向右滚动标签'}
-      className={cn(
-        'text-(--tab-text) inline-flex w-9 shrink-0 items-center justify-center self-stretch',
-        'transition-opacity hover:opacity-70 focus-visible:outline-2',
-        'disabled:pointer-events-none disabled:opacity-0',
-      )}
-      disabled={!canScroll}
-      onClick={scroll}
-      type="button"
-    >
-      {side === 'left' ? (
-        <ChevronLeftIcon aria-hidden className="size-4" />
-      ) : (
-        <ChevronRightIcon aria-hidden className="size-4" />
-      )}
-    </button>
+    <Tooltip content={side === 'left' ? '向左滚动标签' : '向右滚动标签'} side="bottom">
+      <button
+        aria-label={side === 'left' ? '向左滚动标签' : '向右滚动标签'}
+        className={cn(
+          'text-(--tab-text) inline-flex w-9 shrink-0 items-center justify-center self-stretch',
+          'transition-opacity hover:opacity-70 focus-visible:outline-2',
+          'disabled:pointer-events-none disabled:opacity-0',
+        )}
+        disabled={!canScroll}
+        onClick={scroll}
+        type="button"
+      >
+        {side === 'left' ? (
+          <ChevronLeftIcon aria-hidden className="size-4" />
+        ) : (
+          <ChevronRightIcon aria-hidden className="size-4" />
+        )}
+      </button>
+    </Tooltip>
   )
 }
 

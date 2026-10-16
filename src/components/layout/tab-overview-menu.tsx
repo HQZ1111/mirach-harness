@@ -29,6 +29,8 @@ import {
 } from 'lucide-react'
 import type { IDockviewHeaderActionsProps, IDockviewPanel } from 'dockview-react'
 
+import { Tooltip } from '@/components/motion/tooltip'
+
 /** 类型图标（旧版 TYPE_ICONS 的 dockview 面板映射——按 panel id）。 */
 const PanelGlyph: FC<{ panel: IDockviewPanel }> = ({ panel }) => {
   const id = panel.id
@@ -65,21 +67,26 @@ export const TabOverviewButton: FC<IDockviewHeaderActionsProps> = (props) => {
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          aria-label="标签总览"
-          className="tab-overview-trigger"
-          data-slot="tab-overview-trigger"
-          title="标签总览"
-          type="button"
-        >
-          <ChevronDownIcon className="size-3.5" />
-        </button>
-      </Popover.Trigger>
+      {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——嵌套序
+          Tooltip 在外、Popover.Trigger 在内，两层 asChild 逐层克隆到 button） */}
+      <Tooltip content="标签总览" side="bottom">
+        <Popover.Trigger asChild>
+          <button
+            aria-label="标签总览"
+            className="tab-overview-trigger"
+            data-slot="tab-overview-trigger"
+            type="button"
+          >
+            <ChevronDownIcon className="size-3.5" />
+          </button>
+        </Popover.Trigger>
+      </Tooltip>
       <Popover.Portal>
         <Popover.Content
           align="end"
-          className="tab-overflow-menu"
+          // 进出场动画（2026-10-16 用户："悬停显示的窗口动画怎么没有"）：
+          // 补 animate-in/out（曲线/时长走 tw-animate-css 的 beUI 令牌覆盖）
+          className="tab-overflow-menu origin-(--radix-popover-content-transform-origin) data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
           collisionPadding={8}
           side="bottom"
           sideOffset={6}

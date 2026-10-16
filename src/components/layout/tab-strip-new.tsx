@@ -20,6 +20,7 @@ import type { IDockviewHeaderActionsProps } from 'dockview-react'
 
 import { regionOfGroup } from './dockview-column-ops'
 import { openPagePanel } from './open-page-actions'
+import { Tooltip } from '@/components/motion/tooltip'
 import type { OpenPageKind } from '@/components/panes/open-page'
 
 const NEW_TAB_OPTIONS: readonly { kind: OpenPageKind; label: string; icon: typeof FolderTreeIcon }[] = [
@@ -28,8 +29,10 @@ const NEW_TAB_OPTIONS: readonly { kind: OpenPageKind; label: string; icon: typeo
   { kind: 'preview', label: '预览', icon: EyeIcon },
 ]
 
+// 进出场动画（2026-10-16 用户："悬停显示的窗口动画怎么没有"）：补 animate-in/out
+// （曲线/时长走 tw-animate-css 的 beUI 令牌覆盖，tailwind.css 在案）。
 const MENU_CONTENT_CLASS =
-  'bg-popover text-popover-foreground z-50 min-w-36 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)'
+  'bg-popover text-popover-foreground z-50 min-w-36 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop) origin-(--radix-dropdown-menu-content-transform-origin) data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95'
 
 const MENU_ITEM_BASE =
   'flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[highlighted]:bg-(--hover-wash)'
@@ -43,17 +46,22 @@ export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
 
   return (
     <DropdownMenu.Root>
-      <DropdownMenu.Trigger asChild>
-        <button
-          aria-label="打开标签"
-          className="tab-new-trigger"
-          data-slot="tab-strip-new"
-          title="打开标签"
-          type="button"
-        >
-          <PlusIcon className="size-3.5" />
-        </button>
-      </DropdownMenu.Trigger>
+      {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——用户点名
+          "悬停显示的窗口动画"；与 win-dot 同款）。**嵌套序 = Tooltip 在外、
+          菜单 Trigger 在内**：两层 asChild 链 Tooltip→Trigger→button 逐层
+          克隆；反序会把 Tooltip 组件当 DOM 节点克隆、菜单事件全丢。 */}
+      <Tooltip content="打开标签" side="bottom">
+        <DropdownMenu.Trigger asChild>
+          <button
+            aria-label="打开标签"
+            className="tab-new-trigger"
+            data-slot="tab-strip-new"
+            type="button"
+          >
+            <PlusIcon className="size-3.5" />
+          </button>
+        </DropdownMenu.Trigger>
+      </Tooltip>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
           align="start"

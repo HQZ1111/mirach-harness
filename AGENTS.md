@@ -354,6 +354,35 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
      按存储比例铺——要恢复出厂布局就删 localStorage
      `mirach.harness.layout.v9` 再 reload（布局存档只存 ratio 不存 px，
      参考 fromJSON 后的归一行为）。
+13. **布局 fromJSON 手术必须持护栏**（2026-10-16 两天两实锤）：dockview
+     `fromJSON` 内部先 `clear()`——逐面板 `onDidRemovePanel` **同步**外发。
+     shell 的 `handlePanelRemoved` 看见「末签关闭」就 `restoreOpenAnchor`
+     → `addPanel(referencePanel:'workspace')` 打进半清树 → 抛
+     `referencePanel 'workspace' does not exist` 且整树搅成空组。两个
+     案发现场：「默认布局」复位、**隐藏面板栏（面板列里有实签时）**。
+     修复 = `holdLayoutSurgery(fn)` 包住一切 fromJSON 手术（column-ops），
+     shell 生命周期 handler 读 `layoutResetInProgress()` 让位。**新增任何
+     fromJSON 调用点都要包**。
+14. **winit 的 dragging 标志会被"没有物理按键的 startDragging"毒死**
+     （2026-10-16 排查实锤）：`WindowMessage::StartDragging → winit
+     handle_os_dragging` 里 `if !guard.dragging { dragging = true } else
+     { return }`——标志只在 `WM_EXITSIZEMOVE` 复位。CDP 合成 pointerdown
+     触发 `startDragging`（无物理按键）→ OS 不进模态移动循环 → 标志永卡
+     true → **之后所有顶栏拖拽全部静默失效**（JS 链全通、窗口不动）。
+     **判定命令必须用物理级输入**（PowerShell mouse_event 全序列），
+     合成 `startDragging` 只能用于验证 JS 调用链，不能用于外观/行为判定；
+     实例被毒后重启即愈。
+15. **CDP 动态 import 的项目模块 ≠ 页面静态 import 的实例**（2026-10-16
+     测试假象实锤）：`import('/src/.../x.ts')`（无 `?t=` HMR 时间戳）在
+     vite 下是**第二个模块实例**——模块级变量（护栏 depth、api 单例）不
+     共享，行为验证会得到假失败。**行为验证走真实 UI 路径**（真鼠标点菜单
+     → 页面自己的模块图）；只在纯函数探针里用动态 import。
+16. **beUI Tooltip 与 Radix asChild 链的嵌套序**（2026-10-16）：Tooltip
+     必须在外层（`<Tooltip content><DropdownMenu.Trigger asChild><button>
+     …`）——两层 asChild 逐层克隆到 button；反序（Trigger 包 Tooltip）会把
+     Tooltip **组件**当 DOM 节点克隆，菜单事件全丢。Tooltip 包
+     SharedLayoutBg 的行（入口条）也不行：它按直接子元素 clone 注入 pill，
+     行壳被包成 Tooltip 后 pill 不渲染——入口条保留原生 title=。
 - **dev 模式的"慢"是编译位置问题**：设置页是动态 import（115 文件 /
   ~1.1MB 源码），vite 按需编译 → 每次重启后**第一次**打开要现场转换整个
   子图（数十秒，React-Compiler 的 babel pass 会放大每个文件的成本），

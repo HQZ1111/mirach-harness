@@ -339,6 +339,33 @@ const extractLeaf = (json: LooseLayout, groupId: string): GroupStash | null => {
   return { leaf: wrapper, panels }
 }
 
+// ── 布局手术护栏（2026-10-16 泛化）────────────────────────────────────────
+
+/** 布局手术进行中护栏（shell 的面板生命周期 handler 消费）：fromJSON 内部
+ *  先 clear（逐面板 onDidRemovePanel **同步**外发）再重建——手术中途的
+ *  「末签关闭」事件不是用户动作，生命周期反应（restoreOpenAnchor 等）
+ *  必须让位。两类实锤：
+ *  ①「默认布局」复位（2026-10-16 早）：清场期 restoreOpenAnchor 把
+ *    addPanel 打进半清树（referencePanel 'workspace' does not exist）；
+ *  ②「隐藏面板栏」带实签（2026-10-16 晚用户报 bug）：面板列里有 files
+ *    实签时隐藏 — extractLeaf + fromJSON 手术期，files 的 onDidRemovePanel
+ *    同步触发 handlePanelRemoved → restoreOpenAnchor → 同一个
+ *    referencePanel 'workspace' 异常 + 整树搅成空 g-panels。
+ *  holdLayoutSurgery(fn) 包住一切 fromJSON 手术（隐藏/打开/复位）。 */
+let layoutResetDepth = 0
+
+export const layoutResetInProgress = (): boolean => layoutResetDepth > 0
+
+/** 手术执行壳：depth++ → fn() → depth--（finally 保证）。 */
+export const holdLayoutSurgery = (fn: () => void): void => {
+  layoutResetDepth++
+  try {
+    fn()
+  } finally {
+    layoutResetDepth--
+  }
+}
+
 /** 隐藏/打开左侧栏。adopt（fromJSON）失败即整体放弃。 */
 export const setLeftHidden = (hidden: boolean): void => {
   const a = api()
@@ -357,7 +384,7 @@ export const setLeftHidden = (hidden: boolean): void => {
       console.error('[dv-column-ops] 左栏 leaf 不在根行——隐藏放弃')
       return
     }
-    a.fromJSON(json as unknown as SerializedDockview)
+    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
     saveStashSafe({ ...loadStash(), left: stash })
     setFlags({ ...flags, leftHidden: true })
   } else {
@@ -377,7 +404,7 @@ export const setLeftHidden = (hidden: boolean): void => {
     const at = Math.min(colOrderInsertIndex(flags.colOrder, 'left', (r) => r === 'panels' && flags.panelsHidden), visCount)
     data.splice(at, 0, stash.leaf)
     Object.assign(json.panels, stash.panels)
-    a.fromJSON(json as unknown as SerializedDockview)
+    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
     const rest = loadStash()
     delete rest.left
     saveStashSafe(rest)
@@ -404,7 +431,7 @@ export const setPanelsHidden = (hidden: boolean): void => {
       console.error('[dv-column-ops] 面板栏 leaf 不在根行——隐藏放弃')
       return
     }
-    a.fromJSON(json as unknown as SerializedDockview)
+    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
     saveStashSafe({ ...loadStash(), panels: stash })
     setFlags({ ...flags, panelsHidden: true })
   } else {
@@ -436,7 +463,7 @@ export const setPanelsHidden = (hidden: boolean): void => {
     const at = Math.min(colOrderInsertIndex(flags.colOrder, 'panels', (r) => r === 'left' && flags.leftHidden), data.length)
     data.splice(at, 0, leaf)
     Object.assign(json.panels, panelEntries)
-    a.fromJSON(json as unknown as SerializedDockview)
+    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
     if (stash) {
       const rest = loadStash()
       delete rest.panels
@@ -506,15 +533,6 @@ export const persistFlagsColOrder = (a: DockviewApi): void => {
 
 // ── 复位（用户 2026-10-16：右键菜单「默认布局」）────────────────────────────
 
-/** 复位进行中护栏（shell 的面板生命周期 handler 消费）：fromJSON 内部先
- *  clear（逐面板 onDidRemovePanel 同步外发）再重建——生命周期 handler 在
- *  clear 阶段误判「末签关闭」去 restoreOpenAnchor，把 addPanel 打进半清
- *  的空树（实锤：referencePanel 'workspace' does not exist + 树被搅成
- *  空组+孤签）。复位期所有生命周期反应一律让位，fromJSON 完成后树即成品。 */
-let layoutResetDepth = 0
-
-export const layoutResetInProgress = (): boolean => layoutResetDepth > 0
-
 /** 布局回出厂形态：fromJSON(FACTORY_LAYOUT)（内部先 clear——会话分栏/
  *  打开页全收，三栏 [左|主|面板] 重建，open 锚在场）+ 旗标复位（colOrder
  *  出厂序、栏显隐归 false；旧 colstash 判废——隐藏期快照对复位后的树已无
@@ -525,9 +543,8 @@ export const layoutResetInProgress = (): boolean => layoutResetDepth > 0
 export const resetLayoutToFactory = (): void => {
   const a = api()
   if (!a) return
-  layoutResetDepth++
   try {
-    a.fromJSON(FACTORY_LAYOUT)
+    holdLayoutSurgery(() => a.fromJSON(FACTORY_LAYOUT))
     // 旗标复位 + 快照判废（隐藏语义清零）
     setFlags({ colOrder: ['left', 'chat', 'panels'], leftHidden: false, panelsHidden: false })
     saveStashSafe({})
@@ -549,7 +566,5 @@ export const resetLayoutToFactory = (): void => {
     console.info('[dv-column-ops] 布局已复位为出厂形态')
   } catch (e) {
     console.error('[dv-column-ops] 布局复位失败', e)
-  } finally {
-    layoutResetDepth--
   }
 }

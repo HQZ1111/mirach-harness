@@ -116,7 +116,10 @@ export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
     <div className="hub-entry-bar">
       {/* 悬停指示 = beUI SharedLayoutBg 滑动 pill（2026-10-14 接线）：
           行间滑动比逐行洗底更有方向感；行自身 CSS hover 洗底已移除防
-          双层背景。inset=0 = pill 与行同宽（行即按钮本体）。 */}
+          双层背景。inset=0 = pill 与行同宽（行即按钮本体）。
+          注：Tooltip 包裹会破坏 SharedLayoutBg 的 clone 注入（它按直接
+          子元素重写行壳）——入口条保留 title=（原生提示），行本身已有
+          pill 滑动/文字变色两重反馈。 */}
       <SharedLayoutBg className="hub-entry-rows" inset={0} pillClassName="rounded-[6px] bg-(--hover-wash)">
         {ITEMS.map((item) => {
           return (

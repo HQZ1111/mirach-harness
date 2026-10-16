@@ -117,6 +117,7 @@ import {
   type SidebarRowMeta,
   type SidebarSortKey,
 } from "@/components/panes/session-manage/sidebar-view";
+import { Tooltip } from "@/components/motion/tooltip";
 
 /**
  * 会话侧栏（左栏会话列表）——hermes app/chat/sidebar 一链到底对齐版：
@@ -418,9 +419,20 @@ const useThreadDisplay = (searchQuery: string) => {
  *  只有底部动作项（收起/展开全部、重置为默认）关。 */
 const keepViewMenuOpen = (event: Event) => event.preventDefault();
 
-const VIEW_MENU_CONTENT_CLASS =
+/** 菜单进出场动画（2026-10-16 用户：「悬停显示的窗口动画怎么没有，不是
+ *  下载了 beui 组件了吗，不是加到令牌里了吗」）——beUI 时序早已进令牌
+ *  （tailwind.css：animate-in/out 曲线/时长换 beUI EASE_OUT + 0.18/0.12s），
+ *  但应用自家菜单的内容类**没挂 animate-in/out 类**（Radix 变体缺失 =
+ *  无动画帧）——此常量补上（对齐 ui/popover.tsx 的标准挂法）。 */
+const MENU_ANIM_CLASS =
+  "origin-(--radix-dropdown-menu-content-transform-origin) data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95";
+
+const VIEW_MENU_CONTENT_CLASS = cn(
   // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-(--shadow-pop) 承担
-  "bg-popover text-popover-foreground z-50 min-w-52 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)";
+  "bg-popover text-popover-foreground z-50 min-w-52 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)",
+  // 进出场动画（MENU_ANIM_CLASS 头注；子菜单同用）
+  MENU_ANIM_CLASS,
+);
 
 const VIEW_MENU_ITEM_BASE =
   "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-(--hover-wash)";
@@ -495,20 +507,23 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
 
   return (
     <DropdownMenuPrimitive.Root>
-      <DropdownMenuPrimitive.Trigger asChild>
-        {/* hermes 触发钮：list-filter 图标 ghost icon-xs（HEADER_NAV_BTN
-            形态——常驻可见 70%，open 态点亮）。 */}
-        <button
-          aria-label="侧栏选项"
-          className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
-          data-slot="aui_thread-list-view-menu-trigger"
-          title="侧栏选项"
-          type="button"
-        >
-          <ListFilterIcon className="mx-auto size-3" />
-          <span className="sr-only">侧栏选项</span>
-        </button>
-      </DropdownMenuPrimitive.Trigger>
+      {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——嵌套序
+          Tooltip 在外、Trigger asChild 在内，两层克隆到 button） */}
+      <Tooltip content="侧栏选项" side="bottom">
+        <DropdownMenuPrimitive.Trigger asChild>
+          {/* hermes 触发钮：list-filter 图标 ghost icon-xs（HEADER_NAV_BTN
+              形态——常驻可见 70%，open 态点亮）。 */}
+          <button
+            aria-label="侧栏选项"
+            className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+            data-slot="aui_thread-list-view-menu-trigger"
+            type="button"
+          >
+            <ListFilterIcon className="mx-auto size-3" />
+            <span className="sr-only">侧栏选项</span>
+          </button>
+        </DropdownMenuPrimitive.Trigger>
+      </Tooltip>
       <DropdownMenuPrimitive.Portal>
         <DropdownMenuPrimitive.Content
           align="start"
@@ -1415,18 +1430,21 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   );
 };
 
-/** 会话区段头的新建入口（hermes SidebarSectionAddButton：hover 显现 ＋）。 */
+/** 会话区段头的新建入口（hermes SidebarSectionAddButton：hover 显现 ＋）。
+ *  悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——嵌套序
+ *  Tooltip 在外、New asChild 在内，两层克隆链 Tooltip→New→button）。 */
 const ThreadListNewAria: FC = () => (
-  <ThreadListPrimitive.New asChild>
-    <button
-      aria-label="新建会话"
-      className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
-      title="新建会话"
-      type="button"
-    >
-      <PlusIcon className="mx-auto size-3.5" />
-    </button>
-  </ThreadListPrimitive.New>
+  <Tooltip content="新建会话" side="bottom">
+    <ThreadListPrimitive.New asChild>
+      <button
+        aria-label="新建会话"
+        className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-[4px] p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
+        type="button"
+      >
+        <PlusIcon className="mx-auto size-3.5" />
+      </button>
+    </ThreadListPrimitive.New>
+  </Tooltip>
 );
 
 export const ThreadListNew = forwardRef<
@@ -1491,9 +1509,11 @@ function disarmMarquee(event: ReactPointerEvent<HTMLElement>) {
   delete event.currentTarget.dataset.marquee;
 }
 
-const MENU_CONTENT_CLASS =
+const MENU_CONTENT_CLASS = cn(
   // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-(--shadow-pop) 承担
-  "bg-popover text-popover-foreground z-50 w-40 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)";
+  "bg-popover text-popover-foreground z-50 w-40 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)",
+  MENU_ANIM_CLASS,
+);
 
 const MENU_ITEM_BASE =
   "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
@@ -1745,12 +1765,15 @@ export const ThreadListItem: FC = () => {
             // 的合法区就谁提交。把手/⋯ 动作簇自带监听，行壳不重复起拖
             // （hermes :385 同款豁免选择器）。
             if ((e.target as HTMLElement).closest("[data-reorder-handle], [data-row-actions]")) return;
-            // 跨面拖拽（v8.1 恢复；2026-10-15 落点感知）：拖出到对话栏内容区
-            // 松手 → 按落点开该会话分栏（session-drag.ts 的 dockview 版；
-            // openSessionTabBridge 带 { referenceGroup, direction } = shell
-            // 侧 addPanel 落位——center=堆叠进该组、四边=向该边分栏）。
+            // 跨面拖拽（v8.1 恢复；2026-10-15 落点感知；2026-10-16 指针
+            // 跟随 chip）：拖出到对话栏内容区松手 → 按落点开该会话分栏
+            // （session-drag.ts 的 dockview 版；openSessionTabBridge 带
+            // { referenceGroup, direction } = shell 侧 addPanel 落位——
+            // center=堆叠进该组、四边=向该边分栏；ghostLabel = 拖起时
+            // 鼠标上的会话名 chip，hermes createDragGhost 语义）。
             startSessionRowDrag(e, {
               onCommitOpenTab: (position) => openSessionTabBridge(threadId, position),
+              ghostLabel: title ?? "New Chat",
             });
             sortable?.dragHandleProps.onPointerDown?.(e);
           }}
