@@ -467,8 +467,47 @@ resize-handles.tsx  四边手柄离角 45 → 56（圆角区在窗口 region 之
 **验后实测**：左栏图标 30 / 左栏文字 54 / 主栏 30 / 右栏 30 —— **三栏内容线
 统一**；tsc 0；vitest 426 全过。
 
-### 全量回归（阶段 1–7 完成后）
+### 死代码清理 ✅ 完成（2026-10-16）
 
+**用户决定**：82 个功能组件（图表/媒体/数据展示等）**都留着（打算用）**，
+只清**真重复**的。
+
+**审计方法**：从 `src/` 全量扫 import 图，做可达性分析（入口 = `elements/` 之外的引用者）：
+`elements/` 共 **118** 个组件 → 可达 **24** / 不可达 **94**。再对 94 个按功能分组
+找"同类多套"。
+
+**结论：绝大部分"不可达"不是重复，是上游的能力货架**（用多少拿多少）。
+真正该清的只有两类：
+
+| 类别 | 文件 | 理由 |
+|---|---|---|
+| 被取代的高亮器 | `elements/syntax-highlighter.tsx` | 已由 `@/components/shiki/syntax-highlighter` 取代（我们的 `markdown-text.tsx` 用的就是 shiki 版）；elements 版零引用 |
+| 官方整页模板 | `assistant-modal.aui.tsx` · `assistant-sidebar.aui.tsx` · `threadlist-sidebar.aui.tsx` · `chat-panel.tsx` | 0 引用；我们用自己的 `components/thread.aui.tsx` 接线层，不用官方整页壳 |
+| 连带孤儿 | `elements/thread.aui.tsx`(30KB) · `elements/thread-list.aui.tsx`(14KB) | 仅被上面 4 个模板引用，删模板后成孤儿 |
+
+**共删 7 个文件 / 66.6 KB。**
+
+#### ⚠️ 审计中的两次自我纠正（值得记）
+
+1. **误判 `thinking-indicator` / `voice` 为"重复"**——实际它们是
+   `.aui` 版（接线层）的**底层依赖**：
+   ```
+   thinking-indicator.aui.tsx → import { ThinkingIndicator } from "./thinking-indicator"
+   voice.aui.tsx              → import { ... } from "./voice"
+   ```
+   是「展示层 + 接线层」的两层结构（同 hermes 的 ansi-text→markdown-text 模式），
+   **不是两套实现**。删了会直接编译失败。已保留。
+2. **误判 `syntax-highlighter` 被 `markdown-text.tsx` 引用**——后缀同名导致的
+   假匹配；`markdown-text.tsx` 引的是 `@/components/shiki/syntax-highlighter`。
+   用完整路径精确比对后确认 elements 版零引用。
+
+**旁证**：`code-diff`vs`reviewable-diff`、`chart`vs`diagram`、`web-search`vs
+`web-preview`、`tool-call`vs`tool-timeline` 四对**判定为"非重复"**（粒度/用途不同），
+用户确认全部保留。
+
+**验证**：tsc 0；vitest 34 文件 / 426 用例全过；应用重跑渲染无变化、console 错误 0。
+
+### 全量回归（阶段 1–7 完成后）
 - `tsc --noEmit`：**0 错误**
 - `cargo check` / `cargo build`：**通过**（1 条 pre-existing warning，在 agui.rs）
 - `vitest run`：**34 文件 / 426 用例全过**
