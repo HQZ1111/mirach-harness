@@ -7,9 +7,7 @@
 > 统计：**已接 30**（+ 面板内直接消费 3：todo-list / task-card / logos；
 > 合计 33 个在渲染）/ **孤儿 80**。
 
-## 一、本轮新接（7 个）
-
-| 组件 | 挂点 | 数据源 | 适配 |
+## 一、本轮新接（9 个）| 组件 | 挂点 | 数据源 | 适配 |
 |---|---|---|---|
 | `todo-list` | 活动面板「待办」分区 | `todo-store`（`todo_list.v1`） | `panel-adapters.toAuiTodoItems`（open→pending / in_progress→active / dropped→done+「已删除」/ blocked→failed+reason） |
 | `task-card` | 活动面板「子代理」「终端」分区 | `agent-hub-store` / `jobs-store` | `panel-adapters.childToTaskCardState`；终端用 exitCode 判 done/failed |
@@ -18,6 +16,8 @@
 | `typing-indicator` | 助手消息 indicator 部件 | `status.type === 'running'` | 替换此前手写的 `"●"` 脉冲 |
 | `tool-timeline` | 助手消息底部（run 级） | 消息的 tool-call 部件聚合 | verb=工具名、chip=参数摘要 |
 | `day-separator`（行提取） | 消息间隙 | `createdAt` | 已有（组件本体是整块演示，只提取日期行） |
+| **`thinking-indicator` + `unstable_useMessageStallDetection`** | 消息内部（message scope） | `part.timing` 变化停 2s | 官方 `message-stall-indicator.tsx`：正文已流出后工具思考/卡住时浮出「仍在工作 Ns」 |
+| **`useToolCallElapsed`**（assistant-ui hook） | 通用工具卡 | `part.timing`（**宿主提供**） | turn-actor 记 `startedAt`/`completedAt` → `convertTurnMessage` 映射 `ToolCallTiming`；运行中显示「工具名 运行中 · N.Ns」 |
 
 ## 二、明确不接的原因（按类别）
 
@@ -55,15 +55,42 @@
 | `mobile-composer` / `launcher-bubble` / `onboarding` / `draft-restore` / `feedback-dialog` / `shared-conversation` / `conversation-search` / `thread-search` / `prompt-library` / `mcp-server-panel` / `mcp-config.aui` / `file` / `image` / `mermaid-diagram` / `markdown-text` / `directive-text` / `math-block` | 各自有等价现役实现，或需新的交互面（下一轮） |
 
 > `directive-text`：需要 `DirectiveTextFormatter`（指令语法），pi 侧无此语法。
+> （assistant-ui 有 `unstable_defaultDirectiveFormatter`，但我们的输入流没有
+> 指令语法可解析。）
 > `math-block`：需要结构化 `steps`（表达式 + 注记），消息里只有 LaTeX 文本；
-> 接它要加 `remark-math` + katex 依赖（未做）。
+> 接它要加 `remark-math` + `rehype-katex` + `katex` 三个依赖（**未装，
+> 等用户批准**）。`@assistant-ui/react-markdown` 已导出
+> `normalizeMathDelimiters` / `rewriteCustomMathTags` / `rewriteLatexBracketDelimiters`
+> —— 装了 katex 就能直接用。
 > `markdown-text`：现役 `src/components/markdown-text.tsx`（shiki 高亮）已是
 > 更完整版本。
+
+### D. assistant-ui 内未用但**不该接**的（ExternalStore 模式限制）
+- `useMessageTiming`（tok/s）：读 `message.metadata.timing`，该字段由
+  runtime 自己算；`ThreadMessageLike`（ExternalStore 的输入形状）**不接受
+  metadata.timing** → 拿不到数据。要用得换 runtime 或自算。
+- `useAssistantTransportRuntime` / `AssistantCloud` / `RemoteThreadList`：
+  面向托管云 + transport 运行时；我们是 in-process + Tauri。
+- `McpAppRenderer` / `defineMcpToolkit`：MCP 未启用（`SessionOptions.mcp`
+  未设，见 pi-coverage §3）。
+- `ChainOfThought*`：需要 reasoning 分步结构，pi 只有 thinking 文本。
+- `Interactables` / `unstable_useInteractable*`：需要交互式 UI 协议（未建）。
+- `hitlTool` / `humanTool` / `makeAssistantToolUI`：面向 AI SDK 的 tool 定义；
+  我们的工具来自 pi，不经 AI SDK。
 
 ## 三、验证
 
 - 实跑（CEF + CDP）：面板注入真形状数据后渲染 —
   `todo-list` / `task-card`(×2, 含 actions/result) 均出现在 DOM
   （`data-slot` 实测），console 错误 0。
-- 回归：tsc 0 / vitest 全绿（面板 31 用例，含 7 个 adapter 用例）/
+- 实跑验证工具耗时链路：页面内跑归约器 → `startedAt`/`completedAt` 存在，
+  `convertTurnMessage` 输出 `timing:{startedAt,completedAt}`（CDP 实测）。
+- 回归：tsc 0 / vitest 全绿（面板 31 用例 + turn-actor 45 用例）/
   cargo test 53 / vite build OK。
+
+## 四、⚠️ 依赖漂移（发现但未处理）
+
+`@assistant-ui/tap` 实际安装 **0.9.19**，而 AGENTS.md 钉死 **0.9.8 exact**
+（`^0.9.0` 会装到 0.9.18 → "getSnapshot should be cached" 无限循环）。
+package.json 里没有 tap 的直接依赖（是 transitive）。**需要用户决定**：
+降钉到 0.9.8 还是更新 AGENTS 记录。本轮跑测试全绿，但这是已知雷区。

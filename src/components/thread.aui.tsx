@@ -75,6 +75,7 @@ import {
   ToolTimeline,
   type TimelineStep,
 } from "@/components/assistant-ui/elements/tool-timeline";
+import { MessageStallIndicator } from "@/components/assistant-ui/elements/message-stall-indicator";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -109,6 +110,7 @@ import {
   ThreadPrimitive,
   useAui,
   useAuiState,
+  useToolCallElapsed,
   type FileMessagePartComponent,
   type ImageMessagePartComponent,
   type TextMessagePartComponent,
@@ -780,10 +782,17 @@ const GenericToolCall: FC<{
   running: boolean;
 }> = ({ toolName, argsText, args, result, running }) => {
   const [open, setOpen] = useState(false);
+  // 官方 useToolCallElapsed：读 part.timing，运行中每秒 tick；无 timing
+  // 时 undefined（不显示——不编造时长）。
+  const elapsedMs = useToolCallElapsed();
   return (
     <ToolCall
       label={toolName}
-      activeLabel={`${toolName} 运行中`}
+      activeLabel={
+        elapsedMs === undefined
+          ? `${toolName} 运行中`
+          : `${toolName} 运行中 · ${(elapsedMs / 1000).toFixed(1)}s`
+      }
       query={summarizeArgs(args)}
       request={argsText || summarizeArgs(args)}
       result={toolResultText(result)}
@@ -1618,6 +1627,11 @@ const AssistantMessage: FC = () => {
           聚合成一条可折叠的步骤线（verb = 工具名、chip = 主参数摘要）。只在
           有工具调用时渲染——无工具调用则整块缺席。 */}
       <RunToolTimeline />
+
+      {/* 停滞指示（官方 unstable_useMessageStallDetection）：正文/工具已流出
+          但内容 2s 未变（工具思考期/provider 卡住）时重新浮出"仍在工作"。
+          必须在消息 scope 内（hook 读 s.message.*）。 */}
+      <MessageStallIndicator />
 
       {/* run 级 usage（官方 message-timing 元素）——只在最后一条 assistant */}
       <RunTiming />

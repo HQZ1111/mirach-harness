@@ -132,6 +132,9 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
 /** TurnMessage → ThreadMessageLike（ExternalStore convertMessage 的纯映射，
  *  主 runtime 与会话分栏运行时共用——单源防漂移）：
  *  - tool-call：args/result 断言为运行时 JSON 形状（pi arguments Value）；
+ *    `startedAt`/`completedAt` → assistant-ui 的 `timing`
+ *    (`ToolCallTiming{startedAt, completedAt?}`)——官方 useToolCallElapsed
+ *    读它做工具卡耗时（官方注释明说 host 自己提供权威时间）；
  *  - thinking → reasoning（ThreadMessageLike 的 ReasoningMessagePart，
  *    §2.2 thinking 流式；TurnPart 内部保持 thinking）；
  *  - text / image 原样透传；createdAt 透传（day-separator 消费）。 */
@@ -144,8 +147,24 @@ export function convertTurnMessage(m: TurnMessage): ThreadMessageLike {
       typeof m.content === 'string'
         ? m.content
         : m.content.map((p) => {
-            if (p.type === 'tool-call')
-              return { ...p, args: p.args as never, result: p.result as never }
+            if (p.type === 'tool-call') {
+              // startedAt 由 tool_execution start 记录；缺它就不给 timing
+              // （hook 会返回 undefined，不编造时长）。
+              const { startedAt, completedAt, ...rest } = p
+              return {
+                ...rest,
+                args: rest.args as never,
+                result: rest.result as never,
+                ...(startedAt === undefined
+                  ? {}
+                  : {
+                      timing: {
+                        startedAt,
+                        ...(completedAt === undefined ? {} : { completedAt }),
+                      },
+                    }),
+              }
+            }
             if (p.type === 'thinking') return { type: 'reasoning' as const, text: p.text }
             return p
           }),

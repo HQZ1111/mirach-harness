@@ -37,6 +37,13 @@ export type TurnPart =
       args?: Record<string, unknown>
       result?: unknown
       isError?: boolean
+      /** 工具执行起始时刻（epoch ms）——CUSTOM tool_execution start 到达时记。
+       * assistant-ui 的 `useToolCallElapsed` 读 `part.timing`（官方注释：
+       * "hosts that need authoritative timings supply the field themselves"），
+       * convertTurnMessage 把它转成 ToolCallTiming{startedAt,completedAt}。 */
+      startedAt?: number
+      /** 结果落地时刻（epoch ms）——end 到达时记；缺席 = 仍在跑。 */
+      completedAt?: number
     }
 
 /** 上下文压缩快照（AG-UI CUSTOM name=compaction，§数据面契约：
@@ -233,15 +240,16 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
             ? (value.args as Record<string, unknown>)
             : undefined
         const messages = [...ctx.messages]
+        const startedAt = Date.now()
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].role !== 'assistant') continue
           const c = messages[i].content
           const parts: TurnPart[] =
             typeof c === 'string'
               ? c
-                ? [{ type: 'text', text: c }, { type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args }]
-                : [{ type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args }]
-              : [...c, { type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args }]
+                ? [{ type: 'text', text: c }, { type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args, startedAt }]
+                : [{ type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args, startedAt }]
+              : [...c, { type: 'tool-call', toolCallId: value.toolCallId, toolName: value.toolName ?? '', args, startedAt }]
           messages[i] = { ...messages[i], content: parts }
           break
         }
@@ -249,11 +257,12 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
       }
       if (ev.name === 'tool_execution' && value?.phase === 'end' && value.toolCallId) {
         const messages = [...ctx.messages]
+        const completedAt = Date.now()
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].role !== 'assistant' || typeof messages[i].content === 'string') continue
           const parts = (messages[i].content as TurnPart[]).map((p) =>
             p.type === 'tool-call' && p.toolCallId === value.toolCallId
-              ? { ...p, result: value.result, isError: value.isError === true }
+              ? { ...p, result: value.result, isError: value.isError === true, completedAt }
               : p,
           )
           messages[i] = { ...messages[i], content: parts }

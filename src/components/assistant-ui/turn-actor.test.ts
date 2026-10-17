@@ -49,10 +49,12 @@ describe('reduceAguiEvent tool-call parts', () => {
     })
     const content = c.messages[0].content
     expect(Array.isArray(content)).toBe(true)
-    expect(content).toEqual([
+    expect(content).toMatchObject([
       { type: 'text', text: '我来读文件' },
       { type: 'tool-call', toolCallId: 't1', toolName: 'read', args: { path: 'a.ts' } },
     ])
+    // 工具耗时基准：start 记 startedAt（官方 useToolCallElapsed 读 part.timing）
+    expect(typeof (content as never as { startedAt: number }[])[1].startedAt).toBe('number')
   })
 
   it('tool start with empty text produces a bare tool-call part', () => {
@@ -61,7 +63,7 @@ describe('reduceAguiEvent tool-call parts', () => {
       name: 'tool_execution',
       value: { phase: 'start', toolCallId: 't1', toolName: 'bash' },
     })
-    expect(c.messages[0].content).toEqual([
+    expect(c.messages[0].content).toMatchObject([
       { type: 'tool-call', toolCallId: 't1', toolName: 'bash', args: undefined },
     ])
   })
@@ -77,10 +79,31 @@ describe('reduceAguiEvent tool-call parts', () => {
       value: { phase: 'end', toolCallId: 't1', result: 'file body', isError: false },
     })
     c = send(c, 'TEXT_MESSAGE_CONTENT', { delta: '读完了' })
-    expect(c.messages[0].content).toEqual([
+    expect(c.messages[0].content).toMatchObject([
       { type: 'tool-call', toolCallId: 't1', toolName: 'read', args: undefined, result: 'file body', isError: false },
       { type: 'text', text: '读完了' },
     ])
+  })
+
+  it('tool start/end stamp startedAt and completedAt (useToolCallElapsed 数据面)', () => {
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'CUSTOM', {
+      name: 'tool_execution',
+      value: { phase: 'start', toolCallId: 't1', toolName: 'bash' },
+    })
+    const started = (c.messages[0].content as { type: string; startedAt?: number }[])[0]
+    expect(started.startedAt).toBeTypeOf('number')
+    // 运行中：有 startedAt、无 completedAt
+    expect(started).toMatchObject({ type: 'tool-call' })
+    expect((started as { completedAt?: number }).completedAt).toBeUndefined()
+
+    c = send(c, 'CUSTOM', {
+      name: 'tool_execution',
+      value: { phase: 'end', toolCallId: 't1', result: 'ok' },
+    })
+    const ended = (c.messages[0].content as { startedAt?: number; completedAt?: number }[])[0]
+    expect(ended.completedAt).toBeTypeOf('number')
+    expect(ended.completedAt!).toBeGreaterThanOrEqual(ended.startedAt!)
   })
 
   it('tool end with isError flags the part', () => {
@@ -145,7 +168,7 @@ describe('thinking parts (§2.2)', () => {
       value: { phase: 'start', toolCallId: 't1', toolName: 'read' },
     })
     c = send(c, 'THINKING_TEXT_MESSAGE_CONTENT', { delta: '复盘' })
-    expect(c.messages[0].content).toEqual([
+    expect(c.messages[0].content).toMatchObject([
       { type: 'tool-call', toolCallId: 't1', toolName: 'read', args: undefined },
       { type: 'thinking', text: '复盘' },
     ])
