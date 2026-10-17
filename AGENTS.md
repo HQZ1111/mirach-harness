@@ -329,6 +329,15 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   ja/zh-hant 样本换成 zh——意图不变。
 - hermes 的 `electron/`、`e2e/`、`scripts/`、playwright、tsconfig.electron
   均未复制（Tauri 壳已替代或不需要）。
+- **openhuman 设置页移植已整体回退（2026-10-18，用户决策）**：提交 80a1a60
+  的 `src/components/settings/`（83 文件 / 13,569 行）+ settings-overlay 的
+  外壳切换已删。实测原因：48 个 UI 原语只有 3 个（Button/Card/Tabs）真正
+  渲染到屏幕上，45 个零调用；13 个 controls shim 零导入者；26 个面板里
+  14 个是"引擎侧缺数据"占位——13.5k 行维护面换不来可用的设置页。
+  **唯一保留**：`src/components/assistant-ui/tool-presentation/`（工具呈现
+  层，5 文件，提交 5fa38cd）。盘点结论仍存档于
+  `docs/openhuman-inventory.md` / `docs/openhuman-migration-plan.md`，
+  将来重新评估搬运时直接复用，不用重做盘点。
 
 ## 已知的环境陷阱
 

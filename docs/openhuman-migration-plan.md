@@ -1,5 +1,18 @@
 # openhuman 全量移植可行性（方案 B）
 
+> **【2026-10-18 状态：设置页移植已全部回退，本文仅存档】**
+> 用户决策：「除了工具呈现层，移植 openhuman 的全部删除」。已执行：
+> `src/components/settings/`（83 文件 / 13,569 行，提交 80a1a60）整体删除，
+> `settings-overlay.tsx` 的外壳切换与 `SettingsPage` 引用一并撤除，设置页
+> 恢复为自建 6 段（模型 / 凭据 / 压缩 / 重试 / 原始配置 / 关于）。
+> **保留**：`src/components/assistant-ui/tool-presentation/`（5 文件，提交
+> 5fa38cd）。**保留本文与 `openhuman-inventory.md`**：若将来重新评估搬运，
+> 面板↔能力映射与依赖分级仍然有效，不用重做盘点。
+> 删除理由（实测）：48 个 UI 原语里只有 3 个（Button / Card / Tabs）真正
+> 渲染到屏幕上，其余 45 个零调用；13 个 controls shim 零导入者；26 个面板
+> 里 14 个是「引擎侧缺数据」占位。付出 13.5k 行维护面，换来的是一个换不了
+> 数据的设置页外壳——与工程规矩 1（照抄 hermes、不自己做）无关，是净负担。
+
 > 2026-10-17。目标：全量照抄 openhuman settings（132 文件 / 27,914 行），
 > 引擎侧没有的数据**标注出来由你决定（删 or 加引擎能力）**；能用 pi 接口
 > 代替的 OpenHuman API 一并替换。

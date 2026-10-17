@@ -1,5 +1,10 @@
 # openhuman 可复用清单（2026-10-17 盘点）
 
+> **【2026-10-18 状态】** 第 1 批（工具呈现层 4 文件）已落地并保留：
+> `src/components/assistant-ui/tool-presentation/`。第 2/3 批（UI 原语、
+> settings 壳）移植后已整体回退（13,569 行，实测 45/48 原语零调用）。
+> 本文保留作为下次搬运的成本参考。详见 `openhuman-migration-plan.md` 顶部。
+
 > 源：`G:\openhuman-main\app\src`（本地已有，无需下载）。
 > 判据：**零/低依赖且语义与 pi 对齐**才可直接拿；带 redux/router/i18n/
 > react-icons 或接 openhuman gateway 的，需改写数据层（成本高，不推荐整搬）。
