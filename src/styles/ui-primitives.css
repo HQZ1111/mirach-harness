@@ -59,3 +59,141 @@
   scrollbar-color: color-mix(in srgb, var(--scrollbar-thumb) 28%, transparent)
     transparent;
 }
+
+/* ============================================================
+ * 动效原语（2026-10-18，抄 beui.dev motion/animated-sidebar 三套值）
+ * 用户点名的三处"生硬"：侧栏收放 / 按钮点击 / 选项展开。
+ * 令牌唯一源头 = tokens.css「侧栏收放 + 按压 + 展开」段。
+ * 全部带 prefers-reduced-motion 降级（用户系统级关动效时必须真的停）。
+ * ============================================================ */
+
+/* ── 1. 侧栏收放：dockview 列宽插值 ──────────────────────────────
+   dockview 的列宽载体 = split 容器下每个 .dv-view 的 inline width/left
+   （实测 2026-10-18：350→0 时 dv-view 的 style.width 由库直接改写）。
+   库本身不插值（transition-duration 实测 0s），但给这两个属性挂 CSS
+   transition 后逐帧采样为平滑收敛（17 帧，chat 列同步位移）。
+   **只在 [data-dv-morph] 容器上生效**：dockview-column-ops 在
+   setLeftHidden/setPanelsHidden 期间给 split 容器打标记，收放手术
+   完成即摘除——常态拖 sash 不受影响（那是逐帧跟指针，插值反而拖尾）。 */
+.dv-split-view-container[data-dv-morph='col'] > .dv-view-container > .dv-view {
+  transition:
+    width var(--sidebar-morph-dur) var(--sidebar-morph-ease),
+    left var(--sidebar-morph-dur) var(--sidebar-morph-ease) !important;
+  will-change: width, left;
+}
+
+/* 收放期间列内容跟着淡（宽度先动、文字后走——纯宽度插值时文字在 0 宽
+   边界内被硬裁，看起来像"闪"一下）。标记打在**被收的那一组**上
+   （.dv-groupview[data-dv-morph]），不波及同 split 的其它列。
+   注意挂在 groupview 自身（不是 `> *`）：组内容的层级由 dockview 决定，
+   直接子元素未必是内容面（实测 `.left-rail-pane` 在更深层）。 */
+.dv-groupview[data-dv-morph] {
+  transition: opacity var(--disclose-fade-dur) var(--beui-ease-out);
+}
+.dv-groupview[data-dv-morph='hide'] {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dv-split-view-container[data-dv-morph='col'] > .dv-view-container > .dv-view {
+    transition: none !important;
+  }
+}
+
+/* ── 2. 按压：通用点击缩放（transform 走 GPU，不影响布局）──────────
+   用法 = 给按钮/可点面加 class="pressable"（大面）或 "pressable-sm"
+   （图标钮）。两段曲线：按下 90ms 加速压下去，松开 180ms 弹回来——单一
+   时长做不出"按下去立刻有反应、松开有回弹"的分离感（beUI whileTap 的
+   CSS 等价）。
+   **不挂全局 button 选择器**：dockview 页签/contenteditable 内的按钮
+   有自己的拖拽手势，统一缩放会和指针跟随打架（按面逐个 opt-in）。
+
+   特异性说明（2026-10-18 实锤）：选择器写成 `.pressable.pressable`
+   （同类名重复 = (0,2,0)）——组件自己的规则如
+   `.rail-logo-leading .rail-logo-word-btn { transition: color 100ms, … }`
+   也是 (0,2,0) 且在本文件之前导入，同分时**后者赢**，会把 transform 从
+   transition 里顶掉（实测：按压缩放完全无过渡，用户报"按钮点击没效果"
+   的根因之一）。提升到 (0,2,0) + 本文件后导入 → 稳定胜出，同时不碰
+   组件规则的其它属性（只用 transition-property 显式列表，不写简写）。 */
+.pressable.pressable {
+  transition-property: transform, opacity, color, background-color, border-color, box-shadow;
+  transition-duration: var(--press-dur-out);
+  transition-timing-function: var(--press-ease-out);
+  transform-origin: center;
+}
+.pressable.pressable:active:not(:disabled) {
+  transition-duration: var(--press-dur-in);
+  transition-timing-function: var(--press-ease-in);
+  transform: scale(var(--press-scale));
+}
+/* 小面积图标钮：同样的位移在 20px 上都看不出来，压得更狠一档 */
+.pressable-sm.pressable-sm {
+  transition-property: transform, opacity, color, background-color, border-color, box-shadow;
+  transition-duration: var(--press-dur-out);
+  transition-timing-function: var(--press-ease-out);
+  transform-origin: center;
+}
+.pressable-sm.pressable-sm:active:not(:disabled) {
+  transition-duration: var(--press-dur-in);
+  transition-timing-function: var(--press-ease-in);
+  transform: scale(var(--press-scale-sm));
+}
+@media (prefers-reduced-motion: reduce) {
+  .pressable.pressable,
+  .pressable.pressable:active:not(:disabled),
+  .pressable-sm.pressable-sm,
+  .pressable-sm.pressable-sm:active:not(:disabled) {
+    transition-property: opacity, color, background-color, border-color, box-shadow;
+    transform: none;
+  }
+}
+
+/* ── 3. 选项展开：内容被"挤"下去 ─────────────────────────────────
+   会话分组/日期桶的行是被 display 管线**整行滤掉**的
+   （session-display.hideCollapsedGroupRows），展开 = 行重新挂载——
+   只有挂载即播的 animation 有时序可放（transition 需要旧值在场）。
+   逐行 0 高入场 + --disclose-index × 40ms 步进：后续行跟着往下推，
+   视觉上就是"内容被挤下去"。见 thread-list.aui.tsx 的 renderRow。
+   fill-mode = backwards（不是 both）：延迟期先呈 0 高（步进才有意义），
+   动画结束后**不留** max-height——行回到自然高度，不被 200px 上限扣住。 */
+@keyframes beui-disclose-row {
+  from {
+    max-height: 0;
+    opacity: 0;
+  }
+  to {
+    max-height: 200px;
+    opacity: 1;
+  }
+}
+.disclose-row {
+  animation: beui-disclose-row var(--disclose-dur) var(--disclose-ease) backwards;
+  animation-delay: calc(var(--disclose-index, 0) * 40ms);
+  overflow: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+  .disclose-row {
+    animation: none;
+  }
+}
+
+/* 折叠指示箭头：与展开同拍旋转（原先是无条件 -rotate-90 硬切）。
+   状态由最近的 aria-expanded 祖先驱动。**注意**：本文件先于 tailwind.css
+   导入，同特异性的 `.transition` 工具类会赢——消费方不要给箭头再加
+   `transition` 类（透明度过渡已包含在下面这条规则里）。 */
+.disclosure-chevron {
+  transition:
+    transform var(--disclose-dur) var(--disclose-ease),
+    opacity var(--beui-dur-exit) var(--beui-ease-out);
+}
+[aria-expanded='false'] > .disclosure-chevron,
+[data-state='closed'] .disclosure-chevron {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .disclosure-chevron {
+    transition: none;
+  }
+}
+
+

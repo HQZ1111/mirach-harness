@@ -24,7 +24,7 @@ export const RailLogoLeading = ({
     {onWordClick ? (
       <Tooltip content={wordTitle ?? ''} side="bottom">
         <button
-          className="rail-logo-word rail-logo-word-btn"
+          className="rail-logo-word rail-logo-word-btn pressable-sm"
           onClick={onWordClick}
           type="button"
         >

@@ -1060,11 +1060,16 @@ const TOOL_STEP_ICON = WrenchIcon;
 const RunToolTimeline: FC = () => {
   const role = useAuiState((s) => s.message.role);
   const running = useAuiState((s) => s.thread.isRunning);
-  const parts = useAuiState((s) => {
-    const m = s.thread.messages[s.message.index];
-    if (!m) return null;
+  // 选择器只取引用稳定的原始值（message 对象）。**不得在选择器里造数组**
+  // ——useAuiState 的 getSnapshot 每次返回新引用会让 useSyncExternalStore
+  // 判定快照变化 → forceStoreRerender 无限循环 → "Maximum update depth
+  // exceeded" → RuntimeBoundary 兜住整棵聊天树（2026-10-18 实测：发消息后
+  // 黑屏的根因，栈顶就是本组件的 mountSyncExternalStore）。派生放 useMemo。
+  const content = useAuiState((s) => s.thread.messages[s.message.index]?.content);
+  const parts = useMemo(() => {
+    if (content === undefined || typeof content === "string") return null;
     const out: { toolName: string; chip: string; done: boolean; error: boolean }[] = [];
-    for (const p of m.content) {
+    for (const p of content) {
       if (p.type !== "tool-call") continue;
       out.push({
         toolName: p.toolName,
@@ -1074,7 +1079,7 @@ const RunToolTimeline: FC = () => {
       });
     }
     return out;
-  });
+  }, [content]);
   const [open, setOpen] = useState(false);
   if (role !== "assistant" || !parts || parts.length === 0) return null;
 

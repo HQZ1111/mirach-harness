@@ -101,7 +101,7 @@ const TabStripArrow: FC<{ side: 'left' | 'right' } & IDockviewHeaderActionsProps
       <button
         aria-label={side === 'left' ? '向左滚动标签' : '向右滚动标签'}
         className={cn(
-          'text-(--tab-text) inline-flex w-9 shrink-0 items-center justify-center self-stretch',
+          'pressable-sm text-(--tab-text) inline-flex w-9 shrink-0 items-center justify-center self-stretch',
           'transition-opacity hover:opacity-70 focus-visible:outline-2',
           'disabled:pointer-events-none disabled:opacity-0',
         )}

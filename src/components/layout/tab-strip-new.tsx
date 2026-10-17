@@ -54,7 +54,7 @@ export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
         <DropdownMenu.Trigger asChild>
           <button
             aria-label="打开标签"
-            className="tab-new-trigger"
+            className="tab-new-trigger pressable-sm"
             data-slot="tab-strip-new"
             type="button"
           >

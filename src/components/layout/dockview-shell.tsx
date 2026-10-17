@@ -60,6 +60,7 @@ import {
   persistFlagsColOrder,
   RAIL_W,
   rootPanelsGroup,
+  withoutColumnMorph,
 } from './dockview-column-ops'
 import { radialDropResolver } from './drop-geometry'
 import { openPagePanel, panelsDropPosition } from './open-page-actions'
@@ -389,11 +390,15 @@ export function DockviewShell() {
       } finally {
         hydratingRef.current = false
       }
-      // boot 自愈（旗标 vs 实际树；列序对齐）
-      normalizeColumns()
-      // 面板列缺席但旗标未藏（normalizeColumns 收敛过旗标）→ 一致性兜底：
-      // 打开页锚重建（隐藏语义交给菜单动词，boot 只保证锚在场）
-      restoreOpenAnchor(a)
+      // boot 自愈（旗标 vs 实际树；列序对齐）。**关动画**：boot 期按旗标
+      // 补藏/对齐是恢复既有形态，不是用户点动作——首帧看到"栏滑出去"是
+      // 假象（2026-10-18 收放动画接入时同改）。
+      withoutColumnMorph(() => {
+        normalizeColumns()
+        // 面板列缺席但旗标未藏（normalizeColumns 收敛过旗标）→ 一致性兜底：
+        // 打开页锚重建（隐藏语义交给菜单动词，boot 只保证锚在场）
+        restoreOpenAnchor(a)
+      })
     },
     [handlePanelAdded, handlePanelRemoved, restoreOpenAnchor],
   )

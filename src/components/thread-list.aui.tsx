@@ -515,7 +515,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               形态——常驻可见 70%，open 态点亮）。 */}
           <button
             aria-label="侧栏选项"
-            className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+            className="pressable-sm text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
             data-slot="aui_thread-list-view-menu-trigger"
             type="button"
           >
@@ -1009,10 +1009,7 @@ const SectionHeader: FC<{
       {collapsible && (
         <ChevronDownIcon
           aria-hidden
-          className={cn(
-            "text-(--text-3) size-3 shrink-0 opacity-0 transition group-hover/section-label:opacity-100 focus-visible:opacity-100",
-            collapsed && "-rotate-90",
-          )}
+          className="disclosure-chevron text-(--text-3) size-3 shrink-0 opacity-0 group-hover/section-label:opacity-100 focus-visible:opacity-100"
         />
       )}
     </>
@@ -1086,10 +1083,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, l
         </span>
         <ChevronDownIcon
           aria-hidden
-          className={cn(
-            "text-(--text-3) size-3 shrink-0 opacity-0 transition group-hover/workspace:opacity-100",
-            collapsed && "-rotate-90",
-          )}
+          className="disclosure-chevron text-(--text-3) size-3 shrink-0 opacity-0 group-hover/workspace:opacity-100"
         />
         <span aria-hidden className="bg-(--stroke-soft) h-px min-w-4 flex-1" />
       </button>
@@ -1126,10 +1120,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketK
         <span className="text-(--side-text) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
-          className={cn(
-            "text-(--text-3) size-3 shrink-0 opacity-0 transition group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100",
-            collapsed && "-rotate-90",
-          )}
+          className="disclosure-chevron text-(--text-3) size-3 shrink-0 opacity-0 group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100"
         />
         <span aria-hidden className="bg-(--stroke-soft) h-px min-w-4 flex-1" />
       </button>
@@ -1165,10 +1156,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey,
         <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-group-size) font-bold">{label}</span>
         <ChevronDownIcon
           aria-hidden
-          className={cn(
-            "text-(--text-3) size-3 shrink-0 opacity-0 transition group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100",
-            collapsed && "-rotate-90",
-          )}
+          className="disclosure-chevron text-(--text-3) size-3 shrink-0 opacity-0 group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100"
         />
         <span aria-hidden className="bg-(--stroke-soft) h-px min-w-4 flex-1" />
       </button>
@@ -1211,6 +1199,26 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   // 「没有会话符合这些筛选条件」zh.ts:2900 逐字）。
   const statusFilter = useSidebarView((s) => s.statusFilter);
   const aui = useAui();
+
+  // ── 展开动画（2026-10-18，beUI accordion-open 的列表版）──────────────
+  // 收起组的行是被 display 管线**整行滤掉**的（hideCollapsedGroupRows），
+  // 所以"展开"= 行重新挂载——挂载即播的 CSS animation 正好是唯一时序点。
+  // 但挂载也会发生在换分组/换排序时（那不该播），因此只对**刚刚由收→展**
+  // 的桶打标记（prevCollapsedRef 对比），250ms 后自然过期。
+  const prevCollapsedRef = useRef(groupsCollapsed);
+  const [justExpanded, setJustExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    const prev = prevCollapsedRef.current;
+    prevCollapsedRef.current = groupsCollapsed;
+    const opened: string[] = [];
+    for (const key of Object.keys(prev)) {
+      if (prev[key] === true && groupsCollapsed[key] !== true) opened.push(key);
+    }
+    if (opened.length === 0) return;
+    setJustExpanded(new Set(opened));
+    const timer = window.setTimeout(() => setJustExpanded(new Set()), 400);
+    return () => window.clearTimeout(timer);
+  }, [groupsCollapsed]);
 
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
   // 归档表/未读水位同纪律（归档会话被 pi_delete_session 后不留死键）。
@@ -1294,7 +1302,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     ctxValue.commitListMove(moved.movedId, group, moved.beforeId);
   };
 
-  const renderRow = (id: string, group: SessionRowGroup | "search", key: string) => {
+  const renderRow = (id: string, group: SessionRowGroup | "search", key: string, discloseIndex?: number) => {
     const row = (
       <ThreadListPrimitive.ItemByIndex index={indexOfId.get(id) ?? 0} components={{ ThreadListItem }} />
     );
@@ -1302,11 +1310,41 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     // 无 SortableRowBridge ⇒ ThreadListItem 无 bindings ⇒ 跨面拖照常、
     // 列表内不排。
     const body = group === "search" ? row : <SortableRowBridge id={id}>{row}</SortableRowBridge>;
+    // 展开入场（见上方 justExpanded）：行是重新挂载的，挂载即播的
+    // animation 才有时序；逐行 40ms 步进 = "内容被往下挤"（ui-primitives.css
+    // .disclose-row）。
+    // **包装层恒在**（不按需插拔）：动画结束后撤掉包装会让 React 换父类型
+    // → 整行卸载重挂（sortable 节点重绑、滚动位置抖动）。只切换类与
+    // 自定义属性，DOM 结构保持稳定。
     return (
       <SessionListContext.Provider key={key} value={{ ...ctxValue, group, meta: metasById.get(id) }}>
-        {body}
+        <div
+          className={discloseIndex === undefined ? undefined : "disclose-row"}
+          style={
+            discloseIndex === undefined
+              ? undefined
+              : ({ ["--disclose-index" as string]: discloseIndex } as React.CSSProperties)
+          }
+        >
+          {body}
+        </div>
       </SessionListContext.Provider>
     );
+  };
+
+  /** 行按所属分隔线桶展开时的入场序号（undefined = 不播）。
+   *  只用于非虚拟化分支：虚拟行是 absolute + translateY 定位，入场动画的
+   *  max-height 会与 measureElement 的高度测量打架（滚动手感优先）。
+   *  段级折叠（「置顶」「会话」两个段头）也走这里：段头之后、第一条分隔线
+   *  之前的行没有桶 key，回落到段 key（pinned/recent）——段头同样是
+   *  disclosure 按钮，展开时这些行也该被"挤下来"。 */
+  const discloseIndexOf = (
+    dividerKey: string | null,
+    nth: number,
+    fallbackKey: string,
+  ): number | undefined => {
+    const key = dividerKey ?? fallbackKey;
+    return justExpanded.has(key) ? nth : undefined;
   };
 
   const query = searchQuery.trim();
@@ -1360,7 +1398,9 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
             onReorder={(next) => commitReorder("pinned", sortablePinnedIds, next)}
             sensors={dndSensors}
           >
-            {pinnedIds.map((id) => renderRow(id, "pinned", `p-${id}`))}
+            {pinnedIds.map((id, i) =>
+              renderRow(id, "pinned", `p-${id}`, discloseIndexOf(null, i, "pinned")),
+            )}
           </ReorderableList>
         ) : (
           <PinnedEmptyState />
@@ -1426,19 +1466,28 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
             onReorder={(next) => commitReorder("recent", sortableSessionIds, next)}
             sensors={dndSensors}
           >
-            {rows.map((row) =>
-              row.kind === "divider" ? (
-                row.variant === "project" ? (
-                  <WorkspaceDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
-                ) : row.variant === "status" ? (
-                  <StatusDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
-                ) : (
-                  <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
-                )
-              ) : (
-                renderRow(row.id, "recent", `r-${row.id}`)
-              ),
-            )}
+            {(() => {
+              // 展开动画的桶游标：遇到 divider 重置当前桶 + 计数归零；
+              // 只有"刚由收→展"的桶里的行才带入场序号（见 justExpanded）。
+              let dividerKey: string | null = null;
+              let nth = 0;
+              return rows.map((row) => {
+                if (row.kind === "divider") {
+                  dividerKey = row.key;
+                  nth = 0;
+                  return row.variant === "project" ? (
+                    <WorkspaceDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+                  ) : row.variant === "status" ? (
+                    <StatusDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+                  ) : (
+                    <DateDividerRow key={`div-${row.key}`} bucketKey={row.key} label={row.label} />
+                  );
+                }
+                const index = discloseIndexOf(dividerKey, nth, "recent");
+                nth += 1;
+                return renderRow(row.id, "recent", `r-${row.id}`, index);
+              });
+            })()}
           </ReorderableList>
         ))}
     </SessionListContext.Provider>
@@ -1453,7 +1502,7 @@ const ThreadListNewAria: FC = () => (
     <ThreadListPrimitive.New asChild>
       <button
         aria-label="新建会话"
-        className="text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
+        className="pressable-sm text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
         type="button"
       >
         <PlusIcon className="mx-auto size-3.5" />

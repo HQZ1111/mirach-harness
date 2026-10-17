@@ -317,6 +317,132 @@ export const panelsPosLabel = (): string => {
   return colOrder.indexOf('panels') < colOrder.indexOf('chat') ? '面板栏移到右侧' : '面板栏移到左侧'
 }
 
+// ── 收放动画（2026-10-18，抄 beui.dev motion/animated-sidebar 的 morph） ────
+//
+// 用户口径：侧栏收放要"有动画"，且"隐藏后不要它变成工具栏的效果，就是全
+// 隐藏"——栏宽归 0，不做 icon rail。dockview 的列宽载体 = split 容器下每个
+// `.dv-view` 的 inline width/left，库本身不插值（实测 transition-duration
+// 0s）；给这两个属性挂 CSS transition（ui-primitives.css，只在
+// `[data-dv-morph='col']` 容器上生效）后可逐帧平滑收敛（实测 17 帧，
+// chat 列同步位移）。
+//
+// 流程（隐藏）：打标记 → 强制 reflow → 解除 min 约束 → setSize(0) → 等
+// 过渡结束 → 序列化手术（此时组已 0 宽，摘除不可见）→ 摘标记。
+// 流程（显示）：先手术插回组 → 立刻压到 0（同帧，不闪）→ 下一帧解除约束
+// 并把宽度补间回快照值 → 恢复约束 → 摘标记。
+//
+// 时序令牌唯一源头 = tokens.css `--sidebar-morph-dur`（此处常量仅供 JS
+// 计时，必须与 CSS 同值；改一处改两处）。
+const MORPH_DUR_MS = 320
+
+const prefersReducedMotion = (): boolean =>
+  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+
+/** 收放动画进行中（二次点击让位——手术与补间不能交错）。 */
+let morphBusy = false
+export const columnMorphInProgress = (): boolean => morphBusy
+
+/** boot 自愈等非用户动作的面：期间关掉动画（首帧不该看到"栏滑进来"）。 */
+let morphSuppressed = false
+export const withoutColumnMorph = (fn: () => void): void => {
+  const prev = morphSuppressed
+  morphSuppressed = true
+  try {
+    fn()
+  } finally {
+    morphSuppressed = prev
+  }
+}
+
+const morphAnimated = (): boolean => !morphSuppressed && !prefersReducedMotion()
+
+/** 组的宽度载体（`dv-groupview` 的父节点 `.dv-view`，inline width/left）。 */
+const viewOfGroup = (g: DockviewGroupPanel): HTMLElement | undefined => {
+  const el = g.element?.parentElement
+  return el instanceof HTMLElement ? el : undefined
+}
+
+/** 宽度载体所在的 split 容器（`.dv-view` → `.dv-view-container` →
+ *  `.dv-split-view-container`）。 */
+const splitOfView = (view: HTMLElement): HTMLElement | undefined => {
+  const el = view.parentElement?.parentElement
+  return el instanceof HTMLElement ? el : undefined
+}
+
+/** 给组与所在 split 打动画标记（CSS 只认这两个标记才插值）。 */
+const markMorph = (g: DockviewGroupPanel, phase: 'show' | 'hide'): void => {
+  const view = viewOfGroup(g)
+  if (!view) {
+    console.error('[dv-column-ops] 组缺少宽度载体——收放动画降级为瞬时', g.id)
+    return
+  }
+  splitOfView(view)?.setAttribute('data-dv-morph', 'col')
+  g.element?.setAttribute('data-dv-morph', phase)
+}
+
+const clearMorph = (g: DockviewGroupPanel | undefined): void => {
+  if (!g) return
+  const view = viewOfGroup(g)
+  g.element?.removeAttribute('data-dv-morph')
+  if (view) splitOfView(view)?.removeAttribute('data-dv-morph')
+}
+
+/** 强制一次样式结算：标记引入的 transition 必须先被浏览器看到，紧接着的
+ *  width 改动才会走动画（同一批样式里加规则+改值 = 不补间）。 */
+const forceStyleFlush = (el: HTMLElement | undefined): void => {
+  void el?.offsetWidth
+}
+
+/** 组快照约束（暂时解除 min-宽，0 宽才可达）。 */
+interface SavedConstraints {
+  minimumWidth?: number
+  maximumWidth?: number
+}
+
+const savedConstraints = new WeakMap<DockviewGroupPanel, SavedConstraints>()
+
+const releaseMinWidth = (g: DockviewGroupPanel): void => {
+  const state = savedConstraints.get(g)
+  if (state) return
+  const api = g.api as unknown as {
+    setConstraints?: (v: { minimumWidth?: number; maximumWidth?: number }) => void
+  }
+  if (typeof api.setConstraints !== 'function') {
+    console.error('[dv-column-ops] group.api.setConstraints 不在场——收放将受 min 宽限制', g.id)
+    return
+  }
+  savedConstraints.set(g, {})
+  api.setConstraints({ minimumWidth: 0, maximumWidth: Number.MAX_SAFE_INTEGER })
+}
+
+const restoreMinWidth = (g: DockviewGroupPanel): void => {
+  if (!savedConstraints.has(g)) return
+  savedConstraints.delete(g)
+  const api = g.api as unknown as {
+    setConstraints?: (v: { minimumWidth?: number; maximumWidth?: number }) => void
+  }
+  // 由组的序列化/出厂约束决定——这里按 region 回落到本文件的已知值（组的
+  // 生效约束来自 panel 记录，重建后自然还原；仅在补间期临时放开）。
+  const region = regionOfGroup(g)
+  const min =
+    region === 'left' ? 240 : region === 'panels' ? 240 : region === 'chat' ? 395 : undefined
+  api.setConstraints?.({ minimumWidth: min, maximumWidth: Number.MAX_SAFE_INTEGER })
+}
+
+/** 把组宽补间到目标值并等过渡结束；无载体/降级时同步 step 到目标。 */
+const tweenWidthTo = (g: DockviewGroupPanel, width: number, done: () => void): void => {
+  if (!morphAnimated()) {
+    g.api.setSize({ width })
+    done()
+    return
+  }
+  markMorph(g, width === 0 ? 'hide' : 'show')
+  forceStyleFlush(viewOfGroup(g))
+  releaseMinWidth(g)
+  g.api.setSize({ width })
+  window.setTimeout(done, MORPH_DUR_MS)
+}
+
 // ── 隐藏/恢复（序列化手术：toJSON 摘除/拼回 → fromJSON） ────────────────────
 
 /** 组 leaf（branch 包装对象）+ 其 panels 记录条目的序列化摘除。 */
@@ -366,12 +492,21 @@ export const holdLayoutSurgery = (fn: () => void): void => {
   }
 }
 
-/** 隐藏/打开左侧栏。adopt（fromJSON）失败即整体放弃。 */
+/** 隐藏/打开左侧栏。adopt（fromJSON）失败即整体放弃。
+ *
+ * 带收放动画（2026-10-18）：隐藏 = 先把组宽补间到 0（CSS transition 逐帧），
+ * 过渡结束再做序列化摘除（组已 0 宽，摘除无视觉跳变）；打开 = 先手术插回
+ * 组、同帧压到 0，下一帧补间回快照宽度。**全隐藏语义**（用户口径）：宽度
+ * 归 0，不留 icon rail。 */
 export const setLeftHidden = (hidden: boolean): void => {
   const a = api()
   if (!a) return
   const flags = columnFlagsOf()
   if (hidden === flags.leftHidden) return
+  if (morphBusy) {
+    console.error('[dv-column-ops] 收放动画进行中——本次左栏切换忽略')
+    return
+  }
   if (hidden) {
     const lg = groupsOfRegion(a, 'left')[0]
     if (!lg) {
@@ -384,9 +519,17 @@ export const setLeftHidden = (hidden: boolean): void => {
       console.error('[dv-column-ops] 左栏 leaf 不在根行——隐藏放弃')
       return
     }
-    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
-    saveStashSafe({ ...loadStash(), left: stash })
-    setFlags({ ...flags, leftHidden: true })
+    morphBusy = true
+    tweenWidthTo(lg, 0, () => {
+      try {
+        holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
+        saveStashSafe({ ...loadStash(), left: stash })
+        setFlags({ ...flags, leftHidden: true })
+      } finally {
+        clearMorph(lg)
+        morphBusy = false
+      }
+    })
   } else {
     const stash = loadStash().left
     if (!stash) {
@@ -402,23 +545,56 @@ export const setLeftHidden = (hidden: boolean): void => {
     const data = root.data ?? []
     const visCount = data.length
     const at = Math.min(colOrderInsertIndex(flags.colOrder, 'left', (r) => r === 'panels' && flags.panelsHidden), visCount)
+    // 插回时的目标宽 = 快照里的列宽（leaf.size 按比例存，取 setSize 前的
+    // 组宽作为动画终点——出厂 350 / 用户拖过的宽度都在 stash.leaf.size 里）
+    const targetWidth =
+      typeof stash.leaf.size === 'number' && stash.leaf.size > 0 ? stash.leaf.size : RAIL_W
     data.splice(at, 0, stash.leaf)
     Object.assign(json.panels, stash.panels)
+    morphBusy = true
     holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
     const rest = loadStash()
     delete rest.left
     saveStashSafe(rest)
     setFlags({ ...flags, leftHidden: false })
+    const lg = groupsOfRegion(a, 'left')[0]
+    if (!lg) {
+      console.error('[dv-column-ops] 左栏插回后组不在场——动画放弃')
+      morphBusy = false
+      return
+    }
+    if (!morphAnimated()) {
+      lg.api.setSize({ width: targetWidth })
+      morphBusy = false
+      return
+    }
+    // 先压到 0 并打标记（同帧，用户看不到"闪现全宽"），下一帧再补间回目标宽
+    markMorph(lg, 'show')
+    forceStyleFlush(viewOfGroup(lg))
+    releaseMinWidth(lg)
+    lg.api.setSize({ width: 0 })
+    requestAnimationFrame(() => {
+      lg.api.setSize({ width: targetWidth })
+      window.setTimeout(() => {
+        restoreMinWidth(lg)
+        clearMorph(lg)
+        morphBusy = false
+      }, MORPH_DUR_MS)
+    })
   }
 }
 
 /** 隐藏/打开面板栏（根面板列唯一；恢复位 = colOrder 语义位；无快照重开 =
- *  新打开页）。 */
+ *  新打开页）。与 setLeftHidden 同款收放动画（全隐藏，无 icon rail）。 */
 export const setPanelsHidden = (hidden: boolean): void => {
   const a = api()
   if (!a) return
   const flags = columnFlagsOf()
   if (hidden === flags.panelsHidden) return
+  if (morphBusy) {
+    console.error('[dv-column-ops] 收放动画进行中——本次面板栏切换忽略')
+    return
+  }
   if (hidden) {
     const root = rootPanelsGroup(a)
     if (!root) {
@@ -431,9 +607,17 @@ export const setPanelsHidden = (hidden: boolean): void => {
       console.error('[dv-column-ops] 面板栏 leaf 不在根行——隐藏放弃')
       return
     }
-    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
-    saveStashSafe({ ...loadStash(), panels: stash })
-    setFlags({ ...flags, panelsHidden: true })
+    morphBusy = true
+    tweenWidthTo(root, 0, () => {
+      try {
+        holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
+        saveStashSafe({ ...loadStash(), panels: stash })
+        setFlags({ ...flags, panelsHidden: true })
+      } finally {
+        clearMorph(root)
+        morphBusy = false
+      }
+    })
   } else {
     const json = toLoose(a)
     const rootJson = json.grid.root
@@ -461,8 +645,11 @@ export const setPanelsHidden = (hidden: boolean): void => {
       }
     const data = rootJson.data ?? []
     const at = Math.min(colOrderInsertIndex(flags.colOrder, 'panels', (r) => r === 'left' && flags.leftHidden), data.length)
+    const targetWidth =
+      typeof leaf.size === 'number' && leaf.size > 0 ? leaf.size : RAIL_W
     data.splice(at, 0, leaf)
     Object.assign(json.panels, panelEntries)
+    morphBusy = true
     holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
     if (stash) {
       const rest = loadStash()
@@ -472,6 +659,29 @@ export const setPanelsHidden = (hidden: boolean): void => {
     setFlags({ ...flags, panelsHidden: false })
     const na = api()
     if (na) alignVisibleToOrder(na)
+    const pg = na ? rootPanelsGroup(na) : undefined
+    if (!pg) {
+      console.error('[dv-column-ops] 面板栏插回后组不在场——动画放弃')
+      morphBusy = false
+      return
+    }
+    if (!morphAnimated()) {
+      pg.api.setSize({ width: targetWidth })
+      morphBusy = false
+      return
+    }
+    markMorph(pg, 'show')
+    forceStyleFlush(viewOfGroup(pg))
+    releaseMinWidth(pg)
+    pg.api.setSize({ width: 0 })
+    requestAnimationFrame(() => {
+      pg.api.setSize({ width: targetWidth })
+      window.setTimeout(() => {
+        restoreMinWidth(pg)
+        clearMorph(pg)
+        morphBusy = false
+      }, MORPH_DUR_MS)
+    })
   }
 }
 

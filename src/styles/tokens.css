@@ -407,6 +407,30 @@
 
   /* Theme Toggle Blinds 几何（mask-size 72px 钉住"两端落干净"） */
   --beui-vt-slat: 72px;       /* 板条宽（theme-toggle.tsx 消费） */
+
+  /* ── 侧栏收放 + 按压 + 展开（2026-10-18，抄 beui.dev motion/animated-sidebar
+     的三套动效值；用户点名要"侧栏收放/按钮点击/选项展开"不再生硬）──
+     用户口径："隐藏后不要它变成工具栏的效果，就是全隐藏"——本应用栏宽归
+     0（非 icon rail），故只有 width 一条轴；临界阻尼 spring 的 CSS 等价 =
+     EASE_DRAWER 曲线 + 320ms（过冲会在 0 宽边界上"卡一下再弹回"）。 */
+  --sidebar-morph-dur: 320ms;                       /* 收放总时长 */
+  --sidebar-morph-ease: var(--beui-ease-drawer);    /* 收放曲线（无过冲） */
+
+  /* 按压：beUI SPRING_PRESS = stiffness 500/damping 30/mass 0.6 的 CSS 近似
+     ——按下即时缩小（快），松开回弹（慢一档），两段曲线分离才有"弹"感。 */
+  --press-scale: 0.96;                              /* 主要按钮按下缩到 96% */
+  --press-scale-sm: 0.92;                           /* 图标钮（小面积要更明显） */
+  --press-dur-in: 90ms;                             /* 按下（快） */
+  --press-dur-out: 180ms;                           /* 回弹（慢一档） */
+  --press-ease-in: cubic-bezier(0.4, 0, 1, 1);      /* 加速压下去 */
+  --press-ease-out: var(--beui-ease-out);           /* 弹回来 */
+
+  /* 展开（分组/折叠面板内容）：beUI accordion-open 的 CSS 等价——高度用
+     grid-template-rows 0fr→1fr 才有"内容被往下挤"的连续过程（height:auto
+     不可插值）。opacity 稍慢起、稍早收，避免文字在高度过半时仍糊着。 */
+  --disclose-dur: 220ms;
+  --disclose-ease: var(--beui-ease-out);
+  --disclose-fade-dur: 160ms;
 }
 
 /* ── beUI 关键帧（唯一非规则的例外：关键帧是**定义**不是规则）──
