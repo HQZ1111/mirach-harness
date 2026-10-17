@@ -577,6 +577,36 @@ fn pi_job_list(
     state.engine.job_list()
 }
 
+/// 待办状态（活动面板 Todo 分区拉取面）：重放会话 Custom `todo_list.v1`
+/// 条目（docs/engine-gaps.md G2 过渡方案——不需要上游暴露 Agent 上的
+/// plan_state）。返回 `{schema, list, summary}`；无 todo = schema null。
+#[tauri::command(async)]
+fn pi_todo_state(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.todo_state()
+}
+
+/// 终止一个子代理（活动面板 Stop）：`agent_hub::registry().mark_killed(id)`。
+/// id 不存在 = Err（不静默成功）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_hub_kill(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    agent_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.hub_kill(&agent_id)
+}
+
+/// 取消一个后台 bash 任务（活动面板 Stop）：`jobs::cancel_async(owner, id)`
+/// （等结算，pi 内部超时即 Err）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_job_cancel(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    job_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.job_cancel(&job_id)
+}
+
 #[tauri_runtime_cef::cef_entry_point]
 fn main() {
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
@@ -730,6 +760,9 @@ fn main() {
             pi_switch_branch,
             pi_hub_roster,
             pi_job_list,
+            pi_todo_state,
+            pi_hub_kill,
+            pi_job_cancel,
             pi_settings::pi_get_settings,
             pi_settings::pi_set_settings,
             pi_settings::pi_get_models_config,

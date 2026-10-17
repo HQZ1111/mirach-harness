@@ -291,8 +291,12 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
       右上角（`.assistant-thread-pane` 已 position:relative）。
     - 验证：cargo check 0 / agui 37 测试 / tsc 0 / vitest 全绿 + 新增 20 用例
       （`status-panel-stores.test.ts`）/ vite build OK。
-    - **未接线（见 gaps G5）**：面板 Stop 按钮是禁用占位——`hub agent kill` /
-      `jobs cancel` 的宿主 IPC 未加（能力在 pi 侧 pub，成本低，待定）。
+    - **待办拉取面 + Stop 接线（2026-10-16 补，同轮）**：`pi_todo_state`
+      （重放会话 Custom `todo_list.v1` 条目——`pi::todo::latest_from_entries`，
+      G2 宿主侧过渡，不需上游改）+ `pi_hub_kill`（`agent_hub::registry()
+      .mark_killed`）/ `pi_job_cancel`（`jobs::cancel_async`）——面板 Stop
+      按钮已接线（成功后 refresh，失败 console.error 可见）。
+    - 验证（同轮）：cargo test 47（+4 待办重放）/ tsc 0 / vitest 全绿。
 
 ## 工具（`scripts/`）
 

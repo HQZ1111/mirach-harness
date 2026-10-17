@@ -21,6 +21,9 @@
 | ~~目标 goal~~ | `GoalState` | **无**（仅 handoff 文本） | ❌ 见 G4（UI 占位） |
 | ~~环境 git 变更~~ | `gitWorktreeChangeSummary` | 部分（宿主可自建） | ⚠️ 见 G6（UI 占位） |
 
+**已解：** G2（待办拉取面，`pi_todo_state`）/ G5（Stop 接线，`pi_hub_kill` /
+`pi_job_cancel`）——2026-10-16 自建完成。**待定：** G1 / G3 / G4 / G6。
+
 ---
 
 ## G1：会话计划（sessionPlans）无结构化步骤输出
@@ -68,7 +71,10 @@ Custom 条目、取最新）。已在 checkpoint 的 `list_checkpoints` 里做�
 （`pi_session.rs:936` 枚举 `custom_type == "checkpoint"`）。加一个
 `pi_todo_state()` 即可，**不需要上游改**。
 
-**裁决**：待定（倾向"自建 `pi_todo_state` IPC"，成本低）。
+**裁决**：✅ **已自建（2026-10-16）**——`pi_todo_state` IPC
+（`pi_session.rs::todo_state()` 调 `pi::todo::latest_from_entries`）+ 前端
+`todoBridge.refresh()` 挂载时拉。4 个 Rust 单测（重放取最新 / 空 / 坏条目
+跳过 / summary 形状）。
 
 ---
 
@@ -134,7 +140,10 @@ pi **有**能力但宿主未接：
 **影响**：面板的 Stop 按钮当前是**禁用占位**（`StopAffordance`，tooltip
 说明）。要接线就加 `pi_hub_kill(agentId)` / `pi_job_cancel(jobId)` IPC。
 
-**裁决**：待定（成本低，可自建）。
+**裁决**：✅ **已自建（2026-10-16）**——`pi_hub_kill`（`hub_kill()` 调
+`agent_hub::registry().mark_killed`，id 不存在 Err）+ `pi_job_cancel`
+（`job_cancel()` 调 `jobs::cancel_async`，等结算）+ 前端 `StopButton`
+（IPC + 成功后 refresh；失败 console.error 可见）。
 
 ---
 

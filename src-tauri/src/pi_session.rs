@@ -983,6 +983,103 @@ pub fn side_prompt(
         })?
     }
 
+    /// 待办状态（活动面板 Todo 分区拉取面，docs/engine-gaps.md G2 过渡方案）：
+    /// 重放会话活动路径上的 Custom `todo_list.v1` 条目——与 pi 内部
+    /// `todo::latest_from_entries` 同逻辑（枚举 Custom 条目、取最新一条
+    /// 反序列化），**不需要上游暴露 Agent 上的 plan_state**。
+    /// 真相在 pi 会话树（todo 工具每次变更 append 一条 Custom 条目）；
+    /// 本方法只重放投影。返回 `{schema, list, summary}`（无 todo 时
+    /// schema=null + list 空 + summary=null——诚实空态，不编造）。
+    /// 损坏条目：`latest_from_entries` 的 `.ok()` 语义 = 跳过（上游同款——
+    /// 坏条目从未可用）。
+    pub fn todo_state(&self) -> Result<serde_json::Value, String> {
+        self.flush_active_session()?;
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let agent_session = handle.session_mut();
+                let store = Arc::clone(&agent_session.session);
+                let inner = store
+                    .lock(cx.cx())
+                    .await
+                    .map_err(|e| format!("session lock failed: {e}"))?;
+                let entries = inner.entries_for_current_path();
+                let has_todo = entries.iter().any(|e| {
+                    matches!(e, pi::session::SessionEntry::Custom(c)
+                        if c.custom_type == pi::todo::TODO_LIST_SCHEMA)
+                });
+                let list = pi::todo::latest_from_entries(entries.iter().copied());
+                let summary = list.summary_line();
+                let list_val = if has_todo {
+                    serde_json::to_value(&list)
+                        .map_err(|e| format!("todo 状态序列化失败: {e}"))?
+                } else {
+                    // 无 todo 条目 = 诚实空态（区分"没建过"与"建过空的"）
+                    serde_json::Value::Null
+                };
+                Ok(serde_json::json!({
+                    "schema": if has_todo { Some(pi::todo::TODO_LIST_SCHEMA) } else { None },
+                    "list": list_val,
+                    "summary": summary,
+                }))
+            })
+        })?
+    }
+
+    /// 终止一个子代理（活动面板 Agent 分区 Stop 按钮，docs/engine-gaps.md
+    /// G5）：`agent_hub::registry().mark_killed(id)`——与模型调 `hub agent
+    /// kill` 同一操作（tools.rs dispatch_agent "kill"）。id 不存在 → Err
+    /// （不静默成功）。registry 是进程级单例，锁中毒 = Err 传播。
+    pub fn hub_kill(&self, agent_id: &str) -> Result<serde_json::Value, String> {
+        let mut registry = pi::agent_hub::registry()
+            .lock()
+            .map_err(|_| "agent_hub registry mutex poisoned".to_string())?;
+        if registry.get(agent_id).is_none() {
+            return Err(format!("no subagent with id '{agent_id}'"));
+        }
+        registry.mark_killed(agent_id);
+        let entry = registry
+            .get(agent_id)
+            .ok_or_else(|| format!("subagent '{agent_id}' 消失于终止后"))?;
+        serde_json::to_value(entry).map_err(|e| format!("子代理条目序列化失败: {e}"))
+    }
+
+    /// 取消一个后台 bash 任务（活动面板 Terminal 分区 Stop 按钮，G5）：
+    /// `jobs::cancel_async(ownerSessionId, id)`——等结算（上限 10s，pi 内部
+    /// 超时即 Err，不假装成功）。owner session id 从活动会话取；无活动
+    /// 会话 = Err（任务无从归属）。
+    pub fn job_cancel(&self, job_id: &str) -> Result<serde_json::Value, String> {
+        let shared = Arc::clone(&self.shared);
+        let session_id = on_big_stack({
+            let shared = Arc::clone(&shared);
+            move || {
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                let handle = guard.as_mut().ok_or("no active session")?;
+                shared
+                    .runtime
+                    .block_on(handle.state())
+                    .map_err(|e| e.to_string())
+            }
+        })??.session_id;
+        let owner = session_id
+            .filter(|s| !s.is_empty())
+            .ok_or("no active session（后台任务无从归属）")?;
+        let snapshot = shared
+            .runtime
+            .block_on(pi::jobs::cancel_async(&owner, job_id))
+            .map_err(|e| format!("后台任务取消失败: {e}"))?;
+        serde_json::to_value(snapshot).map_err(|e| format!("任务快照序列化失败: {e}"))
+    }
+
     /// 回退到 checkpoint：active context 截断到该 checkpoint 边界（内部
     /// 对齐到 user-turn 起点，防 trailing tool_use 悬空），checkpoint 之后
     /// 的 span 折叠为一条摘要报告消息；会话树完整保留（append-only，
@@ -994,8 +1091,7 @@ pub fn side_prompt(
     /// 摘要失败 = Err 传播（mirach 兜底禁令；上游 rpc 在此降级为
     /// "(summarization failed…)" 文本注记，我们不降级——回退半途而废比
     /// 明确失败更糟）。
-    pub fn rewind(&self, checkpoint_id: &str) -> Result<serde_json::Value, String> {
-        self.flush_active_session()?;
+    pub fn rewind(&self, checkpoint_id: &str) -> Result<serde_json::Value, String> {        self.flush_active_session()?;
         let shared = Arc::clone(&self.shared);
         let checkpoint_id = checkpoint_id.to_string();
         on_big_stack(move || {
@@ -1756,5 +1852,93 @@ mod fork_tests {
         assert_eq!(root_plan.leaf_id, None);
         assert!(root_plan.entries.is_empty());
         assert_eq!(root_plan.selected_text, "第一条");
+    }
+}
+
+#[cfg(test)]
+mod todo_state_tests {
+    //! 待办重放纯逻辑单测（活动面板 Todo 分区拉取面，docs/engine-gaps.md
+    //! G2）：in-memory Session + `append_custom_entry(TODO_LIST_SCHEMA, ...)`
+    //! 构造定制条目树，验证 `pi::todo::latest_from_entries` 的"取最新"
+    //! 语义与我们的 JSON 形状。`todo_state()` 方法本身需要真实 handle
+    //! （session_mut + runtime），留冒烟验证。
+
+    use super::*;
+
+    /// 构造一条 `todo_list.v1` 定制条目的 data（pi TodoList serde 形状：
+    /// phases[].tasks[] = { content, state }，state 为 tag="state" snake_case）。
+    fn todo_data(tasks: &[(&str, &str)]) -> serde_json::Value {
+        serde_json::json!({
+            "phases": [{
+                "tasks": tasks.iter().map(|(c, s)| serde_json::json!({
+                    "content": c, "state": s
+                })).collect::<Vec<_>>()
+            }]
+        })
+    }
+
+    #[test]
+    fn latest_from_entries_picks_newest_todo_entry() {
+        let mut s = pi::session::Session::in_memory();
+        s.append_custom_entry(
+            pi::todo::TODO_LIST_SCHEMA.to_string(),
+            Some(todo_data(&[("第一步", "open"), ("第二步", "open")])),
+        );
+        // 第二次变更（模拟 start 第二步）：再 append 一条，应取这条
+        s.append_custom_entry(
+            pi::todo::TODO_LIST_SCHEMA.to_string(),
+            Some(todo_data(&[("第一步", "done"), ("第二步", "in_progress")])),
+        );
+        let entries = s.entries_for_current_path();
+        let list = pi::todo::latest_from_entries(entries.iter().copied());
+        let v = serde_json::to_value(&list).expect("serialize");
+        let tasks = v["phases"][0]["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0]["content"], "第一步");
+        assert_eq!(tasks[0]["state"], "done");
+        assert_eq!(tasks[1]["state"], "in_progress");
+    }
+
+    #[test]
+    fn latest_from_entries_empty_without_todo_entries() {
+        let mut s = pi::session::Session::in_memory();
+        s.append_custom_entry("checkpoint".to_string(), Some(serde_json::json!({})));
+        let entries = s.entries_for_current_path();
+        let list = pi::todo::latest_from_entries(entries.iter().copied());
+        assert!(list.is_empty());
+        assert!(list.summary_line().is_none());
+    }
+
+    #[test]
+    fn latest_from_entries_skips_corrupt_entry() {
+        // 坏 data（缺 phases）→ serde 失败 → .ok() 跳过（上游同款：
+        // 坏条目从未可用），回落到上一条合法条目
+        let mut s = pi::session::Session::in_memory();
+        s.append_custom_entry(
+            pi::todo::TODO_LIST_SCHEMA.to_string(),
+            Some(todo_data(&[("好任务", "open")])),
+        );
+        s.append_custom_entry(
+            pi::todo::TODO_LIST_SCHEMA.to_string(),
+            Some(serde_json::json!({ "bogus": true })),
+        );
+        let entries = s.entries_for_current_path();
+        let list = pi::todo::latest_from_entries(entries.iter().copied());
+        assert_eq!(list.phases.len(), 1);
+        assert_eq!(list.phases[0].tasks[0].content, "好任务");
+    }
+
+    #[test]
+    fn summary_line_has_settled_over_total_and_current() {
+        let mut s = pi::session::Session::in_memory();
+        s.append_custom_entry(
+            pi::todo::TODO_LIST_SCHEMA.to_string(),
+            Some(todo_data(&[("甲", "done"), ("乙", "in_progress"), ("丙", "open")])),
+        );
+        let entries = s.entries_for_current_path();
+        let list = pi::todo::latest_from_entries(entries.iter().copied());
+        let summary = list.summary_line().expect("summary");
+        assert!(summary.starts_with("1/3"));
+        assert!(summary.contains("乙"));
     }
 }

@@ -18,6 +18,7 @@
  * 标注缺数据，别砍）。
  */
 import { useEffect, useState, type FC, type ReactNode } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import {
   ActivityIcon,
   BotIcon,
@@ -51,6 +52,7 @@ import {
 } from '@/components/assistant-ui/jobs-store'
 import {
   flatTasks,
+  todoBridge,
   useTodoBridge,
   type TodoTask,
 } from '@/components/assistant-ui/todo-store'
@@ -139,18 +141,30 @@ const StatusRow: FC<{
   </li>
 )
 
-/** 停止按钮（后台任务 / 子代理共用）——mirach MVP 先只展示，不做取消 IPC
- * （pi `hub agent kill` / `jobs cancel` 的宿主面未接线，见 docs/engine-gaps.md
- * §3 缺口 G5）；有控制句柄时显示禁用态按钮 + tooltip 说明。 */
-const StopAffordance: FC<{ reason: string }> = ({ reason }) => (
-  <span
-    title={reason}
-    className={cn(ghostButton, 'size-6 cursor-not-allowed opacity-40')}
-    aria-disabled
-  >
-    <SquareIcon className="size-3 fill-current" />
-  </span>
-)
+/** 停止按钮（后台任务 / 子代理共用）：调 host IPC 取消，成功后拉取刷新投影。
+ * 失败 console.error 可见（不乐观假装成功——兜底禁令）；进行中禁用防重复。 */
+const StopButton: FC<{ onStop: () => Promise<void> }> = ({ onStop }) => {
+  const [busy, setBusy] = useState(false)
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      aria-label="停止"
+      onClick={() => {
+        if (busy) return
+        setBusy(true)
+        void onStop().finally(() => setBusy(false))
+      }}
+      className={cn(ghostButton, 'size-6', busy && 'opacity-40')}
+    >
+      {busy ? (
+        <Loader2Icon className="size-3 animate-spin" />
+      ) : (
+        <SquareIcon className="size-3 fill-current" />
+      )}
+    </button>
+  )
+}
 
 // ── 分区：待办（plan，真数据）────────────────────────────────────────
 const PLAN_ICON: Record<TodoTask['status'], ReactNode> = {
@@ -271,7 +285,16 @@ const AgentSection: FC = () => {
             meta={childMeta(c, now)}
             trailing={
               !isSettled(c.status) ? (
-                <StopAffordance reason="宿主取消未接线（docs/engine-gaps.md G5）" />
+                <StopButton
+                  onStop={async () => {
+                    try {
+                      await invoke('pi_hub_kill', { agentId: c.id })
+                    } catch (e) {
+                      console.error('[hub] 子代理终止失败', e)
+                    }
+                    await agentHubBridge.getState().refresh()
+                  }}
+                />
               ) : undefined
             }
           />
@@ -331,7 +354,16 @@ const TerminalSection: FC = () => {
             }
             trailing={
               j.status === 'running' ? (
-                <StopAffordance reason="宿主取消未接线（docs/engine-gaps.md G5）" />
+                <StopButton
+                  onStop={async () => {
+                    try {
+                      await invoke('pi_job_cancel', { jobId: j.id })
+                    } catch (e) {
+                      console.error('[jobs] 后台任务取消失败', e)
+                    }
+                    await jobsBridge.getState().refresh()
+                  }}
+                />
               ) : undefined
             }
           />
@@ -444,10 +476,12 @@ export const ConversationStatusPanel: FC = () => {
   const [collapsed, setCollapsed] = useState(false)
 
   // 挂载/聚焦拉取：registry 与会话解耦，模型没调 hub/jobs 工具时也要能看到
-  // 已注册的子代理与后台任务（真相在 pi 进程级 registry）。
+  // 已注册的子代理与后台任务（真相在 pi 进程级 registry）；待办同理——重放
+  // 会话 Custom 条目（重启后模型未再调 todo 工具前也能显示历史待办，G2）。
   useEffect(() => {
     void agentHubBridge.getState().refresh()
     void jobsBridge.getState().refresh()
+    void todoBridge.getState().refresh()
   }, [])
 
   const hasRealContent =

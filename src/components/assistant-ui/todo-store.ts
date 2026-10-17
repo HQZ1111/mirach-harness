@@ -4,14 +4,18 @@
  *
  * - 真相在 pi（会话树 Custom `todo_list.v1` 条目，`latest_from_entries`
  *   重放；todo.rs:547 持久化 → 会话切回来能恢复）。
- * - 通道：唯一来源是 `CUSTOM tool_execution` 的
- *   `details = { schema: "todo_list.v1", list: TodoList, summary?: string }`
- *   —— 模型每次调 todo 工具（init/start/done/...）经 turn-actor 归约到此。
- *   没有 IPC 拉取面：pi 的 `plan_state()`/todo 状态在 Agent 上，SDK
- *   `AgentSessionHandle` 未暴露（见 docs/engine-gaps.md §2 缺口 G2）——
- *   重启后未调工具前拿不到历史 todo（诚实空态，不编造）。
+ * - 双通道：
+ *   ①拉取面 `refresh()` → `pi_todo_state` IPC（Rust 重放活动路径 Custom
+ *     条目，与 pi `latest_from_entries` 同逻辑）——挂载/切会话时拉，解决
+ *     "重启后模型未再调 todo 工具前拿不到历史待办"（docs/engine-gaps.md
+ *     G2，宿主侧过渡方案，不需上游改）。
+ *   ②事件面 `CUSTOM tool_execution` 的
+ *     `details = { schema: "todo_list.v1", list: TodoList, summary?: string }`
+ *     —— 模型每次调 todo 工具（init/start/done/...）经 tool-sidecar 归约
+ *     到此（即时）。
  *   zustand vanilla 模式，照抄 checkpoint-store。
  */
+import { invoke } from '@tauri-apps/api/core'
 import { createStore, useStore } from 'zustand'
 
 /** pi `todo::TodoStatus`（serde tag="state" snake_case）+ flatten：
@@ -112,6 +116,8 @@ export const flatTasks = (proj: TodoProjection): TodoTask[] =>
 interface TodoBridgeState {
   /** 待办投影；null = 本会话尚未观察到 todo（诚实空态，不编造） */
   todo: TodoProjection | null
+  /** 拉取面：`pi_todo_state` IPC 重放会话 Custom 条目（挂载/切会话拉） */
+  refresh: () => Promise<void>
   /** 事件面提交（CUSTOM tool_execution details.schema = todo_list.v1） */
   applyTodo: (raw: unknown, summary: unknown) => void
   resetProjection: () => void
@@ -119,6 +125,34 @@ interface TodoBridgeState {
 
 export const todoBridge = createStore<TodoBridgeState>((set) => ({
   todo: null,
+  refresh: async () => {
+    try {
+      const raw = await invoke<unknown>('pi_todo_state')
+      if (typeof raw !== 'object' || raw === null) {
+        console.error('[todo] pi_todo_state 返回形状非法——清投影', raw)
+        set({ todo: null })
+        return
+      }
+      const r = raw as Record<string, unknown>
+      // schema null = 无 todo 条目（诚实空态，非错误）
+      if (r.schema === null || r.schema === undefined) {
+        set({ todo: null })
+        return
+      }
+      const parsed = parseTodoList(r.list)
+      if (parsed === null) return // 形状非法：console.error 已发，保留旧投影
+      parsed.summary = asString(r.summary)
+      set({ todo: parsed })
+    } catch (e) {
+      if (String(e).includes('no active session')) {
+        // 首启 / New Chat / 删除活动会话后的预期域状态：无会话 = 无待办
+        set({ todo: null })
+        return
+      }
+      console.error('[todo] 待办状态拉取失败——清投影', e)
+      set({ todo: null })
+    }
+  },
   applyTodo: (raw, summary) => {
     const parsed = parseTodoList(raw)
     if (parsed === null) return // 非法形状：console.error 已发，保留旧投影
