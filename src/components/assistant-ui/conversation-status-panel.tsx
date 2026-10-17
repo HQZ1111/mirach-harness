@@ -21,34 +21,37 @@ import { useEffect, useState, type FC, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ActivityIcon,
-  BotIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   ChevronRightIcon,
   CircleIcon,
   FileDiffIcon,
-  ListChecksIcon,
   Loader2Icon,
   Maximize2Icon,
   Minimize2Icon,
   PlayIcon,
   SquareIcon,
   SquareTerminalIcon,
-  Workflow,
+  BotIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { field, ghostButton, mono, paper } from '@/components/assistant-ui/elements/surfaces'
+import { ghostButton, mono, paper } from '@/components/assistant-ui/elements/surfaces'
+import { TodoList } from '@/components/assistant-ui/elements/todo-list'
+import { TaskCard } from '@/components/assistant-ui/elements/task-card'
+import {
+  childToTaskCardState,
+  toAuiTodoItems,
+} from '@/components/assistant-ui/panel-adapters'
 import {
   agentHubBridge,
   isSettled,
   useAgentHubBridge,
   type ChildEntry,
-  type ChildStatus,
 } from '@/components/assistant-ui/agent-hub-store'
 import {
   jobsBridge,
   useJobsBridge,
-  type JobSnapshot,
+  type JobStatus,
 } from '@/components/assistant-ui/jobs-store'
 import { gitBridge, useGitBridge } from '@/components/assistant-ui/git-store'
 import { useStore } from 'zustand'
@@ -60,7 +63,6 @@ import {
   flatTasks,
   todoBridge,
   useTodoBridge,
-  type TodoTask,
 } from '@/components/assistant-ui/todo-store'
 
 // ── 时长格式化（ZCode formatDurationUnits 同款语义）──────────────────
@@ -173,14 +175,6 @@ const StopButton: FC<{ onStop: () => Promise<void> }> = ({ onStop }) => {
 }
 
 // ── 分区：待办（plan，真数据）────────────────────────────────────────
-const PLAN_ICON: Record<TodoTask['status'], ReactNode> = {
-  done: <CheckCircle2Icon className="size-3.5 shrink-0 text-emerald-500" />,
-  dropped: <CircleIcon className="size-3.5 shrink-0 text-foreground/25" />,
-  in_progress: <PlayIcon className="size-3.5 shrink-0 text-foreground" />,
-  open: <CircleIcon className="size-3.5 shrink-0 text-foreground/35" />,
-  blocked: <CircleIcon className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />,
-}
-
 const TodoSection: FC = () => {
   const { todo } = useTodoBridge()
   if (todo === null) return null
@@ -196,39 +190,16 @@ const TodoSection: FC = () => {
         </span>
       }
     >
-      <ul className="space-y-0">
-        {tasks.map((t, i) => (
-          <li
-            key={`${t.content}-${i}`}
-            className="flex min-h-8 items-start gap-2 rounded-lg px-2 py-1.5 hover:bg-foreground/[0.04]"
-          >
-            <span className="mt-0.5 shrink-0">{PLAN_ICON[t.status]}</span>
-            <span className="min-w-0 flex-1">
-              <span
-                className={cn(
-                  'line-clamp-2 text-[13px] leading-5 break-words',
-                  t.status === 'done' || t.status === 'dropped'
-                    ? 'text-foreground/35 line-through'
-                    : 'text-foreground/90',
-                )}
-              >
-                {t.content}
-              </span>
-              {t.status === 'blocked' && t.reason !== undefined && (
-                <span className="mt-0.5 block text-[12px] leading-4 text-amber-700/80 break-words dark:text-amber-400/80">
-                  {t.reason}
-                </span>
-              )}
-            </span>
-          </li>
-        ))}
-      </ul>
+      {/* 官方 TodoList 元素（形状经 panel-adapters.toAuiTodoItems 适配：
+          open→pending / in_progress→active / done→done / dropped→done+「已删除」
+          / blocked→failed+reason） */}
+      <TodoList items={toAuiTodoItems(tasks)} className="max-w-none px-1" />
     </StatusSection>
   )
 }
 
 // ── 分区：子代理（agent，真数据）────────────────────────────────────
-const CHILD_STATUS_TEXT: Record<ChildStatus, string> = {
+const CHILD_STATUS_TEXT: Record<ChildEntry['status'], string> = {
   starting: '启动中',
   running: '运行中',
   done: '已完成',
@@ -236,20 +207,6 @@ const CHILD_STATUS_TEXT: Record<ChildStatus, string> = {
   cancelled: '已取消',
   killed: '已终止',
 }
-
-const childMeta = (c: ChildEntry, now: number): ReactNode => (
-  <>
-    <span className="shrink-0 text-foreground/45 tabular-nums">
-      {isSettled(c.status) && c.finishedMs !== null
-        ? elapsedLabel(c.startedMs, c.finishedMs)
-        : elapsedLabel(c.startedMs, now)}
-    </span>
-    <span className="shrink-0 text-foreground/35">{CHILD_STATUS_TEXT[c.status]}</span>
-    <span className={cn(mono, 'shrink-0 text-foreground/30')}>
-      {c.kind === 'tan' ? '/tan' : c.name}
-    </span>
-  </>
-)
 
 const AgentSection: FC = () => {
   const { children } = useAgentHubBridge()
@@ -276,42 +233,49 @@ const AgentSection: FC = () => {
           : `${ended.length} 个已结束`
       }
     >
-      <ul className="space-y-0">
-        {[...running, ...ended].map((c) => (
-          <StatusRow
-            key={c.id}
-            icon={
-              isSettled(c.status) ? (
-                <CheckCircle2Icon className="size-4" />
-              ) : (
-                <BotIcon className="size-4" />
-              )
-            }
-            title={c.task}
-            meta={childMeta(c, now)}
-            trailing={
-              !isSettled(c.status) ? (
-                <StopButton
-                  onStop={async () => {
-                    try {
-                      await invoke('pi_hub_kill', { agentId: c.id })
-                    } catch (e) {
-                      console.error('[hub] 子代理终止失败', e)
-                    }
-                    await agentHubBridge.getState().refresh()
-                  }}
-                />
-              ) : undefined
-            }
-          />
-        ))}
-      </ul>
+      {/* 官方 TaskCard 元素（每个子代理一张卡）：state 经
+          panel-adapters.childToTaskCardState 适配；meta = kind；
+          elapsed = 时长；actions = Stop（有真 IPC）。
+          卡内 transcript 用 <pre> 展开（pi 的 transcript 是 JSONL 文本）。 */}
+      <div className="flex flex-col gap-1.5 px-1">
+        {[...running, ...ended].map((c) => {
+          const state = childToTaskCardState(c.status)
+          const elapsed =
+            c.finishedMs !== null
+              ? elapsedLabel(c.startedMs, c.finishedMs)
+              : elapsedLabel(c.startedMs, now)
+          return (
+            <TaskCard
+              key={c.id}
+              label={c.task}
+              meta={c.kind === 'tan' ? '/tan' : c.name}
+              state={state}
+              elapsed={elapsed}
+              actions={
+                !isSettled(c.status) ? (
+                  <StopButton
+                    onStop={async () => {
+                      try {
+                        await invoke('pi_hub_kill', { agentId: c.id })
+                      } catch (e) {
+                        console.error('[hub] 子代理终止失败', e)
+                      }
+                      await agentHubBridge.getState().refresh()
+                    }}
+                  />
+                ) : undefined
+              }
+              result={CHILD_STATUS_TEXT[c.status]}
+            />
+          )
+        })}
+      </div>
     </StatusSection>
   )
 }
 
 // ── 分区：终端（terminal，真数据）───────────────────────────────────
-const JOB_STATUS_TEXT: Record<JobSnapshot['status'], string> = {
+const JOB_STATUS_TEXT: Record<JobStatus, string> = {
   running: '运行中',
   exited: '已退出',
   killed: '已终止',
@@ -340,25 +304,33 @@ const TerminalSection: FC = () => {
           : `${jobs.length} 个`
       }
     >
-      <ul className="space-y-0">
+      {/* 官方 TaskCard 元素（每个后台任务一张卡）。**不用 JobProgress**：
+          它要求 stages（带权重的阶段），而 pi 的 bash job 是单阶段命令——
+          硬塞成阶段进度条是编造（panel-adapters.jobStages 返回 null 即此意）。
+          result = 输出尾部（pi JobSnapshot.outputTail，截断标记照实）。 */}
+      <div className="flex flex-col gap-1.5 px-1">
         {[...running, ...jobs.filter((j) => j.status !== 'running')].map((j) => (
-          <StatusRow
+          <TaskCard
             key={j.id}
-            icon={<SquareTerminalIcon className="size-4" />}
-            title={j.command}
-            meta={
-              <>
-                <span className="shrink-0 text-foreground/45 tabular-nums">
-                  {j.status === 'running' ? elapsedLabel(j.startedAtMs, now) : JOB_STATUS_TEXT[j.status]}
-                </span>
-                {j.exitCode !== null && (
-                  <span className={cn(mono, 'shrink-0 text-foreground/30')}>
-                    exit {j.exitCode}
-                  </span>
-                )}
-              </>
+            label={j.command}
+            meta={j.exitCode !== null ? `exit ${j.exitCode}` : JOB_STATUS_TEXT[j.status]}
+            state={
+              j.status === 'running'
+                ? 'working'
+                : j.status === 'exited'
+                  ? j.exitCode === 0
+                    ? 'done'
+                    : 'failed'
+                  : j.status === 'failed'
+                    ? 'failed'
+                    : 'cancelled'
             }
-            trailing={
+            elapsed={
+              j.status === 'running'
+                ? elapsedLabel(j.startedAtMs, now)
+                : JOB_STATUS_TEXT[j.status]
+            }
+            actions={
               j.status === 'running' ? (
                 <StopButton
                   onStop={async () => {
@@ -372,9 +344,17 @@ const TerminalSection: FC = () => {
                 />
               ) : undefined
             }
+            result={
+              j.outputTail ? (
+                <pre className={cn(mono, 'max-h-32 overflow-auto whitespace-pre-wrap break-all')}>
+                  {j.outputTail}
+                  {j.artifactTruncated ? '\n…[截断]' : ''}
+                </pre>
+              ) : undefined
+            }
           />
         ))}
-      </ul>
+      </div>
     </StatusSection>
   )
 }

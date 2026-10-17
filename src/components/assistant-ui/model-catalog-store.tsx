@@ -9,9 +9,15 @@
  * zustand vanilla 模式，照抄 connection-store / approval-bridge。
  */
 import { invoke } from '@tauri-apps/api/core'
+import type { ReactNode } from 'react'
 import { createStore, useStore } from 'zustand'
 
 import type { ModelOption } from './model-selector.aui'
+import {
+  ClaudeLogo,
+  GeminiLogo,
+  OpenAILogo,
+} from '@/components/assistant-ui/elements/logos'
 
 /** pi 模型目录条目（pi_list_models 返回形状，原 composer-wired 定义上移） */
 export interface PiModelEntry {
@@ -22,15 +28,38 @@ export interface PiModelEntry {
   contextWindow: number
 }
 
+/** 模型 provider → 官方 logos 元素（ClaudeLogo/OpenAILogo/GeminiLogo）。
+ * 按 provider/id 关键字匹配（pi provider 名如 anthropic / openai / google /
+ * amazon-bedrock）。**未匹配的 provider 不塞图标**（不借别家 logo 冒充——
+ * 返回 undefined，选择器用文字）。 */
+function providerLogo(provider: string, id: string): ReactNode | undefined {
+  const key = `${provider} ${id}`.toLowerCase()
+  if (key.includes('anthropic') || key.includes('claude')) {
+    return <ClaudeLogo className="size-4 shrink-0" />
+  }
+  if (key.includes('openai') || key.includes('gpt') || /\bo[13]\b/.test(key)) {
+    return <OpenAILogo className="size-4 shrink-0" />
+  }
+  if (key.includes('google') || key.includes('gemini')) {
+    return <GeminiLogo className="size-4 shrink-0" />
+  }
+  return undefined
+}
+
 /** pi 模型目录 → ModelSelector 选项；reasoning 模型带默认三档
- * （原 composer-wired 投影上移，逐行为保持不变） */
+ * （原 composer-wired 投影上移，逐行为保持不变）。图标 = 官方 logos 元素
+ * （provider 可识别时；否则无图标，不冒充）。 */
 export function toModelOptions(entries: PiModelEntry[]): ModelOption[] {
-  return entries.map((e) => ({
-    id: `${e.provider}/${e.id}`,
-    name: e.name || e.id,
-    description: e.provider,
-    ...(e.reasoning ? { efforts: true as const } : {}),
-  }))
+  return entries.map((e) => {
+    const logo = providerLogo(e.provider, e.id)
+    return {
+      id: `${e.provider}/${e.id}`,
+      name: e.name || e.id,
+      description: e.provider,
+      ...(logo === undefined ? {} : { icon: logo }),
+      ...(e.reasoning ? { efforts: true as const } : {}),
+    }
+  })
 }
 
 interface ModelCatalogState {

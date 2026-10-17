@@ -12,6 +12,13 @@ import { jobsBridge, parseJobs } from './jobs-store'
 import { gitBridge, parseGitDiffStat } from './git-store'
 import { flatTasks, parseTodoList, todoBridge } from './todo-store'
 import { dispatchToolDetails } from './tool-sidecar'
+import {
+  childToSubagentItem,
+  childToTaskCardState,
+  jobStages,
+  toAuiTodoItems,
+  toAuiTodoStatus,
+} from './panel-adapters'
 
 const silenceErrors = () => vi.spyOn(console, 'error').mockImplementation(() => {})
 
@@ -274,5 +281,65 @@ describe('parseGitDiffStat（fs_git_diff_stat）', () => {
     expect(gitBridge.getState().stat).toBeNull()
     await gitBridge.getState().refresh('   ')
     expect(gitBridge.getState().stat).toBeNull()
+  })
+})
+
+describe('panel-adapters（pi 形状 → 官方 elements 形状）', () => {
+  it('toAuiTodoStatus：open/in_progress/done 直映', () => {
+    expect(toAuiTodoStatus({ content: 'a', status: 'open' }).status).toBe('pending')
+    expect(toAuiTodoStatus({ content: 'a', status: 'in_progress' }).status).toBe('active')
+    expect(toAuiTodoStatus({ content: 'a', status: 'done' }).status).toBe('done')
+  })
+
+  it('toAuiTodoStatus：dropped → done + 「已删除」（不静默当完成）', () => {
+    expect(toAuiTodoStatus({ content: 'a', status: 'dropped' })).toEqual({
+      status: 'done',
+      reason: '已删除',
+    })
+  })
+
+  it('toAuiTodoStatus：blocked → failed + reason', () => {
+    expect(toAuiTodoStatus({ content: 'a', status: 'blocked', reason: '缺凭据' })).toEqual({
+      status: 'failed',
+      reason: '缺凭据',
+    })
+  })
+
+  it('toAuiTodoItems：id 用序号、reason 只在有值时出现', () => {
+    const out = toAuiTodoItems([
+      { content: '甲', status: 'open' },
+      { content: '乙', status: 'blocked', reason: 'x' },
+    ])
+    expect(out).toEqual([
+      { id: '0', text: '甲', status: 'pending' },
+      { id: '1', text: '乙', status: 'failed', reason: 'x' },
+    ])
+  })
+
+  it('childToTaskCardState：六态全覆盖', () => {
+    expect(childToTaskCardState('starting')).toBe('working')
+    expect(childToTaskCardState('running')).toBe('working')
+    expect(childToTaskCardState('done')).toBe('done')
+    expect(childToTaskCardState('failed')).toBe('failed')
+    expect(childToTaskCardState('cancelled')).toBe('cancelled')
+    expect(childToTaskCardState('killed')).toBe('cancelled')
+  })
+
+  it('childToSubagentItem：model 位用真实 kind（不编造模型名）', () => {
+    const c = {
+      id: 's-1', name: 'scout', kind: 'subagent' as const, task: 't', pid: null,
+      status: 'running' as const, startedMs: 1, finishedMs: null, outputBytes: 0,
+      transcriptPath: 'p', steerPath: 's', revivedFrom: null,
+    }
+    expect(childToSubagentItem(c)).toEqual({ name: 'scout', model: 'subagent' })
+  })
+
+  it('jobStages：bash job 无阶段 → null（不硬塞阶段进度条）', () => {
+    const j = {
+      schema: 'pi.bash_job.v1', id: 'j', command: 'ls', startedAtMs: 1,
+      status: 'running' as const, exitCode: null, pid: 1, artifactPath: 'p',
+      artifactTruncated: false, artifactError: null, outputTail: '', outputComplete: false,
+    }
+    expect(jobStages(j)).toBeNull()
   })
 })

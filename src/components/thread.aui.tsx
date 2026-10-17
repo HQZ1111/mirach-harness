@@ -69,6 +69,12 @@ import { ToolError } from "@/components/assistant-ui/elements/tool-error";
 import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { WebSearch, type WebSearchResult } from "@/components/assistant-ui/elements/web-search";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
+import { TypingIndicator } from "@/components/assistant-ui/elements/typing-indicator";
+import { QuoteBlock } from "@/components/assistant-ui/elements/quote.aui";
+import {
+  ToolTimeline,
+  type TimelineStep,
+} from "@/components/assistant-ui/elements/tool-timeline";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -120,6 +126,7 @@ import {
   HistoryIcon,
   MicIcon,
   PencilIcon,
+  WrenchIcon,
   PhoneIcon,
   Volume2Icon,
 } from "lucide-react";
@@ -677,6 +684,9 @@ const CheckpointBar: FC = () => {
                 );
               })}
             </div>
+            {/* 未用官方 checkpoint-history 元素：它把第三行硬编码成
+                "{files} files"，而 pi 无文件数概念（只有 messageCount）——
+                塞进去会把"3 条消息"显示成"3 files"（撒谎）。保留本行渲染。 */}
             <p className="text-destructive/90 px-1 text-[11px] leading-relaxed">
               回到此点会截断其后的上下文：该点之后的对话将折叠为一条摘要，不再逐条显示（会话树保留）。
             </p>
@@ -862,8 +872,59 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
 // ── message-timing（官方元素）：run 级 usage 展示。轮次机只归并 run 级
 // 快照（RUN_FINISHED.usage，替换语义——不按消息归并），因此只在最后一条
 // assistant 上显示（旧消息显示过期快照会误导）；流式中蓝字。
-const RunTiming: FC = () => {
+// ── run 级工具时间线（官方 tool-timeline 元素）─────────────────────────
+// 本 assistant 消息的 tool-call 部件 → 步骤线。verb = 工具名、chip = 主参数
+// 摘要（与工具卡同一 summarizeArgs）；状态取部件的 result/isError。
+// 运行中（最后一个部件无 result）= streaming。
+const TOOL_STEP_ICON = WrenchIcon;
+
+const RunToolTimeline: FC = () => {
   const role = useAuiState((s) => s.message.role);
+  const running = useAuiState((s) => s.thread.isRunning);
+  const parts = useAuiState((s) => {
+    const m = s.thread.messages[s.message.index];
+    if (!m) return null;
+    const out: { toolName: string; chip: string; done: boolean; error: boolean }[] = [];
+    for (const p of m.content) {
+      if (p.type !== "tool-call") continue;
+      out.push({
+        toolName: p.toolName,
+        chip: summarizeArgs(p.args).slice(0, 48),
+        done: p.result !== undefined,
+        error: p.isError === true,
+      });
+    }
+    return out;
+  });
+  const [open, setOpen] = useState(false);
+  if (role !== "assistant" || !parts || parts.length === 0) return null;
+
+  const steps: TimelineStep[] = parts.map((p) => ({
+    verb: p.toolName,
+    chip: p.chip,
+    icon: TOOL_STEP_ICON,
+  }));
+  const streaming = running && parts.some((p) => !p.done);
+  const doneCount = parts.filter((p) => p.done).length;
+  const failedCount = parts.filter((p) => p.error).length;
+
+  return (
+    <ToolTimeline
+      data-slot="aui_tool-timeline"
+      className="ms-2 mt-1"
+      steps={steps}
+      visibleSteps={parts.length}
+      streaming={streaming}
+      open={open}
+      onOpenChange={setOpen}
+      activeLabel={`${parts.length} 个工具调用`}
+      restingLabel={`${doneCount}/${parts.length} 个工具调用${failedCount > 0 ? ` · ${failedCount} 失败` : ""}`}
+      stats={[]}
+    />
+  );
+};
+
+const RunTiming: FC = () => {  const role = useAuiState((s) => s.message.role);
   const isLast = useAuiState((s) => s.message.isLast);
   const streaming = useAuiState((s) => s.thread.isRunning);
   const { usage } = useUsageBridge();
@@ -1535,13 +1596,14 @@ const AssistantMessage: FC = () => {
                   </div>
                 );
               case "indicator":
+                // 官方 typing-indicator 元素（bare 变体：三点 bounce）——
+                // 取代此前手写的 "●" 脉冲字符（同一语义、官方动画）。
                 return (
                   <span
                     data-slot="aui_assistant-message-indicator"
-                    className="animate-pulse font-sans"
-                    aria-label="Assistant is working"
+                    className="inline-flex items-center py-1"
                   >
-                    {"●"}
+                    <TypingIndicator variant="bare" />
                   </span>
                 );
               default:
@@ -1551,6 +1613,11 @@ const AssistantMessage: FC = () => {
         </MessagePrimitive.GroupedParts>
         <MessageError />
       </div>
+
+      {/* run 级工具时间线（官方 tool-timeline 元素）：本消息的 tool-call 部件
+          聚合成一条可折叠的步骤线（verb = 工具名、chip = 主参数摘要）。只在
+          有工具调用时渲染——无工具调用则整块缺席。 */}
+      <RunToolTimeline />
 
       {/* run 级 usage（官方 message-timing 元素）——只在最后一条 assistant */}
       <RunTiming />
@@ -1790,7 +1857,7 @@ const UserMessage: FC = () => {
       <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
         <div className="aui-user-message-content peer bg-muted text-foreground rounded-(--composer-radius) px-4 py-2 wrap-break-word empty:hidden">
           <MessagePrimitive.Parts
-            components={{ File: UserFilePart, Image: UserImagePart }}
+            components={{ File: UserFilePart, Image: UserImagePart, Quote: QuoteBlock }}
           />
         </div>
         <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
