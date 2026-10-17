@@ -3,6 +3,7 @@
 import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired';
 import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
+import { AskCards } from '@/components/assistant-ui/ask-cards'
 import {
   useConversationWidthAxis,
   WidthHandle,
@@ -76,6 +77,16 @@ import {
   type TimelineStep,
 } from "@/components/assistant-ui/elements/tool-timeline";
 import { MessageStallIndicator } from "@/components/assistant-ui/elements/message-stall-indicator";
+import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
+import { AgentPlan } from "@/components/assistant-ui/elements/agent-plan";
+import {
+  parsePlanSteps,
+  planReviewState,
+} from "@/components/assistant-ui/plan-parse";
+import {
+  diffFilename,
+  diffFromToolResult,
+} from "@/components/assistant-ui/diff-parse";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -847,8 +858,23 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
     return <ToolFallback {...part} />;
   }
 
-  if (toolName === "web_search") {
-    const query =
+  // edit / hashline_edit：pi 的 details.diff 是自研格式（+行号/‑行号/上下文），
+  // 解析成官方 code-diff 元素。write 整体覆盖无 diff（回退通用卡，不编造）。
+  const diff = diffFromToolResult(toolName, result);
+  if (diff !== null) {
+    return (
+      <CodeDiff
+        filename={diffFilename(args)}
+        additions={diff.additions}
+        deletions={diff.deletions}
+        lines={diff.lines}
+        cycle={0}
+        className="max-w-none"
+      />
+    );
+  }
+
+  if (toolName === "web_search") {    const query =
       args && typeof args === "object" && !Array.isArray(args)
         ? (args as Record<string, unknown>).query ?? (args as Record<string, unknown>).q
         : undefined;
@@ -868,6 +894,32 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
       }
     }
     return <ToolFallback {...part} />;
+  }
+
+  // submit_plan：pi 的 plan 是自由文本（无结构化步骤数组），按列表标记
+  // 提取步骤；提取不到就回退通用卡（不假装有计划）。
+  if (toolName === "submit_plan") {
+    const planArg =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>).plan
+        : undefined;
+    const parsed = parsePlanSteps(planArg);
+    if (parsed !== null) {
+      const review = planReviewState(result);
+      // pi 没有"第几步在跑"的信息：未审完 → 全部待办（activeIndex 0 表示
+      // 第 0 步进行中会让首步显示转圈，语义不符）；审完 → 全部完成。
+      // agent-plan 的 activeIndex 语义是"已完成数"，故：pending=0（全待办）、
+      // auto_approved=steps.length（全完成）。
+      const activeIndex = review === "auto_approved" ? parsed.steps.length : 0;
+      return (
+        <AgentPlan
+          steps={parsed.steps}
+          activeIndex={activeIndex}
+          data-slot="aui-submit-plan"
+          className="max-w-none"
+        />
+      );
+    }
   }
 
   return (
@@ -1295,6 +1347,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
                 <RunErrorBar />
                 <StoppedRunBanner />
                 <ApprovalCards />
+                <AskCards />
                 {/* 会话维护条（手动压缩 / 撤销 / 重做）：pi 有这些能力但
                     此前无入口（docs/pi-coverage.md 缺口）。只在非运行态显示
                     ——运行中压缩会与自动压缩打架，撤销会与工具写入竞争。 */}

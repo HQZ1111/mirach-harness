@@ -41,6 +41,7 @@ import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
 import { dispatchToolDetails } from './tool-sidecar'
+import { askBridge } from './ask-bridge'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import { sessionCatalog, sessionDisplayName, hydrateSessionMeta } from '@/components/panes/session-manage/session-catalog'
@@ -269,6 +270,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             .getState()
             .refresh()
             .catch((err) => console.error('[pi] 审批列表拉取失败', err))
+        }
+        // ask 工具问题卡（同款信号语义：流上只有 id，详情走注册表拉取）
+        if (parsed?.type === 'CUSTOM' && parsed?.name === 'ask_request') {
+          askBridge
+            .getState()
+            .refresh()
+            .catch((err) => console.error('[pi] 问题列表拉取失败', err))
         }
         // 活动面板 sidecar（todo / agent roster / jobs）：tool_execution
         // 的 details.schema 分派到对应 store。纯桥读取，不改消息段——真相

@@ -208,6 +208,84 @@ const CHILD_STATUS_TEXT: Record<ChildEntry['status'], string> = {
   killed: '已终止',
 }
 
+// ── 子代理 transcript + steer（TaskCard children 槽）────────────────
+// pi `hub agent transcript` / `steer` 的宿主面。**懒加载**：只有卡片展开
+// （children 被渲染）时才拉——不展开不发 IPC。
+const ChildTranscript: FC<{ agentId: string }> = ({ agentId }) => {
+  const [text, setText] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [input, setInput] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const raw = await invoke<{ transcript?: string }>('pi_hub_transcript', {
+          agentId,
+        })
+        if (!cancelled) setText(raw.transcript ?? '')
+      } catch (e) {
+        if (!cancelled) setErr(String(e))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [agentId])
+
+  const send = async () => {
+    const body = input.trim()
+    if (!body || busy) return
+    setBusy(true)
+    setErr(null)
+    try {
+      await invoke('pi_hub_send', { agentId, body })
+      setInput('')
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className={cn(mono, 'text-foreground/30')}>transcript</span>
+      {err !== null ? (
+        <p className="text-[12px] text-destructive">{err}</p>
+      ) : text === null ? (
+        <p className="text-[12px] text-foreground/35">加载中…</p>
+      ) : text.length === 0 ? (
+        <p className="text-[12px] text-foreground/35">（还没有输出）</p>
+      ) : (
+        <pre className="max-h-40 overflow-auto rounded-md bg-foreground/[0.04] p-2 font-mono text-[11px] leading-4 whitespace-pre-wrap break-all">
+          {text}
+        </pre>
+      )}
+      <div className="flex items-center gap-1.5">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void send()
+          }}
+          placeholder="给子代理发消息（steer）"
+          className="h-7 min-w-0 flex-1 rounded-md border border-border/60 bg-transparent px-2 text-xs outline-none focus:border-foreground/30"
+        />
+        <button
+          type="button"
+          disabled={busy || input.trim() === ''}
+          onClick={() => void send()}
+          className={cn(ghostButton, 'h-7 shrink-0 px-2 text-[11px]')}
+        >
+          发送
+        </button>
+      </div>
+    </div>
+  )
+}
+
 const AgentSection: FC = () => {
   const { children } = useAgentHubBridge()
   const [now, setNow] = useState(() => Date.now())
@@ -266,7 +344,9 @@ const AgentSection: FC = () => {
                 ) : undefined
               }
               result={CHILD_STATUS_TEXT[c.status]}
-            />
+            >
+              <ChildTranscript agentId={c.id} />
+            </TaskCard>
           )
         })}
       </div>

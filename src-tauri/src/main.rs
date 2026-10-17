@@ -636,6 +636,58 @@ fn pi_undo_history(
     state.engine.undo_history()
 }
 
+/// ask 工具的挂起问题（交互卡）。形状：`[{id, questions:[{id?,question,
+/// header?,options:[{label,description?}],recommended?,multi}]}]`——与审批卡片
+/// 同款：详情以 Rust 注册表为真相，流上只有 id 信号。
+#[tauri::command(async)]
+fn pi_ask_pending(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    Ok(serde_json::Value::Array(state.asks.list()))
+}
+
+/// 应答 ask 问题（回灌 pi `AskTool::respond_ui`）。answers 为空 +
+/// dismissed=true = 用户关掉卡片。应答未送达 = Err（不静默成功）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_ask_response(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    id: String,
+    answers: Vec<pi::ask::AskAnswer>,
+    dismissed: bool,
+) -> Result<(), String> {
+    state
+        .asks
+        .respond(&id, pi::ask::AskResponse { answers, dismissed })
+}
+
+/// 子代理 transcript（活动面板 TaskCard 展开）：pi `transcript_page`。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_hub_transcript(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    agent_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.hub_transcript(&agent_id)
+}
+
+/// 给子代理发消息（steer）：pi `registry.steer`。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_hub_send(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    agent_id: String,
+    body: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.hub_send(&agent_id, &body)
+}
+
+/// 子代理 inbox（operator→child 消息队列）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_hub_inbox(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    agent_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.hub_inbox(&agent_id)
+}
+
 #[tauri_runtime_cef::cef_entry_point]
 fn main() {
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
@@ -795,6 +847,11 @@ fn main() {
             pi_compact,
             pi_undo_redo,
             pi_undo_history,
+            pi_ask_pending,
+            pi_ask_response,
+            pi_hub_transcript,
+            pi_hub_send,
+            pi_hub_inbox,
             pi_settings::pi_get_settings,
             pi_settings::pi_set_settings,
             pi_settings::pi_get_models_config,

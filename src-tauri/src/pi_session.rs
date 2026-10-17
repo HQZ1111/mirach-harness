@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use pi::model::{ContentBlock, ImageContent, TextContent, UserContent};
 use pi::sdk::{AgentEvent, AgentSessionHandle, SessionOptions, create_agent_session};
 
-use crate::agui::{AguiImage, ApprovalRegistry, ThreadBuffers, UiAnswer};
+use crate::agui::{AguiImage, ApprovalRegistry, AskRegistry, ThreadBuffers, UiAnswer};
 
 /// block_on 的固定执行栈：16MiB（虚拟预留，惰性提交）。
 const PI_STACK_BYTES: usize = 16 * 1024 * 1024;
@@ -99,6 +99,9 @@ struct EngineShared {
     /// UiBridgeHandle（handler 桥），会话 discard/切换成功后由引擎侧
     /// 清理挂起项（P1-3 防鬼影卡片）。
     approvals: Arc<ApprovalRegistry>,
+    /// ask 工具问题注册表（交互卡）——同款共享：channel UI 的请求经
+    /// 本表登记 + 进 AG-UI 流，前端应答经 `pi_ask_response` 回灌。
+    asks: Arc<AskRegistry>,
 }
 
 /// prompt 期间的清场守卫。Drop 无法传播错误——这里的锁失败只能忽略：
@@ -206,6 +209,7 @@ impl PiEngine {
                 abort: Mutex::new(None),
                 run_counter: AtomicU64::new(0),
                 approvals: Arc::new(ApprovalRegistry::default()),
+                asks: Arc::new(AskRegistry::default()),
             }),
             side_engines: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -215,6 +219,11 @@ impl PiEngine {
     /// UiBridgeHandle，清理在会话切换路径，同一 Arc 才能对上）。
     pub fn approvals(&self) -> Arc<ApprovalRegistry> {
         Arc::clone(&self.shared.approvals)
+    }
+
+    /// ask 问题注册表共享柄（AguiState 与 PiEngine 同一份真相）。
+    pub fn asks(&self) -> Arc<AskRegistry> {
+        Arc::clone(&self.shared.asks)
     }
 
     /// 创建/打开进程内会话（provider/model 缺省读 ~/.pi settings；
@@ -280,6 +289,39 @@ impl PiEngine {
         })?
         .map_err(|e| e.to_string())?;
         let (provider, model_id) = handle.model();
+        // ask 交互卡桥（docs/pi-coverage.md）：把 AskTool 的 picker 换成
+        // channel UI——请求经 mpsc 流出，本任务登记到 asks 注册表 + 往
+        // AG-UI 常驻流推 CUSTOM name=ask_request（只带 id 作信号，详情
+        // 以注册表为真相——与审批卡片同款语义）。无 picker 时 AskTool 走
+        // ask_policy 自动回答（默认 recommended），行为不变。
+        if let Some(ask_tool) = handle.ask_tool() {
+            let asks = Arc::clone(&self.shared.asks);
+            let ask_for_task = ask_tool.clone();
+            let (tx, mut rx) = asupersync::channel::mpsc::channel::<pi::ask::AskUiRequest>(8);
+            ask_tool.install_channel_ui(tx);
+            // PiRuntime 是 current_thread 运行时（无 spawn），故用独立
+            // std 线程消费：每轮 block_on(rx.recv()) 等一条请求，登记到
+            // 注册表（详情真相）——前端经 pi_ask_pending 拉取、经
+            // pi_ask_response → AskTool::respond_ui 回灌。
+            let runtime = self.shared.runtime.runtime;
+            std::thread::Builder::new()
+                .name("pi-ask-bridge".into())
+                .spawn(move || {
+                    loop {
+                        let cx = pi::agent_cx::AgentCx::for_request();
+                        let next = runtime.block_on(rx.recv(cx.cx()));
+                        let Ok(req) = next else {
+                            // 通道关闭（会话销毁 / picker 关闭）= 正常退出
+                            break;
+                        };
+                        match serde_json::to_value(&req.request) {
+                            Ok(v) => asks.register(req.id, v, ask_for_task.clone()),
+                            Err(e) => eprintln!("[ask] 请求序列化失败: {e}"),
+                        }
+                    }
+                })
+                .map_err(|e| format!("ask bridge 线程启动失败: {e}"))?;
+        }
         *self
             .shared
             .handle
@@ -288,6 +330,8 @@ impl PiEngine {
         // P1-3：会话切换成功后清理上一会话的挂起审批（防鬼影卡片）。
         // 失败路径不清理——此时旧会话仍在位，其审批仍有效。
         self.shared.approvals.cleanup();
+        // ask 问题卡片同款清理（旧会话的 picker 已随会话销毁，卡片失效）
+        self.shared.asks.cleanup();
         Ok(format!("{provider}/{model_id}"))
     }
 
@@ -1102,6 +1146,40 @@ pub fn side_prompt(
                 .map_err(|e| format!("手动压缩失败: {e}"))?;
             Ok(serde_json::json!({ "ok": true }))
         })?
+    }
+
+    /// 子代理 transcript（活动面板 TaskCard 展开）：`agent_hub::registry()
+    /// .transcript_page(id)`——子进程逐帧写出的 JSONL 片段（已脱敏）。
+    /// 未知 id = Err（不返回空串冒充"还没输出"）。
+    pub fn hub_transcript(&self, agent_id: &str) -> Result<serde_json::Value, String> {
+        let registry = pi::agent_hub::registry()
+            .lock()
+            .map_err(|_| "agent_hub registry mutex poisoned".to_string())?;
+        let page = registry
+            .transcript_page(agent_id)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "id": agent_id, "transcript": page }))
+    }
+
+    /// 给子代理发消息（steer / bus send）：`registry.steer(id, from, body)`。
+    /// 返回 BusMessage（含 seq/from/to/body/sentMs）。
+    pub fn hub_send(&self, agent_id: &str, body: &str) -> Result<serde_json::Value, String> {
+        let mut registry = pi::agent_hub::registry()
+            .lock()
+            .map_err(|_| "agent_hub registry mutex poisoned".to_string())?;
+        let msg = registry
+            .steer(agent_id, "host", body)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(msg).map_err(|e| format!("消息序列化失败: {e}"))
+    }
+
+    /// 子代理收到的消息（operator→child 的 inbox）。
+    pub fn hub_inbox(&self, agent_id: &str) -> Result<serde_json::Value, String> {
+        let registry = pi::agent_hub::registry()
+            .lock()
+            .map_err(|_| "agent_hub registry mutex poisoned".to_string())?;
+        let msgs = registry.inbox(agent_id);
+        serde_json::to_value(msgs).map_err(|e| format!("inbox 序列化失败: {e}"))
     }
 
     /// 撤销 / 重做（docs/pi-coverage.md 缺口 G7）：pi 的会话级

@@ -118,13 +118,22 @@
 **接完了吗？** 核心链路（对话/会话/工具/检查点/分支/审批/设置/模型）**完整**。
 但有三类没接完：
 
-**A. 有 pi 能力、缺前端 UI（应补）**
-1. `edit`/`write` 的 diff 视图（组件在，缺结构化 diff 数据）
-2. `submit_plan` 的计划卡
-3. `ask` 工具的交互卡（需宿主装 picker）
-4. `hub` transcript/steer/inbox
+**A. 有 pi 能力、缺前端 UI（应补）** — **2026-10-17 全部补齐**：
+1. ✅ `edit`/`hashline_edit` 的 diff 视图 —— pi 的 details **本来就有**
+   `diff`（自研格式 `+行号/‑行号/上下文`）与 `firstChangedLine`，
+   解析成官方 `code-diff` 元素（`diff-parse.ts`）。`write` 无 diff（整体覆盖），
+   回退通用卡。
+2. ✅ `submit_plan` 的计划卡 —— `plan-parse.ts` 从自由文本提取有序步骤
+   （编号/符号列表 + `Steps:` 段），渲染官方 `agent-plan`；提取不到则回退
+   （不假装有计划）。`planReview` → 全部待办 / 全部完成。
+3. ✅ `ask` 交互卡 —— `install_channel_ui` + `AskRegistry` +
+   `pi_ask_pending`/`pi_ask_response`（应答走 `AskTool::respond_ui`）+
+   `ask-cards.tsx`（单选/多选/其他/取消）。此前 ask 只能被 `ask_policy`
+   自动回答。
+4. ✅ `hub` transcript/steer/inbox —— `pi_hub_transcript`/`pi_hub_send`/
+   `pi_hub_inbox` + `TaskCard` children 槽（懒加载 transcript + steer 输入）。
 
-**已补（2026-10-17）**：手动 `compact`（`pi_compact` + 会话维护条）、
+**已补（2026-10-17 早先）**：手动 `compact`（`pi_compact` + 会话维护条）、
 撤销/重做（`pi_undo_redo` / `pi_undo_history` + 会话维护条）。
 
 **B. 有 IPC 但 UI 弱**

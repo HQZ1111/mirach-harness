@@ -19,6 +19,9 @@ import {
   toAuiTodoItems,
   toAuiTodoStatus,
 } from './panel-adapters'
+import { diffFilename, extractDiffText, parsePiDiff } from './diff-parse'
+import { parsePlanSteps, planReviewState } from './plan-parse'
+import { parsePendingAsks } from './ask-bridge'
 
 const silenceErrors = () => vi.spyOn(console, 'error').mockImplementation(() => {})
 
@@ -341,5 +344,120 @@ describe('panel-adapters（pi 形状 → 官方 elements 形状）', () => {
       artifactTruncated: false, artifactError: null, outputTail: '', outputComplete: false,
     }
     expect(jobStages(j)).toBeNull()
+  })
+})
+
+describe('parsePiDiff（edit/hashline_edit 的 details.diff）', () => {
+  // pi generate_diff_string 的真实形状：'+{新行号} 文本' / '-{旧行号} 文本'
+  // / ' {行号} 文本' / '   ...'
+  const SAMPLE = [
+    '  1 const a = 1',
+    '+2 const b = 2',
+    '-2 const c = 3',
+    '  3 return a',
+    '   ...',
+  ].join('\n')
+
+  it('分类：context / added / removed，计数正确', () => {
+    const d = parsePiDiff(SAMPLE)!
+    expect(d.additions).toBe(1)
+    expect(d.deletions).toBe(1)
+    expect(d.lines.map((l) => l.kind)).toEqual(['context', 'added', 'removed', 'context'])
+    expect(d.lines[1]!.text).toBe('const b = 2')
+  })
+
+  it('skip marker（...）不入 lines', () => {
+    const d = parsePiDiff(SAMPLE)!
+    expect(d.lines.some((l) => l.text.includes('...'))).toBe(false)
+  })
+
+  it('保留行内前导空格（只剥行号）', () => {
+    const d = parsePiDiff('+10     indented')!
+    expect(d.lines[0]!.text).toBe('    indented')
+  })
+
+  it('空输入 / 无有效行 → null', () => {
+    expect(parsePiDiff('')).toBeNull()
+    expect(parsePiDiff('garbage')).toBeNull()
+  })
+})
+
+describe('extractDiffText / diffFilename', () => {
+  it('从 result.details.diff 取字符串', () => {
+    expect(extractDiffText({ details: { diff: '+1 x' } })).toBe('+1 x')
+  })
+  it('无 details / 非字符串 → null', () => {
+    expect(extractDiffText({})).toBeNull()
+    expect(extractDiffText(null)).toBeNull()
+    expect(extractDiffText({ details: { diff: 42 } })).toBeNull()
+  })
+  it('文件名取 args.path，缺省 "?"', () => {
+    expect(diffFilename({ path: 'a.ts' })).toBe('a.ts')
+    expect(diffFilename({})).toBe('?')
+    expect(diffFilename(null)).toBe('?')
+  })
+})
+
+describe('parsePlanSteps（submit_plan 自由文本 → 步骤）', () => {
+  it('数字编号列表', () => {
+    const p = parsePlanSteps('目标：修 bug\n1. 读代码\n2. 改代码\n3. 跑测试')!
+    expect(p.steps).toEqual(['读代码', '改代码', '跑测试'])
+  })
+
+  it('符号列表（- / * / •）', () => {
+    const p = parsePlanSteps('- 甲\n* 乙\n• 丙')!
+    expect(p.steps).toEqual(['甲', '乙', '丙'])
+  })
+
+  it('"Steps:" 段落内的缩进行', () => {
+    const p = parsePlanSteps('Goal: x\nSteps:\n    第一步\n    第二步')!
+    expect(p.steps).toEqual(['第一步', '第二步'])
+  })
+
+  it('去重保序', () => {
+    const p = parsePlanSteps('1. a\n2. b\n3. a')!
+    expect(p.steps).toEqual(['a', 'b'])
+  })
+
+  it('无可提取步骤 → null（不假装有计划）', () => {
+    expect(parsePlanSteps('一段没有列表的散文。')).toBeNull()
+    expect(parsePlanSteps('')).toBeNull()
+    expect(parsePlanSteps(undefined)).toBeNull()
+  })
+})
+
+describe('planReviewState', () => {
+  it('pending / auto_approved', () => {
+    expect(planReviewState({ details: { planReview: 'pending' } })).toBe('pending')
+    expect(planReviewState({ details: { planReview: 'auto_approved' } })).toBe('auto_approved')
+  })
+  it('缺失/未知 → null', () => {
+    expect(planReviewState({})).toBeNull()
+    expect(planReviewState({ details: { planReview: 'weird' } })).toBeNull()
+  })
+})
+
+describe('parsePendingAsks（pi_ask_pending）', () => {
+  const good = {
+    id: 'ask-1',
+    request: {
+      questions: [
+        { id: 'q1', question: '选哪个？', options: [{ label: 'A' }, { label: 'B' }], multi: false },
+      ],
+    },
+  }
+
+  it('正常行解析', () => {
+    const out = parsePendingAsks([good])
+    expect(out).toHaveLength(1)
+    expect(out[0]!.id).toBe('ask-1')
+    expect(out[0]!.request.questions[0]!.options).toHaveLength(2)
+  })
+
+  it('非数组 / 缺字段 → 丢弃 + 错误可见', () => {
+    const spy = silenceErrors()
+    expect(parsePendingAsks('x')).toEqual([])
+    expect(parsePendingAsks([{ id: 'x' }])).toEqual([])
+    expect(spy).toHaveBeenCalled()
   })
 })

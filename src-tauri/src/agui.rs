@@ -36,6 +36,8 @@ pub struct AguiState {
     buffers: Arc<Mutex<ThreadBuffers>>,
     /// 扩展 UI 请求挂起注册表（§4.4：挂载时拉取 + 应答回灌）
     pub approvals: Arc<ApprovalRegistry>,
+    /// ask 工具问题挂起注册表（交互卡；同款拉取 + 回灌）
+    pub asks: Arc<AskRegistry>,
 }
 
 #[derive(Default)]
@@ -129,6 +131,63 @@ impl ApprovalRegistry {
     }
 }
 
+/// 前端待应答的 ask 工具问题（docs/pi-coverage.md：ask 交互卡）。
+/// 与 ApprovalRegistry 同款：请求进 AG-UI 流（CUSTOM name=ask_request，
+/// 只带 id 作信号），详情以本注册表为唯一真相（重放流不复活已答卡片）。
+/// **应答不走 oneshot**：pi 的 `install_channel_ui` 内部持有 oneshot，
+/// 宿主经 `AskTool::respond_ui(id, response)` 回灌（返回 bool）。
+/// 故本表只存请求详情 + 该会话的 AskTool 克隆。
+#[derive(Clone)]
+pub struct PendingAsk {
+    pub request: serde_json::Value,
+    pub ask_tool: pi::ask::AskTool,
+}
+
+#[derive(Default)]
+pub struct AskRegistry {
+    pending: Mutex<HashMap<String, PendingAsk>>,
+}
+
+impl AskRegistry {
+    pub(crate) fn register(&self, id: String, request: serde_json::Value, ask_tool: pi::ask::AskTool) {
+        self.pending
+            .lock()
+            .expect("ask registry poisoned")
+            .insert(id, PendingAsk { request, ask_tool });
+    }
+
+    /// 挂载/刷新时拉取挂起问题（应答后移除——不复活）
+    pub fn list(&self) -> Vec<serde_json::Value> {
+        self.pending
+            .lock()
+            .expect("ask registry poisoned")
+            .values()
+            .map(|p| p.request.clone())
+            .collect()
+    }
+
+    /// 应答回灌：pi `AskTool::respond_ui` 返回 false（对端已超时/关闭）
+    /// = 错误（不静默成功）。
+    pub fn respond(&self, id: &str, response: pi::ask::AskResponse) -> Result<(), String> {
+        let pending = self
+            .pending
+            .lock()
+            .expect("ask registry poisoned")
+            .remove(id)
+            .ok_or_else(|| format!("no pending ask with id {id}"))?;
+        if pending.ask_tool.respond_ui(id, response) {
+            Ok(())
+        } else {
+            Err(format!("ask {id} 应答未送达（上游已超时或 picker 已关闭）"))
+        }
+    }
+
+    /// 会话 discard/切换后清理（防鬼影卡片；pi 侧超时自行收回）
+    pub fn cleanup(&self) {
+        self.pending.lock().expect("ask registry poisoned").clear();
+    }
+}
+
 impl AguiState {
     pub fn new() -> Self {
         // token：本地进程随机串（§0.2-3——localhost 威胁模型不需要 JWT）
@@ -144,12 +203,14 @@ impl AguiState {
         // 侧清理挂起项）——这里共享同一 Arc，登记与清理一份真相。
         let engine = crate::pi_session::PiEngine::new();
         let approvals = engine.approvals();
+        let asks = engine.asks();
         Self {
             engine,
             token,
             port: Mutex::new(None),
             buffers: Arc::new(Mutex::new(ThreadBuffers::default())),
             approvals,
+            asks,
         }
     }
 
