@@ -35,6 +35,7 @@ import { Cpu, Info, KeyRound, Layers, RefreshCw, Wrench, XIcon } from 'lucide-re
 
 import pkg from '../../../package.json'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
+import { SettingsPage } from '@/components/settings/settings-page'
 
 /** pi 模型目录条目（pi_list_models 返回形状，同 composer-wired）。 */
 interface PiModelEntry {
@@ -419,6 +420,8 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
   // ── 主从两栏状态 ──
   // 选中节：左导航高亮 + 右栏条件渲染的依据，默认落模型节。
   const [activeSection, setActiveSection] = useState<SectionId>('model')
+  /** 外壳：'classic' = 本文件自建 6 段；'openhuman' = openhuman 移植版 */
+  const [shell, setShell] = useState<'classic' | 'openhuman'>('classic')
   // 数字字段草稿（键 = 段.键名，如 compaction.reserve_tokens）——从
   // SetNumField 本地 state 提升到此，条件渲染下切节不丢未落盘输入。
   const [numDrafts, setNumDrafts] = useState<Record<string, string | null>>({})
@@ -765,12 +768,35 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
       >
         <div className="set-header">
           <h2 className="set-title">设置</h2>
+          {/* 外壳切换（2026-10-17）：openhuman 移植版 ⇄ 自建版。
+              移植版 = openhuman 两栏导航 + 26 个面板（能接的接 pi，缺引擎
+              数据的由面板内标注）；自建版 = 本文件原有 6 段。两者共存，
+              便于对照与回退（用户要求"其他直接用"，故保留原版不删）。 */}
+          <button
+            aria-pressed={shell === 'openhuman'}
+            className="set-close"
+            onClick={() => setShell((s) => (s === 'openhuman' ? 'classic' : 'openhuman'))}
+            style={{ width: 'auto', paddingInline: 8 }}
+            title="切换设置页外壳"
+            type="button"
+          >
+            {shell === 'openhuman' ? '自建版' : 'openhuman 版'}
+          </button>
           <button aria-label="关闭设置" className="set-close" onClick={onClose} type="button">
             <XIcon size={14} />
           </button>
         </div>
         {/* 主从两栏（.set-card 是 grid：头栏横跨，左导航 + 右内容两列落位）。
             左导航：图标 + 名称，选中态高亮；↑/↓ 换选、Enter/Space 原生 click。 */}
+        {shell === 'openhuman' ? (
+          /* openhuman 移植版：自带两栏导航 + 26 个面板（见
+             components/settings/settings-page.tsx）。外面包一层撑满的容器，
+             让它自己的 flex 布局吃到整个内容区。 */
+          <div className="set-content" style={{ padding: 0, gridColumn: '1 / -1' }}>
+            <SettingsPage onClose={onClose} />
+          </div>
+        ) : (
+        <>
         <nav aria-label="设置节" className="set-nav" onKeyDown={onNavKeyDown}>
           {SECTIONS.map((s) => {
             const Icon = s.icon
@@ -1209,6 +1235,8 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
           </section>
           )}
         </div>
+        </>
+        )}
       </div>
     </div>,
     document.body,
