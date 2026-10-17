@@ -269,6 +269,30 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     ③**A22 清账**——crates.io a2ui v0.0.0 占位（后端全桌面 GUI，无
     Web）；a2ui-rs 不存在。A2UI 三层全自建，维持 MVP 后（文档新增 §9）。
     ④全量回归 30/30（constraints/rowfix/pane-registry/turn-actor）。
+  - **活动面板（2026-10-16，提交 e85c25f）**：对话栏右上角状态面板 =
+    ZCode `ConversationStatusPanel`（`G:\ZCode-main\packages\ui\src\v4\`，
+    2086 行）的 mirach 移植版。**能做的接真数据、缺数据的做 UI 并标注**
+    （用户口径：别砍）：
+    - **真数据三分区**：待办（`todo` 工具 `todo_list.v1` details →
+      `todo-store`）/ 子代理（`agent_hub::registry().roster()` →
+      `pi_hub_roster` IPC → `agent-hub-store`）/ 终端（`jobs::list(sessionId)`
+      → `pi_job_list` IPC → `jobs-store`）。
+    - **数据通路两条**：①拉取（挂载时 `pi_hub_roster`/`pi_job_list`——
+      registry 是 pi **进程级全局单例**（`agent_hub.rs:165` pub /
+      `jobs.rs:2205` pub），宿主直接拉，不依赖模型调 hub/jobs 工具）；
+      ②事件（`CUSTOM tool_execution` 的 `details.schema` 经 `tool-sidecar.ts`
+      在 runtime 边界分派到 store——`ToolOutput.details` 序列化存活，
+      `agui.rs` mapper 整包透传 partial/result，**已加 3 个回归测试**）。
+    - **引擎侧缺数据分区**（UI 保留 + 占位行）：workflow run / goal / git
+      变更统计——pi 内核无这些概念。**缺口清单见 `docs/engine-gaps.md`**
+      （G1-G6，每条留"自建/等上游"决策位，待用户定）。
+    - 组件：`src/components/assistant-ui/conversation-status-panel.tsx`
+      （浮动卡 + mini 胶囊 + 分区折叠）；挂点 `assistant-thread-pane.tsx`
+      右上角（`.assistant-thread-pane` 已 position:relative）。
+    - 验证：cargo check 0 / agui 37 测试 / tsc 0 / vitest 全绿 + 新增 20 用例
+      （`status-panel-stores.test.ts`）/ vite build OK。
+    - **未接线（见 gaps G5）**：面板 Stop 按钮是禁用占位——`hub agent kill` /
+      `jobs cancel` 的宿主 IPC 未加（能力在 pi 侧 pub，成本低，待定）。
 
 ## 工具（`scripts/`）
 

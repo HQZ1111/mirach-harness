@@ -466,6 +466,17 @@ export function DockviewShell() {
             // 最近边）。组内容目标与整布局边缘目标同源消费（源码实证：
             // 两者都读 host.options.dropPositionResolver）。
             dropPositionResolver={radialDropResolver}
+            // DnD 后端 = pointer（2026-10-16 实锤：面板标签拖出分栏失效的根因）
+            // ——CEF 152 窗口模式下 **HTML5 DnD 的 drop 事件根本不派发**：最小
+            // 对照（页面内裸 <div draggable> + 落区 preventDefault）实测
+            // dragstart=1/dragover=38/drop=0/dragend=1——与 dockview、本仓库代码
+            // 全无关，是 CEF windowed 模式的平台缺口。dockview 的 dndStrategy
+            // 文档正为此设 'pointer'（"useful in environments where HTML5
+            // drag-and-drop is unreliable … embedded webviews"）：改走
+            // pointerdown/move/up 自绘拖拽，绕开缺失的 drop。
+            // 代价：跨窗（popout）HTML5 拖拽与原生 drag image 不可用——本应用
+            // 无 popout 分栏需求（三栏定式），可接受。
+            dndStrategy="pointer"
             onReady={onReady}
             className="dockview-theme-light"
           />

@@ -1446,6 +1446,49 @@ pub fn side_prompt(
         }))
     }
 
+    /// 子代理名册（活动面板 Agent 分区数据面）：读 pi 进程级
+    /// `agent_hub::registry().roster()`——`ChildEntry[]`（id/name/kind/task/
+    /// pid/status/startedMs/finishedMs/outputBytes/transcriptPath/steerPath/
+    /// revivedFrom）。registry 是进程级单例（`docs/engine-gaps.md` §1），
+    /// 宿主直接拉，不依赖模型调 `hub` 工具。**无活动会话 = 空名册**（不是
+    /// 错误：registry 与会话解耦，新会话前空数组是诚实值）；锁中毒 = Err
+    /// 传播（兜底禁令）。
+    pub fn hub_roster(&self) -> Result<serde_json::Value, String> {
+        let registry = pi::agent_hub::registry()
+            .lock()
+            .map_err(|_| "agent_hub registry mutex poisoned".to_string())?;
+        let entries = registry.roster();
+        serde_json::to_value(entries).map_err(|e| format!("子代理名册序列化失败: {e}"))
+    }
+
+    /// 后台 bash 任务列表（活动面板 Terminal 分区数据面）：pi
+    /// `jobs::list(owner_session_id)`——按 owner session 过滤的
+    /// `JobSnapshot[]`（id/command/startedAtMs/status/exitCode/pid/
+    /// artifactPath/outputTail/...）。owner session id 从活动会话取
+    /// （`handle.state().session_id`）；无活动会话 = Err（jobs 必须按
+    /// session 归属，没有 session 就没有可归属的任务——不返回全量冒充）。
+    pub fn job_list(&self) -> Result<serde_json::Value, String> {
+        let shared = Arc::clone(&self.shared);
+        let session_id = on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared
+                .runtime
+                .block_on(handle.state())
+                .map_err(|e| e.to_string())
+        })??.session_id;
+        // 无 session_id = 无活动会话的诚实空列表（job 无从归属；与
+        // hub_roster 同语义——不冒充、不降级成全量）。
+        let Some(owner) = session_id.filter(|s| !s.is_empty()) else {
+            return Ok(serde_json::Value::Array(vec![]));
+        };
+        let jobs = pi::jobs::list(&owner).map_err(|e| format!("后台任务清单拉取失败: {e}"))?;
+        serde_json::to_value(jobs).map_err(|e| format!("后台任务清单序列化失败: {e}"))
+    }
+
     /// 会话消息历史（pi Message 序列化；camelCase tag=role）。
     pub fn messages(&self) -> Result<serde_json::Value, String> {
         let shared = Arc::clone(&self.shared);

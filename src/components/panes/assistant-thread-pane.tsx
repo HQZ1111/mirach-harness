@@ -9,6 +9,7 @@
 import { Thread } from '@/components/thread.aui'
 import { MainTint } from '@/components/layout/main-tint'
 import { ChatTabLabel } from '@/components/layout/chat-tab-label'
+import { ConversationStatusPanel } from '@/components/assistant-ui/conversation-status-panel'
 
 export function AssistantThreadPane() {
   return (
@@ -16,6 +17,7 @@ export function AssistantThreadPane() {
       <MainTint />
       <ChatTabLabel />
       <Thread />
+      <ConversationStatusPanel />
     </div>
   )
 }

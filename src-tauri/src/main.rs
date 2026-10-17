@@ -554,6 +554,29 @@ fn pi_switch_branch(
     state.engine.switch_branch(&leaf_id)
 }
 
+// ── 活动面板数据面（对话栏右上角 ConversationStatusPanel）──────────────
+// 子代理名册与后台任务列表：pi 进程级 registry 直接拉（不依赖模型调
+// hub/jobs 工具）。缺 data 概念（workflow run / goal）见 docs/engine-gaps.md。
+
+/// 子代理名册：`agent_hub::registry().roster()` → `ChildEntry[]`
+/// （id/name/kind/task/pid/status/startedMs/finishedMs/outputBytes/...）。
+/// 无活动会话 = 空名册（registry 与会话解耦）。
+#[tauri::command(async)]
+fn pi_hub_roster(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.hub_roster()
+}
+
+/// 后台 bash 任务列表：`jobs::list(ownerSessionId)` → `JobSnapshot[]`。
+/// 无活动会话 = 空列表（任务无从归属）。
+#[tauri::command(async)]
+fn pi_job_list(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.job_list()
+}
+
 #[tauri_runtime_cef::cef_entry_point]
 fn main() {
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
@@ -705,6 +728,8 @@ fn main() {
             pi_get_fork_points,
             pi_list_sibling_branches,
             pi_switch_branch,
+            pi_hub_roster,
+            pi_job_list,
             pi_settings::pi_get_settings,
             pi_settings::pi_set_settings,
             pi_settings::pi_get_models_config,

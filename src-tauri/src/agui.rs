@@ -923,6 +923,75 @@ mod tests {
         assert_eq!(v[0]["value"]["result"]["isError"], true);
     }
 
+    /// 带 details 的工具输出（活动面板数据面：todo/subagent/jobs 的
+    /// schema payload 都走 ToolOutput.details）。
+    fn tool_out_with_details(details: serde_json::Value) -> ToolOutput {
+        ToolOutput {
+            content: vec![],
+            details: Some(details),
+            is_error: false,
+        }
+    }
+
+    /// details 端到端直通（防回归）：todo/subagent/jobs schema payload 经
+    /// `tool_execution` update/end 的 partial/result 原样到前端——前端归约器
+    /// 按 `value.partial.details.schema` 分派（turn-actor.ts）。若 mapper 哪天
+    /// 改成只透 content，本测试立刻红。
+    #[test]
+    fn tool_execution_update_passes_details_through() {
+        let details = serde_json::json!({
+            "schema": "todo_list.v1",
+            "phases": [{ "tasks": [{ "content": "写文档", "state": "in_progress" }] }],
+        });
+        let e = AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "tc-todo".into(),
+            tool_name: "todo".into(),
+            args: serde_json::json!({}),
+            partial_result: tool_out_with_details(details.clone()),
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(v[0]["value"]["partial"]["details"]["schema"], "todo_list.v1");
+        assert_eq!(
+            v[0]["value"]["partial"]["details"]["phases"][0]["tasks"][0]["content"],
+            "写文档"
+        );
+        assert_eq!(v[0]["value"]["partial"]["details"], details);
+    }
+
+    #[test]
+    fn tool_execution_end_passes_details_through() {
+        let details = serde_json::json!({
+            "schema": "pi.agent-hub.roster/v1",
+            "children": [{ "id": "scout-1", "status": "running" }],
+        });
+        let e = AgentEvent::ToolExecutionEnd {
+            tool_call_id: "tc-hub".into(),
+            tool_name: "hub".into(),
+            result: tool_out_with_details(details.clone()),
+            is_error: false,
+        };
+        let v = map_agent_event(&e);
+        assert_eq!(
+            v[0]["value"]["result"]["details"]["schema"],
+            "pi.agent-hub.roster/v1"
+        );
+        assert_eq!(v[0]["value"]["result"]["details"], details);
+    }
+
+    /// details 缺省时不注入空对象（None → 字段缺席，不是 `{}`）：前端据
+    /// 「有无 details」区分「工具无结构化输出」与「空结构化输出」。
+    #[test]
+    fn tool_execution_without_details_omits_field() {
+        let e = AgentEvent::ToolExecutionEnd {
+            tool_call_id: "tc-plain".into(),
+            tool_name: "read".into(),
+            result: tool_out(),
+            is_error: false,
+        };
+        let v = map_agent_event(&e);
+        assert!(v[0]["value"]["result"]["details"].is_null());
+    }
+
     #[test]
     fn turn_end_maps_step_finished() {
         let e = AgentEvent::TurnEnd {
