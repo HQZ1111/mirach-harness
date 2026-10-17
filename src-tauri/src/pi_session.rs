@@ -1561,24 +1561,29 @@ pub fn side_prompt(
     /// `jobs::list(owner_session_id)`——按 owner session 过滤的
     /// `JobSnapshot[]`（id/command/startedAtMs/status/exitCode/pid/
     /// artifactPath/outputTail/...）。owner session id 从活动会话取
-    /// （`handle.state().session_id`）；无活动会话 = Err（jobs 必须按
-    /// session 归属，没有 session 就没有可归属的任务——不返回全量冒充）。
+    /// （`handle.state().session_id`）；无活动会话 = 空列表（诚实空态——
+    /// job 无从归属，不返回全量冒充）。
     pub fn job_list(&self) -> Result<serde_json::Value, String> {
         let shared = Arc::clone(&self.shared);
-        let session_id = on_big_stack(move || {
+        let state = on_big_stack(move || {
             let mut guard = shared
                 .handle
                 .lock()
                 .map_err(|_| "pi handle mutex poisoned".to_string())?;
-            let handle = guard.as_mut().ok_or("no active session")?;
-            shared
+            // 无活动会话 = 空列表（与 hub_roster 同语义：无会话即无从归属，
+            // 诚实空态而非错误——面板挂载时首启/New Chat 都会到这里）。
+            let Some(handle) = guard.as_mut() else {
+                return Ok::<_, String>(None);
+            };
+            let state = shared
                 .runtime
                 .block_on(handle.state())
-                .map_err(|e| e.to_string())
-        })??.session_id;
+                .map_err(|e| e.to_string())?;
+            Ok(Some(state.session_id))
+        })??;
         // 无 session_id = 无活动会话的诚实空列表（job 无从归属；与
         // hub_roster 同语义——不冒充、不降级成全量）。
-        let Some(owner) = session_id.filter(|s| !s.is_empty()) else {
+        let Some(owner) = state.flatten().filter(|s| !s.is_empty()) else {
             return Ok(serde_json::Value::Array(vec![]));
         };
         let jobs = pi::jobs::list(&owner).map_err(|e| format!("后台任务清单拉取失败: {e}"))?;

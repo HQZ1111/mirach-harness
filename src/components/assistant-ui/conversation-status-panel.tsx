@@ -513,6 +513,10 @@ const SummaryPill: FC<{ onExpand: () => void }> = ({ onExpand }) => {
 // ── 面板主体 ───────────────────────────────────────────────────────
 export const ConversationStatusPanel: FC = () => {
   const [collapsed, setCollapsed] = useState(false)
+  const { todo } = useTodoBridge()
+  const { children } = useAgentHubBridge()
+  const { jobs } = useJobsBridge()
+  const { stat: gitStat } = useGitBridge()
   // 活动会话工作区（git 变更统计的目标目录）；数据源与对话栏列头同源
   const cwd = useStore(sessionCatalog, (s) =>
     sessionProjectCwd(s.activeId ? s.entries[s.activeId] : undefined, s.pendingCwd),
@@ -530,9 +534,11 @@ export const ConversationStatusPanel: FC = () => {
   }, [cwd])
 
   const hasRealContent =
-    useTodoBridge().todo !== null ||
-    useAgentHubBridge().children.length > 0 ||
-    useJobsBridge().jobs.length > 0
+    todo !== null ||
+    children.length > 0 ||
+    jobs.length > 0 ||
+    (gitStat?.isRepository === true &&
+      (gitStat.added + gitStat.removed > 0 || gitStat.changedFiles > 0))
 
   if (collapsed) {
     return (
@@ -566,7 +572,7 @@ export const ConversationStatusPanel: FC = () => {
         <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-2">
           {!hasRealContent && (
             <p className="px-2 pb-1 text-[12px] text-foreground/35">
-              暂无活动。待办 / 子代理 / 终端任务出现时自动显示。
+              暂无活动。待办 / 子代理 / 终端任务 / 工作区变更出现时自动显示。
             </p>
           )}
           <TodoSection />
