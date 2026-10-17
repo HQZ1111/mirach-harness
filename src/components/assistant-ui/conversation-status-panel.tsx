@@ -50,6 +50,12 @@ import {
   useJobsBridge,
   type JobSnapshot,
 } from '@/components/assistant-ui/jobs-store'
+import { gitBridge, useGitBridge } from '@/components/assistant-ui/git-store'
+import { useStore } from 'zustand'
+import {
+  sessionCatalog,
+  sessionProjectCwd,
+} from '@/components/panes/session-manage/session-catalog'
 import {
   flatTasks,
   todoBridge,
@@ -408,16 +414,49 @@ const GoalSection: FC = () => (
   </StatusSection>
 )
 
-const GitSection: FC = () => (
-  <StatusSection title="环境" defaultOpen={false}>
-    <ul className="space-y-0">
-      <EngineGapRow
-        what="本会话改动 +N/-M 统计"
-        why="引擎侧缺数据：宿主可自建（git diff --numstat），docs/engine-gaps.md G6"
-      />
-    </ul>
-  </StatusSection>
-)
+const GitSection: FC = () => {
+  const { stat } = useGitBridge()
+  // 非仓库 / 无变更 → 隐藏分区（与 ZCode buildGitModel 的 added+removed<=0 同款）
+  if (stat === null || !stat.isRepository) return null
+  const hasChanges = stat.added + stat.removed > 0 || stat.changedFiles > 0
+  if (!hasChanges) return null
+  return (
+    <StatusSection
+      title="环境"
+      defaultOpen
+      trailing={
+        <span className="flex items-center gap-1.5">
+          <span className="text-emerald-600 dark:text-emerald-400">+{stat.added}</span>
+          <span className="text-red-600 dark:text-red-400">-{stat.removed}</span>
+        </span>
+      }
+    >
+      <ul className="space-y-0">
+        <li className="flex items-center gap-2 rounded-lg px-2 py-1.5">
+          <FileDiffIcon className="size-4 shrink-0 text-foreground/45" />
+          <span className="min-w-0 flex-1 truncate text-[13px] text-foreground/90">
+            {stat.changedFiles} 个文件变更
+          </span>
+          <span className={cn(mono, 'shrink-0 tabular-nums')}>
+            <span className="text-emerald-600 dark:text-emerald-400">+{stat.added}</span>{' '}
+            <span className="text-red-600 dark:text-red-400">-{stat.removed}</span>
+          </span>
+        </li>
+        {stat.branch !== null && (
+          <li className="flex items-center gap-2 rounded-lg px-2 py-1.5">
+            <CircleIcon className="size-3.5 shrink-0 text-foreground/30" />
+            <span className={cn(mono, 'min-w-0 flex-1 truncate text-foreground/55')}>
+              {stat.branch}
+            </span>
+          </li>
+        )}
+      </ul>
+      <p className="px-2 pb-1 text-[11px] leading-4 text-foreground/30">
+        工作区当前状态（相对 HEAD 的未提交变更，非本会话改动）
+      </p>
+    </StatusSection>
+  )
+}
 
 // ── mini 胶囊（收起态：优先级最高的一件事）─────────────────────────
 const SummaryPill: FC<{ onExpand: () => void }> = ({ onExpand }) => {
@@ -474,15 +513,21 @@ const SummaryPill: FC<{ onExpand: () => void }> = ({ onExpand }) => {
 // ── 面板主体 ───────────────────────────────────────────────────────
 export const ConversationStatusPanel: FC = () => {
   const [collapsed, setCollapsed] = useState(false)
+  // 活动会话工作区（git 变更统计的目标目录）；数据源与对话栏列头同源
+  const cwd = useStore(sessionCatalog, (s) =>
+    sessionProjectCwd(s.activeId ? s.entries[s.activeId] : undefined, s.pendingCwd),
+  )
 
   // 挂载/聚焦拉取：registry 与会话解耦，模型没调 hub/jobs 工具时也要能看到
   // 已注册的子代理与后台任务（真相在 pi 进程级 registry）；待办同理——重放
-  // 会话 Custom 条目（重启后模型未再调 todo 工具前也能显示历史待办，G2）。
+  // 会话 Custom 条目（重启后模型未再调 todo 工具前也能显示历史待办，G2）；
+  // git 变更统计（G6，工作区当前状态）。
   useEffect(() => {
     void agentHubBridge.getState().refresh()
     void jobsBridge.getState().refresh()
     void todoBridge.getState().refresh()
-  }, [])
+    void gitBridge.getState().refresh(cwd ?? null)
+  }, [cwd])
 
   const hasRealContent =
     useTodoBridge().todo !== null ||

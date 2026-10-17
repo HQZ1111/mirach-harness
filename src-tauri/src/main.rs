@@ -771,6 +771,7 @@ fn main() {
             pi_resources::pi_list_resources,
             fs::fs_list,
             fs::fs_git_root,
+            fs::fs_git_diff_stat,
             fs::fs_read_data_url,
             fs::fs_write_text_file,
             terminal::terminal_spawn,

@@ -19,10 +19,10 @@
 | 会话计划 sessionPlans | `ToolCallRow` ExitPlanMode | `submit_plan` 工具（details 无结构化步骤） | ⚠️ 见 G1 |
 | ~~工作流 workflow~~ | `WorkflowRunState[]` | **无** | ❌ 见 G3（UI 占位） |
 | ~~目标 goal~~ | `GoalState` | **无**（仅 handoff 文本） | ❌ 见 G4（UI 占位） |
-| ~~环境 git 变更~~ | `gitWorktreeChangeSummary` | 部分（宿主可自建） | ⚠️ 见 G6（UI 占位） |
+| ~~环境 git 变更~~ | `gitWorktreeChangeSummary` | 宿主自建（`git diff --numstat`） | ✅ 已接（G6） |
 
-**已解：** G2（待办拉取面，`pi_todo_state`）/ G5（Stop 接线，`pi_hub_kill` /
-`pi_job_cancel`）——2026-10-16 自建完成。**待定：** G1 / G3 / G4 / G6。
+**已解：** G2（待办拉取面）/ G5（Stop 接线）/ G6（git 变更统计）——
+2026-10-16 自建完成。**待定：** G1 / G3 / G4。
 
 ---
 
@@ -160,7 +160,11 @@ pi **没有**"本会话改动统计"。相关但不同：`worktree_iso.rs`（age
 注意：这是**工作区当前状态**，不是"本会话改动"（若用户手动改了文件也算进
 去）——语义要对齐 ZCode 的话，需要 ZCode 那种 taskChangeSummary 概念。
 
-**裁决**：待定（可自建，但语义要定清楚）。
+**裁决**：✅ **已自建（2026-10-16）**——`fs_git_diff_stat` IPC（`fs.rs`：
+`git diff --numstat HEAD` + `git status --porcelain` + `rev-parse
+--abbrev-ref`）+ 前端 `gitBridge` + 面板 Environment 分区（有变更才显示；
+底部注明"工作区当前状态，非本会话改动"）。6 个 Rust 单测（numstat 普通/
+二进制/空/畸形 + porcelain 计数/排除忽略项）+ 4 个前端用例。
 
 ---
 

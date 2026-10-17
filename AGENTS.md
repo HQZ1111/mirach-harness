@@ -297,6 +297,11 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
       .mark_killed`）/ `pi_job_cancel`（`jobs::cancel_async`）——面板 Stop
       按钮已接线（成功后 refresh，失败 console.error 可见）。
     - 验证（同轮）：cargo test 47（+4 待办重放）/ tsc 0 / vitest 全绿。
+    - **G6 git 变更统计（2026-10-16 补）**：`fs_git_diff_stat` IPC（`git diff
+      --numstat HEAD` + `status --porcelain` + `rev-parse`）+ `git-store` +
+      面板「环境」分区（有变更才显示；底部注明"工作区当前状态，非本会话
+      改动"）。6 Rust 单测 + 4 前端用例。
+    - 验证（G6 轮）：cargo test 53 / tsc 0 / vitest 全绿（24 面板用例）。
 
 ## 工具（`scripts/`）
 

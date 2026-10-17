@@ -252,3 +252,177 @@ pub fn fs_write_text_file(path: String, contents: String) -> Result<(), String> 
     fs::write(PathBuf::from(trimmed), contents.into_bytes())
         .map_err(|error| error_code(&error).to_string())
 }
+
+// ── Git 变更统计（活动面板「环境」分区，docs/engine-gaps.md G6）─────────
+
+/// 工作区变更统计（活动面板 Environment 分区数据面）：跑
+/// `git -C <dir> diff --numstat HEAD` + `git -C <dir> status --porcelain`
+/// 汇总为 `{isRepository, added, removed, changedFiles, branch}`。
+///
+/// **语义（对齐 ZCode 的诚实口径）**：这是**工作区当前状态**（相对 HEAD 的
+/// 未提交变更），不是"本会话改动"——用户手动改的文件也算。要精确到"本会话"
+/// 需 ZCode 那种 taskChangeSummary 概念（pi 无，见 G6）。
+///
+/// - 非仓库 / git 不可用 → `isRepository:false`（渲染层隐藏分区，不报错）。
+/// - `--numstat` 输出 `added\tremoved\tpath`（二进制文件为 `-\t-\tpath`，
+///   计为 0/0 但计入 changedFiles）。
+/// - git 命令失败（非仓库以外，如权限）→ Err 传播（不静默降级为 0）。
+#[tauri::command]
+pub fn fs_git_diff_stat(path: String) -> Result<GitDiffStat, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("invalid-path".to_string());
+    }
+    let dir = PathBuf::from(trimmed);
+    let root = match fs_git_root(trimmed.to_string()) {
+        Some(r) => r,
+        None => return Ok(GitDiffStat::not_a_repo()),
+    };
+
+    let numstat = git_output(&dir, &["diff", "--numstat", "HEAD"])?;
+    let status = git_output(&dir, &["status", "--porcelain"])?;
+    let branch = git_output(&dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .ok();
+
+    let (added, removed, changed) = parse_numstat(&numstat);
+    let changed_files = changed.max(parse_porcelain_changed(&status));
+
+    Ok(GitDiffStat {
+        is_repository: true,
+        root,
+        branch,
+        added,
+        removed,
+        changed_files,
+    })
+}
+
+/// `git -C <dir> <args>` 的 stdout；退出码非 0 → Err（含 stderr 摘要）。
+fn git_output(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git 不可用: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git {:?} 失败: {}", args, stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// 解析 `git diff --numstat HEAD`：每行 `added\tremoved\tpath`（二进制为
+/// `-\t-`）。返回 (added, removed, 文件数)。空行/畸形行跳过（不 panic）。
+fn parse_numstat(raw: &str) -> (u64, u64, usize) {
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    let mut files = 0usize;
+    for line in raw.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, '\t');
+        let (Some(a), Some(r)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if parts.next().is_none() {
+            continue; // 缺路径列的畸形行
+        }
+        // 二进制文件是 "-"：计文件数，不计行数
+        added += a.parse::<u64>().unwrap_or(0);
+        removed += r.parse::<u64>().unwrap_or(0);
+        files += 1;
+    }
+    (added, removed, files)
+}
+
+/// 解析 `git status --porcelain` 的变更条目数（含未跟踪 `??`；`!!` 忽略项
+/// 不计）。
+fn parse_porcelain_changed(raw: &str) -> usize {
+    raw.lines()
+        .filter(|l| {
+            let l = l.trim_end();
+            !l.is_empty() && !l.starts_with("!!")
+        })
+        .count()
+}
+
+/// 工作区变更统计（`fs_git_diff_stat` 返回体；serde camelCase）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffStat {
+    #[serde(rename = "isRepository")]
+    is_repository: bool,
+    /// 仓库根（非仓库时为空串）
+    root: String,
+    /// 当前分支（detached 时 = "HEAD"；非仓库/查询失败 = null）
+    branch: Option<String>,
+    added: u64,
+    removed: u64,
+    changed_files: usize,
+}
+
+impl GitDiffStat {
+    fn not_a_repo() -> Self {
+        Self {
+            is_repository: false,
+            root: String::new(),
+            branch: None,
+            added: 0,
+            removed: 0,
+            changed_files: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod git_stat_tests {
+    //! `fs_git_diff_stat` 的纯解析单测（不跑 git——git 调用是端到端行为，
+    //! 留冒烟）。覆盖 numstat（普通/二进制/空/畸形）与 porcelain 计数
+    //! （含未跟踪、忽略项排除）。
+
+    use super::*;
+
+    #[test]
+    fn numstat_sums_normal_lines() {
+        let raw = "10\t2\tsrc/a.rs\n3\t0\tsrc/b.rs\n";
+        assert_eq!(parse_numstat(raw), (13, 2, 2));
+    }
+
+    #[test]
+    fn numstat_counts_binary_as_file_only() {
+        // 二进制："-\t-\tpath" — 计文件数，行数不计
+        let raw = "-\t-\tassets/logo.png\n5\t1\tsrc/x.rs\n";
+        assert_eq!(parse_numstat(raw), (5, 1, 2));
+    }
+
+    #[test]
+    fn numstat_empty_and_malformed_skipped() {
+        let raw = "\n\nbogus\n1\t2\n";
+        // "bogus" 无制表符、"1\t2" 缺路径列 → 都跳过；结果零
+        assert_eq!(parse_numstat(raw), (0, 0, 0));
+    }
+
+    #[test]
+    fn porcelain_counts_entries_excludes_ignored() {
+        let raw = " M src/a.rs\n?? new.txt\n!! ignored.log\n M src/b.rs\n";
+        assert_eq!(parse_porcelain_changed(raw), 3);
+    }
+
+    #[test]
+    fn porcelain_empty_is_zero() {
+        assert_eq!(parse_porcelain_changed(""), 0);
+    }
+
+    #[test]
+    fn not_a_repo_shape() {
+        let s = GitDiffStat::not_a_repo();
+        assert!(!s.is_repository);
+        assert_eq!(s.added, 0);
+        assert_eq!(s.changed_files, 0);
+        assert!(s.branch.is_none());
+    }
+}

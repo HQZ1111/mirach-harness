@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { agentHubBridge, isSettled, parseChildEntries } from './agent-hub-store'
 import { jobsBridge, parseJobs } from './jobs-store'
+import { gitBridge, parseGitDiffStat } from './git-store'
 import { flatTasks, parseTodoList, todoBridge } from './todo-store'
 import { dispatchToolDetails } from './tool-sidecar'
 
@@ -19,6 +20,7 @@ beforeEach(() => {
   agentHubBridge.setState({ children: [] })
   jobsBridge.setState({ jobs: [] })
   todoBridge.setState({ todo: null })
+  gitBridge.setState({ stat: null })
 })
 
 describe('isSettled（ChildStatus 终态，与 pi ChildStatus::settled 同语义）', () => {
@@ -221,5 +223,56 @@ describe('dispatchToolDetails（CUSTOM tool_execution → store 分派）', () =
     expect(dispatchToolDetails('tool_execution', { phase: 'start' })).toBe(false)
     expect(dispatchToolDetails('compaction', {})).toBe(false)
     expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('parseGitDiffStat（fs_git_diff_stat）', () => {
+  it('正常行解析（含 branch）', () => {
+    const out = parseGitDiffStat({
+      isRepository: true,
+      root: 'G:/x',
+      branch: 'main',
+      added: 13,
+      removed: 2,
+      changedFiles: 2,
+    })
+    expect(out).toEqual({
+      isRepository: true,
+      root: 'G:/x',
+      branch: 'main',
+      added: 13,
+      removed: 2,
+      changedFiles: 2,
+    })
+  })
+
+  it('非仓库（branch null）解析', () => {
+    const out = parseGitDiffStat({
+      isRepository: false,
+      root: '',
+      branch: null,
+      added: 0,
+      removed: 0,
+      changedFiles: 0,
+    })
+    expect(out?.isRepository).toBe(false)
+    expect(out?.branch).toBeNull()
+  })
+
+  it('字段缺失/非法 → null + 错误可见', () => {
+    const spy = silenceErrors()
+    expect(parseGitDiffStat({ isRepository: true })).toBeNull()
+    expect(parseGitDiffStat('nope')).toBeNull()
+    expect(spy).toHaveBeenCalled()
+  })
+
+  it('refresh(null/空) → 清投影不报错', async () => {
+    gitBridge.setState({
+      stat: { isRepository: true, root: 'r', branch: null, added: 1, removed: 0, changedFiles: 1 },
+    })
+    await gitBridge.getState().refresh(null)
+    expect(gitBridge.getState().stat).toBeNull()
+    await gitBridge.getState().refresh('   ')
+    expect(gitBridge.getState().stat).toBeNull()
   })
 })
