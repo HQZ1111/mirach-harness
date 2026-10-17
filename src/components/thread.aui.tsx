@@ -84,6 +84,10 @@ import {
   planReviewState,
 } from "@/components/assistant-ui/plan-parse";
 import {
+  describeToolCall,
+  toolLabelZh,
+} from "@/components/assistant-ui/tool-presentation/tool-presentation";
+import {
   diffFilename,
   diffFromToolResult,
 } from "@/components/assistant-ui/diff-parse";
@@ -799,16 +803,25 @@ const GenericToolCall: FC<{
   // 官方 useToolCallElapsed：读 part.timing，运行中每秒 tick；无 timing
   // 时 undefined（不显示——不编造时长）。
   const elapsedMs = useToolCallElapsed();
+  // 工具呈现（openhuman toolPresentation 移植）：真实动词（"读取文件" /
+  // "正在搜索代码"）+ 目标 chip（路径缩短 / URL 清洗）。未知工具走兜底。
+  const pres = describeToolCall({
+    name: toolName,
+    args,
+    status: running ? "running" : "success",
+  });
+  const label = toolLabelZh(pres.phrase, running);
+  const chipText = pres.chip;
   return (
     <ToolCall
-      label={toolName}
+      label={label}
       activeLabel={
         elapsedMs === undefined
-          ? `${toolName} 运行中`
-          : `${toolName} 运行中 · ${(elapsedMs / 1000).toFixed(1)}s`
+          ? `正在${label}`
+          : `正在${label} · ${(elapsedMs / 1000).toFixed(1)}s`
       }
-      query={summarizeArgs(args)}
-      request={argsText || summarizeArgs(args)}
+      query={chipText ?? ""}
+      request={argsText || JSON.stringify(args ?? {}, null, 1)}
       result={toolResultText(result)}
       running={running}
       open={open}
