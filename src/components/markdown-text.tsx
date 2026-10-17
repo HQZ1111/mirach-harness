@@ -8,6 +8,12 @@ import {
   useIsMarkdownCodeBlock,
 } from "@assistant-ui/react-markdown";
 import remarkGfm from "remark-gfm";
+// 数学公式（2026-10-17 用户批准装依赖）：remark-math 把 $...$ / $$...$$
+// 解析成 math 节点，rehype-katex 渲染成 HTML；katex 的样式表必须显式引入
+// （否则公式以无排版的裸字符显示——与 dockview CSS 同一类坑）。
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import { type FC, memo, useMemo, useRef } from "react";
 import type { TextMessagePartProps } from "@assistant-ui/react";
 
@@ -46,7 +52,8 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
 
   return (
     <MarkdownTextPrimitive
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
       className="aui-md"
       components={markdownComponents}
       defer

@@ -127,7 +127,10 @@ import {
   GitBranchIcon,
   HistoryIcon,
   MicIcon,
+  MinimizeIcon,
   PencilIcon,
+  Redo2Icon,
+  Undo2Icon,
   WrenchIcon,
   PhoneIcon,
   Volume2Icon,
@@ -881,6 +884,108 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
 // ── message-timing（官方元素）：run 级 usage 展示。轮次机只归并 run 级
 // 快照（RUN_FINISHED.usage，替换语义——不按消息归并），因此只在最后一条
 // assistant 上显示（旧消息显示过期快照会误导）；流式中蓝字。
+// ── 会话维护条（手动压缩 / 撤销 / 重做）────────────────────────────────
+// pi 能力：`AgentSessionHandle::compact` 与会话级 FileMutationRecorder
+// 的 undo/redo（docs/pi-coverage.md 缺口 G7）。此前无任何前端入口。
+// 只在非运行态渲染：运行中压缩会与自动压缩打架、撤销会与工具写入竞争。
+// 全部结果诚实反馈（失败 console.error + 可见文案；不乐观假装成功）。
+const SessionMaintenanceBar: FC = () => {
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  const [busy, setBusy] = useState<null | 'compact' | 'undo' | 'redo'>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [undoable, setUndoable] = useState(0);
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      const raw = await invoke<unknown>('pi_undo_history');
+      const r = (raw ?? {}) as { units?: unknown[] };
+      setUndoable(Array.isArray(r.units) ? r.units.length : 0);
+    } catch (e) {
+      // 无会话 / 无 recorder 是预期态（不刷错误）
+      if (!String(e).includes('no active session')) {
+        console.error('[pi] 撤销历史拉取失败', e);
+      }
+      setUndoable(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isRunning) return;
+    void refreshHistory();
+  }, [isRunning, refreshHistory]);
+
+  if (isRunning) return null;
+
+  const run = async (kind: 'compact' | 'undo' | 'redo') => {
+    if (busy !== null) return;
+    setBusy(kind);
+    setNote(null);
+    try {
+      if (kind === 'compact') {
+        await invoke('pi_compact');
+        setNote('已触发压缩');
+      } else {
+        const out = await invoke<unknown>('pi_undo_redo', {
+          kind,
+          n: 1,
+          force: false,
+        });
+        const o = (out ?? {}) as {
+          restored?: unknown[]
+          applied?: unknown[]
+          skipped?: unknown[]
+        };
+        const done = (kind === 'undo' ? o.restored : o.applied) ?? [];
+        const skipped = o.skipped ?? [];
+        setNote(
+          skipped.length > 0
+            ? `${kind === 'undo' ? '撤销' : '重做'} ${done.length} 个文件，${skipped.length} 个冲突跳过（可加 force 覆盖）`
+            : `${kind === 'undo' ? '已撤销' : '已重做'} ${done.length} 个文件`,
+        );
+      }
+      await refreshHistory();
+    } catch (e) {
+      console.error(`[pi] ${kind} 失败`, e);
+      setNote(`${kind === 'undo' ? '撤销' : kind === 'redo' ? '重做' : '压缩'}失败：${String(e)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const btn =
+    'flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] text-foreground/55 transition-colors hover:bg-foreground/[0.06] hover:text-foreground/90 disabled:opacity-40';
+
+  return (
+    <div
+      data-slot="aui_session-maintenance"
+      className="flex w-full items-center gap-1.5"
+    >
+      <button type="button" className={btn} disabled={busy !== null} onClick={() => void run('compact')}>
+        <MinimizeIcon className="size-3.5" aria-hidden />
+        压缩上下文
+      </button>
+      <button
+        type="button"
+        className={btn}
+        disabled={busy !== null || undoable === 0}
+        onClick={() => void run('undo')}
+      >
+        <Undo2Icon className="size-3.5" aria-hidden />
+        撤销{undoable > 0 ? ` (${undoable})` : ''}
+      </button>
+      <button type="button" className={btn} disabled={busy !== null} onClick={() => void run('redo')}>
+        <Redo2Icon className="size-3.5" aria-hidden />
+        重做
+      </button>
+      {note !== null && (
+        <span className="min-w-0 truncate font-mono text-[11px] tracking-tight text-foreground/40">
+          {note}
+        </span>
+      )}
+    </div>
+  );
+};
+
 // ── run 级工具时间线（官方 tool-timeline 元素）─────────────────────────
 // 本 assistant 消息的 tool-call 部件 → 步骤线。verb = 工具名、chip = 主参数
 // 摘要（与工具卡同一 summarizeArgs）；状态取部件的 result/isError。
@@ -1190,6 +1295,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
                 <RunErrorBar />
                 <StoppedRunBanner />
                 <ApprovalCards />
+                {/* 会话维护条（手动压缩 / 撤销 / 重做）：pi 有这些能力但
+                    此前无入口（docs/pi-coverage.md 缺口）。只在非运行态显示
+                    ——运行中压缩会与自动压缩打架，撤销会与工具写入竞争。 */}
+                <SessionMaintenanceBar />
                 {/* 运行成本（cost-meter）与排队消息（message-queue）：composer
                     上方、ApprovalCards 之下——非运行态显示成本、运行态显示
                     排队（二者不同时渲染，消息密度最低的挂点） */}

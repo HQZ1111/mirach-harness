@@ -607,6 +607,35 @@ fn pi_job_cancel(
     state.engine.job_cancel(&job_id)
 }
 
+/// 手动压缩（pi `AgentSessionHandle::compact`）。压缩进度经常驻 AG-UI
+/// 流的 CUSTOM name=compaction 到达前端——本命令只触发，不转发事件。
+#[tauri::command(async)]
+fn pi_compact(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.compact()
+}
+
+/// 撤销 / 重做文件改动（pi 会话级 FileMutationRecorder）。
+/// kind = "undo" | "redo"；n = 步数；force = 冲突时强制覆盖。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_undo_redo(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    kind: String,
+    n: usize,
+    force: bool,
+) -> Result<serde_json::Value, String> {
+    state.engine.undo_redo(&kind, n, force)
+}
+
+/// 撤销历史（可撤销单元清单 + 统计）。
+#[tauri::command(async)]
+fn pi_undo_history(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.undo_history()
+}
+
 #[tauri_runtime_cef::cef_entry_point]
 fn main() {
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
@@ -763,6 +792,9 @@ fn main() {
             pi_todo_state,
             pi_hub_kill,
             pi_job_cancel,
+            pi_compact,
+            pi_undo_redo,
+            pi_undo_history,
             pi_settings::pi_get_settings,
             pi_settings::pi_set_settings,
             pi_settings::pi_get_models_config,

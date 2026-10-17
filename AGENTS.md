@@ -24,7 +24,7 @@ src/mock 已删（pi 真引擎上线）；历史文档归档 `docs/history-audit
 |---|---|---|
 | typescript | 6.0.3 | hermes 钉版；5.9 会报 TS2783/TS8047 等假错 |
 | react / react-dom | 19.2.7 | hermes 钉版 |
-| **@assistant-ui/tap** | **0.9.8（exact，直接进了 dependencies）** | **^0.9.0 会装到 0.9.18 → "getSnapshot should be cached" 无限循环，33 个测试文件全炸** |
+| **@assistant-ui/tap** | **实测 0.9.19（transitive）** | **历史教训**：^0.9.0 曾装到 0.9.18 → "getSnapshot should be cached" 无限循环，33 个测试文件全炸；当时钉 0.9.8 exact。**2026-10-17 复核**：`@assistant-ui/react@0.15.22` 依赖链实际装的是 **0.9.19**，全量 vitest 绿（含 turn-actor 45 / 面板 31），未复现循环——判定该问题在 ≥0.9.19 已修。**保持现状（0.9.19）**；若将来出现 getSnapshot 循环，先查这个版本，可临时钉回 0.9.8 |
 | vite | 8.2.0 + @rolldown/plugin-babel + babel-plugin-react-compiler | React Compiler 的 babel pass **必须保留**（vite.config.ts），砍掉会导致测试里 tap 循环复发 |
 | vitest / jsdom | 4.1.10 / 29.1.1 | hermes 钉版；jsdom 30 会让 Radix pointerDown 菜单打不开 |
 | @tauri-apps/api 等 | 2.11.x | 上一轮验证过的 Tauri 基线（见 package.json） |

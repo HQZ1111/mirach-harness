@@ -1080,6 +1080,93 @@ pub fn side_prompt(
         serde_json::to_value(snapshot).map_err(|e| format!("任务快照序列化失败: {e}"))
     }
 
+    /// 手动压缩（docs/pi-coverage.md 缺口：pi 有 `compact` 能力但宿主无入口）。
+    /// 调 `AgentSessionHandle::compact(on_event)`：pi 内部执行一次压缩并实时
+    /// 回调 AgentEvent——本方法把事件**丢弃**（压缩进度已由常驻 AG-UI 流经
+    /// CUSTOM name=compaction 到达前端，这里再发就是重复）。返回压缩是否
+    /// 触发（`compact` 内部在不可压缩时也会正常返回——不假装压缩了东西）。
+    pub fn compact(&self) -> Result<serde_json::Value, String> {
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            shared
+                .runtime
+                .block_on(handle.compact(|_event| {
+                    // 事件走常驻流（AG-UI 缓冲），此处无需转发；丢弃是
+                    // 有意为之（避免重复通道，§0.2-1 通道归零）。
+                }))
+                .map_err(|e| format!("手动压缩失败: {e}"))?;
+            Ok(serde_json::json!({ "ok": true }))
+        })?
+    }
+
+    /// 撤销 / 重做（docs/pi-coverage.md 缺口 G7）：pi 的会话级
+    /// `FileMutationRecorder`（`create_agent_session` 默认路径已挂，
+    /// `ToolRegistry::with_mutation_recorder`）记录每次文件写入前的快照。
+    /// `kind` = "undo" | "redo"；`n` = 步数（≥1）；`force` = 有冲突时是否
+    /// 强制覆盖（pi 语义：false 时冲突单元跳过并在 outcome 里报告）。
+    /// 返回 `UndoOutcome` JSON（restored/applied/skipped/...），前端据此
+    /// 显示结果——**不假装成功**（outcome 里 skipped > 0 是真实情况）。
+    pub fn undo_redo(
+        &self,
+        kind: &str,
+        n: usize,
+        force: bool,
+    ) -> Result<serde_json::Value, String> {
+        if kind != "undo" && kind != "redo" {
+            return Err(format!("undo_redo: kind 必须是 undo/redo（收到 {kind}）"));
+        }
+        if n == 0 {
+            return Err("undo_redo: n 必须 >= 1".to_string());
+        }
+        let shared = Arc::clone(&self.shared);
+        let kind = kind.to_string();
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            let agent_session = handle.session_mut();
+            let recorder = agent_session.agent.mutation_recorder().ok_or(
+                "本会话没有 mutation recorder（undo/redo 不可用）",
+            )?;
+            let outcome = if kind == "undo" {
+                recorder.undo(n, force)
+            } else {
+                recorder.redo(n, force)
+            };
+            serde_json::to_value(&outcome).map_err(|e| format!("undo outcome 序列化失败: {e}"))
+        })?
+    }
+
+    /// 撤销历史（前端显示"可撤销 N 步"）：`FileMutationRecorder::history()`
+    /// → `UnitSummary[]`。无 recorder = 空数组（诚实空态）。
+    pub fn undo_history(&self) -> Result<serde_json::Value, String> {
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            let mut guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_mut().ok_or("no active session")?;
+            let agent_session = handle.session_mut();
+            let Some(recorder) = agent_session.agent.mutation_recorder() else {
+                return Ok(serde_json::Value::Array(vec![]));
+            };
+            let history = recorder.history();
+            let stats = recorder.stats();
+            Ok(serde_json::json!({
+                "units": history,
+                "stats": stats,
+            }))
+        })?
+    }
+
     /// 回退到 checkpoint：active context 截断到该 checkpoint 边界（内部
     /// 对齐到 user-turn 起点，防 trailing tool_use 悬空），checkpoint 之后
     /// 的 span 折叠为一条摘要报告消息；会话树完整保留（append-only，

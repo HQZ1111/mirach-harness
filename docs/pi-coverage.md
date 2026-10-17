@@ -85,7 +85,7 @@
 | 检查点 mark/list/rewind | 3 条 IPC | CheckpointBar | ✅ |
 | 重试编辑 | `pi_retry_edit` | 消息编辑 | ✅ |
 | 压缩（自动） | CUSTOM compaction | guardrail-notice 横幅 | ✅ |
-| 手动压缩 `compact` | **无 IPC** | **无** | ❌ **缺口** |
+| 手动压缩 `compact` | `pi_compact` | **会话维护条**「压缩上下文」 | ✅ 已接（2026-10-17） |
 | fork 出子会话后打开 | `pi_open_session` | 会话分栏 | ✅ |
 | 模型列表/切换 | `pi_list_models` / `pi_set_model` | composer 选择器 | ✅ |
 | thinking level | `pi_set_thinking_level` | composer | ✅ |
@@ -99,7 +99,7 @@
 | 扩展（extensions）加载 | `SessionOptions.extension_paths` | **无 UI** | ❌ **缺口**（只能配置文件） |
 | MCP 服务器 | `SessionOptions.mcp`（未设） | **无 UI** | ❌ **未启用** |
 | 工作区多根（`/add-dir`） | `SessionOptions.workspace`（未设） | **无 UI** | ❌ **未启用** |
-| 撤销 / 重做（undo） | **无 IPC** | **无** | ❌ **缺口**（pi 有 `FileMutationRecorder`，会话创建时已挂 recorder） |
+| 撤销 / 重做（undo） | `pi_undo_redo` / `pi_undo_history` | **会话维护条**「撤销 (N) / 重做」 | ✅ 已接（2026-10-17；pi 的 `create_agent_session` 默认路径已挂 `FileMutationRecorder`） |
 | steer / follow-up（排队） | **无 IPC** | 入队靠 `sessionQueue`（宿主自建） | ⚠️ 部分 |
 | `ask` 工具 picker | 无 | approval-cards 兜底 | ⚠️ 部分 |
 | advisor / semantic context | 未设 | 无 | ❌ 未用 |
@@ -122,9 +122,10 @@
 1. `edit`/`write` 的 diff 视图（组件在，缺结构化 diff 数据）
 2. `submit_plan` 的计划卡
 3. `ask` 工具的交互卡（需宿主装 picker）
-4. 手动 `compact`（缺 IPC + 入口）
-5. 撤销/重做（pi 有 recorder，缺 IPC + UI）
-6. `hub` transcript/steer/inbox
+4. `hub` transcript/steer/inbox
+
+**已补（2026-10-17）**：手动 `compact`（`pi_compact` + 会话维护条）、
+撤销/重做（`pi_undo_redo` / `pi_undo_history` + 会话维护条）。
 
 **B. 有 IPC 但 UI 弱**
 - `hub`/`jobs` 只有 list/kill/cancel 面，深层操作（transcript/steer/wait）无入口
