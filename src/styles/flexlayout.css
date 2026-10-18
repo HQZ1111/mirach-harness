@@ -10,43 +10,11 @@
    - 常驻 1px 发丝线，hover/拖动全亮 accent；
    - 命中区 8px（::before 提供，不占布局）；
    - tabDragSpeed：拖拽幻影跟随光标的过渡（0.08 比默认 0.3 跟手）。 */
-.flexlayout-host {
-  flex: 1;
-  min-height: 0;
-  min-width: 0;
-  overflow: hidden;
-  position: relative;
-  /* 建立层叠上下文：z -1 的调色层垫在布局内容之下、又不会掉到 app 白底之下 */
-  isolation: isolate;
-}
 
-.flexlayout-host .flexlayout__tabset_tabbar_outer {
-  height: var(--logo-strip-h);
-  min-height: var(--logo-strip-h);
-  align-items: flex-end; /* 页签行沉到条底，上部留给 logo/文字（用户定稿） */
-  /* 页签行离条底 15px——**所有栏统一**（用户 2026-10-03：主区/左右栏一致；
-     strip 内 stretch 头栏不再私有底距）。 */
-  padding-bottom: var(--strip-pad-bottom);
-  border-bottom: none;   /* 条底 1px 灰线（flexlayout 默认）去掉——页签纯文字化 */
-}
 
-.flexlayout-host .flexlayout__tabset_tabbar_inner,
-.flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
-  height: calc(var(--logo-strip-h) - var(--strip-pad-bottom));
-  align-items: flex-end;
-}
-.flexlayout-host .flexlayout__tabset_tabbar_inner_tab_container {
-  position: relative; /* leading 绝对定位（条顶满宽带）的参照 */
-  /* 页签文字与 logo 同一左线 20：容器 10 + 页签自身 padding 10
-     （stretch 头栏同理；0 宽 spacer 不影响） */
-  padding-left: 10px;
-}
 /* 左栏（logo 栏）：页签与 **Mirach 文字**左对齐（用户定稿——文字在
    图标 50 + gap 12 之后，左缘 83；70 = 83 - 容器原 10 - 边框 1 - 字形
    差 2）。 */
-.flexlayout-host .flexlayout__tabset:has(.rail-logo-leading) .flexlayout__tabset_tabbar_inner_tab_container {
-  padding-left: 70px;
-}
 
 /* ── 条隐藏（「切换标签」）形态：顶带（--logo-strip-h=85）**保留**——内容不从 tabset
    顶开始（用户 2026-10-03："和左侧栏一样"）。enableTabStrip=false 时
@@ -55,61 +23,17 @@
    data-strip-hidden 标记（左栏跳过：railform logo 自带顶带）。content
    是 position:relative——top 位移不压缩布局（底溢 100px 实锤），在
    **父容器 tabset** 打 padding-top 推子项+压缩 content 可用高。 ── */
-.flexlayout-host .flexlayout__tabset[data-strip-hidden='true'] {
-  padding-top: var(--logo-strip-h);
-}
-.flexlayout-host .flexlayout__tabset[data-strip-hidden='true'] .flexlayout__tabset_content {
-  height: calc(100% - var(--logo-strip-h)) !important;
-}
 
 /* ── 上下分栏的非顶部分栏（sync 打 fl-strip-low）：100 高条的双重身份
    （标题栏拖拽区/窗口按钮让位）只属于窗口顶带——下面分栏的条降到
    --strip-low-height。文字与顶带同规：**沉条底**（用户 2026-09-29：
    下分栏标签在条顶是错的——"在上面的时候明明在底部"，全应用统一）。 ── */
-.flexlayout-host .flexlayout__tabset_tabbar_outer.fl-strip-low {
-  height: var(--strip-low-height);
-  min-height: var(--strip-low-height);
-  align-items: flex-end;
-}
-.flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_inner,
-.flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_inner_tab_container {
-  height: var(--strip-low-height);
-  align-items: flex-end;
-}
-.flexlayout-host .fl-strip-low .flexlayout__tab_button_stretch {
-  align-items: flex-end; /* 低条同样沉底（旧 center=标签悬条中，视觉跑顶） */
-  padding-bottom: 0;
-}
 /* 低条（36px 紧凑条）不参与 15px 统一底距——紧凑语义，15px 在 36px 内
    比例失衡；15px 只约束顶带 100px 的条（左/中/右所有栏的顶带条）。 */
-.flexlayout-host .fl-strip-low .flexlayout__tabset_tabbar_outer {
-  padding-bottom: 0;
-}
-.flexlayout-host .fl-strip-low .rail-logo-leading {
-  display: none; /* 低条不存在 logo 位（sessions 被拖到下方时的退化保护） */
-}
 
 /* ── 横向页签 = **纯文字**（用户 2026-09-27：文字就是按钮，给文字加
    点击效果就行，不要按钮形式）——无表面、无下划线、无页签间分隔线；
    状态全靠文字颜色：常规 #242424 / hover 变品牌色 / 选中 #006fff。 ── */
-.flexlayout-host .flexlayout__tab_button {
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  font-size: var(--tab-font-size);
-  font-weight: var(--tab-font-weight);
-  letter-spacing: var(--tab-tracking);
-  /* 等宽收缩下限（ZCode SIDE_PANE_TAB_MIN_WIDTH_PX=60 同源）：空间充足时
-     tab 自然排布，不足时各签等比收缩到 60px，仍溢出才交给原生溢出按钮
-     （hiddenTabs 机制）+ 横向滚动。 */
-  min-width: 60px;
-  overflow: hidden;
-  padding: 0 var(--tab-pad-x);
-  position: relative; /* 分隔圆点（fl-tab-sep）绝对定位的参照 */
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  transition: color 100ms;
-}
 
 /* 横向多页签之间的分隔圆点（onRenderTab 对非首签注入 leading）：
    骑在两签交界（前签右 padding 与本签左 padding 的中点 = 圆点半径 2.5px
@@ -119,39 +43,15 @@
    裁掉左半——min-width 60 轮引入）；作为本签 leading 的 flex 子项占位
    --tab-dot-size，圆点落在前签文字与本签文字之间（前签右 pad + 本签
    左 pad 各 10px 合成间距），垂直对文字中线。 */
-.flexlayout-host .fl-tab-sep {
-  align-self: center;
-  background: var(--tab-dot-color);
-  border-radius: 50%;
-  flex: none;
-  height: var(--tab-dot-size);
-  width: var(--tab-dot-size);
-}
 
 /* 左对齐：首个页签与拉伸头栏的文字与 logo 同一左线（由容器的
    padding-left 10 + 页签自身 padding 10 合成，见上方 tabbar 规则） */
 
 /* 选中 = 品牌色文字（无白色表面、无 2px 下划线——"标签下面那根线"） */
-.flexlayout-host .flexlayout__tab_button--selected,
-.flexlayout-host .flexlayout__tab_button_stretch {
-  background: transparent;
-  box-shadow: none;
-  color: var(--tab-text-active);
-}
 
 /* 未选中 hover：文字变品牌色（点击效果的静态部分） */
-.flexlayout-host .flexlayout__tab_button--unselected:hover {
-  background: transparent;
-  color: var(--tab-text-active);
-}
 
 /* 多选页签：accent 14% 渐变洗压在任何表面上（hermes TAB_SELECTED） */
-.flexlayout-host .flexlayout__tab_button.fl-tab-selected,
-.flexlayout-host .flexlayout__border_button.fl-tab-selected {
-  background-image: linear-gradient(var(--tab-accent-wash), var(--tab-accent-wash));
-  box-shadow: none;
-  color: var(--tab-text-active);
-}
 
 /* ── 拉伸头栏（tabSetEnableSingleTabStretch：单页签 zone 的头栏） ──
    **关键：它不带基础 tab_button 类**——字号/内边距必须在这里单独接
@@ -220,12 +120,12 @@
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-default-tab,
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-open-tab {
   background: var(--brand);
-  color: #fff;
+  color: var(--on-brand);
 }
 /* 胶囊内 ✕ 同色系（dockview 默认继承 + --dv-icon-hover-background-color
    灰底，在品牌色胶囊上不和谐——hover 换半透明白） */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-default-tab-action:hover {
-  background-color: color-mix(in srgb, #fff 22%, transparent);
+  background-color: color-mix(in srgb, var(--on-brand) 22%, transparent);
 }
 /* 未选中 hover：素底微洗（beUI text-muted hover:text-foreground 的本地化） */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:not(.dv-active-tab) .dv-default-tab:hover,
@@ -330,7 +230,7 @@
   font: inherit;
   letter-spacing: inherit;
   padding: 0;
-  transition: color 100ms, opacity 100ms;
+  transition: color var(--dur-fast), opacity var(--dur-fast);
 }
 
 .rail-logo-leading .rail-logo-word-btn:hover {
@@ -342,110 +242,30 @@
   opacity: var(--logo-word-btn-active-opacity);
 }
 
-.flexlayout-host .flexlayout__tab_button_stretch {
-  align-items: flex-end; /* 拉伸头栏 100 高：文字沉底，上部留白（logo/文字区） */
-  background: transparent;
-  box-shadow: none;
-  font-size: var(--tab-font-size);
-  font-weight: var(--tab-font-weight);
-  letter-spacing: var(--tab-tracking);
-  /* 页签行底距由 tabbar_outer 统一管（--strip-pad-bottom，所有栏一致）；
-     页签文字靠左（**只有主对话栏**从中线开始往右排——见
-     .flexlayout__chat-tabset 限定规则） */
-  padding: 0 var(--tab-pad-x) 0;
-  position: relative; /* 双行块绝对定位参照 */
-  text-transform: uppercase;
-}
 /* 主对话栏专属：页签文字从中线开始往右排（双行块占左半——用户定稿）。
    标记 = data-chat-zone（StripHiddenTitleOverlay 打在收容 workspace 的
    tabset 上，tab 级存在性不受激活态影响）；页签内容里的
    [data-chat-lead] 依赖 workspace 激活（切走即卸载），不再作定位依据。 */
-.flexlayout-host .flexlayout__tabset[data-chat-zone='true'] .flexlayout__tab_button_stretch {
-  padding-left: 50%;
-}
 /* 主对话栏多页签（拉伸头栏不适用）：双行块仍占左半，页签容器整体从中线
    起排。data-chat-zone 由 StripHiddenTitleOverlay 打（收容 workspace 的
    tabset，tab 级存在性不受激活态影响）；:has(.flexlayout__tab_button)
    限定多签形态——stretch 不带基础 tab_button 类，单签居中由上面规则管，
    两规则若叠加文字会被推到 75%。 */
-.flexlayout-host .flexlayout__tabset[data-chat-zone='true']:has(.flexlayout__tab_button) .flexlayout__tabset_tabbar_inner_tab_container {
-  padding-left: 50%;
-}
 
 /* ── zone 头部最小化按钮（onRenderTabSet 注入） ──
    悬停 zone 才显形；还原钮（fl-restore-btn）在 border/竖轨里没有
    hover 上下文，常显——后写覆盖。 */
-.fl-min-btn {
-  align-items: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--zone-btn-radius);
-  color: var(--tab-text);
-  cursor: pointer;
-  display: flex;
-  font-size: var(--zone-btn-font);
-  height: var(--zone-btn-size);
-  justify-content: center;
-  line-height: 1;
-  margin-left: var(--zone-btn-gap);
-  padding: 0;
-  width: var(--zone-btn-size);
-}
 
-.fl-min-btn:hover {
-  background: var(--tab-hover-bg);
-  color: var(--tab-text-active);
-}
 
-.flexlayout-host .fl-min-btn { opacity: 0; transition: opacity 120ms; }
-.flexlayout-host .flexlayout__tabset:hover .fl-min-btn { opacity: 1; }
 
 /* ── 页签关闭/回家钮（用户 2026-09-27：统一图标+令牌，仅悬停显形——
    撤销"离家 ✕ 常显"）── 四处同一形态：多页签条原生 trailing（icons.close
    注入 CloseIcon）、拉伸头栏注入钮（fl-stretch-close / fl-home-btn）、
    竖轨行（zone-rail-close）。显隐：悬停**所在页签/行**才出现。 */
-.fl-close-btn {
-  align-items: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-control);
-  color: var(--tab-close-color);
-  cursor: pointer;
-  display: flex;
-  flex: none;
-  height: var(--tab-close-hit);
-  justify-content: center;
-  padding: 0;
-  width: var(--tab-close-hit);
-}
-.fl-close-btn svg {
-  height: var(--tab-close-size);
-  width: var(--tab-close-size);
-}
-.fl-close-btn:hover {
-  background: var(--tab-hover-bg);
-  color: var(--tab-close-color-hover);
-}
 /* 显形 = 悬停所在页签（拉伸头栏钮在按钮内部、原生 trailing 由
    flexlayout 自己的 hover 规则管） */
-.flexlayout-host .fl-close-btn {
-  opacity: 0;
-  transition: opacity 120ms;
-}
-.flexlayout-host .flexlayout__tab_button_stretch:hover .fl-close-btn,
-.flexlayout-host .flexlayout__tab_button:hover .fl-close-btn,
-.zone-rail-cell:hover .fl-close-btn {
-  opacity: 1;
-}
 /* 原生 trailing：flexlayout 默认让**选中页签**的 ✕ 常显——同样压成
    仅悬停显形（用户 2026-09-27：关闭钮不常显） */
-.flexlayout-host .flexlayout__tab_button--selected .flexlayout__tab_button_trailing {
-  visibility: hidden;
-}
-.flexlayout-host .flexlayout__tab_button:hover .flexlayout__tab_button_trailing,
-.flexlayout-host .flexlayout__tab_button--selected:hover .flexlayout__tab_button_trailing {
-  visibility: visible;
-}
 
 /* 拖拽幽灵线（flexlayout 非 clamp 状态的跟手轮廓）：实时缩放 + onAction
    钳制下它是"第二条会动的手柄线"，纯干扰——但**只能 visibility 隐藏，
@@ -453,173 +273,26 @@
    作为拖拽位置输入，display:none 会让 offset 变 0 → 每次拖动都按"缝在
    最左"重算，宽度/高度拖动全部失效、只会跳（2026-09-26 实测）。
    visibility 保留几何、仅不可见。 */
-.flexlayout-host .flexlayout__splitter_drag {
-  visibility: hidden !important;
-}
 
 /* ── 页签拖出的跟手克隆件（drag-session 的「拖出来」视觉）── 页签本尊
    的克隆：surface 底 + 浮起阴影让它读作"被拿起的页签"（黑底白字 chip 的
    替代，用户 2026-10-05）；跟随指针、pointer-events none 不挡命中。 */
-.fl-drag-clone {
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16);
-  opacity: 0.95;
-  pointer-events: none;
-  position: fixed;
-  z-index: 9998;
-  background: var(--surface);
-  border-radius: var(--radius-control);
-}
 
 /* ── 三种轨道页签同一形态（用户定稿：文字横向直立、字号字重字距与横向
    页签完全一致，取值全部来自令牌）── flexlayout 的 border 页签原生整行
    旋转 90°（字形侧躺），摆正为纵向排列的普通页签：文字直立 + 还原钮
    上下堆叠、全部交叉轴居中。 */
-.flexlayout-host .flexlayout__border_inner_tab_container_left,
-.flexlayout-host .flexlayout__border_inner_tab_container_right {
-  align-items: center;
-  flex-direction: column !important;
-  left: 0 !important;
-  position: absolute !important;
-  right: 0 !important;
-  top: 0 !important;
-  transform: none !important;
-  /* 折叠轨道与栏级竖轨同规：上下各避一个页签条带（--logo-strip-h=85，
-     页签条带 + 圆角） */
-  padding: var(--logo-strip-h) 0;
-}
-.flexlayout-host .flexlayout__border_button {
-  align-items: center;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  height: auto !important;
-  justify-content: flex-start;
-  margin: 0;
-  max-width: var(--rail-width);
-  overflow: hidden;
-  padding: var(--tab-pad-y) 2px;
-  width: var(--rail-width);
-}
-.flexlayout-host .flexlayout__border_button,
-.flexlayout-host .flexlayout__border_button_content {
-  font-size: var(--tab-font-size);
-  font-weight: var(--tab-font-weight);
-  letter-spacing: var(--tab-tracking);
-  text-transform: uppercase;
-}
 /* 折叠轨道文字 90°（用户 2026-09-26 定稿：与 flexlayout 原生折叠轨道
    的旋转观感一致——此前"文字横向"轮的摆正撤销） */
-.flexlayout-host .flexlayout__border_button_content {
-  align-items: center;
-  display: flex;
-  justify-content: center;
-  line-height: 1.4;
-  max-height: 100%;
-  overflow: hidden;
-  writing-mode: vertical-rl;
-}
-.flexlayout-host .flexlayout__border_button + .flexlayout__border_button {
-  border-top: 1px solid var(--tab-separator);
-}
 
 /* ── 栏级竖轨（v3 定稿：整栏页签导航）──
    竖轨 = 该栏外缘一条 20px 原生空轨 tabset（真占位、零重叠）；经
    onTabSetPlaceHolder 对它渲染 RailNav：该栏全部分栏的全部页签（90°
    竖排、行下关闭图标、分栏之间留缝）、点行=切换显示（页签常驻）、
    行纵向拖=轨内重排、横向拖出=搬去别的大栏、顶部切横轨钮、底部「+」。 */
-.zone-rail {
-  align-items: center;
-  bottom: 0;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  left: 0;
-  overflow-y: auto;
-  /* 上下各避一个页签条带（用户 2026-09-27：顶部让开 100px 页签条/标题栏
-     带，底部让开圆角曲线——20px 轨贴大栏外缘，两头都会撞） */
-  padding: var(--logo-strip-h) 2px;
-  position: absolute;
-  right: 0;
-  scrollbar-width: none;
-  top: 0;
-}
-.zone-rail::-webkit-scrollbar { display: none; }
-.zone-rail-btn {
-  align-items: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-control);
-  color: var(--tab-text);
-  cursor: pointer;
-  display: flex;
-  flex: none;
-  height: var(--rail-btn-size);
-  justify-content: center;
-  line-height: 1;
-  padding: 0;
-  width: var(--rail-btn-size);
-}
-.zone-rail-btn:hover {
-  background: var(--tab-hover-bg);
-  color: var(--tab-text-active);
-}
 /* 分栏分组：同分栏的页签连排；相邻组之间**一条**分割线（相邻选择器）。
    此前组自带上下边框 + 组间 gap 线，两组之间渲染出三根线（用户实测
    打回）。 */
-.zone-rail-group {
-  display: flex;
-  flex: none;
-  flex-direction: column;
-  gap: 2px;
-  margin: 4px 0 0;
-  padding: 4px 0;
-  width: 100%;
-}
-.zone-rail-group + .zone-rail-group {
-  border-top: 1px solid var(--tab-separator);
-  margin-top: 4px;
-}
-.zone-rail-cell {
-  align-items: center;
-  border-radius: var(--radius-control);
-  box-sizing: border-box;
-  cursor: pointer;
-  display: flex;
-  flex: none;
-  flex-direction: column;
-  gap: 3px;
-  /* hermes TAB_VERTICAL 同款：文字竖排（vertical-rl）+ 高度上限 + 主轴
-     居中；max-h 192px = hermes max-h-48。label 随竖排自适应（py-2 居中）。 */
-  justify-content: center;
-  max-height: 12rem;
-  padding: 4px 1px;
-  width: 100%;
-}
-.zone-rail-cell:hover { background: var(--tab-hover-bg); }
-.zone-rail-cell.active { background: var(--tab-accent-wash); }
-.zone-rail-cell.dragging { opacity: 0.4; }
-.zone-rail-label {
-  color: var(--tab-text);
-  font-size: var(--tab-font-size);
-  font-weight: var(--tab-font-weight);
-  letter-spacing: var(--tab-tracking);
-  overflow: hidden;
-  text-transform: uppercase;
-  white-space: nowrap;
-  writing-mode: vertical-rl;
-}
-.zone-rail-cell.active .zone-rail-label { color: var(--tab-text-active); }
-.zone-rail-insert {
-  flex: none;
-  height: 2px;
-  left: 2px;
-  position: absolute;
-  right: 2px;
-  background: var(--tab-accent);
-}
-.zone-rail-add { flex: none; padding-bottom: 2px; }
 
 /* ── 竖轨形态的会话分栏 logo 带：横向条被 sync 隐藏后，工厂在内容顶部
    补 RailLogoLeading（同一条带，§6 logo 随 sessions）；body 吃剩余高度，
@@ -639,34 +312,9 @@
 }
 
 /* ── 「+」弹出菜单（PaneAddButton：多可开类型时选择） ── */
-.zone-add-menu {
-  background: var(--surface);
-  border: 1px solid var(--stroke);
-  border-radius: var(--radius-overlay);
-  box-shadow: var(--shadow-pop);
-  display: flex;
-  flex-direction: column;
-  padding: 4px;
-  position: fixed;
-  transform: translateX(-100%);
-  z-index: 90;
-}
-.zone-add-item {
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-control);
-  color: var(--text);
-  cursor: pointer;
-  font-size: var(--font-sm);
-  padding: 6px 10px;
-  text-align: left;
-  white-space: nowrap;
-}
-.zone-add-item:hover { background: var(--hover-wash); }
 
 /* ── 边框轨道（折叠栏）宽度：flexlayout 用 border_sizer 元素实测
    定栏宽，sizer 去掉上下 padding、按钮 var(--rail-width) 即得栏宽。 */
-.flexlayout-host .flexlayout__border_sizer { padding-top: 0; padding-bottom: 0; }
 
 /* ── 左栏标签条：logo/文字迁入条内（onRenderTabSet leading），不再需要
    margin 让位（宿主层浮层方案已退役，见 overlays.css 注释） ── */
@@ -676,29 +324,7 @@
    已替换为双 chevron；本块只做令牌化样式）。面板 = cmdk Command
    （搜索框 + "打开的标签页"分组 + 类型图标 + 名字 + 相对时间 + ✕）。
    全部令牌化（--zone-btn-* 与 --tab-* 与 --surface/--text/--stroke/--hover-wash）。 */
-.flexlayout-host .flexlayout__tab_button_overflow {
-  align-items: center;
-  background: transparent;
-  border: 0;
-  border-radius: var(--zone-btn-radius);
-  color: var(--tab-text);
-  cursor: pointer;
-  display: flex;
-  flex: none;
-  height: var(--zone-btn-size) !important;
-  justify-content: center;
-  min-width: var(--zone-btn-size) !important;
-  padding: 0 !important;
-  width: var(--zone-btn-size) !important;
-}
-.flexlayout-host .flexlayout__tab_button_overflow:hover {
-  background: var(--tab-hover-bg);
-  color: var(--tab-text-active);
-}
 /* ZCode 原生无数字——flexlayout 的 count badge 隐藏 */
-.flexlayout-host .flexlayout__tab_button_overflow_count {
-  display: none;
-}
 
 /* 面板（2026-10-16 换 beUI goo 弹层：面板底色/圆角/投影由 goo 体
    （.bg-popover blob + 弹簧 morph 的 clip）承担——原 background/border/
@@ -760,7 +386,7 @@
   color: var(--text);
   cursor: pointer;
   display: flex;
-  gap: 8px;
+  gap: var(--space-inline);
   margin-bottom: 2px;
   min-height: 32px;
   outline: none;
@@ -815,7 +441,7 @@
   justify-content: center;
   opacity: 0.7;
   padding: 0;
-  transition: opacity 120ms;
+  transition: opacity var(--dur-hover);
   width: 18px;
 }
 .tab-overview-close:hover {
@@ -835,21 +461,9 @@
    tabset 子树里，按 data-layout-path 前缀映射），只标对话语义列。
    v8.0 注：本段为 flexlayout 时代死规则（.flexlayout-host 已不存在）；
    dockview 版贴边语义在 panes.css（:has() 判定贴边侧）。 ── */
-.flexlayout-host .flexlayout__tab.fl-edge-start {
-  padding-left: 20px;
-}
 
-.flexlayout-host .flexlayout__tab.fl-edge-end {
-  padding-right: 20px;
-}
 
-.flexlayout-host .flexlayout__tabset.fl-edge-start .flexlayout__tabset_tabbar_outer {
-  padding-left: 20px;
-}
 
-.flexlayout-host .flexlayout__tabset.fl-edge-end .flexlayout__tabset_tabbar_outer {
-  padding-right: 20px;
-}
 
 /* ══════════════════════════════════════════════════════════════════════
    ── 标签选中态：beUI pill（2026-10-15 替换 underline 指示条）──

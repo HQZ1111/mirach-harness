@@ -5,10 +5,10 @@
 .pane-placeholder {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-inline);
   height: 100%;
   overflow: auto;
-  padding: 16px;
+  padding: var(--space-stack);
 }
 
 .pane-placeholder h2 {
@@ -490,23 +490,27 @@
    载体 = ThreadList 根的 data-density（thread-list.aui.tsx），行/分隔线
    规则只引用变量——切密度不改任何行规则。comfortable（默认）= 现行几何
    （行盒 26px / 分隔线上距 8px）；compact = 行盒 22px / 上距 4px。
-   变量带 fallback：行组件独立于 ThreadListRoot 使用时保持现行几何。 */
+   变量带 fallback：行组件独立于 ThreadListRoot 使用时保持现行几何。
+   **单位用 px 不用 rem**（2026-10-18）：根字号 15px 下 0.5rem=7.5px、
+   0.375rem=5.625px、1.625rem=24.375px——系统性产出半像素，与"消掉半像素"
+   的排版目标冲突（实测行高 33px 里有 0.375 是这么来的）。注释里的像素
+   值就是本意，直接写整数。 */
 [data-density='comfortable'] {
-  --tl-row-min-h: 1.625rem;
-  --tl-div-pt: 0.5rem;
-  --tl-row-pad-y: 0.25rem;                    /* 会话行纵向内距（行与行间距，用户定稿加大） */
-  --tl-head-pt: 0.8rem;                       /* 组头上距（用户 2026-10-14 定稿：置顶→会话视觉 15px = 12px + 2px 居中差 + 1px 行缝） */
-  --tl-head-pinned-gap: 0.6rem;               /* 置顶标签下距（用户 2026-10-14 定稿 9px；原 37.5px 空白过大） */
-  --tl-ws-pt: 0.6rem;                         /* 工作区分隔行上距（用户 2026-10-15：会话标签→文件夹名原 22.5px 太大；取"标签下 9px"同一节奏） */
+  --tl-row-min-h: 26px;
+  --tl-div-pt: 8px;
+  --tl-row-pad-y: 4px;                        /* 会话行纵向内距（行与行间距，用户定稿加大） */
+  --tl-head-pt: 12px;                         /* 组头上距（用户 2026-10-14 定稿：置顶→会话视觉 15px = 12px + 2px 居中差 + 1px 行缝） */
+  --tl-head-pinned-gap: 9px;                  /* 置顶标签下距（用户 2026-10-14 定稿 9px；原 37.5px 空白过大） */
+  --tl-ws-pt: 9px;                            /* 工作区分隔行上距（用户 2026-10-15：会话标签→文件夹名原 22.5px 太大；取"标签下 9px"同一节奏） */
 }
 
 [data-density='compact'] {
-  --tl-row-min-h: 1.25rem;
-  --tl-div-pt: 0.375rem;                      /* 紧凑档：组头/工作区组间距均 8px（用户定稿九轮：会话与工作区之间显太大） */
-  --tl-row-pad-y: 0.25rem;                    /* 行间紧凑档 = 4px（同舒适档） */
-  --tl-head-pt: 0.5rem;                       /* 组头上距紧凑 8px（舒适 15px，九轮回调） */
-  --tl-head-pinned-gap: 0.4rem;               /* 置顶标签下距紧凑 6px（舒适 9px） */
-  --tl-ws-pt: 0.5rem;                         /* 工作区分隔行紧凑 8px（舒适 24px） */
+  --tl-row-min-h: 20px;
+  --tl-div-pt: 6px;                           /* 紧凑档：组头/工作区组间距均 8px（用户定稿九轮：会话与工作区之间显太大） */
+  --tl-row-pad-y: 4px;                        /* 行间紧凑档 = 4px（同舒适档） */
+  --tl-head-pt: 8px;                          /* 组头上距紧凑 8px（舒适 15px，九轮回调） */
+  --tl-head-pinned-gap: 6px;                  /* 置顶标签下距紧凑 6px（舒适 9px） */
+  --tl-ws-pt: 8px;                            /* 工作区分隔行紧凑 8px（舒适 24px） */
 }
 
 /* ── hub：左栏入口条（panes/hub/entry-bar.tsx，2026-10-02）──
@@ -614,7 +618,7 @@
   color: var(--text-2);
   display: flex;
   font-size: var(--hub-kbd-font);
-  gap: 4px;
+  gap: var(--space-inline-xs);
   line-height: 1.5;
   padding: 5px 6px;
 }
@@ -674,7 +678,7 @@
   min-width: 0;
   padding: 6px var(--hub-row-pad-x);
   text-align: left;
-  transition: background-color 100ms ease-out;
+  transition: background-color var(--dur-fast) var(--beui-ease-out);
 }
 
 .hub-bot-row:hover {
@@ -760,15 +764,7 @@
   color: var(--destructive);
 }
 
-/* 面板脚注（目录说明/诊断等长文） */
-.hub-foot {
-  border-top: 1px solid var(--stroke-soft);
-  color: var(--text-4);
-  flex: none;
-  font-size: var(--hub-kbd-font);
-  line-height: 1.6;
-  padding: 6px var(--hub-row-pad-x);
-}
+/* 面板脚注（目录说明/诊断等长文）——.hub-foot 已随组件删除，保留注释备查 */
 
 /* ── 对话宽度手柄（dsh ui-conversation ConversationRoot 移植，2026-10-05）
    宽度轴：一个内容宽 W 同时管消息列与 composer（harness 里 composer 与
@@ -794,7 +790,7 @@
   position: absolute;
   top: 0;
   width: min(40px, calc((100% - var(--dsh-chat-content-width)) / 2 - 24px - 24px));
-  z-index: 8;
+  z-index: var(--z-width-handle);
 }
 
 .aui-width-handle[data-side='left'] {
@@ -883,18 +879,8 @@
   margin-bottom: var(--rail-nav-list-gap);
 }
 
-/* 顶带右下的当前视图指示（只读；Mirach 文字是唯一切换钮） */
-.left-rail-view-name {
-  bottom: 10px;
-  color: var(--left-rail-view-color);
-  font-size: var(--left-rail-view-size);
-  position: absolute;
-  right: var(--logo-leading-pad);
-}
-
-.left-rail-view-name[data-view='bots'] {
-  color: var(--left-rail-view-active-color);
-}
+/* 顶带右下的当前视图指示已删（2026-10-06 用户定稿：Mirach 文字是唯一切换钮，
+   指示字冗余——组件已移除，规则随之删除） */
 
 /* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
 .open-page {
@@ -929,7 +915,7 @@
   gap: var(--openpage-btn-gap);
   padding: var(--openpage-btn-pad-y) var(--openpage-btn-pad-x);
   text-align: left;
-  transition: background 100ms, border-color 100ms;
+  transition: background var(--dur-fast), border-color var(--dur-fast);
   width: 100%;
 }
 

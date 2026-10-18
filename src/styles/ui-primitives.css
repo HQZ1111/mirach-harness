@@ -9,6 +9,8 @@
 :root {
   /* 滚动条轨道色（hermes --dt-scrollbar-thumb 的等价取值：中景文字色） */
   --scrollbar-thumb: color-mix(in srgb, var(--text-3) 70%, transparent);
+  /* 滚动条宽高（整数 px，避免 0.5rem 在 15px 根字号下的 7.5px 半像素） */
+  --scrollbar-size: 8px;
   /* dialog 阴影（hermes --shadow-nous：四段累积阴影）与描边 */
   --shadow-dialog:
     0 0.125rem 0.25rem -0.125rem color-mix(in srgb, #000 7%, transparent),
@@ -24,8 +26,10 @@
    注意（hermes 头注释）：Chromium 121+ 同时给标准 scrollbar-* 与
    webkit 时忽略 webkit——因此这里只用 webkit 前缀。 */
 *::-webkit-scrollbar {
-  width: 0.5rem;
-  height: 0.5rem;
+  /* 8px 而非 0.5rem（2026-10-18）：根字号 15px 下 0.5rem = **7.5px**，
+     滚动条宽度落在半像素上会被取整抖动（且 thumb 3px 圆角与轨道对不齐）。 */
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
 }
 *::-webkit-scrollbar-track,
 *::-webkit-scrollbar-corner {

@@ -74,7 +74,7 @@ body.in-browser { background: var(--surface); }
   right: 0;
   top: 0;
   user-select: none;
-  z-index: 50;
+  z-index: var(--z-titlebar);
 }
 
 .app-titlebar > * { pointer-events: auto; }
@@ -86,24 +86,11 @@ body.in-browser { background: var(--surface); }
    没页签的空白（多页签条 logo 区/条带空白）拖窗口。 ── */
 
 /* 标题栏按钮提升绘制层级（历史：盖层拖拽带时代按钮需 relative 才不被
-   盖；盖层已退役，保留无副作用）。 */
+   盖；盖层已退役，保留无副作用）。.tb-divider 选择器已随死规则删除。 */
 .app-titlebar > button,
-.app-titlebar > .win-controls,
-.app-titlebar > .tb-divider {
+.app-titlebar > .win-controls {
   position: relative;
 }
-
-.app-titlebar-btn {
-  background: var(--scale-gray-a2);
-  border: 1px solid var(--stroke);
-  border-radius: var(--radius-control);
-  color: var(--text-2);
-  cursor: pointer;
-  font-size: var(--font-caption);
-  padding: 3px 10px;
-}
-
-.app-titlebar-btn:hover { background: var(--scale-gray-a3); color: var(--text); }
 
 /* ── 自绘窗口控制圆点（用户定稿 2026-10-02：四钮改 20px 圆点） ──
    位置：绝对定位右上，距上缘 --win-dot-top(25)、右缘 --win-dot-right(50
@@ -126,7 +113,7 @@ body.in-browser { background: var(--surface); }
   flex: none;
   height: var(--win-dot-size);
   padding: 0;
-  transition: transform 120ms ease;
+  transition: transform var(--dur-hover) ease;
   width: var(--win-dot-size);
 }
 
@@ -136,88 +123,6 @@ body.in-browser { background: var(--surface); }
 .win-dot[data-dot-role='maximize'] { --dot-color: var(--win-dot-maximize); }
 .win-dot[data-dot-role='minimize'] { --dot-color: var(--win-dot-minimize); }
 .win-dot[data-dot-role='sidebar'] { --dot-color: var(--win-dot-sidebar); }
-
-/* ── 标题栏工具钮（hermes TitlebarToolButton：icon ghost，opacity 表态） ──
-   2026-10-16 阶段 3：矩形 26×24/5px → **正方形 24×24 圆形**（用户定稿"命中盒
-   改成正方形的，换成圆形"）。原 26 宽是为文字留量，但本钮只有图标——
-   非正方形时 50% 会渲成椭圆，故宽度归一到 --size-icon-btn。 */
-.tb-tool {
-  align-items: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-icon-btn);
-  color: var(--text-2);
-  cursor: pointer;
-  display: flex;
-  height: var(--size-icon-btn);
-  justify-content: center;
-  opacity: 0.6;
-  padding: 0;
-  transition: opacity 120ms;
-  width: var(--size-icon-btn);
-}
-
-.tb-tool:hover { opacity: 1; }
-
-/* 收起态：整侧进了轨道（hermes positional toggle 无高亮，用降透明表态） */
-.tb-tool-off { opacity: 0.3; }
-.tb-tool-off:hover { opacity: 0.75; }
-
-.tb-divider {
-  background: var(--stroke);
-  height: 16px;
-  margin: 0 2px;
-  width: 1px;
-}
-
-/* ── 窗格菜单（hermes zone 菜单 Show 行的 harness 版） ── */
-.pane-menu {
-  position: relative;
-}
-
-.pane-menu-list {
-  background: var(--surface);
-  border: 1px solid var(--stroke);
-  border-radius: var(--radius-overlay);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
-  display: flex;
-  flex-direction: column;
-  min-width: 200px;
-  padding: 4px;
-  position: absolute;
-  right: 0;
-  top: 30px;
-  z-index: 100;
-}
-
-.pane-menu-item {
-  align-items: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-control);
-  color: var(--text);
-  cursor: pointer;
-  display: flex;
-  font-size: var(--font-body);
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 10px;
-}
-
-.pane-menu-item:hover:not(:disabled) {
-  background: var(--scale-gray-a2);
-  color: var(--text);
-}
-
-.pane-menu-item:disabled {
-  color: var(--text-4);
-  cursor: default;
-}
-
-.pane-menu-badge {
-  color: var(--text-3);
-  font-size: var(--font-caption);
-}
 
 /* ── 状态栏（用户：高度 20；内容左右避开圆角区——2026-10-16 阶段 7：
    壳圆角 40→56 + 内缩 8，故留白 = 内缩 + 42 与原 50 同视觉余量）。

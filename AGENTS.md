@@ -407,6 +407,7 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
     的 padding 与 `.hub-entry-bar` 的 margin-bottom 上，不是 `> .hub-entry-bar`。
   - **左栏字级分层**（原来入口条 16/500 比段头 15/400 更大更粗，从属
     关系视觉上是反的；段头又与行同号只能靠颜色分）：
+
     | 层 | 新值 | 令牌 |
     |---|---|---|
     | 段头（置顶/会话） | 13px / 600 / 0.06em 字距 | `--side-group-size/-weight/-tracking` |
@@ -435,6 +436,38 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   content-container：面板栏标签条否则会先整条出现、内容后淡）。
   tint/列头的 20px 内缩过渡只在 `[data-dv-morph='col']`（补间期间的 split
   容器）上开——无条件挂会让 boot 自愈时颜色层滑 320ms。
+- **CSS 硬编码审计与收口（2026-10-18 第四轮，用户"哪些硬编码能收敛到令牌"）**：
+  审计结论与直觉相反：7 个样式文件 528 处字面值里，**216 处（41%）在死规则**
+  （组件早已删除、CSS 没跟着清）。所以第一优先级是**删**，不是抽——先抽会把
+  已删功能的数值搬进令牌层。
+  - **P0 删除**（CDP 运行时逐类名核验全部 0 命中后执行）：
+    `editor.css` 整文件删（`.ep-*`/`.ze-*` 48 个类名源码命中 0，407 行）；
+    `overlays.css` 的 `.fl-edit-*`/`.fl-drop-*`（edit-veils/drop-overlay 组件
+    v5.0/v8.0 删）；`flexlayout.css` 的 48 个 `.flexlayout-host` 子树块
+    （`flexlayout-react` 已从依赖移除，**保留** `.dockview-*`/`.dv-*`/
+    `.rail-logo-*`）；`base.css` 的 `.tb-tool*`/`.tb-divider`/`.pane-menu*`/
+    `.app-titlebar-btn`（**保留** `.win-dot`）；`panes.css` 的 `.hub-foot`/
+    `.left-rail-view-name`。净删 547 行。
+  - **P1 间距**：接 `--space-inline`(8) / `--space-inline-xs`(4) /
+    `--space-stack`(16)。**离格值（6/10/5/3/14px）不归一**——实测它们几乎
+    全是控件内部微距（`padding: 3px 10px` 是胶囊标签），强行归 8/16 会明显
+    改变密度且违背设计意图。审计里"重复 20 次"多数是把复合 padding 拆开
+    计的假重复，真实重复只有 `gap: 8px`×6 这一类。
+  - **P2 rem → px（修真实缺陷）**：根字号 15px 下 `0.5rem`=7.5px、
+    `0.375rem`=5.625px、`1.625rem`=24.375px——**系统性产出半像素**（与
+    tokens.css 自己"消掉半像素"的目标冲突）。密度令牌 `--tl-*` 全改整数
+    （注释里本来就写了目标像素值）；滚动条 `0.5rem` → `--scrollbar-size: 8px`
+    （实测修复前 Chromium 报 8、实际 7.5，圆角对不齐）；弹层几何
+    `56rem/11.5rem/6rem/4rem` → `--dialog-w/-nav-w/-inset-y/-inset-x`。
+  - **P3 动效**：`--dur-fast: 100ms` / `--dur-hover: 120ms`（`--beui-*` 那套
+    是进场/退场语义，规则里的 hover 反馈一直写裸值）。
+  - **P4 z-index**：`--z-titlebar/-tint/-width-handle/-local`（层级表里记着
+    值但没铸令牌）。
+  - **P5/P6**：`--on-brand`（品牌胶囊白字，原裸 `#fff`×2）、
+    `--weight-semibold`（弹层标题 600×6 处）。
+  - **不动**：`1px` 边框（设备像素发丝线）、`50%`/`translate(-50%,-50%)`
+    （居中语义）、`opacity: 0/1`（显隐开关）、tailwind 的 32 个 oklch/hsl
+    （那是 shadcn 令牌**定义本身**，按"出现次数"排序会把力气花错地方）。
 - **openhuman 设置页移植已整体回退（2026-10-18，用户决策）**：提交 80a1a60
   的 `src/components/settings/`（83 文件 / 13,569 行）+ settings-overlay 的
   外壳切换已删。实测原因：48 个 UI 原语只有 3 个（Button/Card/Tabs）真正

@@ -15,12 +15,12 @@ import 'harmonyos-sans-sc-webfont-splitted'
 // "内容全错位"根因 = M1 写壳时忘了这条 import）。
 import 'dockview-react/dist/styles/dockview.css'
 // 样式分层（见 src/styles/tokens.css 头注释）：令牌 → 壳 → flexlayout
-// → 窗格 → 编辑器 → 叠片。规则文件里禁止写字面值，取值一律进 tokens.css。
+// → 窗格 → 叠片。规则文件里禁止写字面值，取值一律进 tokens.css。
+// （editor.css 已删：.ep-*/.ze-* 对应组件在 v5.0/v8.0 两轮删除后无消费方）
 import './styles/tokens.css'
 import './styles/base.css'
 import './styles/flexlayout.css'
 import './styles/panes.css'
-import './styles/editor.css'
 import './styles/overlays.css'
 // 全局原语（hermes 可抄件）：滚动条/弹窗阴影/z 层令牌——tailwind 之前，
 // 其工具类仍可覆盖

@@ -69,6 +69,12 @@
   --stroke-soft: var(--scale-gray-a3);        /* 弱分隔线（原 0.06） */
   --hover-wash: var(--scale-gray-a2);         /* 悬停洗底（原 0.07） */
   --surface: #ffffff;
+  /* 品牌色块上的文字（2026-10-18 收口）：页签选中/悬停的胶囊是品牌色底，
+     白字此前在 flexlayout.css 里写了两次裸 #fff。 */
+  --on-brand: #ffffff;
+  /* 字重刻度（2026-10-18 收口）：弹层标题/字段标签统一 600，此前在
+     overlays.css 里写了 6 处裸 600。 */
+  --weight-semibold: 600;
   --brand: #006fff;                           /* 品牌色/主题色（用户定稿） */
   --width-handle-glow: var(--brand);          /* 对话宽度手柄光条（用户定稿
                                    2026-10-05：品牌蓝；dsh 官方浅色原值
@@ -160,6 +166,12 @@
      **宿主内 z 永远压不过 app-titlebar**——模态必须 portal 到 body。 */
   --z-modal-backdrop: 120;
   --z-modal: 130;
+  /* 以下四项此前只在规则文件里写字面值（2026-10-18 收口，值与注释层级表
+     对齐）：标题栏浮层 / 主区调色层 / 对话宽度手柄 / 弹层内局部层。 */
+  --z-titlebar: 50;
+  --z-tint: -1;
+  --z-width-handle: 8;
+  --z-local: 1;
 
   /* ── 文件树（workspace-file-tree，ZCode 移植；2026-10-01） ──
      行字号 = ZCode text-ui-base（--ui-font-size 14px）；其余语义色/悬停/
@@ -451,10 +463,25 @@
   /* 收起（与展开分开）：用户已决定不要，动画不该挡下一次操作。 */
   --disclose-out-dur: 160ms;
 
+  /* 通用交互时长（2026-10-18 收口）：--beui-* 那套是"进场/退场"语义
+     （0.18s/0.12s），规则文件里的 hover/按压反馈一直写裸 100ms/120ms。
+     这两档是它们的最小充分集，规则文件不再写字面时长。 */
+  --dur-fast: 100ms;                                /* hover 变色 / 边框 */
+  --dur-hover: 120ms;                               /* 悬停位移 / 透明度 */
+
   /* 遮罩式弹层（.set-overlay 家族）进场/退场。**退场值必须与 JS 常量同源**
      ——lib/overlay-exit.ts 的 EXIT_MS 是按这个时长排卸载的，改一处改两处。 */
   --overlay-enter-dur: 200ms;                       /* 卡片入场（遮罩走 180） */
   --overlay-exit-dur: 160ms;                        /* 卡片/遮罩退场 */
+
+  /* 弹层几何（.set-card，settings/resources/bots 三处共用）。px 不用 rem：
+     根字号 15px 下 11.5rem = 172.5px 会产出半像素；原 rem 只是按 16px
+     根字号写的名义值，折算后取整。 */
+  --dialog-w: 840px;                                /* 原 56rem */
+  --dialog-nav-w: 172px;                            /* 原 11.5rem，左侧导航列 */
+  --dialog-inset-x: 64px;                           /* 原 4rem，左右安全边 */
+  --dialog-inset-y: 96px;                           /* 原 6rem，上下安全边 */
+  --dialog-nav-item-w: 168px;                       /* 原 11rem，弹层内列表列宽 */
 }
 
 /* ── beUI 关键帧（唯一非规则的例外：关键帧是**定义**不是规则）──
