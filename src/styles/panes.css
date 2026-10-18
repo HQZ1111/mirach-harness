@@ -75,12 +75,52 @@
   height: auto;
 }
 
-/* 贴左/右软件边缘（该侧无相邻栏）→ 该侧内缩 20px */
+/* 收放补间期间：贴边内缩量跟着列一起滑。
+   标记 `data-dv-morph='col'` 由 setColumnCollapsed 打在 split 容器上、补间
+   结束摘除——**不能无条件挂 transition**：boot 期 normalizeColumns 会把
+   隐藏态的标记一次性补上，无条件过渡会让颜色层在启动时滑 320ms。 */
+.dv-split-view-container[data-dv-morph='col'] .main-tint--dockview {
+  transition:
+    left var(--sidebar-morph-dur) var(--sidebar-morph-ease),
+    right var(--sidebar-morph-dur) var(--sidebar-morph-ease);
+}
+.dv-split-view-container[data-dv-morph='col'] .chat-tab-label {
+  transition:
+    padding-left var(--sidebar-morph-dur) var(--sidebar-morph-ease),
+    padding-right var(--sidebar-morph-dur) var(--sidebar-morph-ease);
+}
+@media (prefers-reduced-motion: reduce) {
+  .dv-split-view-container[data-dv-morph='col'] .main-tint--dockview,
+  .dv-split-view-container[data-dv-morph='col'] .chat-tab-label {
+    transition: none;
+  }
+}
+
+/* 贴左/右软件边缘（该侧无相邻栏）→ 该侧内缩 20px。
+ *
+ * **两个判据**（2026-10-18 实锤）：侧栏收起后组仍常驻（宽度 0，见
+ * dockview-column-ops 的 setColumnCollapsed），DOM 序里它还是 `:first-child`
+ * ——chat 因此不再是 first-child，左内缩 20px 失效，颜色层直接贴到窗口
+ * 边缘（用户报"隐藏之后主对话到边缘的间距没了"）。
+ *   ① 结构性：chat 真的是 first/last-child（没有左/右邻居）→ 内缩
+ *   ② 状态性：JS 在收放后给 chat 组打 `data-edge-left` / `data-edge-right`
+ *      （"该侧没有**可见**邻居"）→ 内缩
+ * ② 是唯一可靠的表达方式：CSS 没有"跳过 0 宽兄弟后的第一个"这种选择器，
+ *   而 :has() 只能看相邻/后代，数不了"前面有几个可见列"。 */
 .dv-view-container > .dv-view:first-child:has(> .dv-groupview .main-tint--dockview) .main-tint--dockview {
   left: var(--chat-edge-inset);
 }
 
 .dv-view-container > .dv-view:last-child:has(> .dv-groupview .main-tint--dockview) .main-tint--dockview {
+  right: var(--chat-edge-inset);
+}
+
+/* ② JS 标记的贴边（侧栏收起/面板栏收起后仍然成立） */
+.dv-groupview[data-edge-left] .main-tint--dockview {
+  left: var(--chat-edge-inset);
+}
+
+.dv-groupview[data-edge-right] .main-tint--dockview {
   right: var(--chat-edge-inset);
 }
 
@@ -107,12 +147,16 @@
 }
 
 /* 贴软件边缘时列头随颜色层同侧内缩（与 v7.3.6 语义一致：标题层与
-   内容/颜色层同步） */
-.dv-view-container > .dv-view:first-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label {
+   内容/颜色层同步）。
+   **同样两个判据**：chat 组常驻之后 `:first-child` 基本不再命中，走 JS 的
+   `data-edge-left/right` 标记（见上方 main-tint 段注释）。 */
+.dv-view-container > .dv-view:first-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label,
+.dv-groupview[data-edge-left] .chat-tab-label {
   padding-left: calc(var(--rail-gutter) + var(--chat-edge-inset));
 }
 
-.dv-view-container > .dv-view:last-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label {
+.dv-view-container > .dv-view:last-child:has(> .dv-groupview .main-tint--dockview) .chat-tab-label,
+.dv-groupview[data-edge-right] .chat-tab-label {
   padding-right: calc(var(--rail-gutter) + var(--chat-edge-inset));
 }
 

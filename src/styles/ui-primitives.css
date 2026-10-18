@@ -84,7 +84,11 @@
   /* 不参与命中测试：0 宽列若仍能接收 pointer，用户拖 sash 会误触 */
   pointer-events: none;
 }
-/* 0 宽列里的可聚焦元素退出 tab 序（否则 Tab 会钻进看不见的侧栏） */
+/* 0 宽列里的可聚焦元素退出 tab 序（否则 Tab 会钻进看不见的侧栏）。
+   **注意顺序**：展开时本属性在补间**开始前**就被摘掉（setColumnCollapsed
+   的 `if (!hidden) applyCollapsedMarker(group, false)`）——早期版本留到补间
+   结束才摘，导致整段展开过程中内容都 `visibility:hidden`，等宽度到位才
+   一次性恢复，用户看到的是"容器展开完、内容瞬间冒出来"（2026-10-18 实锤）。 */
 .dv-groupview[data-dv-collapsed] :is(a, button, input, select, textarea, [tabindex]) {
   visibility: hidden;
 }
@@ -94,6 +98,26 @@
 }
 .dv-groupview[data-dv-morph='hide'] {
   opacity: 0;
+}
+/* 展开入场：内容层随宽度补间一起淡入（挂载即播的 animation——attribute
+   由 markMorph 在补间开始前写入，transition 没有"旧值"可放）。
+   打在整个 groupview 上（含页签条）：只动 content-container 的话，面板栏
+   的标签条会在补间一开始就整条出现、内容后淡，两层错位。 */
+@keyframes dv-column-unveil {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.dv-groupview[data-dv-morph='show'] {
+  animation: dv-column-unveil var(--sidebar-morph-dur) var(--sidebar-morph-ease) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dv-groupview[data-dv-morph='show'] {
+    animation: none;
+  }
 }
 /* 0 宽列右侧的 sash 变成 `dv-minimum`（left:-2px，落在列内部），不会挡内容；
    但它的光标仍是 resize，用户可能误以为还能拖宽——给它 default 光标。 */

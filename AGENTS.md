@@ -357,6 +357,23 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   另：CEF 下 `requestAnimationFrame` 在布局结算后会停 400ms+
   （setTimeout(0) 只要 2ms），补间驱动用 `setTimeout` 不用 rAF；
   栏旗标**不要加模块级 cache**（vite HMR 双实例会互相覆盖持久化）。
+  **贴边标记（2026-10-18 补，用户报"隐藏后颜色层直接贴到窗口边缘"）**：
+  组常驻之后 chat 永远是 `:first-child` 的**兄弟**，`.main-tint--dockview`
+  的 `:first-child` 结构性内缩判据基本失效——改由 JS 按"物理序里该侧有
+  没有宽度>0 的组"打 `data-edge-left/right`（`refreshChatEdgeMarkers`），
+  CSS 两个判据并存。三处配套：①`onDidLayoutChange` 里调一次（拖 sash
+  把列拖到 0 时跟手）；②收放补间开始时用 `override={{group,visible:目标态}}`
+  按**意图**声明（补间期实际宽度还没到位，按实际算会在收尾硬跳 20px）；
+  ③`refreshChatEdgeMarkers` 在 `morphBusy` 期间无 override 直接让位——
+  而收尾回调里必须**先落 `morphBusy=false` 再打标记**，顺序反了最终收敛
+  那一次就成了空操作。
+  **展开时内容跟着动（同日，用户报"容器有动画内容没有，展开完瞬间出现"）**：
+  `data-dv-collapsed` 里的 `visibility:hidden` 会让整栏内容在整段补间里
+  都不可见，等收尾才一次性恢复——展开方向必须在补间**开始前**摘掉它，
+  并给 groupview 挂 `dv-column-unveil` 淡入（打在整个 groupview 上而非
+  content-container：面板栏标签条否则会先整条出现、内容后淡）。
+  tint/列头的 20px 内缩过渡只在 `[data-dv-morph='col']`（补间期间的 split
+  容器）上开——无条件挂会让 boot 自愈时颜色层滑 320ms。
 - **openhuman 设置页移植已整体回退（2026-10-18，用户决策）**：提交 80a1a60
   的 `src/components/settings/`（83 文件 / 13,569 行）+ settings-overlay 的
   外壳切换已删。实测原因：48 个 UI 原语只有 3 个（Button/Card/Tabs）真正

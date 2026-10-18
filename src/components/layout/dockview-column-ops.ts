@@ -339,11 +339,21 @@ const splitOfView = (view: HTMLElement): HTMLElement | undefined => {
  *  宽度**不靠 CSS**（见 tweenFrames 头注释：CSS 与 dockview 模型不同步）。 */
 const markMorph = (g: DockviewGroupPanel, phase: 'show' | 'hide'): void => {
   g.element?.setAttribute('data-dv-morph', phase)
+  // split 容器上的 `data-dv-morph='col'`：给"跟随列移动的装饰层"（主对话
+  // 颜色层的贴边内缩、列头内边距）开过渡——它们的状态在补间开始时按目标
+  // 态翻转，没有过渡就是硬跳 20px（用户报"颜色层直接到边缘/再闪回来"）。
+  // 只在补间期间存在，boot 期自愈走 withoutColumnMorph 不会挂上。
+  const view = viewOfGroup(g)
+  const split = view ? splitOfView(view) : undefined
+  split?.setAttribute('data-dv-morph', 'col')
 }
 
 const clearMorph = (g: DockviewGroupPanel | undefined): void => {
   if (!g) return
   g.element?.removeAttribute('data-dv-morph')
+  const view = viewOfGroup(g)
+  const split = view ? splitOfView(view) : undefined
+  split?.removeAttribute('data-dv-morph')
 }
 
 /** 组快照约束（暂时解除 min-宽，0 宽才可达）。
@@ -606,7 +616,22 @@ const setColumnCollapsed = (
   morphBusy = true
   // 收到 0 时必须放开 min 约束（出厂 min=240，否则钳住）
   if (hidden) releaseMinWidth(group)
+  // **补间开始前就要处理两件"内容侧"的事**（2026-10-18 用户报"展开时容器
+  // 有动画、内容没有，等容器展开完瞬间出现"）：
+  //  ① 展开方向：摘掉 `data-dv-collapsed`——它里面的 `visibility: hidden`
+  //     会让整栏内容在整段补间里都不可见，等收尾才一次性恢复（"瞬间冒
+  //     出来"）。此刻组宽仍是 0（overflow 裁切），摘掉不会提前露出内容，
+  //     只是让内容跟着宽度一起入场（CSS 走 [data-dv-morph='show']）。
+  //  ② 两个方向都按**目标态**重算贴边标记：补间期间组宽还没到位，按实际
+  //     宽度算会得出旧结论，tint 的 20px 内缩就会在补间结束的一刻硬跳
+  //     （用户报"颜色层直接到边缘/再闪回来"）。用 override 按意图声明，
+  //     配合 panes.css 里 tint 的 left/right 过渡，内缩与列同步滑。
+  if (!hidden) setCollapsedAttr(group, false)
+  // 先挂补间标记（含 split 容器的 `[data-dv-morph='col']`）**再**翻贴边
+  // 状态——顺序反了的话，属性翻转与 transition 规则出现在同一次样式结算
+  // 里，起始值可能取到"新值"，20px 内缩就变成硬跳而不是滑（见 panes.css）。
   markMorph(group, hidden ? 'hide' : 'show')
+  refreshChatEdgeMarkers({ group, visible: !hidden })
 
   tweenFrames(
     MORPH_DUR_MS,
@@ -628,18 +653,75 @@ const setColumnCollapsed = (
       } else {
         restoreMinWidth(group)
       }
+      // **先落 morphBusy 再打标记**：refreshChatEdgeMarkers 在补间期间会让位
+      // （见其注释），顺序反了这次最终收敛会变成空操作，贴边标记停留在补间
+      // 起点声明的目标态上——若期间用户拖过 sash，结果就是错的（2026-10-18
+      // 实测：split 列的 data-edge 校准丢失）。
+      morphBusy = false
       applyCollapsedMarker(group, hidden)
       clearMorph(group)
-      morphBusy = false
       onDone?.()
     },
   )
 }
 
 /** 0 宽组的视觉与命中处理：CSS 认这个属性隐藏内容并屏蔽 pointer。 */
-const applyCollapsedMarker = (g: DockviewGroupPanel, collapsed: boolean): void => {
+const setCollapsedAttr = (g: DockviewGroupPanel, collapsed: boolean): void => {
   if (collapsed) g.element?.setAttribute('data-dv-collapsed', '')
   else g.element?.removeAttribute('data-dv-collapsed')
+}
+
+const applyCollapsedMarker = (g: DockviewGroupPanel, collapsed: boolean): void => {
+  setCollapsedAttr(g, collapsed)
+  refreshChatEdgeMarkers()
+}
+
+/** 给 chat 组打"这一侧没有**可见**邻居"标记（CSS 用它决定颜色层是否内缩）。
+ *
+ *  **为什么需要 JS**（2026-10-18 实锤）：侧栏收起后组仍常驻（0 宽），DOM 序
+ *  里它还是 firstChild——chat 不再是 first-child，`.main-tint--dockview` 的
+ *  左内缩 20px 失效，颜色层直接贴到窗口边缘（用户报"隐藏之后主对话到边缘
+ *  的间距没了"）。CSS 没有"跳过 0 宽兄弟后的第一个"这种选择器，而 :has()
+ *  数不了"前面有几个可见列"——只能在收放后由 JS 算。
+ *
+ *  判据 = 物理序里 chat 前后各有没有**宽度 > 0** 的组。
+ *
+ *  **组常驻改造后这条从"收放兜底"变成"唯一判据"**：左栏组永远在 DOM 里，
+ *  chat 永远不是 first-child，`.dv-view:first-child` 结构性规则已退役
+ *  （见 panes.css）。所以本函数必须在 boot 与每次收放后都跑。
+ *
+ *  `override` 供展开补间期使用：此刻组宽仍是 0，但**意图**是可见——按实际
+ *  宽度算会把"马上要出现的邻居"当成不存在，tint 会在补间中途多出一条
+ *  20px 缝再消失（闪一下）。
+ *
+ *  **补间期间只认 override**：`onDidLayoutChange` 的防抖回调也会调本函数
+ *  （用户拖 sash 把某列拖到 0 时得靠它），而它在补间中每帧都会排队——
+ *  若用"实际宽度"覆盖补间开始时声明的目标态，tint 会在补间末段闪一下。
+ *  故 morphBusy 且无 override 时直接返回，补间结束的 applyCollapsedMarker
+ *  会做最终收敛。 */
+export const refreshChatEdgeMarkers = (override?: {
+  group: DockviewGroupPanel
+  visible: boolean
+}): void => {
+  if (morphBusy && !override) return
+  const a = api()
+  if (!a) return
+  const visual = visualOrderOf(a)
+  const groupById = new Map(a.groups.map((g) => [g.id, g] as const))
+  const isVisible = (id: string): boolean => {
+    if (override && override.group.id === id) return override.visible
+    return Math.round(groupById.get(id)?.width ?? 0) > 0
+  }
+  for (const chat of groupsOfRegion(a, 'chat')) {
+    const at = visual.indexOf(chat.id)
+    if (at < 0) continue
+    const visibleBefore = visual.slice(0, at).some(isVisible)
+    const visibleAfter = visual.slice(at + 1).some(isVisible)
+    if (visibleBefore) chat.element?.removeAttribute('data-edge-left')
+    else chat.element?.setAttribute('data-edge-left', '')
+    if (visibleAfter) chat.element?.removeAttribute('data-edge-right')
+    else chat.element?.setAttribute('data-edge-right', '')
+  }
 }
 
 /** 用户的列宽记忆（0 宽时读不到 group.width，只能自己存）。
@@ -711,6 +793,8 @@ export const normalizeColumns = (): void => {
     console.error('[dv-column-ops] 面板栏组不在树里——旗标未隐藏但无法恢复（布局存档异常）')
   }
   alignVisibleToOrder(a)
+  // 贴边标记每次收敛后都要重算（组常驻改造后它是唯一判据，见函数注释）
+  refreshChatEdgeMarkers()
   persistFlagsColOrder(a)
 }
 

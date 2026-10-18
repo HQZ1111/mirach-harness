@@ -59,6 +59,7 @@ import {
   normalizeColumns,
   persistFlagsColOrder,
   RAIL_W,
+  refreshChatEdgeMarkers,
   rootPanelsGroup,
   withoutColumnMorph,
 } from './dockview-column-ops'
@@ -361,6 +362,9 @@ export function DockviewShell() {
       let persistTimer: ReturnType<typeof setTimeout> | null = null
       a.onDidLayoutChange(() => {
         if (hydratingRef.current) return
+        // 贴边标记要跟手（拖 sash 把某列拖到 0 时 chat 就该立刻内缩，不等
+        // 250ms 防抖）。收放补间期间本函数内部会让位（见其注释）。
+        refreshChatEdgeMarkers()
         if (persistTimer) clearTimeout(persistTimer)
         persistTimer = setTimeout(() => {
           persistTimer = null
