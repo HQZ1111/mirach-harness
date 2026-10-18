@@ -424,7 +424,7 @@ export function ComposerAttachButton({
       disabled={!props.onClick}
       className={cn(
         ghostButton,
-        "size-8 disabled:pointer-events-none disabled:opacity-30",
+        "pressable-sm size-8 disabled:pointer-events-none disabled:opacity-30",
         className,
       )}
       {...props}
@@ -613,9 +613,9 @@ export function ComposerVoiceButton({
         active
           ? cn(
               inkButton,
-              "flex size-8 items-center justify-center rounded-full",
+              "pressable-sm flex size-8 items-center justify-center rounded-full",
             )
-          : cn(ghostButton, "size-8"),
+          : cn(ghostButton, "pressable-sm size-8"),
         className,
       )}
       {...props}
@@ -644,7 +644,7 @@ export function ComposerSend({
       aria-label={streaming ? "Stop generating" : "Send message"}
       data-slot="composer-send"
       className={cn(
-        "grid size-8 place-items-center rounded-full",
+        "pressable-sm grid size-8 place-items-center rounded-full",
         streaming || !idle
           ? inkButton
           : "bg-foreground/[0.06] text-foreground/30 dark:bg-foreground/[0.09] transition-colors",

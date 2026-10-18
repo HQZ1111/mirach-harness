@@ -23,6 +23,7 @@ import { RefreshCw, XIcon } from 'lucide-react'
 import { createStore, useStore } from 'zustand'
 
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
+import { useOverlayExit } from '@/lib/overlay-exit'
 
 /** pi_list_resources 行（pi Skill，resources.rs:134-142 字段映射） */
 interface PiSkillRow {
@@ -95,10 +96,13 @@ export function ResourcesDialog({ onClose }: { onClose: () => void }) {
     return () => disposeEscape()
   }, [])
 
+  // 退场编排（2026-10-18，见 lib/overlay-exit.ts）：关闭先播退场再卸载。
+  const { closing, requestClose } = useOverlayExit(onClose)
+
   const onEscape = (e: ReactKeyboardEvent) => {
     if (e.key === 'Escape' && isTopEscapeLayer(ESCAPE_PRIORITY.overlay)) {
       e.stopPropagation()
-      onClose()
+      requestClose()
     }
   }
 
@@ -109,7 +113,12 @@ export function ResourcesDialog({ onClose }: { onClose: () => void }) {
   }
 
   return createPortal(
-    <div className="set-overlay" onClick={onClose} onKeyDown={onEscape} role="presentation">
+    <div
+      className={closing ? 'set-overlay set-overlay--closing' : 'set-overlay'}
+      onClick={requestClose}
+      onKeyDown={onEscape}
+      role="presentation"
+    >
       <div
         aria-label="技能与工具"
         aria-modal="true"
@@ -130,7 +139,7 @@ export function ResourcesDialog({ onClose }: { onClose: () => void }) {
             >
               <RefreshCw size={14} />
             </button>
-            <button aria-label="关闭" className="set-close" onClick={onClose} type="button">
+            <button aria-label="关闭" className="set-close pressable-sm" onClick={requestClose} type="button">
               <XIcon size={14} />
             </button>
           </div>

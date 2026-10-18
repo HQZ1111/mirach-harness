@@ -125,7 +125,7 @@ export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
           return (
             <button
               aria-label={item.label}
-              className="hub-entry-row"
+              className="hub-entry-row pressable-row"
               data-entry-id={item.id}
               key={item.id}
               onClick={() => {

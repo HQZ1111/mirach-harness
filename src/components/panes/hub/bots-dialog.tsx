@@ -31,6 +31,7 @@ import { Bot, XIcon } from 'lucide-react'
 
 import { useModelCatalog, modelCatalogStore } from '@/components/assistant-ui/model-catalog-store'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
+import { useOverlayExit } from '@/lib/overlay-exit'
 
 import { botsStore, splitBotModel, useBotsStore, type BotPreset } from './bots-store'
 
@@ -78,10 +79,15 @@ export function BotsDialog({
     return () => disposeEscape()
   }, [])
 
+  // 退场编排（2026-10-18）：关闭先播 160ms 退场再真卸载；所有关闭路径
+  // （遮罩点击/Esc/✕/提交后）必须走 requestClose，否则退场被跳过
+  // （onClose 直连 = 同步卸载，CSS 没有机会播）。
+  const { closing, requestClose } = useOverlayExit(onClose)
+
   const onEscape = (e: ReactKeyboardEvent) => {
     if (e.key === 'Escape' && isTopEscapeLayer(ESCAPE_PRIORITY.overlay)) {
       e.stopPropagation()
-      onClose()
+      requestClose()
     }
   }
 
@@ -108,11 +114,16 @@ export function BotsDialog({
     // Duplicate 名也可建（hermes duplicateBot 语义——upsert 按 name 键）
     botsStore.getState().upsert(preset, editing?.name)
     callbacks.launched?.(preset)
-    onClose()
+    requestClose()
   }
 
   return createPortal(
-    <div className="set-overlay" onClick={onClose} onKeyDown={onEscape} role="presentation">
+    <div
+      className={closing ? 'set-overlay set-overlay--closing' : 'set-overlay'}
+      onClick={requestClose}
+      onKeyDown={onEscape}
+      role="presentation"
+    >
       <div
         aria-label={editing ? '编辑机器人' : '新建机器人'}
         aria-modal="true"
@@ -126,7 +137,7 @@ export function BotsDialog({
             {editing ? '编辑机器人' : '新建机器人'}
           </h2>
           <div className="set-header-actions">
-            <button aria-label="关闭" className="set-close" onClick={onClose} type="button">
+            <button aria-label="关闭" className="set-close pressable-sm" onClick={requestClose} type="button">
               <XIcon size={14} />
             </button>
           </div>
@@ -223,11 +234,11 @@ export function BotsDialog({
               working_directory 一次性给足）。
             </p>
             <div className="set-actions">
-              <button className="set-btn" onClick={onClose} type="button">
+              <button className="set-btn pressable" onClick={requestClose} type="button">
                 取消
               </button>
               <button
-                className="set-btn set-btn-primary"
+                className="set-btn set-btn-primary pressable"
                 disabled={!valid}
                 onClick={submit}
                 type="button"

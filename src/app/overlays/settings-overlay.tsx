@@ -35,6 +35,7 @@ import { Cpu, Info, KeyRound, Layers, RefreshCw, Wrench, XIcon } from 'lucide-re
 
 import pkg from '../../../package.json'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
+import { useOverlayExit } from '@/lib/overlay-exit'
 
 /** pi 模型目录条目（pi_list_models 返回形状，同 composer-wired）。 */
 interface PiModelEntry {
@@ -379,6 +380,8 @@ const SECTIONS: readonly { icon: typeof Cpu; id: SectionId; label: string }[] = 
 ]
 
 export function SettingsOverlay({ onClose }: { onClose: () => void }) {
+  // 退场编排（2026-10-18，见 lib/overlay-exit.ts）：关闭先播退场再卸载。
+  const { closing, requestClose } = useOverlayExit(onClose)
   // Esc 关闭（escape-layers overlay 层=40）：拖拽层（50）在拖拽中更高，
   // Esc 只中止拖拽不关浮层；编辑模式（20）更低，浮层开着时 Esc 不退编辑模式。
   useEffect(() => {
@@ -388,14 +391,14 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
       if (e.defaultPrevented) return
       if (!isTopEscapeLayer(ESCAPE_PRIORITY.overlay)) return
       e.preventDefault()
-      onClose()
+      requestClose()
     }
     window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('keydown', onKey)
       release()
     }
-  }, [onClose])
+  }, [requestClose])
 
   // ── 数据面：挂载即拉取（§4.5 IPC）；null = 载入中（可见状态）──
   const [models, setModels] = useState<PiModelEntry[] | null>(null)
@@ -755,7 +758,11 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
     : null
 
   return createPortal(
-    <div className="set-overlay" onClick={onClose} role="presentation">
+    <div
+      className={closing ? 'set-overlay set-overlay--closing' : 'set-overlay'}
+      onClick={requestClose}
+      role="presentation"
+    >
       <div
         aria-label="设置"
         aria-modal="true"
@@ -765,7 +772,12 @@ export function SettingsOverlay({ onClose }: { onClose: () => void }) {
       >
         <div className="set-header">
           <h2 className="set-title">设置</h2>
-          <button aria-label="关闭设置" className="set-close" onClick={onClose} type="button">
+          <button
+            aria-label="关闭设置"
+            className="set-close pressable-sm"
+            onClick={requestClose}
+            type="button"
+          >
             <XIcon size={14} />
           </button>
         </div>

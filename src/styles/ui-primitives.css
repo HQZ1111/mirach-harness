@@ -173,6 +173,32 @@
   }
 }
 
+/* 行级按压（会话行、入口条行、列表项）：**只压暗不缩放**。
+   为什么不能用 .pressable：这些行同时是 dnd-kit sortable 节点，行壳的
+   inline `style.transform` 是拖拽跟指针的唯一载体（reorderable-list 的
+   useSortableBindings）——CSS 的 transform: scale() 会被 inline 值整条
+   覆盖（拖拽中完全不生效），非拖拽时又和 dnd 的过渡互相拉扯。行级反馈
+   改走 opacity：与 transform 正交，两者可同时成立。
+   2026-10-18 用户报"点击按钮，文字没效果"——会话行/组头这些**文字面**
+   正是此前完全没有按压反馈的一批（只有 4 个图标钮挂了 pressable）。 */
+.pressable-row.pressable-row {
+  transition-property: opacity, color, background-color;
+  transition-duration: var(--press-dur-out);
+  transition-timing-function: var(--press-ease-out);
+}
+.pressable-row.pressable-row:active:not(:disabled) {
+  transition-duration: var(--press-dur-in);
+  transition-timing-function: var(--press-ease-in);
+  opacity: var(--press-row-opacity);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pressable-row.pressable-row,
+  .pressable-row.pressable-row:active:not(:disabled) {
+    transition-property: opacity, color, background-color;
+    opacity: 1;
+  }
+}
+
 /* ── 3. 选项展开：内容被"挤"下去 ─────────────────────────────────
    会话分组/日期桶的行是被 display 管线**整行滤掉**的
    （session-display.hideCollapsedGroupRows），展开 = 行重新挂载——
@@ -196,8 +222,42 @@
   animation-delay: calc(var(--disclose-index, 0) * 40ms);
   overflow: hidden;
 }
+/* 收起方向（2026-10-18，用户报"展开有动画、收起直接消失"）：行不是淡出
+   卸载，而是被**延迟提交**——点击收起先给行挂 `.disclose-row--closing`
+   播退场，动画结束才真正写 store（行随之被数据管线滤掉）。与展开**反向**
+   步进：最后一行先走，视觉上是"从下往上收"。
+   见 session-manage/deferred-collapse.ts（时长必须与其 COLLAPSE_MS 同值）。
+   **选择器不带 `.disclose-row`**：渲染侧入/退二选一（同一行不会同时带两个
+   类），写成后代/并列都会匹配不上（实测 animationName:none）。 */
+@keyframes beui-disclose-row-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scaleY(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-2px) scaleY(0.6);
+  }
+}
+.disclose-row--closing {
+  /* 收得比展开快一档（--disclose-out-dur）：收起是"用户已经决定不要了"，
+     慢动画会挡着下一次操作。 */
+  animation: beui-disclose-row-out var(--disclose-out-dur) var(--disclose-ease) forwards;
+  /* 步进 8ms：收起是"整片一起往下收"，慢步进会让大部分行停在 delay 里、
+     视觉上像卡住不动（2026-10-18 实测：30ms 步进下 op 恒 1.0）。
+     反向序号见 thread-list.aui.tsx 的 animationOf（末行先走）。 */
+  animation-delay: calc(var(--disclose-out-index, 0) * 8ms);
+  /* **不用 max-height**（2026-10-18 实锤）：行自然高度普遍 <200px，从
+     `200px` 起播时前段没有任何可见变化，用户看到的是"先静着、最后一瞬
+     消失"。transform/opacity 全程可插值。 */
+  overflow: hidden;
+  transform-origin: top center;
+}
 @media (prefers-reduced-motion: reduce) {
   .disclose-row {
+    animation: none;
+  }
+  .disclose-row--closing {
     animation: none;
   }
 }
@@ -218,6 +278,78 @@
 @media (prefers-reduced-motion: reduce) {
   .disclosure-chevron {
     transition: none;
+  }
+}
+
+/* ── 5. 遮罩式弹层（.set-overlay 家族）进场/退场 ─────────────────────
+   2026-10-18 用户报"弹窗只有输入框的模型有效果，其他弹窗都没生效"——
+   实测：设置浮层 / 技能与工具 / 机器人编辑 / 资源面板全是 .set-overlay +
+   .set-card，**此前没有任何动画规则**（挂载硬出现、卸载硬消失）。
+   模型选择器看着"有效果"是因为它走 beUI goo popover（另一套 motion 实现）。
+
+   进场 = 挂载即播的 animation（遮罩淡入 + 卡片 scale 0.96→1 上浮 4px）；
+   退场 = 调用方先加 `.set-overlay--closing` 播退场，到点再卸载
+   （见 lib/overlay-exit.ts——React 卸载是同步的，CSS 没有机会播完）。
+   **时长/曲线与 JS 常量同源**：--overlay-exit-dur 改一处必须改
+   overlay-exit.ts 的 EXIT_MS。 */
+@keyframes beui-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes beui-overlay-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes beui-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes beui-overlay-card-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px) scale(0.97);
+  }
+}
+
+.set-overlay {
+  animation: beui-overlay-in var(--beui-dur-enter) var(--beui-ease-out) both;
+}
+.set-overlay > .set-card {
+  animation: beui-overlay-card-in var(--overlay-enter-dur) var(--sidebar-morph-ease) both;
+  transform-origin: center;
+}
+.set-overlay.set-overlay--closing {
+  animation: beui-overlay-out var(--overlay-exit-dur) var(--beui-ease-out) both;
+  pointer-events: none;
+}
+.set-overlay.set-overlay--closing > .set-card {
+  animation: beui-overlay-card-out var(--overlay-exit-dur) var(--beui-ease-out) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .set-overlay,
+  .set-overlay > .set-card,
+  .set-overlay.set-overlay--closing,
+  .set-overlay.set-overlay--closing > .set-card {
+    animation: none;
   }
 }
 

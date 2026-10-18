@@ -424,6 +424,7 @@
   --press-dur-out: 180ms;                           /* 回弹（慢一档） */
   --press-ease-in: cubic-bezier(0.4, 0, 1, 1);      /* 加速压下去 */
   --press-ease-out: var(--beui-ease-out);           /* 弹回来 */
+  --press-row-opacity: 0.62;                        /* 行级按压（只压暗不缩放） */
 
   /* 展开（分组/折叠面板内容）：beUI accordion-open 的 CSS 等价——高度用
      grid-template-rows 0fr→1fr 才有"内容被往下挤"的连续过程（height:auto
@@ -431,6 +432,13 @@
   --disclose-dur: 220ms;
   --disclose-ease: var(--beui-ease-out);
   --disclose-fade-dur: 160ms;
+  /* 收起（与展开分开）：用户已决定不要，动画不该挡下一次操作。 */
+  --disclose-out-dur: 160ms;
+
+  /* 遮罩式弹层（.set-overlay 家族）进场/退场。**退场值必须与 JS 常量同源**
+     ——lib/overlay-exit.ts 的 EXIT_MS 是按这个时长排卸载的，改一处改两处。 */
+  --overlay-enter-dur: 200ms;                       /* 卡片入场（遮罩走 180） */
+  --overlay-exit-dur: 160ms;                        /* 卡片/遮罩退场 */
 }
 
 /* ── beUI 关键帧（唯一非规则的例外：关键帧是**定义**不是规则）──

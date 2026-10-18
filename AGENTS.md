@@ -357,6 +357,36 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   另：CEF 下 `requestAnimationFrame` 在布局结算后会停 400ms+
   （setTimeout(0) 只要 2ms），补间驱动用 `setTimeout` 不用 rAF；
   栏旗标**不要加模块级 cache**（vite HMR 双实例会互相覆盖持久化）。
+- **动效补齐第二轮（2026-10-18，用户报"文字没效果 / 收起直接消失 /
+  弹窗只有模型选择器有动效"）**：
+  - **按压覆盖面**：此前只有 4 个图标钮挂了 `.pressable`。补了
+    `.pressable-sm`（会话 ⋯ / 分组头 / 入口条 / composer 钮 / 模型选择器
+    / 空态建议 / 弹层关闭钮）与 `.pressable-row`（会话行 / 段头 / 日期与
+    工作区桶头）。**行级只能压暗不能缩放**：会话行是 dnd-kit sortable
+    节点，行壳的 inline `style.transform` 是拖拽唯一载体，CSS `scale()`
+    会被整条覆盖（拖拽中失效、非拖拽时与 dnd 过渡打架）——故
+    `.pressable-row` 走 opacity（`--press-row-opacity: .62`）。
+    按压挂载点选 trigger 而非行壳（行壳 transition 被 dnd 内联接管）。
+  - **收起动画 = 延迟提交**（`session-manage/deferred-collapse.ts`）：
+    行由 `hideCollapsedGroupRows` **整行滤掉**，同步卸载没有动画机会。
+    故点收起先给桶打 `collapsing` 标记、行仍留在树里播
+    `.disclose-row--closing`，播完（`--disclose-out-dur` + 逐行步进）
+    才真正 `setGroupCollapsed`。坑：①四个分组头是**独立组件**，共享不到
+    列表作用域的 hooks → 模块级单例 store；②段级收起（`recent`）必须同时
+    匹配**行所属日期桶 key**，否则类一次都挂不上（实测行直接消失）；
+    ③退场**不能用 max-height**（行自然高度普遍 <200px，从 200px 起播前段
+    无可见变化）→ 改 transform/opacity；④等待时长必须覆盖逐行步进
+    （`waitMsFor(rowCount)`），否则最后几行在 delay 里就被卸载。
+  - **遮罩弹层 （`.set-overlay` 家族：设置 / 技能与工具 / 机器人）**：
+    此前**零动画规则**。加 `beui-overlay-in` / `beui-overlay-card-in`
+    进场 + `--closing` 退场；退场同样要"先播再卸"→
+    `lib/overlay-exit.ts` 的 `useOverlayExit`（所有关闭路径——遮罩点击 /
+    Esc / ✕ / 提交后——都必须走 `requestClose`，直连 `onClose` 会跳过
+    退场）。注意 `.set-card` 的水平居中是 `position:fixed` + grid，不依赖
+    transform，卡片动画可安全用 `translateY + scale`。
+  - **顺带修掉的实 bug**：`ResourcesDialogHost` 从未在任何组件树里渲染
+    （`EntryBar` 调 `openResourcesDialog()` 改 store，但没有消费者）——
+    点「技能与工具」完全没反应。已在 `AssistantSessionsPane` 挂载。
   **贴边标记（2026-10-18 补，用户报"隐藏后颜色层直接贴到窗口边缘"）**：
   组常驻之后 chat 永远是 `:first-child` 的**兄弟**，`.main-tint--dockview`
   的 `:first-child` 结构性内缩判据基本失效——改由 JS 按"物理序里该侧有
