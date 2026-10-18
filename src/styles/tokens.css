@@ -170,7 +170,7 @@
      实测原状：容器 px-2（=0.5rem×15px 根字号 = **7.5px**，半像素）→ 内容左缘
      仅 8、右缘 7.5（**左右不对称**），与左栏 30 不齐。
      改为左右对称的内容线留白（引用 --rail-gutter 与左栏同源）。 */
-  --filetree-pad-x: var(--rail-gutter);       /* 内容线（左=右=30） */
+  --filetree-pad-x: var(--rail-gutter);       /* 内容线（左=右，随 --rail-gutter=26） */
   --filetree-pad-y: var(--space-panel);       /* 上下内距（接间距刻度，非硬编码） */
   --filetree-head-gap: var(--space-stack-sm); /* 地址行↔列表 间距 */
   /* 行缩进：层级步进 + 基础左距（原来写死在 tailwind 任意值里
@@ -329,26 +329,28 @@
 :root {
   /* 左右栏贴边留白（用户 2026-10-14 定稿：左栏/右栏的内容到栏边**左右均
      30px**）——内容线（logo/图标/圆点/文字）对准 --rail-gutter；
-     洗底槽位/列表容器 = 内容线 − 行内距（洗底比内容线宽出是常规）。 */
-  --rail-gutter: 30px;                        /* 内容线到栏缘（左右对称） */
+     洗底槽位/列表容器 = 内容线 − 行内距（洗底比内容线宽出是常规）。
+     2026-10-18 用户口径：30 径感偏大 → **26**（-4px）。所有派生槽位都是
+     `calc(var(--rail-gutter) ± N)`，改本值即全链路跟随（含文件树/打开页）。 */
+  --rail-gutter: 26px;                        /* 内容线到栏缘（左右对称） */
   /* ── 左栏「文字列」与图标列（2026-10-16 方案 A：三栏内容线统一）──
      实测问题：有图标行文字左缘 54、无图标行（组头）只有 21 —— 不在同一列。
      本组令牌定义两列，所有左栏文字必须落在 --rail-text-col：
-       图标列左缘 = --rail-gutter (30)
+       图标列左缘 = --rail-gutter (26)
        图标列宽   = --rail-icon (16)
        图标↔文字  = --rail-icon-gap (8)
-       文字列左缘 = 30 + 16 + 8 = 54 */
+       文字列左缘 = 26 + 16 + 8 = 50 */
   --rail-icon: 16px;                          /* 图标盒宽（图标列） */
   --rail-icon-gap: 8px;                       /* 图标↔文字间距 */
-  --rail-text-col: calc(var(--rail-gutter) + var(--rail-icon) + var(--rail-icon-gap)); /* 54 */
+  --rail-text-col: calc(var(--rail-gutter) + var(--rail-icon) + var(--rail-icon-gap)); /* 50 */
   /* 行槽位（洗底容器）：比内容线外扩行内距，令洗底比内容宽出（常规）。
      **注意 9 不是笔误**：= 1px 透明边 + 8px 行内距（--hub-row-pad-x）——
-     容器 30−9=21 + 行内距 8 + 透明边 1 = 图标线正好落在 30（--rail-gutter）。
+     容器 26−9=17 + 行内距 8 + 透明边 1 = 图标线正好落在 26（--rail-gutter）。
      改这一个值会连带移动图标线（2026-10-16 实测：误改 −8 → 图标线跑到 31）。 */
-  --rail-row-inset: calc(var(--rail-gutter) - 9px);   /* 21 */
+  --rail-row-inset: calc(var(--rail-gutter) - 9px);   /* 17 */
   /* 列表/搜索槽位：无透明边的面，外扩行内距即可（全部整数，无半像素） */
-  --rail-list-inset: calc(var(--rail-gutter) - 8px);  /* 22 */
-  --rail-search-inset: calc(var(--rail-gutter) - 2px);/* 28 */
+  --rail-list-inset: calc(var(--rail-gutter) - 8px);  /* 18 */
+  --rail-search-inset: calc(var(--rail-gutter) - 2px);/* 24 */
   /* ── 左栏垂直节奏（2026-10-18 补齐）─────────────────────────────
      实测病根：logo 带 → 入口条 → 列表 三段的间距**全是 0**（各段自己
      `flex: none` 且无 margin，只靠内部 padding 撑开）——视觉上"有缝"是
@@ -365,7 +367,7 @@
 
 /* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
 :root {
-  --openpage-pad-x: var(--rail-gutter);       /* 页内左右边距（30——与左栏内容线对称，用户 2026-10-14） */
+  --openpage-pad-x: var(--rail-gutter);       /* 页内左右边距（与左栏内容线同源，现 26） */
   --openpage-title-gap: 18px;                 /* 标题与按钮列表间距 */
   --openpage-btn-radius: 10px;                /* 按钮圆角 */
   --openpage-btn-pad-y: 12px;                 /* 按钮上下内边距 */

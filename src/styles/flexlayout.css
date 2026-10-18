@@ -292,7 +292,7 @@
    v8.0：宿主域 .flexlayout-host → .dockview-host（左栏现在是 dockview
    group 的 panel 内容，logo 渲染在 panel 内——M4 实锤 logo 曾 350px 无
    圆角：全部规则挂在死掉的 .flexlayout-host 域下从未命中）。
-   left rail gutter（2026-10-14）：logo 左内边距走 --rail-gutter(30)，
+   left rail gutter（2026-10-14）：logo 左内边距走 --rail-gutter（现 26），
    到栏左缘 30（顶内边距仍 --logo-leading-pad=20 不动）。 */
 .dockview-host .rail-logo-leading {
   align-items: flex-start; /* 顶对齐：logo 上间距 = padding-top（居中会被余量压低） */

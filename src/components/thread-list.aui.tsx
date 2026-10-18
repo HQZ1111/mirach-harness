@@ -1031,6 +1031,8 @@ const SectionHeader: FC<{
   // 的洗底槽位)，故这里只需补 (icon + gap) − 该 inset 的差额，否则两层
   // 叠加会过冲（实测 padL:24 → 文字 46 而非 54；正解 = 24+8 = 32）。
   // 表达式写成 calc 以自证来源，避免下次改 gutter 时又算错。
+  // （注释里的 21/54 是 2026-10-16 当时 gutter=30 的实测值；2026-10-18
+  //  gutter 改 26 后内容线 = 50，本表达式自动跟随，无需改。）
   const ICON_COL_PS =
     "ps-[calc(var(--rail-icon)+var(--rail-icon-gap)+var(--rail-gutter)-var(--rail-list-inset))]";
   return (
