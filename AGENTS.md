@@ -330,15 +330,25 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
 - hermes 的 `electron/`、`e2e/`、`scripts/`、playwright、tsconfig.electron
   均未复制（Tauri 壳已替代或不需要）。
 - **动效三套（2026-10-18，抄 beui.dev motion/animated-sidebar）**：
-  ①侧栏收放 = `dv-view` 的 width transition（`[data-dv-morph='col']` 标记
-  门控）+ dockview-column-ops 先补间到 0 再做序列化摘除；**全隐藏语义**
-  （用户口径：不要 icon rail），宽度归 0。②按钮按压 = `.pressable` /
-  `.pressable-sm`（90ms 压下 / 180ms 弹回两段曲线）。③选项展开 =
-  `.disclose-row`（挂载即播的 max-height+opacity，逐行 40ms 步进）。
-  令牌唯一源头 = tokens.css「侧栏收放 + 按压 + 展开」段。
-  **两个实锤坑**：选择器必须写 `.pressable.pressable`（(0,2,0)——组件
-  自己的 `transition:` 同分且先导入会顶掉 transform）；`disclose-row`
-  的包装层必须恒在（按需插拔会让 React 换父类型 → 整行卸载重挂）。
+  ①侧栏收放 = **JS 逐帧 `api.setSize`**（`tweenFrames`），不用 CSS
+  transition；**全隐藏语义**（用户口径：不要 icon rail），宽度归 0。
+  ②按钮按压 = `.pressable` / `.pressable-sm`（90ms 压下 / 180ms 弹回
+  两段曲线）。③选项展开 = `.disclose-row`（挂载即播的 max-height+opacity，
+  逐行 40ms 步进）。令牌唯一源头 = tokens.css「侧栏收放 + 按压 + 展开」段。
+  **五个实锤坑**：
+  1. 选择器必须写 `.pressable.pressable`——组件自己的 `transition:` 同分
+     且先导入会顶掉 transform。
+  2. `disclose-row` 包装层必须恒在（按需插拔会让 React 换父类型 → 整行
+     卸载重挂）。
+  3. **宽度不能用 CSS transition**：CSS 只改 DOM，dockview 模型不同步 →
+     库重新分配，把释放的宽度全塞给最后一列（实测左栏 350→0 时 panels
+     350→700 = 用户报的"闪烁变大"）。必须逐帧 setSize。
+  4. **`toJSON()` 的 leaf 不含 `size`**（只有 id/views/activeView/
+     hideHeader）——"改快照 size 再 fromJSON"是无操作。
+  5. **位置切换（moveTo）会重新挂载组 DOM**，CSS transition 不跨
+     re-parent——必须 FLIP（`withFlip`/`runFlip`）。
+  另：CEF 窗口模式下 `requestAnimationFrame` 在布局结算后会停 400ms+
+  （setTimeout(0) 只要 2ms），补间驱动用 `setTimeout` 不用 rAF。
 - **openhuman 设置页移植已整体回退（2026-10-18，用户决策）**：提交 80a1a60
   的 `src/components/settings/`（83 文件 / 13,569 行）+ settings-overlay 的
   外壳切换已删。实测原因：48 个 UI 原语只有 3 个（Button/Card/Tabs）真正
