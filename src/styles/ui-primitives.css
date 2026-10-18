@@ -67,37 +67,19 @@
  * 全部带 prefers-reduced-motion 降级（用户系统级关动效时必须真的停）。
  * ============================================================ */
 
-/* ── 1. 侧栏收放：dockview 列宽插值 ──────────────────────────────
-   dockview 的列宽载体 = split 容器下每个 .dv-view 的 inline width/left
-   （实测 2026-10-18：350→0 时 dv-view 的 style.width 由库直接改写）。
-   库本身不插值（transition-duration 实测 0s），但给这两个属性挂 CSS
-   transition 后逐帧采样为平滑收敛（17 帧，chat 列同步位移）。
-   **只在 [data-dv-morph] 容器上生效**：dockview-column-ops 在
-   setLeftHidden/setPanelsHidden 期间给 split 容器打标记，收放手术
-   完成即摘除——常态拖 sash 不受影响（那是逐帧跟指针，插值反而拖尾）。 */
-.dv-split-view-container[data-dv-morph='col'] > .dv-view-container > .dv-view {
-  transition:
-    width var(--sidebar-morph-dur) var(--sidebar-morph-ease),
-    left var(--sidebar-morph-dur) var(--sidebar-morph-ease) !important;
-  will-change: width, left;
-}
-
-/* 收放期间列内容跟着淡（宽度先动、文字后走——纯宽度插值时文字在 0 宽
-   边界内被硬裁，看起来像"闪"一下）。标记打在**被收的那一组**上
-   （.dv-groupview[data-dv-morph]），不波及同 split 的其它列。
-   注意挂在 groupview 自身（不是 `> *`）：组内容的层级由 dockview 决定，
-   直接子元素未必是内容面（实测 `.left-rail-pane` 在更深层）。 */
+/* ── 1. 侧栏收放：**宽度由 JS 逐帧驱动，这里只管内容淡出** ──────────
+   为什么不用 CSS width transition（2026-10-18 实锤）：CSS 只改 DOM 的
+   inline width，而 dockview 的**模型**仍认为该列是原宽；两者不一致时库会
+   按模型重新分配，把释放的宽度全塞给最后一列（实测左栏 350→0 过程中
+   panels 350→700，收起后才回落）——用户看到的就是"面板栏闪烁变大"。
+   正解 = dockview-column-ops 的 tweenFrames 逐帧 `api.setSize`，模型与
+   DOM 同步推进，每帧的分配都落在指定列上。
+   这里保留的标记只用于内容淡出：`.dv-groupview[data-dv-morph='hide']`。 */
 .dv-groupview[data-dv-morph] {
   transition: opacity var(--disclose-fade-dur) var(--beui-ease-out);
 }
 .dv-groupview[data-dv-morph='hide'] {
   opacity: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dv-split-view-container[data-dv-morph='col'] > .dv-view-container > .dv-view {
-    transition: none !important;
-  }
 }
 
 /* ── 2. 按压：通用点击缩放（transform 走 GPU，不影响布局）──────────
