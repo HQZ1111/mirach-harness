@@ -67,19 +67,38 @@
  * 全部带 prefers-reduced-motion 降级（用户系统级关动效时必须真的停）。
  * ============================================================ */
 
-/* ── 1. 侧栏收放：**宽度由 JS 逐帧驱动，这里只管内容淡出** ──────────
+/* ── 1. 侧栏收放：**宽度由 JS 逐帧驱动；组从不摘除** ──────────────
    为什么不用 CSS width transition（2026-10-18 实锤）：CSS 只改 DOM 的
    inline width，而 dockview 的**模型**仍认为该列是原宽；两者不一致时库会
    按模型重新分配，把释放的宽度全塞给最后一列（实测左栏 350→0 过程中
-   panels 350→700，收起后才回落）——用户看到的就是"面板栏闪烁变大"。
-   正解 = dockview-column-ops 的 tweenFrames 逐帧 `api.setSize`，模型与
-   DOM 同步推进，每帧的分配都落在指定列上。
-   这里保留的标记只用于内容淡出：`.dv-groupview[data-dv-morph='hide']`。 */
+   panels 350→700）——用户看到的就是"面板栏闪烁变大"。
+   为什么也不能"摘除/重建组"：展开时要重新挂载整棵左栏 React 树（实测
+   391ms long task），期间补间跑不起来 → 先撑满再跳变。
+   正解 = dockview-column-ops 的 setColumnCollapsed：**组常驻、宽度补到 0**，
+   模型与 DOM 同步推进，展开时没有任何新渲染。
+
+   0 宽组的处理：收起时补间结束给 groupview 打 `data-dv-collapsed`。 */
+.dv-groupview[data-dv-collapsed] {
+  /* 内容不可见（0 宽本来也看不见，这里挡的是 overflow 溢出与残留绘制） */
+  overflow: hidden;
+  /* 不参与命中测试：0 宽列若仍能接收 pointer，用户拖 sash 会误触 */
+  pointer-events: none;
+}
+/* 0 宽列里的可聚焦元素退出 tab 序（否则 Tab 会钻进看不见的侧栏） */
+.dv-groupview[data-dv-collapsed] :is(a, button, input, select, textarea, [tabindex]) {
+  visibility: hidden;
+}
+/* 收放期间内容淡出/淡入（宽度由 JS 驱动，这里只做 opacity） */
 .dv-groupview[data-dv-morph] {
   transition: opacity var(--disclose-fade-dur) var(--beui-ease-out);
 }
 .dv-groupview[data-dv-morph='hide'] {
   opacity: 0;
+}
+/* 0 宽列右侧的 sash 变成 `dv-minimum`（left:-2px，落在列内部），不会挡内容；
+   但它的光标仍是 resize，用户可能误以为还能拖宽——给它 default 光标。 */
+.dv-split-view-container > .dv-sash-container > .dv-sash.dv-minimum {
+  cursor: default;
 }
 
 /* ── 2. 按压：通用点击缩放（transform 走 GPU，不影响布局）──────────

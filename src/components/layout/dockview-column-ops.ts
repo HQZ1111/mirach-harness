@@ -99,10 +99,13 @@ const safeSet = (key: string, value: string): void => {
   }
 }
 
-let flagsCache: ColumnFlags | null = null
-
+/** 读栏旗标。**每次从 localStorage 现读，不缓存**（2026-10-18 实锤）：
+ *  旧实现有模块级 `flagsCache`，但 vite HMR 会同时存在新旧两个模块实例
+ *  （旧实例的 handler 还挂着），两份 cache 各自演化——收放写入 true 之后，
+ *  旧实例的 `persistFlagsColOrder` 拿着自己的 false 又写回存储，隐藏态
+ *  1.3s 后复活（实测）。旗标读极廉价（同步读一个小 JSON），不值得为它
+ *  引入跨实例不一致。 */
 export const columnFlagsOf = (): ColumnFlags => {
-  if (flagsCache) return flagsCache
   let parsed: Partial<ColumnFlags> = {}
   const raw = safeGet(FLAGS_KEY)
   if (raw) {
@@ -116,48 +119,15 @@ export const columnFlagsOf = (): ColumnFlags => {
     Array.isArray(parsed.colOrder) && parsed.colOrder.length === 3 && parsed.colOrder.every((r) => r === 'left' || r === 'chat' || r === 'panels')
       ? parsed.colOrder
       : (['left', 'chat', 'panels'] as ColRegion[])
-  flagsCache = {
+  return {
     colOrder: order as ColRegion[],
     leftHidden: parsed.leftHidden === true,
     panelsHidden: parsed.panelsHidden === true,
   }
-  return flagsCache
 }
 
 const setFlags = (next: ColumnFlags): void => {
-  flagsCache = next
   safeSet(FLAGS_KEY, JSON.stringify(next))
-}
-
-/** 组 leaf 快照（dockview 序列化格式的隐藏期离场内容）。 */
-interface GroupStash {
-  leaf: Record<string, unknown>
-  panels: Record<string, Record<string, unknown>>
-}
-
-const loadStash = (): { left?: GroupStash; panels?: GroupStash } => {
-  const raw = safeGet(STASH_KEY)
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw) as { left?: GroupStash; panels?: GroupStash }
-    return {
-      ...(parsed.left ? { left: parsed.left } : {}),
-      ...(parsed.panels ? { panels: parsed.panels } : {}),
-    }
-  } catch (e) {
-    console.error('[dv-column-ops] 列快照 JSON 解析失败——丢弃', e)
-    return {}
-  }
-}
-
-const saveStashSafe = (stash: { left?: GroupStash; panels?: GroupStash }): void => {
-  safeSet(STASH_KEY, stash.left || stash.panels ? JSON.stringify(stash) : '')
-}
-
-const discardStash = (region: 'left' | 'panels'): void => {
-  const stash = loadStash()
-  delete stash[region]
-  saveStashSafe(stash)
 }
 
 // ── api/组定位 ────────────────────────────────────────────────────────────────
@@ -207,16 +177,6 @@ const visualOrderOf = (a: DockviewApi): string[] => {
   const root = toLoose(a).grid.root
   if (root.type === 'leaf') return [String(leafStateOf(root)?.id ?? '')]
   return (root.data ?? []).map((wrapper) => String(leafStateOf(wrapper)?.id ?? ''))
-}
-
-/** colOrder 语义插入位：colOrder 序里排在 region 前面的可见列数。 */
-const colOrderInsertIndex = (order: ColRegion[], region: ColRegion, isHidden: (r: ColRegion) => boolean): number => {
-  let at = 0
-  for (const r of order) {
-    if (r === region) return at
-    if (!isHidden(r)) at++
-  }
-  return at
 }
 
 // ── 物理归位（v7.3.2 规则，dockview moveTo 版） ──────────────────────────────
@@ -410,14 +370,19 @@ const releaseMinWidth = (g: DockviewGroupPanel): void => {
   api.setConstraints({ minimumWidth: 0, maximumWidth: Number.MAX_SAFE_INTEGER })
 }
 
-const restoreMinWidth = (g: DockviewGroupPanel): void => {
+/** 还原 min 约束。`minOverride` 用于"收起到 0 后仍保持可展开"——
+ *  此时 min 必须留在 0，否则用户下次拖/补间又会被钳回出厂 240。 */
+const restoreMinWidth = (g: DockviewGroupPanel, minOverride?: number): void => {
   const saved = savedConstraints.get(g)
   if (!saved) return
   savedConstraints.delete(g)
   const api = g.api as unknown as {
     setConstraints?: (v: { minimumWidth?: number; maximumWidth?: number }) => void
   }
-  api.setConstraints?.({ minimumWidth: saved.minimumWidth, maximumWidth: saved.maximumWidth })
+  api.setConstraints?.({
+    minimumWidth: minOverride ?? saved.minimumWidth,
+    maximumWidth: saved.maximumWidth,
+  })
 }
 
 /** 逐帧驱动一组宽度（**JS 补间替代 CSS transition**）。
@@ -552,28 +517,6 @@ const withFlip = (a: DockviewApi, mutate: () => void): void => {
   runFlip(a, before)
 }
 
-// ── 隐藏/恢复（序列化手术：toJSON 摘除/拼回 → fromJSON） ────────────────────
-
-/** 组 leaf（branch 包装对象）+ 其 panels 记录条目的序列化摘除。 */
-const extractLeaf = (json: LooseLayout, groupId: string): GroupStash | null => {
-  const root = json.grid.root
-  if (root.type !== 'branch') return null
-  const data = root.data ?? []
-  const idx = data.findIndex((wrapper) => leafStateOf(wrapper)?.id === groupId)
-  if (idx < 0) return null
-  const wrapper = data[idx]!
-  const state = leafStateOf(wrapper)!
-  const views = (state.views as string[] | undefined) ?? []
-  const panels: Record<string, Record<string, unknown>> = {}
-  for (const pid of views) {
-    const entry = json.panels[pid]
-    if (entry) panels[pid] = entry
-    delete json.panels[pid]
-  }
-  data.splice(idx, 1)
-  return { leaf: wrapper, panels }
-}
-
 // ── 布局手术护栏（2026-10-16 泛化）────────────────────────────────────────
 
 /** 布局手术进行中护栏（shell 的面板生命周期 handler 消费）：fromJSON 内部
@@ -607,357 +550,182 @@ export const holdLayoutSurgery = (fn: () => void): void => {
  * 过渡结束再做序列化摘除（组已 0 宽，摘除无视觉跳变）；打开 = 先手术插回
  * 组、同帧压到 0，下一帧补间回快照宽度。**全隐藏语义**（用户口径）：宽度
  * 归 0，不留 icon rail。 */
+/** 收放一列：**只改宽度，从不摘除组**（2026-10-18 根因修复）。
+ *
+ *  ## 为什么之前的做法必然闪烁
+ *
+ *  旧实现走"序列化摘除 / fromJSON 或 addGroup+addPanel 重建"。用户展开侧栏
+ *  时，dockview 必须**重新挂载整棵左栏 React 树**（整张会话列表）——实测
+ *  一次 **391ms 的 long task**。这段时间主线程被占死：任何 JS 补间都排不
+ *  进来，用户先看到"chat 撑满、左栏还是一条缝"，然后再一帧跳到位。
+ *  这不是补间写得不对，是**架构上把渲染和动画串行**了。
+ *
+ *  ## 现在的做法
+ *
+ *  组始终在场、面板始终挂载，收放 = 逐帧 setSize 把宽度推到 0 / 推回来。
+ *  - 展开时不需要渲染任何新东西（树一直在），补间全程可跑；
+ *  - 实测 0 宽时只剩一条 `dv-sash.dv-minimum`（left:-2px，在列内部），
+ *    不挡内容、不可误拖；
+ *  - 组宽 0 时给 groupview 打 `data-dv-collapsed`（CSS 隐藏内容 + 屏蔽
+ *    命中），避免 0 宽里残留的焦点/滚动参与 tab 序。
+ *
+ *  ## 状态语义
+ *
+ *  `leftHidden` 仍是"用户意图"（持久化 + 菜单文案），但**不再对应树上有没有
+ *  组**——只对应宽度。这样 boot 自愈的判据也要跟着改：检查宽度而不是存在性。
+ */
+const setColumnCollapsed = (
+  group: DockviewGroupPanel,
+  hidden: boolean,
+  onDone?: () => void,
+): void => {
+  if (morphBusy) {
+    console.error('[dv-column-ops] 收放动画进行中——本次调用忽略')
+    return
+  }
+  const a = api()
+  if (!a) return
+
+  const startWidth = Math.round(group.width)
+  // 记住用户的原始宽度（展开时还原；0 宽时不能从 group.width 读）
+  if (startWidth > 0) savedColumnWidth.set(group.id, startWidth)
+  const targetWidth = hidden ? 0 : (savedColumnWidth.get(group.id) ?? RAIL_W)
+
+  // 已经到位：只补一致性与标记
+  if (startWidth === targetWidth) {
+    applyCollapsedMarker(group, hidden)
+    onDone?.()
+    return
+  }
+
+  // 让出/收回宽度的邻居：chat 域第一个组（会话分栏的其余组不动）
+  const chat = groupsOfRegion(a, 'chat')[0]
+  const chatStart = chat ? Math.round(chat.width) : 0
+  const delta = targetWidth - startWidth // >0 展开、<0 收起
+
+  morphBusy = true
+  // 收到 0 时必须放开 min 约束（出厂 min=240，否则钳住）
+  if (hidden) releaseMinWidth(group)
+  markMorph(group, hidden ? 'hide' : 'show')
+
+  tweenFrames(
+    MORPH_DUR_MS,
+    (eased) => {
+      const w = Math.round(startWidth + delta * eased)
+      const out = [{ group, width: w }]
+      // chat 反向吸收：列变宽多少，chat 就窄多少——总宽守恒，其它列不动
+      if (chat) out.push({ group: chat, width: Math.round(chatStart - delta * eased) })
+      return out
+    },
+    () => {
+      // 收尾钉一次（取整残差 / 库内部微调）
+      group.api.setSize({ width: targetWidth })
+      if (chat) chat.api.setSize({ width: chatStart - delta })
+      if (hidden) {
+        // 0 宽后仍要保住"下次能展开"：min 约束回到 0（否则再展开会被
+        // 钳回 240，但那时用户本来就是从 0 拉到 350，无需 min）
+        restoreMinWidth(group, 0)
+      } else {
+        restoreMinWidth(group)
+      }
+      applyCollapsedMarker(group, hidden)
+      clearMorph(group)
+      morphBusy = false
+      onDone?.()
+    },
+  )
+}
+
+/** 0 宽组的视觉与命中处理：CSS 认这个属性隐藏内容并屏蔽 pointer。 */
+const applyCollapsedMarker = (g: DockviewGroupPanel, collapsed: boolean): void => {
+  if (collapsed) g.element?.setAttribute('data-dv-collapsed', '')
+  else g.element?.removeAttribute('data-dv-collapsed')
+}
+
+/** 用户的列宽记忆（0 宽时读不到 group.width，只能自己存）。
+ *  键 = 组 id（'g-left' / 'g-panels'），跨会话不持久——重启后回到快照值。 */
+const savedColumnWidth = new Map<string, number>()
+
+/** 隐藏/打开左侧栏（全隐藏语义：宽度归 0，不做 icon rail）。 */
 export const setLeftHidden = (hidden: boolean): void => {
   const a = api()
   if (!a) return
   const flags = columnFlagsOf()
   if (hidden === flags.leftHidden) return
-  if (morphBusy) {
-    console.error('[dv-column-ops] 收放动画进行中——本次左栏切换忽略')
+  const lg = groupsOfRegion(a, 'left')[0]
+  if (!lg) {
+    console.error('[dv-column-ops] 左栏不在场——切换放弃')
     return
   }
-  if (hidden) {
-    const lg = groupsOfRegion(a, 'left')[0]
-    if (!lg) {
-      console.error('[dv-column-ops] 左栏不在场——隐藏放弃')
-      return
-    }
-    // **先确认能摘**（快照形状自检在补间之前做，失败就不动布局）
-    const probe = toLoose(a)
-    if (!extractLeaf(probe, lg.id)) {
-      console.error('[dv-column-ops] 左栏 leaf 不在根行——隐藏放弃')
-      return
-    }
-    const removedWidth = lg.width
-    const chat = groupsOfRegion(a, 'chat')[0]
-    const chatBefore = chat?.width ?? 0
-    morphBusy = true
-    // 解除被收列的 min 约束（否则钳在 240，实测）
-    releaseMinWidth(lg)
-    // 内容淡出（宽度由下面逐帧 setSize 驱动，CSS 不碰宽度）
-    markMorph(lg, 'hide')
-    // 左栏收多少，chat 就长多少；panels 完全不动（用户报的"面板栏闪烁变大"
-    // 就是没钉住这一条）
-    tweenFrames(
-      MORPH_DUR_MS,
-      (eased) => {
-        const lw = Math.round(removedWidth * (1 - eased))
-        const out = [{ group: lg, width: lw }]
-        if (chat) out.push({ group: chat, width: Math.round(chatBefore + (removedWidth - lw)) })
-        return out
-      },
-      () => {
-        try {
-          // 补间结束后再摘除：此时左栏已 0 宽，摘除无视觉跳变
-          const json = toLoose(a)
-          const stash = extractLeaf(json, lg.id)
-          if (!stash) {
-            console.error('[dv-column-ops] 补间后左栏 leaf 不在根行——放弃摘除（宽度已收）')
-            return
-          }
-          holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
-          saveStashSafe({ ...loadStash(), left: stash })
-          setFlags({ ...flags, leftHidden: true })
-        } finally {
-          clearMorph(lg)
-          restoreMinWidth(lg)
-          morphBusy = false
-        }
-      },
-    )
-  } else {
-    const stash = loadStash().left
-    if (!stash) {
-      console.error('[dv-column-ops] 左栏无快照——打开放弃')
-      return
-    }
-    // 插回时的目标宽 = 快照里的列宽
-    const targetWidth =
-      typeof stash.leaf.size === 'number' && stash.leaf.size > 0 ? stash.leaf.size : RAIL_W
-    // **不在场两列的当前几何**（作为补间起点）
-    const chatPre = groupsOfRegion(a, 'chat')[0]
-    const panelsPre = rootPanelsGroup(a)
-    const chatPreWidth = chatPre?.width ?? 0
-    const panelsPreWidth = panelsPre?.width ?? RAIL_W
-    // **走 addPanel 而不是 fromJSON**（2026-10-18 实锤）：整树 fromJSON 会
-    // 触发一次 200~300ms 的同步布局结算（CEF 实测），期间主线程被占住，
-    // 任何 JS 补间都排不进来——用户看到"等半天，然后宽度直接跳到终点"。
-    // addPanel 是增量插入，结算代价低一个量级，补间能真正逐帧跑。
-    const leftFirst = flags.colOrder.indexOf('left') === 0
-    // **锚点必须是"物理端位组"**（2026-10-18 实锤）：`direction:'left'` 是
-    // 相对**锚组**的方向，不是相对整行。若锚取第一个 chat 组、而物理序里
-    // 它不在边缘，左栏会插到中间（实测：加了会话分栏后左栏跑到最右）。
-    // 正解：leftFirst → 取物理最左的组、direction 'left'；
-    //       反之 → 取物理最右的组、direction 'right'。
-    const visual = visualOrderOf(a)
-    const groupById = new Map(a.groups.map((g) => [g.id, g] as const))
-    const edgeGroup = leftFirst
-      ? groupById.get(visual[0] ?? '')
-      : groupById.get(visual[visual.length - 1] ?? '')
-    const anchor = edgeGroup ?? panelsPre ?? chatPre
-    if (!anchor) {
-      console.error('[dv-column-ops] 无可用参照组——左栏打开放弃')
-      return
-    }
-    const firstPanel = (stash.leaf as { data?: { views?: string[] } }).data?.views?.[0]
-    const panelEntry = firstPanel ? stash.panels[firstPanel] : undefined
-    if (!firstPanel || !panelEntry) {
-      console.error('[dv-column-ops] 快照缺 panel 记录——左栏打开放弃', firstPanel)
-      return
-    }
-    morphBusy = true
-    const created = a.addPanel({
-      id: firstPanel,
-      component: String(panelEntry.contentComponent),
-      title: String(panelEntry.title ?? ''),
-      minimumWidth: 0,
-      params: panelEntry.params as Record<string, unknown> | undefined,
-      position: {
-        referenceGroup: anchor.id,
-        direction: leftFirst ? 'left' : 'right',
-      },
-    })    // 同组其它面板（左栏通常只有一个，但按快照补齐）
-    for (const pid of ((stash.leaf as { data?: { views?: string[] } }).data?.views ?? []).slice(1)) {
-      const e = stash.panels[pid]
-      if (!e) continue
-      a.addPanel({
-        id: pid,
-        component: String(e.contentComponent),
-        title: String(e.title ?? ''),
-        params: e.params as Record<string, unknown> | undefined,
-        position: { referencePanel: firstPanel },
-      })
-    }
-    const lg = created.group
-    const rest = loadStash()
-    delete rest.left
-    saveStashSafe(rest)
-    setFlags({ ...flags, leftHidden: false })
-    if (!morphAnimated()) {
-      lg.api.setSize({ width: targetWidth })
-      morphBusy = false
-      return
-    }
-    // 入场：先 0 宽，再逐帧长大，chat 同步让出
-    releaseMinWidth(lg)
-    clearMorph(lg)
-    // **只让"贴左栏的 chat 组"让宽度**：chat 域可能有多个组（会话分栏），
-    // 若平均分配会把分栏也挤动（用户口径：分栏不该跟着变）。
-    const chat = groupsOfRegion(a, 'chat')[0]
-    const panelsNow = rootPanelsGroup(a)
-    // **目标几何按"守恒总宽"算，别用 addPanel 后的实测值**（2026-10-18
-    // 实锤）：addPanel 插入后 dockview 立刻把三列**等分**，此时读 chat.width
-    // 得到的是等分值而非隐藏态的值——拿它当补间起点，第一帧就会"先塌一下"。
-    // chatPreWidth / panelsPreWidth 已在 addPanel 之前取好。
-    const totalTarget = chatPreWidth + panelsPreWidth // = 隐藏态时两者之和
-    tweenFrames(
-      MORPH_DUR_MS,
-      (eased) => {
-        const lw = Math.round(targetWidth * eased)
-        // chat 让出左栏占的宽；panels 恒为原宽
-        const chatW = Math.max(0, totalTarget - panelsPreWidth - lw)
-        const out = [
-          { group: lg, width: lw },
-          ...(chat ? [{ group: chat, width: chatW }] : []),
-          ...(panelsNow && panelsNow.id !== lg.id && panelsNow.id !== chat?.id
-            ? [{ group: panelsNow, width: panelsPreWidth }]
-            : []),
-        ]
-        return out
-      },
-      () => {
-        restoreMinWidth(lg)
-        clearMorph(lg)
-        morphBusy = false
-        // 组重建后 colOrder 记账
-        const na = api()
-        if (na) {
-          alignVisibleToOrder(na)
-          persistFlagsColOrder(na)
-        }
-      },
-    )
-  }
+  setFlags({ ...flags, leftHidden: hidden })
+  setColumnCollapsed(lg, hidden)
 }
 
-/** 隐藏/打开面板栏（根面板列唯一；恢复位 = colOrder 语义位；无快照重开 =
- *  新打开页）。与 setLeftHidden 同款收放动画（全隐藏，无 icon rail）。 */
+/** 隐藏/打开面板栏（根面板列唯一；恢复位 = colOrder 语义位） */
 export const setPanelsHidden = (hidden: boolean): void => {
   const a = api()
   if (!a) return
   const flags = columnFlagsOf()
   if (hidden === flags.panelsHidden) return
-  if (morphBusy) {
-    console.error('[dv-column-ops] 收放动画进行中——本次面板栏切换忽略')
+  const root = rootPanelsGroup(a)
+  if (!root) {
+    console.error('[dv-column-ops] 面板栏不在场——切换放弃')
     return
   }
-  if (hidden) {
-    const root = rootPanelsGroup(a)
-    if (!root) {
-      console.error('[dv-column-ops] 面板栏不在场——隐藏放弃')
-      return
-    }
-    // 形状自检先做（失败不动布局）
-    if (!extractLeaf(toLoose(a), root.id)) {
-      console.error('[dv-column-ops] 面板栏 leaf 不在根行——隐藏放弃')
-      return
-    }
-    const removedWidth = root.width
-    const chat = groupsOfRegion(a, 'chat')[0]
-    const chatBefore = chat?.width ?? 0
-    morphBusy = true
-    releaseMinWidth(root)
-    markMorph(root, 'hide')
-    // 与左栏同款：面板栏收多少、chat 长多少；左栏完全不动
-    tweenFrames(
-      MORPH_DUR_MS,
-      (eased) => {
-        const pw = Math.round(removedWidth * (1 - eased))
-        const out = [{ group: root, width: pw }]
-        if (chat) out.push({ group: chat, width: Math.round(chatBefore + (removedWidth - pw)) })
-        return out
-      },
-      () => {
-        try {
-          // 补间之后才抓快照（同 setLeftHidden）
-          const json = toLoose(a)
-          const stash = extractLeaf(json, root.id)
-          if (!stash) {
-            console.error('[dv-column-ops] 补间后面板栏 leaf 不在根行——放弃摘除（宽度已收）')
-            return
-          }
-          holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
-          saveStashSafe({ ...loadStash(), panels: stash })
-          setFlags({ ...flags, panelsHidden: true })
-        } finally {
-          clearMorph(root)
-          restoreMinWidth(root)
-          morphBusy = false
-        }
-      },
-    )
-  } else {
-    const json = toLoose(a)
-    const rootJson = json.grid.root
-    if (rootJson.type !== 'branch') {
-      console.error('[dv-column-ops] 根非 branch——面板栏打开放弃')
-      return
-    }
-    const stash = loadStash().panels
-    // branch 子项 = 双层包装（{type:'leaf', data:{…}}）——无快照重开的
-    // 新打开页也按包装形状拼回
-    const leaf: Record<string, unknown> =
-      stash?.leaf ?? {
-        type: 'leaf',
-        data: {
-          id: 'g-panels',
-          views: ['open'],
-          // 出厂组属性（无快照重开 = 新打开页，组属性补齐防丢约束）
-          constraints: { minimumWidth: 240 },
-          initialWidth: 350,
-        },
-      }
-    const panelEntries: Record<string, Record<string, unknown>> =
-      stash?.panels ?? {
-        open: { id: 'open', contentComponent: 'open', title: '打开', tabComponent: 'openTab', minimumWidth: 240, params: { region: 'panels' } },
-      }
-    const data = rootJson.data ?? []
-    const at = Math.min(colOrderInsertIndex(flags.colOrder, 'panels', (r) => r === 'left' && flags.leftHidden), data.length)
-    const targetWidth =
-      typeof leaf.size === 'number' && leaf.size > 0 ? leaf.size : RAIL_W
-    // 插入时按 0 宽（同 setLeftHidden 的显示路径：避免一帧全宽闪现）
-    data.splice(at, 0, { ...leaf, size: 0 })
-    Object.assign(json.panels, panelEntries)
-    morphBusy = true
-    holdLayoutSurgery(() => a.fromJSON(json as unknown as SerializedDockview))
-    if (stash) {
-      const rest = loadStash()
-      delete rest.panels
-      saveStashSafe(rest)
-    }
-    setFlags({ ...flags, panelsHidden: false })
-    const na = api()
-    if (na) alignVisibleToOrder(na)
-    const pg = na ? rootPanelsGroup(na) : undefined
-    if (!pg) {
-      console.error('[dv-column-ops] 面板栏插回后组不在场——动画放弃')
-      morphBusy = false
-      return
-    }
-    if (!morphAnimated()) {
-      pg.api.setSize({ width: targetWidth })
-      morphBusy = false
-      return
-    }
-    // 入场：0 宽入树后逐帧长大，chat 同步让出（与收起完全对称）
-    releaseMinWidth(pg)
-    clearMorph(pg)
-    const chat2 = groupsOfRegion(na!, 'chat')[0]
-    // 同 setLeftHidden：基数反推最终几何（此刻新列刚 0 宽入树，当前几何不稳）
-    const totalWidth = na!.groups.reduce((sum, g) => sum + g.width, 0)
-    const othersWidth = na!.groups
-      .filter((g) => g.id !== pg.id && g.id !== chat2?.id)
-      .reduce((sum, g) => sum + g.width, 0)
-    const chatTarget = Math.round(totalWidth - targetWidth - othersWidth)
-    tweenFrames(
-      MORPH_DUR_MS,
-      (eased) => {
-        const pw = Math.round(targetWidth * eased)
-        const out = [{ group: pg, width: pw }]
-        if (chat2) out.push({ group: chat2, width: chatTarget + (targetWidth - pw) })
-        return out
-      },
-      () => {
-        restoreMinWidth(pg)
-        clearMorph(pg)
-        morphBusy = false
-        pg.api.setSize({ width: targetWidth })
-        chat2?.api.setSize({ width: chatTarget })
-      },
-    )
-  }
+  setFlags({ ...flags, panelsHidden: hidden })
+  setColumnCollapsed(root, hidden)
 }
 
 // ── boot 自愈（normalizeColumns 的 dockview 版） ─────────────────────────────
 
-/** 旗标与实际树脱同步时按旗标收敛：隐藏列在场 → 补藏；未隐藏但快照在场 →
- *  判废快照；面板列缺失 → 缺席旗标。一致性零动作。 */
+/** 旗标与实际几何脱同步时按旗标收敛（**判据 = 宽度**，2026-10-18 改）：
+ *  收放现在"只改宽度、从不摘组"，所以"组在不在"不再是隐藏判据——要看
+ *  宽度是不是 0。列序对齐仍是每次都做。 */
 export const normalizeColumns = (): void => {
   const a = api()
   if (!a) return
   const flags = columnFlagsOf()
-  const stash = loadStash()
-  if (flags.leftHidden && groupsOfRegion(a, 'left').length > 0) {
-    setLeftHidden(true)
-    return
+  // 旧版的 colstash 快照在新机制下已无意义（不再摘组）——启动时清掉遗留键
+  if (safeGet(STASH_KEY)) {
+    console.info('[dv-column-ops] 布局快照机制已退役（收放改为纯宽度）——清理旧快照')
+    safeSet(STASH_KEY, '')
   }
-  if (!flags.leftHidden && stash.left) {
-    console.error('[dv-column-ops] 旗标未隐藏但左栏快照在场——判废')
-    discardStash('left')
+  // 左栏：旗标说隐藏但仍有宽度 → 收到 0（boot 期无动画）
+  const lg = groupsOfRegion(a, 'left')[0]
+  if (lg) {
+    const collapsed = Math.round(lg.width) === 0
+    if (flags.leftHidden !== collapsed) {
+      withoutColumnMorph(() => setColumnCollapsed(lg, flags.leftHidden))
+    }
+  } else if (!flags.leftHidden) {
+    console.error('[dv-column-ops] 左栏组不在树里——旗标未隐藏但无法恢复（布局存档异常）')
   }
-  const panelsPresent = rootPanelsGroup(a) !== undefined
-  if (flags.panelsHidden && panelsPresent) {
-    setPanelsHidden(true)
-    return
-  }
-  if (!flags.panelsHidden && stash.panels) {
-    console.error('[dv-column-ops] 旗标未隐藏但面板栏快照在场——判废')
-    discardStash('panels')
-    return
-  }
-  if (!flags.panelsHidden && !panelsPresent) {
-    // 面板列缺失（上次会话关空收列后持久化）→ 缺席旗标（重开 = 新打开页）
-    setFlags({ ...flags, panelsHidden: true })
-    return
+  // 面板栏同理
+  const root = rootPanelsGroup(a)
+  if (root) {
+    const collapsed = Math.round(root.width) === 0
+    if (flags.panelsHidden !== collapsed) {
+      withoutColumnMorph(() => setColumnCollapsed(root, flags.panelsHidden))
+    }
+  } else if (!flags.panelsHidden) {
+    console.error('[dv-column-ops] 面板栏组不在树里——旗标未隐藏但无法恢复（布局存档异常）')
   }
   alignVisibleToOrder(a)
   persistFlagsColOrder(a)
 }
 
-/** 可见列按物理序重排 colOrder、隐藏列保持原槽位（column-ops setFlagsColOrder
- *  同语义——拖拽/手动改序后的记账）。 */
+/** 可见列按物理序重排 colOrder（拖拽/手动改序后的记账）。
+ *
+ *  **只改 colOrder，绝不覆盖 leftHidden/panelsHidden**（2026-10-18 实锤）：
+ *  本函数由 `onDidLayoutChange` 的 250ms 防抖调用，而该事件在**收放补间的
+ *  每一帧**都会触发。旧写法 `setFlags({ ...prev })` 用的是 `columnFlagsOf()`
+ *  的**当时快照**——若某个防抖回调在 `setLeftHidden` 写入 true **之前**
+ *  就取了 `prev`，它会在 250ms 后把 `leftHidden:false` 写回存储，隐藏态
+ *  丢失（实测：点隐藏 → 宽度到 0 → 1.3s 后 flag 复活成 false → 刷新后
+ *  侧栏又展开了）。
+ *  → 现在从**当前缓存**读最新值，只替换 colOrder 字段。 */
 export const persistFlagsColOrder = (a: DockviewApi): void => {
-  const prev = columnFlagsOf()
+  const cur = columnFlagsOf()
   const vis = visualOrderOf(a)
   const firstIdx = new Map<ColRegion, number>()
   a.groups.forEach((g) => {
@@ -966,12 +734,12 @@ export const persistFlagsColOrder = (a: DockviewApi): void => {
     const at = vis.indexOf(g.id)
     if (at >= 0) firstIdx.set(r, at)
   })
-  const visibleSorted = [...prev.colOrder]
+  const visibleSorted = [...cur.colOrder]
     .filter((r) => firstIdx.has(r))
     .sort((x, y) => firstIdx.get(x)! - firstIdx.get(y)!)
   let vi = 0
-  const order = prev.colOrder.map((r) => (firstIdx.has(r) ? visibleSorted[vi++]! : r))
-  setFlags({ ...prev, colOrder: order })
+  const order = cur.colOrder.map((r) => (firstIdx.has(r) ? visibleSorted[vi++]! : r))
+  setFlags({ ...cur, colOrder: order })
 }
 
 // ── 复位（用户 2026-10-16：右键菜单「默认布局」）────────────────────────────
@@ -988,9 +756,12 @@ export const resetLayoutToFactory = (): void => {
   if (!a) return
   try {
     holdLayoutSurgery(() => a.fromJSON(FACTORY_LAYOUT))
-    // 旗标复位 + 快照判废（隐藏语义清零）
+    // 旗标复位 + 快照清理（隐藏语义清零）
     setFlags({ colOrder: ['left', 'chat', 'panels'], leftHidden: false, panelsHidden: false })
-    saveStashSafe({})
+    safeSet(STASH_KEY, '')
+    // 复位后所有列都回到非 0 宽：清掉 0 宽标记与被记住的折叠宽
+    for (const g of a.groups) applyCollapsedMarker(g, false)
+    savedColumnWidth.clear()
     // 双轨钉回 350（两轮互挤后收敛——boot 出厂同款；rAF 后树已稳）。
     // 钉宽放复位护栏之外：rAF/150ms 回调跑时 depth 已归零，不受让位影响。
     const pin = () => {
