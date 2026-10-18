@@ -1038,7 +1038,7 @@ const SectionHeader: FC<{
   return (
     <div
       className={cn(
-        "group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-[var(--rail-section-gap)]",
+        "group/section flex shrink-0 items-center justify-between gap-1 pb-[var(--rail-section-gap-bottom)] pt-[var(--rail-section-gap)]",
         className,
       )}
       data-slot="aui_thread-list-section-header"
@@ -1073,7 +1073,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number }
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-[var(--tl-div-pt,0.5rem)] select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-[var(--rail-section-gap-bottom)] pt-[var(--tl-div-pt,0.5rem)] select-none"
       data-slot="aui_thread-list-date-divider"
     >
       <button
@@ -1106,7 +1106,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string; rowCount?: num
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-[var(--tl-ws-pt,1.5rem)] select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-[var(--rail-section-gap-bottom)] pt-[var(--tl-ws-pt,1.5rem)] select-none"
       data-slot="aui_thread-list-workspace-divider"
     >
       <button
@@ -1143,7 +1143,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number
   const bucket = bucketKey.slice("s:".length) as SessionStatusBucket;
   return (
     <div
-      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-1 pt-[var(--tl-div-pt,0.5rem)] select-none"
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-[var(--rail-section-gap-bottom)] pt-[var(--tl-div-pt,0.5rem)] select-none"
       data-slot="aui_thread-list-status-divider"
     >
       <button

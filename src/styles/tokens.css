@@ -296,9 +296,8 @@
    引用上方全局色板，本块只收几何与强度。 */
 :root {
   --hub-row-h: 28px;                          /* 入口行高（hermes h-7；15px 文字回归原几何） */
-  --hub-row-font: 14px;                       /* 行文字——2026-10-18 分层：入口条是**导航项**，
-                                                 不该比分组标题(16px/工作区头)更大更粗；原 16px/500
-                                                 压在段头 15px/400 之上，从属关系视觉上是反的 */
+  --hub-row-font: 15px;                       /* 行文字（用户 2026-10-18 定稿：14 → 15，
+                                                 与"入口条不是次级导航"的定位一致） */
   --hub-row-weight: 500;                      /* hermes font-medium */
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
@@ -329,7 +328,7 @@
   --chat-workspace-nudge: 5px;                /* 工作区名下移量（对齐 MIRACH 字形顶） */
   --chat-session-nudge: -3px;                 /* 会话名上移量（对齐面板胶囊中线） */
   --chat-tab-session-color: #5A5A5A;          /* 对话标签会话名颜色（用户定稿十轮） */
-  --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
+  --side-row-size: 14px;                      /* 会话行字号（用户 2026-10-18 定稿：15 → 14） */
   --side-row-weight: 400;                     /* 会话行字重（2026-10-18 分层：内容项最轻） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
   --hub-card-radius: 6px;                     /* 卡/行圆角（hermes rounded-md） */
@@ -369,7 +368,10 @@
      内边距的错觉，改内容高度就会贴死。三处提为令牌，节奏可统一调。 */
   --rail-logo-nav-gap: 8px;                   /* logo 带 ↔ 入口条 */
   --rail-nav-list-gap: 12px;                  /* 入口条 ↔ 会话列表 */
-  --rail-section-gap: 20px;                   /* 段头（置顶/会话）上方间距 */
+  --rail-section-gap: 12px;                   /* 段头（置顶/会话）上方间距——2026-10-18
+                                                 用户："置顶/会话的上下间距小一点"，20 → 12 */
+  --rail-section-gap-bottom: 4px;             /* 段头下方间距（原 Tailwind pb-1 = 0.25rem
+                                                 = 3.75px 半像素，改整数） */
   --left-rail-view-size: 12px;                /* 顶带当前视图指示字号 */
   --left-rail-view-color: var(--text-3);      /* 指示文字色 */
   --left-rail-view-active-color: var(--brand);/* 机器人视图指示色 */

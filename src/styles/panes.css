@@ -499,18 +499,18 @@
   --tl-row-min-h: 26px;
   --tl-div-pt: 8px;
   --tl-row-pad-y: 4px;                        /* 会话行纵向内距（行与行间距，用户定稿加大） */
-  --tl-head-pt: 12px;                         /* 组头上距（用户 2026-10-14 定稿：置顶→会话视觉 15px = 12px + 2px 居中差 + 1px 行缝） */
-  --tl-head-pinned-gap: 9px;                  /* 置顶标签下距（用户 2026-10-14 定稿 9px；原 37.5px 空白过大） */
-  --tl-ws-pt: 9px;                            /* 工作区分隔行上距（用户 2026-10-15：会话标签→文件夹名原 22.5px 太大；取"标签下 9px"同一节奏） */
+  /* --tl-head-pt 已退役（2026-10-18）：段头上距统一走 tokens.css 的
+     --rail-section-gap，本处不再定义（留注释防误加回来）。 */
+  --tl-head-pinned-gap: 6px;                  /* 置顶标签下距（2026-10-18 用户："上下间距小一点"，9 → 6） */
+  --tl-ws-pt: 8px;                            /* 工作区分隔行上距（2026-10-18 同步收紧 9 → 8） */
 }
 
 [data-density='compact'] {
   --tl-row-min-h: 20px;
   --tl-div-pt: 6px;                           /* 紧凑档：组头/工作区组间距均 8px（用户定稿九轮：会话与工作区之间显太大） */
   --tl-row-pad-y: 4px;                        /* 行间紧凑档 = 4px（同舒适档） */
-  --tl-head-pt: 8px;                          /* 组头上距紧凑 8px（舒适 15px，九轮回调） */
-  --tl-head-pinned-gap: 6px;                  /* 置顶标签下距紧凑 6px（舒适 9px） */
-  --tl-ws-pt: 8px;                            /* 工作区分隔行紧凑 8px（舒适 24px） */
+  --tl-head-pinned-gap: 4px;                  /* 置顶标签下距紧凑 4px（舒适 6px） */
+  --tl-ws-pt: 6px;                            /* 工作区分隔行紧凑 6px（舒适 8px） */
 }
 
 /* ── hub：左栏入口条（panes/hub/entry-bar.tsx，2026-10-02）──
