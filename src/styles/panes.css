@@ -451,6 +451,15 @@
   border-color: var(--tab-text-active);
 }
 
+/* 会话行标题字重（2026-10-18 分层）：`ThreadListItemPrimitive.Title` 自带
+   font-medium(500)，Tailwind 的 `font-(weight:--side-row-weight)` 在任意值
+   形态下与该工具类同分且先导入，实测压不住（仍 500）。这里用**双类重复**
+   提到 (0,2,0) 稳定胜出（与 .pressable.pressable 同一手法）。
+   字重取令牌 --side-row-weight：内容项应比分组标题(600)/入口条(500)更轻。 */
+.hover-marquee.hover-marquee {
+  font-weight: var(--side-row-weight);
+}
+
 /* ── 会话侧栏标题 hover 跑马灯（hermes styles.css .hover-marquee 段逐字）──
    溢出才上弦：JS（thread-list.aui.tsx armMarquee）在 pointerenter 量
    scrollWidth 溢出量、写 --marquee-d/--marquee-t 并置 data-marquee，
@@ -842,9 +851,36 @@
   overflow: hidden;
 }
 
+/* 垂直节奏（2026-10-18）：此前三段之间**零间距**——各段 `flex: none` 且无
+   margin，视觉缝隙全靠内部 padding，改内容高度就贴死。改为显式间距。
+   令牌见 tokens.css 的「左栏垂直节奏」段。
+   **DOM 结构**（决定选择器）：left-rail-pane > [logo-row, left-rail-body >
+   assistant-sessions-pane > [hub-entry-bar, thread-list]]——入口条不在
+   rail 的直接子级，故两处间距都落在 .assistant-sessions-pane 上：
+   padding-top = logo→入口条，入口条→列表 = .hub-entry-bar 的 margin-bottom。 */
 .left-rail-logo-row {
   flex: none;
   position: relative;
+}
+
+.left-rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.left-rail-body > .assistant-sessions-pane {
+  padding-top: var(--rail-logo-nav-gap);
+}
+/* 机器人视图（BotsPane 根 = .pane-placeholder，自带 16px padding）：
+   只补上方的呼吸量，别覆盖它自己的四边内距。 */
+.left-rail-body > .pane-placeholder {
+  padding-top: calc(16px + var(--rail-logo-nav-gap));
+}
+
+/* 入口条 → 会话列表 */
+.assistant-sessions-pane > .hub-entry-bar {
+  margin-bottom: var(--rail-nav-list-gap);
 }
 
 /* 顶带右下的当前视图指示（只读；Mirach 文字是唯一切换钮） */
@@ -858,12 +894,6 @@
 
 .left-rail-view-name[data-view='bots'] {
   color: var(--left-rail-view-active-color);
-}
-
-.left-rail-body {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
 }
 
 /* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
@@ -967,5 +997,9 @@
 
 [data-slot='aui_thread-list-item'][data-active] [data-slot='aui_thread-list-item-title'] {
   color: var(--fl-accent);
-  font-weight: 500;
+  /* **字重不再固定 500**（2026-10-18 分层）：字重表达的是层级（分组标题 >
+     入口条 > 内容项），不该随选中态变化——原来这条 (0,3,0) 规则会把选中行
+     的标题顶回 500，令"内容项最轻"的分层在选中行上失效。选中态只改颜色
+     （品牌色 + 洗底），已经足够区分。 */
+  font-weight: var(--side-row-weight);
 }

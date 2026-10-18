@@ -32,6 +32,30 @@ const CONTENT_MIN = 330
 /** Column budget the content must leave free: 88px per side keeps the width
  * handles fully placeable (24px inset + 40px strip + 24px safe zone). */
 const CONTENT_EDGE_BUDGET = 176
+/** 列宽变化 → 偏好按比例迁移的**基准**（2026-10-18 修累积漂移）。
+ *
+ *  旧实现每帧 `preference × (新列宽/旧列宽)` 并把结果**写回存储**——侧栏
+ *  收放补间的每一帧都会触发 ResizeObserver，一次收放写 13 次、两次 26 次
+ *  （实测 828 → 1153 → 831，净漂 +3px）。根因不是"取整误差"，是**链式
+ *  相乘**：每次迁移都以"上一次取整后的值"为基数，误差被反复放大。
+ *
+ *  正解 = 只在`列宽稳定`后迁移一次，且迁移永远相对**同一个基准**算：
+ *  基准 = { column, preference } 的快照，列宽没变到"稳定值"之前不写存储。
+ *  这样同一基准下任意次求值结果相同，不会漂。 */
+interface WidthBaseline {
+  column: number
+  preference: number
+}
+
+/** 列宽稳定判定（收放补间结束的静默期）。320ms 补间 + 取整抖动，400ms
+ *  足够；期间只发布显示值、不落盘。 */
+const MIGRATE_SETTLE_MS = 400
+
+/** 把基准偏好按"基准列宽 → 目标列宽"的比例缩放（**相对基准算，不链式**）。
+ *  单独抽成纯函数便于单测：同一 (baseline, target) 永远同一结果。 */
+export function scalePreference(baseline: WidthBaseline, targetColumn: number): number {
+  return Math.round(baseline.preference * (targetColumn / baseline.column))
+}
 
 /** Reads the persisted width preference; a missing or corrupt value resolves
  * to "no preference". @returns the stored width in px, or null. */
@@ -143,40 +167,68 @@ export function WidthHandle(props: {
 
 /** 宽度轴（thread 根消费）：观察对话列宽 → 发布
  * --dsh-conversation-column-width 与 --dsh-chat-user-width（拖出的偏好按
- * 列宽重夹、并按补丁行为等比迁移存储值），返回手柄的四段拖拽回调。
+ * 列宽重夹、列宽**稳定后**按比例迁移存储值），返回手柄的四段拖拽回调。
  * 列宽收缩只重夹显示值、不改写已存偏好——加宽窗口后偏好原样恢复。 */
 export function useConversationWidthAxis() {
   const rootEl = useRef<HTMLDivElement | null>(null)
   const rootObserver = useRef<ResizeObserver | null>(null)
-  const lastColumn = useRef(0)
+  /** 迁移基准（见 WidthBaseline 注释）：链式相乘会漂，必须锚定不变的一对值。 */
+  const baseline = useRef<WidthBaseline | null>(null)
+  const settleTimer = useRef<number | null>(null)
+  const pendingColumn = useRef(0)
 
   const publishWidths = useCallback((root: HTMLElement): void => {
     const column = root.offsetWidth
     root.style.setProperty('--dsh-conversation-column-width', `${column}px`)
-    let preference = readWidthPreference()
-    if (preference !== null) {
-      // 列宽变化：偏好按新旧列宽比例等比迁移（最大化/还原跟随缩放——
-      // apps/mirach conversation-width.ts 的补丁行为）
-      if (lastColumn.current > 0 && lastColumn.current !== column) {
-        const migrated = resolveContentWidth(
-          column,
-          Math.round(preference * (column / lastColumn.current)),
-        )
-        if (migrated !== preference) {
-          try {
-            localStorage.setItem(WIDTH_PREF_KEY, String(migrated))
-            preference = migrated
-          } catch {
-            /* 存储失败忽略——本轮仍按旧偏好夹紧发布 */
-          }
-        }
-      }
-      root.style.setProperty('--dsh-chat-user-width', `${resolveContentWidth(column, preference)}px`)
-    } else {
+    const preference = readWidthPreference()
+    if (preference === null) {
       root.style.removeProperty('--dsh-chat-user-width')
+      return
     }
-    lastColumn.current = column
+    // 首次或列宽没变：只发布显示值，不动存储。
+    const base = baseline.current
+    if (base === null) {
+      baseline.current = { column, preference }
+      root.style.setProperty('--dsh-chat-user-width', `${resolveContentWidth(column, preference)}px`)
+      return
+    }
+    if (base.column === column) {
+      root.style.setProperty('--dsh-chat-user-width', `${resolveContentWidth(column, preference)}px`)
+      return
+    }
+    // 列宽在变：**先按比例即时发布**（视觉跟手），但**不写存储**——
+    // 收放补间每帧都会到这里，此时落盘就会链式累积漂移（见 WidthBaseline）。
+    root.style.setProperty(
+      '--dsh-chat-user-width',
+      `${resolveContentWidth(column, scalePreference(base, column))}px`,
+    )
+    // 稳定后才迁移一次：以**基准**为起点重算，与中间过了多少帧无关
+    // （幂等——同一 (基准, 目标列宽) 永远得到同一个结果，不漂）。
+    pendingColumn.current = column
+    if (settleTimer.current !== null) window.clearTimeout(settleTimer.current)
+    settleTimer.current = window.setTimeout(() => {
+      settleTimer.current = null
+      const settled = pendingColumn.current
+      const b = baseline.current
+      if (!b || settled === b.column) return
+      const migrated = resolveContentWidth(settled, scalePreference(b, settled))
+      try {
+        localStorage.setItem(WIDTH_PREF_KEY, String(migrated))
+      } catch (e) {
+        console.error('[width-handle] 持久化对话宽度失败', e)
+      }
+      // 基准前移：下一次迁移相对"这次稳定后的列宽与偏好"算。
+      baseline.current = { column: settled, preference: migrated }
+    }, MIGRATE_SETTLE_MS)
   }, [])
+
+  // 卸载清场（计时器不泄漏）。
+  useEffect(
+    () => () => {
+      if (settleTimer.current !== null) window.clearTimeout(settleTimer.current)
+    },
+    [],
+  )
 
   const rootResizeRef = useCallback(
     (root: HTMLDivElement | null): void => {
@@ -210,11 +262,16 @@ export function useConversationWidthAxis() {
   const onHandleCommit = useCallback((width: number): void => {
     const root = rootEl.current
     if (root === null) return
+    const column = root.offsetWidth
+    const committed = resolveContentWidth(column, width)
     try {
-      localStorage.setItem(WIDTH_PREF_KEY, `${resolveContentWidth(root.offsetWidth, width)}`)
+      localStorage.setItem(WIDTH_PREF_KEY, `${committed}`)
     } catch (e) {
       console.error('[width-handle] 持久化对话宽度失败', e)
     }
+    // **用户拖拽是新基准**（2026-10-18）：不更新的话，下一次列宽变化会拿
+    // 拖拽**之前**的旧基准去算，把用户刚设定的宽度又按旧比例缩放回去。
+    baseline.current = { column, preference: committed }
   }, [])
   const onHandleEnd = useCallback((): void => {
     const root = rootEl.current

@@ -387,6 +387,37 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   - **顺带修掉的实 bug**：`ResourcesDialogHost` 从未在任何组件树里渲染
     （`EntryBar` 调 `openResourcesDialog()` 改 store，但没有消费者）——
     点「技能与工具」完全没反应。已在 `AssistantSessionsPane` 挂载。
+- **左栏间距与字级分层（2026-10-18 第三轮，用户点名"间距是否收敛/
+  文字大小都一样要不要分层"）**：
+  - **宽度偏好漂移（真因不是取整误差）**：`useConversationWidthAxis` 的
+    等比迁移在 `ResizeObserver` 回调里**每帧**执行并写回 localStorage——
+    侧栏收放补间 13 帧 → 一轮写 13 次，链式相乘累积（实测 828→1153→831）。
+    修法 = `WidthBaseline`：迁移永远相对**同一基准**算（幂等），列宽
+    稳定 400ms 后才落盘一次；拖拽 commit 同步前移基准。实测 5 轮
+    `831 ↔ 1155` 零漂移，单次收放写入 13→1 次。
+    （`scalePreference` 已抽成纯函数 + `width-handle.test.ts` 5 用例守幂等性）
+  - **垂直间距此前是假的**：logo 带 / 入口条 / 列表 三段**间距全为 0**
+    （各段 `flex: none` 无 margin，视觉缝隙全靠内部 padding）。补
+    `--rail-logo-nav-gap: 8px`（logo→入口条）、`--rail-nav-list-gap: 12px`
+    （入口条→列表）、`--rail-section-gap: 20px`（段头上方，原写死
+    `--tl-head-pt,1.5rem`）。
+    **结构陷阱**：入口条不在 `.left-rail-pane` 直接子级——DOM 是
+    `left-rail-pane > [logo-row, left-rail-body > assistant-sessions-pane >
+    [hub-entry-bar, thread-list]]`，故间距落在 `.assistant-sessions-pane`
+    的 padding 与 `.hub-entry-bar` 的 margin-bottom 上，不是 `> .hub-entry-bar`。
+  - **左栏字级分层**（原来入口条 16/500 比段头 15/400 更大更粗，从属
+    关系视觉上是反的；段头又与行同号只能靠颜色分）：
+    | 层 | 新值 | 令牌 |
+    |---|---|---|
+    | 段头（置顶/会话） | 13px / 600 / 0.06em 字距 | `--side-group-size/-weight/-tracking` |
+    | 入口条（新建会话等） | 14px / 500 | `--hub-row-font` |
+    | 会话行 | 15px / 400 | `--side-row-size/-weight` |
+    **两个特异性坑**：①`ThreadListItemPrimitive.Title` 自带 `font-medium`，
+    Tailwind 的 `font-(weight:--side-row-weight)` 压不住 → 用
+    `.hover-marquee.hover-marquee`（双类重复，(0,2,0)）；
+    ②选中态规则 `[...][data-active] [...]` 是 (0,3,0) 且写死
+    `font-weight: 500`，会把选中行顶回 500 → 改为引用同一令牌
+    （字重表达层级，不该随选中态变化；选中态只改颜色）。
   **贴边标记（2026-10-18 补，用户报"隐藏后颜色层直接贴到窗口边缘"）**：
   组常驻之后 chat 永远是 `:first-child` 的**兄弟**，`.main-tint--dockview`
   的 `:first-child` 结构性内缩判据基本失效——改由 JS 按"物理序里该侧有

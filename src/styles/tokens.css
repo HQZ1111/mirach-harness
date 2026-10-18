@@ -284,7 +284,9 @@
    引用上方全局色板，本块只收几何与强度。 */
 :root {
   --hub-row-h: 28px;                          /* 入口行高（hermes h-7；15px 文字回归原几何） */
-  --hub-row-font: 16px;                       /* 行文字（用户定稿 2026-10-02 六轮 16px） */
+  --hub-row-font: 14px;                       /* 行文字——2026-10-18 分层：入口条是**导航项**，
+                                                 不该比分组标题(16px/工作区头)更大更粗；原 16px/500
+                                                 压在段头 15px/400 之上，从属关系视觉上是反的 */
   --hub-row-weight: 500;                      /* hermes font-medium */
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
@@ -293,7 +295,11 @@
   --hub-bar-gap: 1px;                         /* 行间距（hermes gap-px；二轮缩回） */
   --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
   --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */
-  --side-group-size: 15px;                    /* 组头字号（已置顶/会话/状态，品牌色加粗；二轮定稿 15px） */
+  --side-group-size: 13px;                    /* 组头字号（已置顶/会话/状态）——2026-10-18 分层：
+                                                 分组标题做**小号 + 粗 + 字距**的"标签"体，
+                                                 不再与会话行同号（原 15px 与行同大，只能靠颜色分） */
+  --side-group-weight: 600;                   /* 组头字重（原 400——比组内行(500)还细，层级反了） */
+  --side-group-tracking: 0.06em;              /* 组头字距（小号标签的呼吸感） */
   --side-workspace-size: 16px;                /* 工作区头字号（六轮定稿：与入口条同字号） */
   --side-text: #4C4C4C;                       /* 侧栏正文色（工作区头/会话行/入口条共用，五轮定稿 4C4C4C） */
   --chat-tab-workspace-size: 25px;            /* 对话标签工作区字号（2026-10-06 用户定稿：30→25） */
@@ -312,6 +318,7 @@
   --chat-session-nudge: -3px;                 /* 会话名上移量（对齐面板胶囊中线） */
   --chat-tab-session-color: #5A5A5A;          /* 对话标签会话名颜色（用户定稿十轮） */
   --side-row-size: 15px;                      /* 会话行字号（用户定稿） */
+  --side-row-weight: 400;                     /* 会话行字重（2026-10-18 分层：内容项最轻） */
   --hub-avatar-size: 34px;                    /* bot 卡 lead 方块（hermes 34） */
   --hub-card-radius: 6px;                     /* 卡/行圆角（hermes rounded-md） */
   --hub-card-gap: 2px;                        /* 卡内行距（hermes name/details 两行） */
@@ -342,6 +349,13 @@
   /* 列表/搜索槽位：无透明边的面，外扩行内距即可（全部整数，无半像素） */
   --rail-list-inset: calc(var(--rail-gutter) - 8px);  /* 22 */
   --rail-search-inset: calc(var(--rail-gutter) - 2px);/* 28 */
+  /* ── 左栏垂直节奏（2026-10-18 补齐）─────────────────────────────
+     实测病根：logo 带 → 入口条 → 列表 三段的间距**全是 0**（各段自己
+     `flex: none` 且无 margin，只靠内部 padding 撑开）——视觉上"有缝"是
+     内边距的错觉，改内容高度就会贴死。三处提为令牌，节奏可统一调。 */
+  --rail-logo-nav-gap: 8px;                   /* logo 带 ↔ 入口条 */
+  --rail-nav-list-gap: 12px;                  /* 入口条 ↔ 会话列表 */
+  --rail-section-gap: 20px;                   /* 段头（置顶/会话）上方间距 */
   --left-rail-view-size: 12px;                /* 顶带当前视图指示字号 */
   --left-rail-view-color: var(--text-3);      /* 指示文字色 */
   --left-rail-view-active-color: var(--brand);/* 机器人视图指示色 */

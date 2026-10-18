@@ -1009,9 +1009,10 @@ const SectionHeader: FC<{
 }> = ({ headerKey, label, collapsed, collapsible = true, action, rowCount = 1, className }) => {
   const body = (
     <>
-      {/* 组头（用户定稿 2026-10-02 二轮）：15px 品牌色——已置顶/会话/
-          状态三种组头同形制（tokens --side-group-size） */}
-      <span className="text-(--fl-accent) text-(length:--side-group-size) font-normal">{label}</span>
+      {/* 组头（2026-10-18 分层定稿）：**小号 + 粗 + 字距**的分组标签体。
+          原来 15px/400 与会话行同号、还比行(500)更细——"分组标题"看着
+          比"组内条目"弱，层级是反的。字号/字重/字距全走 tokens.css。 */}
+      <span className="text-(--fl-accent) text-(length:--side-group-size) font-(weight:--side-group-weight) tracking-(--side-group-tracking)">{label}</span>
       {collapsible && (
         <ChevronDownIcon
           aria-hidden
@@ -1035,7 +1036,7 @@ const SectionHeader: FC<{
   return (
     <div
       className={cn(
-        "group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-[var(--tl-head-pt,1.5rem)]",
+        "group/section flex shrink-0 items-center justify-between gap-1 pb-1 pt-[var(--rail-section-gap)]",
         className,
       )}
       data-slot="aui_thread-list-section-header"
@@ -1151,7 +1152,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number
         type="button"
       >
         <span aria-hidden className={STATUS_DOT_CLASS[bucket]} />
-        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-group-size) font-bold">{label}</span>
+        <span className="text-(--fl-accent) min-w-0 truncate text-(length:--side-group-size) font-(weight:--side-group-weight) tracking-(--side-group-tracking)">{label}</span>
         <ChevronDownIcon
           aria-hidden
           className="disclosure-chevron text-(--text-3) size-3 shrink-0 opacity-0 group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100"
@@ -1975,7 +1976,7 @@ export const ThreadListItem: FC = () => {
             {isUnread && !isRunning && <span className="sr-only">已完成 — 未读</span>}
             <span className="min-w-0 flex-1 self-center">
               <span
-                className="hover-marquee text-(--side-text) group-hover/row:text-(--text) block truncate text-(length:--side-row-size) leading-[1.45] font-normal"
+                className="hover-marquee text-(--side-text) group-hover/row:text-(--text) block truncate text-(length:--side-row-size) font-(weight:--side-row-weight) leading-[1.45]"
                 data-slot="aui_thread-list-item-title"
                 onPointerEnter={armMarquee}
                 onPointerLeave={disarmMarquee}
