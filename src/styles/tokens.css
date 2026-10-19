@@ -103,12 +103,14 @@
   --logo-text-weight: 900;                    /* black */
   --logo-text-tracking: 2px;                  /* 字间距 2 */
   --logo-text-color: #006fff;                 /* 品牌色 */
-  --logo-strip-h: 85px;                       /* 页签条总高（顶带分栏；标题栏同源
-                                   ——用户 2026-10-05：100 → 85 一处取值） */
+  --logo-strip-h: 75px;                       /* 页签条总高（顶带分栏；标题栏同源
+                                   ——2026-10-19 用户：85 → 75） */
   --strip-pad-bottom: 7px;                    /* 页签行离条底边距（视觉 10px：字形底隙 3px 补偿后；用户定稿 15→下移 5px；所有栏统一） */
   --logo-glyph-drop: 8px;                     /* MIRACH 50px 行盒内字形下沉量（双行块项目名顶对齐字形补偿） */
   --logo-leading-gap: 12px;                   /* logo 带内 logo 与文字的间距 */
-  --logo-leading-pad: 20px;                   /* logo 带上/左内边距（文字与 logo 同一左线 20） */
+  --logo-leading-pad: 15px;                   /* logo 带上/左内边距（2026-10-19 随顶带 85→75
+                                   重算：条 75 − logo 45 = 30，上下各 15 才居中；原 20 是
+                                   按 85 条算的，不跟着改会让 logo 偏下 5px） */
   --strip-low-height: 36px;                   /* 上下分栏的非顶部分栏条高
     （100 高的双重身份=标题栏区只属于窗口顶带；普通条高 36，用户 2026-09-27） */
 
@@ -302,7 +304,8 @@
   --hub-row-gap: 8px;                         /* 图标-文字间距（hermes gap-2） */
   --hub-row-pad-x: 8px;                       /* 行左右内边距（hermes px-2） */
   --hub-row-radius: 6px;                      /* hermes rounded-md */
-  --hub-bar-pad-y: 9px;                      /* 入口条上下内边距（用户 2026-10-14 定稿 6→9） */
+  --hub-bar-pad-y: 14px;                     /* 入口条上下内边距（2026-10-19 用户："入口条
+                                   的上下间距大一点"，9 → 14） */
   --hub-bar-gap: 1px;                         /* 行间距（hermes gap-px；二轮缩回） */
   --hub-kbd-font: 11px;                       /* 快捷键标注字号（hermes KbdGroup sm 系） */
   --hub-kbd-opacity: 0.55;                    /* hermes KbdGroup opacity-55 */
@@ -372,6 +375,11 @@
                                                  用户："置顶/会话的上下间距小一点"，20 → 12 */
   --rail-section-gap-bottom: 4px;             /* 段头下方间距（原 Tailwind pb-1 = 0.25rem
                                                  = 3.75px 半像素，改整数） */
+  /* ── 左栏底部用户区（2026-10-19，用户："参考 zcode 下面的用户"）── */
+  --rail-user-h: 52px;                        /* 用户区行高（头像 28 + 上下 12） */
+  --rail-user-avatar: 28px;                   /* 头像直径 */
+  --rail-user-btn: 28px;                      /* 设置钮命中盒（与头像同高，圆形） */
+  --rail-user-gap: 8px;                       /* 头像 ↔ 设置钮 */
   --left-rail-view-size: 12px;                /* 顶带当前视图指示字号 */
   --left-rail-view-color: var(--text-3);      /* 指示文字色 */
   --left-rail-view-active-color: var(--brand);/* 机器人视图指示色 */

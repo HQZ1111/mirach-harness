@@ -110,13 +110,34 @@ mod win_shape {
     extern "system" {
         fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
         fn SetWindowRgn(hwnd: isize, rgn: isize, redraw: i32) -> i32;
+        fn SetClassLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+        fn InvalidateRect(hwnd: isize, rect: *const Rect, erase: i32) -> i32;
     }
 
     #[link(name = "gdi32")]
     extern "system" {
         fn CreateRoundRectRgn(l: i32, t: i32, r: i32, b: i32, ew: i32, eh: i32) -> isize;
+        fn CreatePolygonRgn(points: *const Point, count: i32, mode: i32) -> isize;
+        fn CreateSolidBrush(color: u32) -> isize;
         fn DeleteObject(obj: isize) -> i32;
     }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    /// 圆角弧的折线段数（每角）。`CreateRoundRectRgn` 的弧在整数栅格上只有
+    /// 端点几个采样点，56px 半径下阶梯非常明显（用户 2026-10-19："圆角有
+    /// 锯齿"）。**区域 API 无法抗锯齿**——像素只有开/关；能做的只是把弧
+    /// 切得更细，让阶梯从"几个大台阶"变成"1px 小台阶"，观感上接近平滑。
+    /// 24 段/角：56px 弧长 ≈ 88px，每段 3.7px，剩余误差 < 1px。
+    const ARC_SEGMENTS: usize = 24;
+
+    /// ALTERNATE = 1（填充采用奇偶规则；单连通多边形用这个即可）。
+    const ALTERNATE: i32 = 1;
 
     /// 逻辑圆角半径——必须与 base.css `.app-shell { border-radius: 56px }`
     /// 同值（CSS px = 窗口逻辑像素，1:1）。**双处同步**：改这里必须同时改
@@ -124,16 +145,95 @@ mod win_shape {
     /// 配合内容 inset 8 / 内层 48 的同心几何）。
     const RADIUS_LOGICAL: f64 = 56.0;
 
+    /// GCLP_HBRBACKGROUND（-10）：窗口类背景刷。
+    const GCLP_HBRBACKGROUND: i32 = -10;
+
+    /// 把窗口类背景刷设成壳色（白）。**每进程只做一次**（`Once`）——
+    /// `sync_round_region` 在每次 resize 都调，重复建刷会泄漏 GDI 对象、
+    /// 且每次 `InvalidateRect` 都触发一次全窗重绘（拖动 resize 时闪烁）。
+    ///
+    /// 为什么需要（2026-10-19 用户："有没切干净的 cef 的黑底"）：CEF windowed
+    /// 画布恒不透明、基色 #1F1F1F；SetWindowRgn 与 CSS 圆角在**亚像素**上
+    /// 不可能完全对齐（region 是整数像素栅格，CSS 圆角是抗锯齿弧），边缘
+    /// 必然漏出 1px 画布底色 = 黑边。
+    /// 设成白色后漏出的那一像素与 `.app-shell` 的 --surface 同色，肉眼不可见
+    /// ——这是"不改变 56px 自绘圆角"前提下唯一能吃掉黑边的办法。
+    /// 注意窗口类可能被其他窗口共享（tauri 只建一个主窗，风险可接受）。
+    fn paint_class_background(hwnd: isize) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // COLORREF: 0x00BBGGRR；白色 = 0x00FFFFFF
+            let brush = unsafe { CreateSolidBrush(0x00FF_FFFF) };
+            if brush == 0 {
+                // 建刷失败不改——错误可见（黑边会回来，用户能看到），不静默假装成功
+                eprintln!("[win_shape] CreateSolidBrush 失败——背景刷未设置，圆角外可能露黑边");
+                return;
+            }
+            // 旧刷子由系统持有，不在这里释放：类背景刷是共享状态，删除旧的
+            // 可能影响其他窗口；进程退出时一并回收。
+            unsafe {
+                SetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND, brush);
+                // 强制重绘一遍，让新背景刷立刻生效（否则要等下次 resize）
+                InvalidateRect(hwnd, std::ptr::null(), 1);
+            }
+        });
+    }
+
     fn clear_region(hwnd: isize) {
         unsafe {
             SetWindowRgn(hwnd, 0, 1);
         }
     }
 
+    /// 生成圆角矩形区域（多边形逼近，弧更细 → 锯齿更小）。
+    ///
+    /// `CreateRoundRectRgn` 的弧在整数栅格上采样点太少，56px 半径下阶梯
+    /// 明显；这里沿每角弧按 `ARC_SEGMENTS` 折线采样，再用
+    /// `CreatePolygonRgn` 建区。**注意**：区域本质是 1bit 掩码，无法真正
+    /// 抗锯齿——只能把台阶切细。要真抗锯齿必须走 DWM 圆角（放弃 56px 自绘）。
+    fn build_round_rgn(w: i32, h: i32, r: i32) -> isize {
+        // 半径不能超过短边一半
+        let r = r.min(w / 2).min(h / 2).max(0);
+        if r == 0 {
+            let pts = [
+                Point { x: 0, y: 0 },
+                Point { x: w, y: 0 },
+                Point { x: w, y: h },
+                Point { x: 0, y: h },
+            ];
+            return unsafe { CreatePolygonRgn(pts.as_ptr(), 4, ALTERNATE) };
+        }
+        let mut pts: Vec<Point> = Vec::with_capacity(ARC_SEGMENTS * 4 + 4);
+        let f = |v: f64| v.round() as i32;
+        let (rf, seg) = (r as f64, ARC_SEGMENTS as f64);
+        // 四个圆心（逻辑坐标）
+        let centers = [
+            (rf, rf),                        // 左上
+            (w as f64 - rf, rf),             // 右上
+            (w as f64 - rf, h as f64 - rf),  // 右下
+            (rf, h as f64 - rf),             // 左下
+        ];
+        // 每角起始角（弧度）：左上 180°→270°，右上 270°→360°，
+        // 右下 0°→90°，左下 90°→180°
+        let starts = [std::f64::consts::PI, 1.5 * std::f64::consts::PI, 0.0, 0.5 * std::f64::consts::PI];
+        for ((cx, cy), a0) in centers.iter().zip(starts.iter()) {
+            for k in 0..=ARC_SEGMENTS {
+                let t = *a0 + (std::f64::consts::FRAC_PI_2) * (k as f64 / seg);
+                pts.push(Point {
+                    x: f(cx + rf * t.cos()),
+                    y: f(cy + rf * t.sin()),
+                });
+            }
+        }
+        unsafe { CreatePolygonRgn(pts.as_ptr(), pts.len() as i32, ALTERNATE) }
+    }
+
     /// 依当前窗口态重设圆角区域（幂等）：Resized / DPI 变化 / 托盘恢复均调。
     pub fn sync_round_region(window: &tauri::WebviewWindow) {
         let Ok(h) = window.hwnd() else { return };
         let hwnd = h.0 as isize;
+        // 背景刷先设（幂等；每窗只生效一次，重复调用只是重设同一个白色刷）
+        paint_class_background(hwnd);
         if window.is_maximized().unwrap_or(false) {
             clear_region(hwnd);
             return;
@@ -145,14 +245,25 @@ mod win_shape {
         let w = r.right - r.left;
         let h = r.bottom - r.top;
         let scale = window.scale_factor().unwrap_or(1.0);
-        let dia = (RADIUS_LOGICAL * 2.0 * scale).round() as i32;
-        if w <= dia || h <= dia {
+        let radius = (RADIUS_LOGICAL * scale).round() as i32;
+        if w <= radius * 2 || h <= radius * 2 {
             // 退化尺寸（最小化 160×28 陷阱等）——不裁，恢复尺寸时 Resized 重来
             clear_region(hwnd);
             return;
         }
-        let rgn = unsafe { CreateRoundRectRgn(0, 0, w + 1, h + 1, dia, dia) };
+        let rgn = build_round_rgn(w, h, radius);
         if rgn == 0 {
+            // 多边形建区失败 → 退回系统圆角矩形（至少形状正确，锯齿差些）
+            let dia = radius * 2;
+            let fallback = unsafe { CreateRoundRectRgn(0, 0, w + 1, h + 1, dia, dia) };
+            if fallback == 0 {
+                return;
+            }
+            if unsafe { SetWindowRgn(hwnd, fallback, 1) } == 0 {
+                unsafe {
+                    DeleteObject(fallback);
+                }
+            }
             return;
         }
         if unsafe { SetWindowRgn(hwnd, rgn, 1) } == 0 {

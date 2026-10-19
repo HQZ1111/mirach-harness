@@ -11,6 +11,7 @@ import { useState } from 'react'
 import { AssistantSessionsPane } from '@/components/panes/assistant-sessions-pane'
 import { BotsPane } from '@/components/panes/bots-pane'
 import { RailLogoLeading } from '@/components/layout/rail-logo-leading'
+import { RailUserZone } from '@/components/layout/rail-user-zone'
 
 type LeftRailView = 'sessions' | 'bots'
 
@@ -27,6 +28,10 @@ export function LeftRailPane() {
       <div className="left-rail-body">
         {view === 'sessions' ? <AssistantSessionsPane /> : <BotsPane />}
       </div>
+      {/* 底部用户区（2026-10-19，用户："参考 zcode 下面的用户"）：
+          头像 + 设置钮，贴左栏底。通知卡留位：将来在 .rail-user-zone
+          **上方**加，本行结构不用改。 */}
+      <RailUserZone />
     </div>
   )
 }

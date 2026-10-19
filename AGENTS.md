@@ -468,6 +468,32 @@ cargo 增量 15s 起窗；WebView2 加载 1420；React 全壳渲染（侧栏/com
   - **不动**：`1px` 边框（设备像素发丝线）、`50%`/`translate(-50%,-50%)`
     （居中语义）、`opacity: 0/1`（显隐开关）、tailwind 的 32 个 oklch/hsl
     （那是 shadcn 令牌**定义本身**，按"出现次数"排序会把力气花错地方）。
+- **顶栏 75 / 底部用户区 / 同心 tint 圆角 / 壳圆角修复（2026-10-19）**：
+  - **顶栏 85 → 75**（`--logo-strip-h`）。**必须同步** `--logo-leading-pad`
+    20 → 15：条 75 − logo 45 = 30，上下各 15 才居中；不跟着改 logo 会偏下
+    5px。列头（`.chat-tab-label`）高与内距都引用这两个令牌，自动跟随。
+  - **入口条上下间距** 9 → 14（`--hub-bar-pad-y`）。
+  - **左栏底部用户区**（`layout/rail-user-zone.tsx`）：头像 28 圆 + 齿轮 28
+    圆，贴栏底单行（`.left-rail-body` 吃剩余高度）。设置钮复用
+    `openSettingsOverlay()`（与右键菜单/命令面板同一入口，不另造开关）。
+    **通知卡留位**：结构上 `.rail-user-zone` 上方已是 flex 列，加卡不改本行；
+    数据源（pi 事件 → 卡片）未定义，先不造假数据。
+  - **同心 tint 圆角**：贴边侧（`data-edge-left/right`）的两个角改
+    `--radius-shell-inner`(48)，非贴边侧保持 30。几何 = 壳 56 − 内缩 8 = 48。
+    双隐藏时四角全 48；复原回 30。
+  - **壳圆角两处修复**（Rust `win_shape`）：
+    ①**CEF 黑底**（用户："有没切干净的 cef 的黑底"）：CEF windowed 画布恒
+      不透明 #1F1F1F，而 `SetWindowRgn` 是整数像素栅格、CSS 圆角是抗锯齿弧，
+      亚像素不可能完全对齐 → 边缘必漏 1px 画布底色。
+      修法 = `SetClassLongPtrW(GCLP_HBRBACKGROUND, 白刷)`：漏出的像素与
+      `.app-shell` 的 --surface 同色，肉眼不可见。实测四角 `dark31=0`。
+    ②**锯齿**（用户："圆角有锯齿"）：`CreateRoundRectRgn` 的弧采样点太少。
+      改用 `CreatePolygonRgn` + 每角 24 段折线逼近（`build_round_rgn`）。
+      **区域 API 本质是 1bit 掩码、无法真抗锯齿**——只能把台阶切细；
+      要真抗锯齿必须放弃 56px 自绘、改 DWM 系统圆角（用户已明确不选）。
+  - **窗口阴影仍缺**：`decorations:false + transparent:true` 时 winit 不走
+    DWM 非客户区阴影，`shadow:true` 对 undecorated 窗口无效。与圆角同源
+    （都用 region 方案），修它需要 DWM 扩展帧——本轮按用户选择未动。
 - **openhuman 设置页移植已整体回退（2026-10-18，用户决策）**：提交 80a1a60
   的 `src/components/settings/`（83 文件 / 13,569 行）+ settings-overlay 的
   外壳切换已删。实测原因：48 个 UI 原语只有 3 个（Button/Card/Tabs）真正

@@ -124,6 +124,24 @@
   right: var(--chat-edge-inset);
 }
 
+/* ── 贴边时颜色层圆角与壳同心（2026-10-19 用户："主对话的颜色层在左侧栏
+   隐藏后，圆角也应该和壳的圆角是同心"）─────────────────────────────
+   几何：壳 56 → 内缩 8 → .app-main 48；颜色层在 .app-main 内部、距上缘
+   --logo-strip-h。**不贴边时**它离栏缘很远（隔着左栏），30 是独立的
+   "内表面"圆角；**贴边时**它紧贴 .app-main 的边，那一侧的角就要跟
+   .app-main 的 48 同心（否则是方块顶在弧线上）。
+   只改**贴边那一侧**的两个角：另一侧仍有相邻栏、保持 30。
+   两侧都贴边时四角全 48。 */
+.dv-groupview[data-edge-left] .main-tint--dockview {
+  border-top-left-radius: var(--radius-shell-inner);
+  border-bottom-left-radius: var(--radius-shell-inner);
+}
+
+.dv-groupview[data-edge-right] .main-tint--dockview {
+  border-top-right-radius: var(--radius-shell-inner);
+  border-bottom-right-radius: var(--radius-shell-inner);
+}
+
 /* ── 对话栏列头（ChatTabLabel 双行块，v8 布局定稿"工作区名=容器子元素"
    回迁；原 ChatLabelOverlay 宿主叠片随 M1 换壳丢失）：嵌在 85px 顶带
    区域内（与左栏 logo 同高带），工作区名大/会话名小两行、上下分开
@@ -881,6 +899,60 @@
 
 /* 顶带右下的当前视图指示已删（2026-10-06 用户定稿：Mirach 文字是唯一切换钮，
    指示字冗余——组件已移除，规则随之删除） */
+
+/* ── 左栏底部用户区（2026-10-19，用户："参考 zcode 下面的用户，
+   一个头像，一个设置按钮"）——贴栏底单行，左头像 + 右齿轮。
+   内容线走 --rail-gutter（与左栏其余行同一条竖线）；行高固定，
+   列表区（.left-rail-body）吃剩余高度，故本行永远贴底。 */
+.rail-user-zone {
+  align-items: center;
+  border-top: 1px solid var(--stroke-soft);
+  display: flex;
+  flex: none;
+  gap: var(--rail-user-gap);
+  height: var(--rail-user-h);
+  padding: 0 var(--rail-gutter);
+}
+
+.rail-user-avatar,
+.rail-user-settings {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  display: flex;
+  flex: none;
+  justify-content: center;
+  padding: 0;
+}
+
+.rail-user-avatar {
+  background: var(--fl-accent);
+  height: var(--rail-user-avatar);
+  width: var(--rail-user-avatar);
+}
+
+/* 头像占位字形（无账号体系时的首字母；接入账号后换真实头像图） */
+.rail-user-avatar-mark {
+  color: var(--on-brand);
+  font-size: var(--font-caption);
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  user-select: none;
+}
+
+.rail-user-settings {
+  color: var(--text-3);
+  height: var(--rail-user-btn);
+  margin-left: auto; /* 齿轮贴右缘 */
+  width: var(--rail-user-btn);
+}
+
+.rail-user-settings:hover {
+  background: var(--hover-wash);
+  color: var(--text);
+}
 
 /* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
 .open-page {
