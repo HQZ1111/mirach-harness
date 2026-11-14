@@ -2118,10 +2118,9 @@ const AssistantActionBar: FC<{
         forkable={forkable}
         className={cn(!feedbackEnabled && "aui-hide-reactions")}
       />
-      <MessageTimeLabel />
       {/* 换模型重生成（官方 regenerate-menu 元素）：reload 带
           runConfig.custom.modelOverride → runtime onReload 探测后
-          pi_set_model + 重发 */}
+          pi_set_model + 重发。图标 = Shuffle（与「重新生成」的 ↻ 区分）。 */}
       <RegenerateMenuWired />
       {/* 朗读（官方 read-aloud 元素入口）：无语音引擎环境隐藏（能力门） */}
       {speechSupported && (
@@ -2156,6 +2155,9 @@ const AssistantActionBar: FC<{
           </ActionBarPrimitive.ExportMarkdown>
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
+      {/* 时间放**整条末尾**（ZCode 口径：只读元数据，跟在所有操作之后；
+          原先夹在操作钮中间，用户实报"时间位置不对/像在上面"2026-11-15）。 */}
+      <MessageTimeLabel />
     </ActionBarPrimitive.Root>
   );
 };

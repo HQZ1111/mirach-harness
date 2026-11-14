@@ -1,7 +1,7 @@
 "use client";
 
 import type { ComponentProps } from "react";
-import { RefreshCwIcon } from "lucide-react";
+import { ShuffleIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { floating, ghostButton, mono } from "./surfaces";
 
@@ -40,7 +40,8 @@ export function RegenerateMenu({
         <button
           type="button"
           aria-expanded={open}
-          aria-label="Regenerate with a different model"
+          aria-label="换模型重新生成"
+          title="换模型重新生成"
           onClick={() => onOpenChange(!open)}
           className={cn(
             ghostButton,
@@ -48,7 +49,9 @@ export function RegenerateMenu({
             open && "bg-foreground/[0.06] text-foreground/90",
           )}
         >
-          <RefreshCwIcon className="size-[var(--size-icon-md)]" />
+          {/* 用 Shuffle 而非 RefreshCw：同一操作条里已有「重新生成」的 ↻，
+              两个同图标按钮会被当成重复入口（2026-11-15 用户实报）。 */}
+          <ShuffleIcon className="size-[var(--size-icon-md)]" />
         </button>
       )}
 
