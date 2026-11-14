@@ -2304,6 +2304,17 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
 
 ## 已知的环境陷阱
 
+0. **C 盘空间布局（2026-11-14 满盘处置，别再往 C 盘堆缓存）**：C 盘曾只剩
+   0.7GB。已迁/已清：`.cargo\targets` → `E:\cargo\targets`（**junction**，
+   cargo 实测正常）、`.cargo\registry` → `E:\cargo\registry`（junction）、
+   用户 TEMP/TMP → `E:\Temp`、npm cache → `E:\npm-cache`、旧 ZCode rollout
+   日志（保留当前会话文件）。**仍占 C 盘的大户**：`~/.zcode/cli/rollout`
+   的当前会话 model-io 日志（单个 8GB+，会话结束才能动）、
+   `~/.zcode/cli/db`（3.2GB，ZCode 会话库别删）、Roaming\Tencent（用户数据
+   微信/QQ，未动）、Roaming\2345Pic / 360se6（用户数据未动）、
+   `~/.rustup`（2.6GB，迁 RUSTUP_HOME 有风险未动）。新工具缓存/大文件
+   一律放 E 盘；`robocopy /E /MOVE` + `mklink /J` 是搬家套路。
+
 1. **dockview 官方 CSS 必须显式 import**（`main.tsx`：
    `import 'dockview-react/dist/styles/dockview.css'`）——漏掉则 `.dv-*` 定位规则
    全缺，三组渲染成垂直堆叠裸 div。
