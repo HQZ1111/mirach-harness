@@ -886,7 +886,7 @@ fn pi_list_models(
 fn pi_pending_approvals(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    Ok(state.approvals.list())
+    state.engine.pending_approvals()
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
@@ -896,9 +896,7 @@ fn pi_extension_ui_response(
     value: Option<serde_json::Value>,
     cancelled: bool,
 ) -> Result<(), String> {
-    state
-        .approvals
-        .respond(&id, agui::UiAnswer { value, cancelled })
+    state.engine.extension_ui_response(&id, value, cancelled)
 }
 
 // ── 模式切换（2026-11-01 用户："输入框的加号右边加个zcode的切换模式按钮"）──
@@ -1221,25 +1219,27 @@ fn pi_undo_history(
 fn pi_ask_pending(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
+    state.engine.refresh_ask_pending()?;
     Ok(serde_json::Value::Array(state.asks.list()))
 }
 
-/// 应答 ask 问题（宿主问答卡桥待接——如实 Err）。
+/// 应答 ask 问题。
 ///
 /// rpi 的提问能力来自插件 `rpi-ask-user` 的工具 `ask_user`（本机已装：
 /// `~/.rpi/agent/extensions/rpi_ask_user.dll`）。实现 = `rpi-extensions`
-/// 的 `UiDialogMailbox`（runtime action 17，`handle` 收
-/// `{op:open|poll|cancel|response}` 信封），且**必须有交互 UI 挂载**，
-/// 否则上游明确拒绝 "ask_user requires an interactive UI"
-/// （`crates/rpi-extensions/src/actions.rs:526`）。宿主目前既没把该
-/// mailbox 挂到会话上，也没把问题卡扇出到前端——`pi_ask_pending` 恒空、
-/// 这里没有可回灌的 id，故保留 Err，等问答卡桥接好再接真。
+/// 的 `UiDialogMailbox`（runtime action 17）：`session::build` 的
+/// `ReloadContext.ui_dialog` 就是会话级邮箱，宿主 build 后立即 attach
+/// （没有交互 UI 时上游拒绝 "ask_user requires an interactive UI"）。
+/// 本命令把前端逐题应答映射成插件 `answer_values` 认识的
+/// `{values|value|text}` 形状后 `respond`；dismissed → `cancel`。
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_ask_response(
-    _state: tauri::State<std::sync::Arc<agui::AguiState>>,
-    _id: String,
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    id: String,
+    answers: Vec<pi_session::AskAnswerWire>,
+    dismissed: bool,
 ) -> Result<(), String> {
-    Err("ask_user 由 rpi-ask-user 插件工具提供（会话内）；宿主问答卡桥待接".into())
+    state.engine.ask_response(&id, &answers, dismissed)
 }
 
 /// 子代理 transcript（活动面板 TaskCard 展开）：pi `transcript_page`。

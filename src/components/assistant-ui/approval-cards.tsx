@@ -6,7 +6,7 @@
  * - 其他 method（select/input/notify…）：MVP 显示 method + payload，
  *   只提供取消——真实 payload 形状出现后按需补全，不做猜测 UI。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 
 import { approvalBridge, useApprovalBridge } from './approval-bridge'
@@ -14,6 +14,20 @@ import { approvalBridge, useApprovalBridge } from './approval-bridge'
 export function ApprovalCards() {
   const { pending } = useApprovalBridge()
   const [busyId, setBusyId] = useState<string | null>(null)
+
+  // rpi 的审批请求是插件 runtime action（不进 AgentEvent 流），SSE 上没有
+  // extension_ui_request 信号——挂载即拉一次 + 轮询（工具调用在审批前
+  // 阻塞，卡片必须在那之前出现）。无会话时命令返回空数组。
+  useEffect(() => {
+    const refresh = () =>
+      approvalBridge
+        .getState()
+        .refresh()
+        .catch((err) => console.error('[pi] 审批列表拉取失败', err))
+    refresh()
+    const timer = window.setInterval(refresh, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   if (pending.length === 0) return null
 

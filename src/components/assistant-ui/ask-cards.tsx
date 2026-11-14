@@ -10,7 +10,7 @@
  * **未用官方 `ElicitationForm`**：它的 `fields` 是静态展示（value 是字符串，
  * 没有选择交互），无法承载真实作答——用它只能看不能答（等于假 UI）。
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { askBridge, useAskBridge, type AskQuestion, type PendingAsk } from './ask-bridge'
 
@@ -175,6 +175,17 @@ function AskCard({ item }: { item: PendingAsk }) {
 
 export function AskCards() {
   const { pending } = useAskBridge()
+  // rpi 的 ask_user 是插件 runtime action（不进 AgentEvent 流），SSE 上没有
+  // ask_request 信号——卡片数据以 Rust 邮箱投影为真相，挂载即拉一次 +
+  // 轮询（run 被工具调用卡住时用户必须看到问题卡）。无会话时命令返回
+  // 空数组，轮询成本 = 锁内查表。
+  useEffect(() => {
+    void askBridge.getState().refresh()
+    const timer = window.setInterval(() => {
+      void askBridge.getState().refresh()
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
   if (pending.length === 0) return null
   return (
     <div className="mb-3 flex flex-col gap-2">

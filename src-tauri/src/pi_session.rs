@@ -19,8 +19,13 @@
 //!   图片转换，前端零改动。
 //! - **分栏（side_*）暂不支持**：rpi v1 非 main lane 拒绝 run 操作
 //!   （InvalidLane）——如实 Err，前端分栏可见错误。
-//! - **审批（变更前确认）下一轮**：rpi 侧经 before_tool_call 钩子接回
-//!   ApprovalRegistry；本轮工具直接执行（审批卡不出现——已记降级）。
+//! - **审批 / ask（rpi runtime action 17）已接真（2026-11-15）**：
+//!   `session::build` 返回的 `ReloadContext.ui_dialog` 是会话级
+//!   `UiDialogMailbox`，宿主 build 后立即 `attach`（没有交互 UI 时上游拒绝
+//!   "ask_user requires an interactive UI"）；插件的 ask / permission
+//!   对话框经 `take_pending_filtered` 取出并投影成前端卡片，应答经
+//!   `respond`/`cancel` 回灌。旧 pi 的 before_tool_call ApprovalRegistry
+//!   oneshot 通道已被邮箱取代（注册表保留语义位与测试）。
 //!
 //! ## 引擎形态（照 egui 试验田验证过的嵌入法）
 //!
@@ -55,8 +60,13 @@ use rpi_harness::session::types::{
 };
 use rpi_harness::session::{DefaultIdGenerator, Session, SystemClock};
 use rpi_ai::types::{ImageContent, UserContent};
+use rpi_cli::session::ReloadContext;
 
 use crate::agui::{AguiImage, AskRegistry, ApprovalRegistry, ThreadBuffers};
+
+/// 无活动会话的固定文案。前端多处按英文锚点 "no active session" 区分
+/// "首启/New Chat 的预期域状态" 与真错误（见 `live()`）。
+const NO_ACTIVE_SESSION: &str = "无活动会话（no active session）";
 
 /// block_on 的固定执行栈：16MiB（虚拟预留，惰性提交）。旧 pi 消费面
 /// （settings/vault/login/usage/capabilities 等 12 模块）的深递归解析仍靠
@@ -85,12 +95,11 @@ pub(crate) fn on_big_stack<T: Send + 'static>(
 }
 
 // ── UiBridgeHandle（形状不变——agui.rs/main.rs 继续构造传递）────────────────
-// rpi 迁移后字段暂无读取方：事件转发（broadcast → ThreadBuffers）与审批桥
-// 待 rpi 面接回，形状保留。
-// rpi 阶段 1 引擎不消费它（审批桥下一轮经 before_tool_call 接回），参数
-// 保留以保调用点签名。
+// rpi 迁移后字段暂无读取方：事件转发（broadcast → ThreadBuffers）待接；
+// 审批/ask 已改走 `ReloadContext.ui_dialog` 邮箱（不经过这里），字段保留以
+// 保调用点签名。
 
-#[allow(dead_code)] // 字段暂无读取方——事件转发/审批桥待 rpi 面接回
+#[allow(dead_code)] // 字段暂无读取方——事件转发待 rpi 面接回
 pub struct UiBridgeHandle {
     pub buffers: Arc<Mutex<ThreadBuffers>>,
     pub approvals: Arc<ApprovalRegistry>,
@@ -165,6 +174,10 @@ struct EngineShared {
 struct HarnessLive {
     harness: Arc<AgentHarness>,
     events: tokio::sync::broadcast::Receiver<AgentEvent>,
+    /// `rpi_cli::session::build` 的第三个返回值。目前只用 `ui_dialog`
+    /// （runtime action 17 的会话级邮箱，插件 ask/permission 的宿主侧入口）；
+    /// 其余字段是 `/reload` 面，随上下文一并保留供后续接。
+    reload: ReloadContext,
     session_path: Option<PathBuf>,
     /// 该会话的 rpi 会话根（`<cwd>/.rpi/sessions` 或 settings 覆盖值，见
     /// `session_root`）。不能统一用 `EngineShared::cwd` 现算：
@@ -219,16 +232,27 @@ impl PiEngine {
     /// 这里按会话 id 反查会话目录补齐——删除保护、fork、导出、静态面板都靠
     /// 路径定位；拿不到路径 = Err（不静默留 None）。
     fn build_harness(&self, cwd: &Path, session_path: Option<&str>) -> Result<HarnessLive, String> {
-        let (harness, events, provider, model_id, id) = self.shared.rt.block_on(async {
+        let (harness, events, reload, provider, model_id, id) = self.shared.rt.block_on(async {
             let resolved = rpi_cli::provider::resolve(None, None, None, None, None)
                 .map_err(|e| format!("模型解析失败: {e}"))?;
             let mut args = rpi_cli::args::Args::default();
             if let Some(p) = session_path {
                 args.session = Some(p.to_string());
             }
-            let (harness, events, _reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
+            let (harness, events, reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
                 .await
                 .map_err(|e| format!("Harness 构建失败: {e}"))?;
+            // 宿主就是那个"交互 UI"：上游语义是没有客户端 attach 时插件拒绝
+            // 弹 UI（rpi-extensions actions.rs `handle` 的 open 分支原文
+            // "ask_user requires an interactive UI"）。`build` 的
+            // ReloadContext 里就是初始 ActionBridge / before_tool_call 钩子
+            // 共用的会话级邮箱，拿到立即 attach；每次重建 harness 都重新
+            // attach（generation 自增，旧桥失效）。attach 失败（锁中毒 /
+            // generation 耗尽）必须传播——静默不 attach 会让插件 UI 全部
+            // fail-closed 而无人知晓（规矩 12；上游 TUI 同样拒绝启动）。
+            if reload.ui_dialog.try_attach_with_generation().is_none() {
+                return Err("扩展 UI 邮箱 attach 失败（mailbox 状态锁中毒或 generation 耗尽）".into());
+            }
             let provider = resolved.model.provider.clone();
             let model_id = resolved.model.id.clone();
             let id = harness
@@ -237,7 +261,7 @@ impl PiEngine {
                 .await
                 .map(|m| m.id)
                 .map_err(|e| format!("会话元数据读取失败: {e}"))?;
-            Ok::<_, String>((harness, events, provider, model_id, id))
+            Ok::<_, String>((harness, events, reload, provider, model_id, id))
         })?;
         let sessions_root = self.session_root(cwd);
         let session_path = match session_path {
@@ -247,6 +271,7 @@ impl PiEngine {
         Ok(HarnessLive {
             harness: Arc::new(harness),
             events,
+            reload,
             session_path: Some(session_path),
             sessions_root,
             provider,
@@ -311,16 +336,37 @@ impl PiEngine {
     }
 
     fn live(&self) -> Result<Arc<HarnessLive>, String> {
-        self.shared
+        self.live_opt()?.ok_or_else(|| NO_ACTIVE_SESSION.to_string())
+    }
+
+    /// 活动会话句柄（None = 首启/New Chat 的预期态，不是错误；锁中毒才 Err）。
+    fn live_opt(&self) -> Result<Option<Arc<HarnessLive>>, String> {
+        Ok(self
+            .shared
             .live
             .lock()
             .map_err(|_| "引擎状态锁中毒".to_string())?
             .as_ref()
-            .map(Arc::clone)
-            // 文案同时给出英文锚点：前端多处按 "no active session" 区分
-            // "首启/New Chat 的预期域状态" 与真错误（branch/checkpoint/
-            // timeline/cost 桥），只给中文会被当成失败刷 console。
-            .ok_or_else(|| "无活动会话（no active session）".to_string())
+            .map(Arc::clone))
+    }
+
+    /// 换装活动会话（ensure/open/new 共用）。
+    ///
+    /// 旧会话的挂起对话框一律 `cancel_all`：插件侧 poll 立刻看到 cancelled
+    /// （不留到超时），宿主侧已取出的卡片随注册表清空（防鬼影卡片）。
+    fn install_live(&self, live: HarnessLive) -> Result<(), String> {
+        let previous = self
+            .shared
+            .live
+            .lock()
+            .map_err(|_| "锁中毒".to_string())?
+            .replace(Arc::new(live));
+        if let Some(previous) = previous {
+            previous.reload.ui_dialog.cancel_all();
+        }
+        self.approvals.cleanup();
+        self.asks.cleanup();
+        Ok(())
     }
 
     /// 当前分支上的 message 条目（seq 升序；水合/重放/fork 点/retry 共用）。
@@ -360,8 +406,7 @@ impl PiEngine {
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
-        *self.shared.live.lock().map_err(|_| "锁中毒".to_string())? = Some(Arc::new(live));
-        Ok(())
+        self.install_live(live)
     }
 
     /// 该路径是否就是当前活动会话。
@@ -413,13 +458,23 @@ impl PiEngine {
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
-        *self.shared.live.lock().map_err(|_| "锁中毒".to_string())? = Some(Arc::new(live));
+        self.install_live(live)?;
         Ok(id)
     }
 
     /// New Chat 语义（§7-3 保持）：丢柄（会话文件已持久化在 rpi 侧）。
     pub fn discard_session(&self) -> Result<(), String> {
-        *self.shared.live.lock().map_err(|_| "锁中毒".to_string())? = None;
+        let previous = self
+            .shared
+            .live
+            .lock()
+            .map_err(|_| "锁中毒".to_string())?
+            .take();
+        if let Some(previous) = previous {
+            previous.reload.ui_dialog.cancel_all();
+        }
+        self.approvals.cleanup();
+        self.asks.cleanup();
         Ok(())
     }
 
@@ -441,7 +496,7 @@ impl PiEngine {
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
-        *self.shared.live.lock().map_err(|_| "锁中毒".to_string())? = Some(Arc::new(live));
+        self.install_live(live)?;
         Ok(id)
     }
 
@@ -514,6 +569,126 @@ impl PiEngine {
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         })
+    }
+
+    // ── 扩展 UI 对话框（rpi runtime action 17：ask / permission）──────────────
+    //
+    // 真源 = 会话级 `UiDialogMailbox`（`HarnessLive::reload.ui_dialog`，
+    // build 时已 attach——宿主就是那个"交互 UI"）。插件（rpi-ask-user /
+    // rpi-permission-gate）经 ActionBridge 把请求投进邮箱，宿主取出、投影成
+    // 前端卡片、应答经 `respond`/`cancel` 回灌；插件自己 poll 取答案。
+    //
+    // **取用策略**：`take_pending_filtered` 只取本命令认识的形状，不匹配的
+    // 请求放回队尾（actions.rs:340）——ask 与审批共用一条队列，谁也不能把
+    // 对方的请求吃掉。取出后请求离开 pending（仍在 active 里等应答），邮箱
+    // 没有枚举 active 的 API，故宿主注册表负责回放重复拉取，并用
+    // `is_pending` 剪掉已答/已取消/已超时的鬼影卡片。
+
+    /// 把邮箱里新到的 ask 请求投影进 `AskRegistry`（前端 ask-bridge 的
+    /// `PendingAsk[]` 数据面；命令层随后 `list()` 返回）。
+    /// 无活动会话 = 空注册表（首启/New Chat 的预期态）。
+    pub fn refresh_ask_pending(&self) -> Result<(), String> {
+        let Some(live) = self.live_opt()? else {
+            self.asks.cleanup();
+            return Ok(());
+        };
+        let mailbox = live.reload.ui_dialog.clone();
+        while let Some(request) =
+            mailbox.take_pending_filtered(|r| ask_row(&r.ui, &r.request_id).is_some())
+        {
+            if let Some(row) = ask_row(&request.ui, &request.request_id) {
+                self.asks.upsert(request.request_id, row);
+            }
+        }
+        self.asks.retain(|id| mailbox.is_pending(id));
+        Ok(())
+    }
+
+    /// 应答 ask 问题。`dismissed = true` → 取消（插件 ask_user 按
+    /// "ask cancelled" 失败，与 TUI Esc 同语义）；否则把前端逐题应答映射成
+    /// 插件 `answer_values` 认识的形状（`values` / `value` / `text`，
+    /// 见 rpi-ask-user 的 answer_values 与 TUI 的应答块
+    /// `rpi-cli/src/interactive_tui/extensions.rs:1000-1008`）。
+    pub fn ask_response(
+        &self,
+        id: &str,
+        answers: &[AskAnswerWire],
+        dismissed: bool,
+    ) -> Result<(), String> {
+        let Some(live) = self.live_opt()? else {
+            return Err(NO_ACTIVE_SESSION.to_string());
+        };
+        let mailbox = live.reload.ui_dialog.clone();
+        if dismissed {
+            mailbox
+                .cancel(id)
+                .map_err(|e| format!("取消 ask 请求失败: {e}"))?;
+            self.asks.remove(id);
+            return Ok(());
+        }
+        let row = self
+            .asks
+            .get(id)
+            .ok_or_else(|| format!("没有挂起的 ask 请求 {id}"))?;
+        let answer = ask_answer_value(&row, answers)?;
+        mailbox
+            .respond(id, answer)
+            .map_err(|e| format!("ask 应答失败: {e}"))?;
+        self.asks.remove(id);
+        Ok(())
+    }
+
+    /// 挂起的审批/确认对话框（前端 approval-bridge 的 `PendingUiRequest[]`）。
+    /// 无活动会话 = 空数组。
+    pub fn pending_approvals(&self) -> Result<Vec<serde_json::Value>, String> {
+        let Some(live) = self.live_opt()? else {
+            self.approvals.cleanup();
+            return Ok(Vec::new());
+        };
+        let mailbox = live.reload.ui_dialog.clone();
+        while let Some(request) =
+            mailbox.take_pending_filtered(|r| approval_row(&r.ui, &r.request_id).is_some())
+        {
+            if let Some(row) = approval_row(&request.ui, &request.request_id) {
+                self.approvals
+                    .upsert_dialog(request.request_id, request.ui.clone(), row);
+            }
+        }
+        self.approvals.retain_dialogs(|id| mailbox.is_pending(id));
+        Ok(self.approvals.list())
+    }
+
+    /// 应答审批/确认对话框。`cancelled = true` → 取消；否则按插件权限
+    /// 语义把布尔决定映射成选项**标题**（rpi-permission-gate 只认第一个
+    /// answer value 是否等于 "Yes"，且插件按 `options[].permission`
+    /// 声明 allow_once / reject_once）。
+    pub fn extension_ui_response(
+        &self,
+        id: &str,
+        value: Option<serde_json::Value>,
+        cancelled: bool,
+    ) -> Result<(), String> {
+        let Some(live) = self.live_opt()? else {
+            return Err(NO_ACTIVE_SESSION.to_string());
+        };
+        let mailbox = live.reload.ui_dialog.clone();
+        if cancelled {
+            mailbox
+                .cancel(id)
+                .map_err(|e| format!("取消扩展 UI 请求失败: {e}"))?;
+            self.approvals.remove_dialog(id);
+            return Ok(());
+        }
+        let ui = self
+            .approvals
+            .dialog_ui(id)
+            .ok_or_else(|| format!("没有挂起的扩展 UI 请求 {id}"))?;
+        let answer = approval_answer_value(&ui, value.as_ref())?;
+        mailbox
+            .respond(id, answer)
+            .map_err(|e| format!("扩展 UI 应答失败: {e}"))?;
+        self.approvals.remove_dialog(id);
+        Ok(())
     }
 
     // ── 会话管理面 ──────────────────────────────────────────────────────────
@@ -1416,8 +1591,258 @@ impl PiEngine {
     // 且已无调用点——随 pi_agent_rust 删除轮一并移除。
 }
 
-// ── 会话树投影助手（纯函数，与引擎锁/异步面分离）──────────────────────────
+// ── 扩展 UI 载荷映射（纯函数，可单测）──────────────────────────────────────
 
+/// 前端 `pi_ask_response` 的逐题应答（src/components/assistant-ui/
+/// ask-bridge.ts 的 `AskAnswer` 同形，camelCase）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskAnswerWire {
+    /// 前端带回的题目 id。rpi 的 ask_user 一次请求只有一个问题、应答只读
+    /// values/text，故宿主不消费它——保留纯为 wire 形状兼容。
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub question_id: Option<String>,
+    #[serde(default)]
+    pub selected: Vec<String>,
+    #[serde(default)]
+    pub other: Option<String>,
+}
+
+/// JSON 字符串字段：首个非空（trim 后）值。与 rpi TUI 的 `ask_user_str`
+/// 同语义（rpi-cli/src/interactive_tui/extensions.rs:699-708）。
+fn json_str(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn json_bool(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_bool))
+}
+
+/// 选项 → 前端 `AskOption`（`{label, description?}`）。
+///
+/// rpi-ask-user 的选项是 `{"title": …, "description"?: …}`；兼容裸字符串与
+/// 旧 label/text 键（rpi TUI `ask_user_options` 的键表，extensions.rs:731）。
+fn option_rows(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(items) = value.get("options").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(title) = item.as_str() {
+            let title = title.trim();
+            if !title.is_empty() {
+                out.push(serde_json::json!({ "label": title }));
+            }
+            continue;
+        }
+        let Some(label) = json_str(item, &["title", "label", "text", "value", "name"]) else {
+            continue;
+        };
+        let mut row = serde_json::json!({ "label": label });
+        if let Some(description) = json_str(item, &["description"]) {
+            row["description"] = serde_json::json!(description);
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// permission-gate 的对话框（rpi-plugin-sdk dialogs.rs 契约）：
+/// `purpose:"permission"`；兼容老的「kind=confirm + options[].permission」。
+fn is_permission_ui(ui: &serde_json::Value) -> bool {
+    if ui.get("purpose").and_then(serde_json::Value::as_str) == Some("permission") {
+        return true;
+    }
+    ui.get("kind").and_then(serde_json::Value::as_str) == Some("confirm")
+        && ui
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|options| {
+                options
+                    .iter()
+                    .any(|option| option.get("permission").and_then(serde_json::Value::as_str).is_some())
+            })
+}
+
+/// ask 请求 → 前端 `PendingAsk`（`{id, request:{questions:[AskQuestion]}}`）。
+///
+/// rpi-ask-user 每次请求一个问题（`ui` 是扁平 question：kind/question/
+/// options/allowMultiple/…，见其 `to_ui`）；同时接受批量的 `questions[]`
+/// 形状（只影响映射，不影响应答——应答仍是整条请求一组 values）。
+/// 非 ask 形状（permission）或没有题目文本 = None：谓词不放行，
+/// 请求留在邮箱里给审批命令。
+fn ask_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value> {
+    if is_permission_ui(ui) {
+        return None;
+    }
+    let kind = ui
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("selector");
+    let items: Vec<&serde_json::Value> = match ui.get("questions").and_then(serde_json::Value::as_array) {
+        Some(items) => items.iter().collect(),
+        None => vec![ui],
+    };
+    let mut questions: Vec<serde_json::Value> = Vec::new();
+    for item in items {
+        let Some(question) = json_str(item, &["question", "summary", "title"]) else {
+            continue;
+        };
+        let mut row = serde_json::json!({
+            "question": question,
+            "options": option_rows(item),
+            // confirm 语义恒单选（rpi TUI 同款：kind=="confirm" 强制单选，
+            // extensions.rs:856）。
+            "multi": kind != "confirm"
+                && json_bool(item, &["allowMultiple", "allow_multiple", "multiple"])
+                    .unwrap_or(false),
+        });
+        if let Some(id) = json_str(item, &["id", "questionId"]) {
+            row["id"] = serde_json::json!(id);
+        }
+        if let Some(header) = json_str(item, &["header"]) {
+            row["header"] = serde_json::json!(header);
+        }
+        questions.push(row);
+    }
+    if questions.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "id": request_id,
+        "request": { "questions": questions },
+    }))
+}
+
+/// 审批对话框 → 前端 `PendingUiRequest`
+/// （`{id, method, payload, extensionId}`）。
+fn approval_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value> {
+    if !is_permission_ui(ui) {
+        return None;
+    }
+    // approval-cards 只对 method === "confirm" 画批准/拒绝；permission-gate
+    // 的 kind 就是 confirm。其它 kind（selector 形状的权限请求）保持原样
+    // ——卡片只给取消，不猜 UI。
+    let method = ui
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("confirm");
+    Some(serde_json::json!({
+        "id": request_id,
+        "method": method,
+        "payload": ui,
+        // rpi runtime action 信封（UiDialogRequest.raw）不带扩展标识——不编造。
+        "extensionId": serde_json::Value::Null,
+    }))
+}
+
+/// 前端逐题应答 → 插件 `answer_values` 认识的回答。
+///
+/// 插件侧（rpi-ask-user `answer_values`）：先读 `values`（字符串数组），
+/// 否则读 `value`（字符串）；`text` 独立读（自由输入）。TUI 的选择器应答
+/// = `{"values":[…],"kind":"selector"}`，输入应答 =
+/// `{"values":[text],"value":text,"text":text,"kind":"input"}`
+/// （rpi-cli/src/interactive_tui/extensions.rs:914-921 / 999-1008）。
+fn ask_answer_value(
+    row: &serde_json::Value,
+    answers: &[AskAnswerWire],
+) -> Result<serde_json::Value, String> {
+    let mut values: Vec<String> = Vec::new();
+    let mut text: Option<String> = None;
+    for answer in answers {
+        for selected in &answer.selected {
+            let selected = selected.trim();
+            if !selected.is_empty() {
+                values.push(selected.to_string());
+            }
+        }
+        if let Some(other) = answer
+            .other
+            .as_deref()
+            .map(str::trim)
+            .filter(|other| !other.is_empty())
+        {
+            text = Some(other.to_string());
+        }
+    }
+    if values.is_empty() {
+        // 自由输入：没有选中项时把文本放进 values（插件优先读 values）。
+        if let Some(text) = &text {
+            values.push(text.clone());
+        }
+    }
+    if values.is_empty() {
+        return Err("ask 应答为空：既没有选中项也没有自由输入".into());
+    }
+    let question = &row["request"]["questions"][0];
+    let has_options = question["options"]
+        .as_array()
+        .is_some_and(|options| !options.is_empty());
+    let kind = if has_options { "selector" } else { "input" };
+    let mut answer = serde_json::json!({ "values": values, "kind": kind });
+    if let Some(text) = text {
+        answer["value"] = serde_json::json!(text);
+        answer["text"] = serde_json::json!(text);
+    }
+    Ok(answer)
+}
+
+/// 审批应答值 → 插件期望的选项标题。
+///
+/// rpi-permission-gate 只检查 `answer_values(answer).first()` 是否等于
+/// "yes"（大小写不敏感），所以宿主必须回标题（"Yes"/"No"），不能回布尔。
+/// 无 options 的 confirm 按上游 TUI 的默认 Yes/No 语义
+/// （rpi-cli/src/interactive_tui/extensions.rs:777-779）。
+fn approval_answer_value(
+    ui: &serde_json::Value,
+    value: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let kind = ui
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("confirm");
+    match value {
+        Some(serde_json::Value::Bool(allow)) => {
+            let wanted = if *allow { "allow" } else { "reject" };
+            let options = ui.get("options").and_then(serde_json::Value::as_array);
+            if options.map_or(true, |options| options.is_empty()) {
+                return Ok(serde_json::json!({
+                    "values": [if *allow { "Yes" } else { "No" }],
+                    "kind": kind,
+                }));
+            }
+            let title = options
+                .and_then(|options| {
+                    options.iter().find_map(|option| {
+                        option
+                            .get("permission")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|permission| permission.starts_with(wanted))
+                            .and_then(|_| option.get("title").and_then(serde_json::Value::as_str))
+                    })
+                })
+                .ok_or_else(|| {
+                    format!("审批对话框没有 {wanted} 选项（options 缺 permission 语义）")
+                })?;
+            Ok(serde_json::json!({ "values": [title], "kind": kind }))
+        }
+        Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
+            Ok(serde_json::json!({ "values": [text.trim()], "kind": kind }))
+        }
+        _ => Err("扩展 UI 应答值非法：permission/confirm 需要 true 或 false".into()),
+    }
+}
+
+// ── 会话树投影助手（纯函数，与引擎锁/异步面分离）──────────────────────────
 /// user 消息文本提取（旧 pi `extract_user_text` 同语义：纯文本直接取；
 /// 块数组取**第一个** Text 块；无 Text 块 = None，不编造空串）。
 fn extract_user_text(content: &UserContent) -> Option<String> {
@@ -1680,5 +2105,178 @@ mod tests {
             mime_type: "image/png".into(),
         })];
         assert_eq!(extract_user_text(&UserContent::Blocks(images_only)), None);
+    }
+
+    // ---- 扩展 UI 载荷映射（rpi runtime action 17 → 前端卡片） ----
+
+    /// rpi-ask-user 的扁平 question（其 `to_ui` 实测键：kind/id/header/
+    /// question/context/options/allowMultiple/allowFreeform/…）。
+    fn rpi_ask_ui() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "selector",
+            "id": "q1",
+            "header": "技术栈",
+            "question": "用哪个语言？",
+            "context": null,
+            "options": [
+                { "title": "Rust", "description": "内存安全" },
+                { "title": "Python" }
+            ],
+            "allowMultiple": true,
+            "allowFreeform": false,
+            "allowComment": false,
+            "suggest": null,
+            "displayMode": null,
+            "timeout": 0
+        })
+    }
+
+    #[test]
+    fn ask_row_maps_flat_rpi_question_to_frontend_row() {
+        let row = ask_row(&rpi_ask_ui(), "req-1").expect("ask row");
+        assert_eq!(row["id"], serde_json::json!("req-1"));
+        let questions = row["request"]["questions"].as_array().expect("questions");
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0]["id"], serde_json::json!("q1"));
+        assert_eq!(questions[0]["header"], serde_json::json!("技术栈"));
+        assert_eq!(questions[0]["question"], serde_json::json!("用哪个语言？"));
+        assert_eq!(questions[0]["multi"], serde_json::json!(true));
+        assert_eq!(
+            questions[0]["options"],
+            serde_json::json!([
+                { "label": "Rust", "description": "内存安全" },
+                { "label": "Python" }
+            ])
+        );
+    }
+
+    #[test]
+    fn ask_row_accepts_batched_questions_and_confirm_is_single_choice() {
+        // 兼容 `questions[]` 批量形状（rpi 自身一次一个问题，但宿主契约
+        // 接受批量）；confirm 语义恒单选（TUI 同款强制）。
+        let ui = serde_json::json!({
+            "kind": "confirm",
+            "summary": "继续执行？",
+            "questions": [
+                { "id": "a", "question": "继续执行？", "allowMultiple": true },
+                { "question": "要备份吗？", "options": ["是", "否"] }
+            ]
+        });
+        let row = ask_row(&ui, "req-2").expect("ask row");
+        let questions = row["request"]["questions"].as_array().expect("questions");
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0]["multi"], serde_json::json!(false));
+        assert_eq!(
+            questions[1]["options"],
+            serde_json::json!([{ "label": "是" }, { "label": "否" }])
+        );
+        // 没有题目文本 = 不认（请求留在邮箱里，不吞掉）
+        assert!(ask_row(&serde_json::json!({ "kind": "selector" }), "req-3").is_none());
+    }
+
+    #[test]
+    fn permission_dialog_is_not_an_ask_row() {
+        // permission-gate 的 ui（purpose=permission、options[].permission）
+        // 必须留给审批命令——ask 取用谓词不能吃它。
+        let ui = serde_json::json!({
+            "kind": "confirm",
+            "purpose": "permission",
+            "id": "permission-gate",
+            "question": "Allow bash?",
+            "message": "rm -rf build",
+            "options": [
+                { "title": "Yes", "permission": "allow_once" },
+                { "title": "No", "permission": "reject_once" }
+            ]
+        });
+        assert!(ask_row(&ui, "req-1").is_none());
+        let row = approval_row(&ui, "req-1").expect("approval row");
+        assert_eq!(row["id"], serde_json::json!("req-1"));
+        assert_eq!(row["method"], serde_json::json!("confirm"));
+        assert_eq!(row["extensionId"], serde_json::Value::Null);
+        assert_eq!(row["payload"]["question"], serde_json::json!("Allow bash?"));
+    }
+
+    #[test]
+    fn ask_answer_value_matches_plugin_answer_values_contract() {
+        let row = ask_row(&rpi_ask_ui(), "req-1").expect("ask row");
+        // 选择器：选中项进 values（TUI 同款 {"values":[…],"kind":"selector"}）
+        let selected = ask_answer_value(
+            &row,
+            &[AskAnswerWire {
+                question_id: Some("q1".into()),
+                selected: vec!["Rust".into()],
+                other: None,
+            }],
+        )
+        .expect("answer");
+        assert_eq!(
+            selected,
+            serde_json::json!({ "values": ["Rust"], "kind": "selector" })
+        );
+        // 自由输入：没有选中项时文本同时进 values/value/text
+        let freeform = ask_answer_value(
+            &row,
+            &[AskAnswerWire {
+                question_id: Some("q1".into()),
+                selected: vec![],
+                other: Some("  Kotlin  ".into()),
+            }],
+        )
+        .expect("answer");
+        assert_eq!(
+            freeform,
+            serde_json::json!({
+                "values": ["Kotlin"],
+                "kind": "selector",
+                "value": "Kotlin",
+                "text": "Kotlin",
+            })
+        );
+        // 空应答 = Err（不编造 "yes"/空串）
+        assert!(ask_answer_value(
+            &row,
+            &[AskAnswerWire {
+                question_id: None,
+                selected: vec![],
+                other: Some("   ".into()),
+            }]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn approval_answer_value_uses_option_titles_and_fails_closed() {
+        let ui = serde_json::json!({
+            "kind": "confirm",
+            "purpose": "permission",
+            "options": [
+                { "title": "Yes", "permission": "allow_once" },
+                { "title": "No", "permission": "reject_once" }
+            ]
+        });
+        assert_eq!(
+            approval_answer_value(&ui, Some(&serde_json::json!(true))).unwrap(),
+            serde_json::json!({ "values": ["Yes"], "kind": "confirm" })
+        );
+        assert_eq!(
+            approval_answer_value(&ui, Some(&serde_json::json!(false))).unwrap(),
+            serde_json::json!({ "values": ["No"], "kind": "confirm" })
+        );
+        // 无 options 的 confirm 按上游 TUI 默认 Yes/No
+        let bare = serde_json::json!({ "kind": "confirm", "purpose": "permission" });
+        assert_eq!(
+            approval_answer_value(&bare, Some(&serde_json::json!(true))).unwrap(),
+            serde_json::json!({ "values": ["Yes"], "kind": "confirm" })
+        );
+        // 缺 permission 语义的 options = Err（不猜哪个是允许）
+        let no_semantics = serde_json::json!({
+            "kind": "confirm",
+            "options": [{ "title": "OK" }, { "title": "Cancel" }]
+        });
+        assert!(approval_answer_value(&no_semantics, Some(&serde_json::json!(true))).is_err());
+        // null 值 = Err（前端只会在 cancelled=true 时省略 value）
+        assert!(approval_answer_value(&ui, None).is_err());
+        assert!(approval_answer_value(&ui, Some(&serde_json::json!("Yes"))).is_ok());
     }
 }

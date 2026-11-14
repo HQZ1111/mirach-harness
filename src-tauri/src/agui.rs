@@ -1,7 +1,7 @@
 //! L2 AG-UI 桥（docs/pi-integration.md §2/§7-2）：axum 双端点 +
 //! per-thread 事件缓冲（sequence 单调）+ AgentEvent→AG-UI 映射器 +
-//! ExtensionUiHandler 桥（§4.4 审批/问题卡：请求→缓冲 CUSTOM→前端卡→
-//! IPC 应答→oneshot 回灌）。
+//! 扩展 UI 对话框注册表（§4.4 审批/问题卡：rpi `UiDialogMailbox`
+//! take → 投影行 → IPC 拉取 → 邮箱 respond/cancel；旧 oneshot 通道退役）。
 //!
 //! 端点（v2.2 定稿，两通道收口）：
 //! - POST /ag-ui?token=…           起 run：{threadId, message} → {runId}
@@ -80,9 +80,23 @@ pub struct UiAnswer {
     pub cancelled: bool,
 }
 
+/// 宿主侧已从 rpi `UiDialogMailbox` 取出的对话框。
+///
+/// 邮箱 `take_pending_filtered` 一旦取出，请求就从 pending 队列消失（仍留
+/// 在 active 里等 `respond`/`cancel`），**没有枚举 active 的公开 API**——
+/// 重复拉取只能由宿主回放。`ui` 保留插件原始载荷（应答时按
+/// `options[].permission` 语义构造插件期望的 `values`），`row` 是给前端的
+/// 投影（形状 = 前端 `PendingUiRequest`）。
+struct UiDialogRow {
+    ui: serde_json::Value,
+    row: serde_json::Value,
+}
+
 #[derive(Default)]
 pub struct ApprovalRegistry {
     pending: Mutex<HashMap<String, PendingApproval>>,
+    /// rpi 邮箱取出的审批对话框（重复拉取回放 + 应答构造）。
+    dialogs: Mutex<HashMap<String, UiDialogRow>>,
 }
 
 impl ApprovalRegistry {
@@ -90,6 +104,7 @@ impl ApprovalRegistry {
     pub(crate) fn new() -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
+            dialogs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -108,19 +123,80 @@ impl ApprovalRegistry {
             .insert(id, PendingApproval { request, responder });
     }
 
-    /// 挂载/刷新时拉取（§4.4：pending_approvals 列表）
+    /// 挂载/刷新时拉取（§4.4：pending_approvals 列表）：rpi 邮箱取出的
+    /// 审批对话框 + 旧 oneshot 通道登记的请求（后者 rpi 迁移后无产出方，
+    /// 语义位保留）。
     pub fn list(&self) -> Vec<serde_json::Value> {
-        self.pending
+        let mut out: Vec<serde_json::Value> = self
+            .dialogs
             .lock()
             .expect("approval registry poisoned")
             .values()
-            .map(|p| p.request.clone())
-            .collect()
+            .map(|dialog| dialog.row.clone())
+            .collect();
+        out.sort_by(|a, b| {
+            a["id"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["id"].as_str().unwrap_or(""))
+        });
+        out.extend(
+            self.pending
+                .lock()
+                .expect("approval registry poisoned")
+                .values()
+                .map(|p| p.request.clone()),
+        );
+        out
+    }
+
+    /// 登记一条从 rpi 邮箱取出的审批对话框（引擎侧调用）。
+    pub(crate) fn upsert_dialog(
+        &self,
+        id: String,
+        ui: serde_json::Value,
+        row: serde_json::Value,
+    ) {
+        self.dialogs
+            .lock()
+            .expect("approval registry poisoned")
+            .insert(id, UiDialogRow { ui, row });
+    }
+
+    /// 该 id 的插件原始 ui 载荷（应答时构造插件期望形状）。
+    pub(crate) fn dialog_ui(&self, id: &str) -> Option<serde_json::Value> {
+        self.dialogs
+            .lock()
+            .expect("approval registry poisoned")
+            .get(id)
+            .map(|dialog| dialog.ui.clone())
+    }
+
+    /// 应答落账后移除（幂等；不存在 = no-op）。
+    pub(crate) fn remove_dialog(&self, id: &str) {
+        let _ = self
+            .dialogs
+            .lock()
+            .expect("approval registry poisoned")
+            .remove(id);
+    }
+
+    /// 剪掉已答/已取消/已超时的条目（邮箱 `is_pending` = 真相）。
+    pub(crate) fn retain_dialogs(&self, keep: impl Fn(&str) -> bool) {
+        self.dialogs
+            .lock()
+            .expect("approval registry poisoned")
+            .retain(|id, _| keep(id));
     }
 
     /// 应答回灌；id 不存在 = 错误（错误即错误，不静默）。
     /// oneshot send 失败（对端 request_ui 已被丢弃——上游超时放弃/会话
     /// discard 中止扩展任务）也 = 错误（P1-3：不假装成功，前端可见）。
+    ///
+    /// rpi 迁移后没有产出方（旧 `ExtensionUiHandler` 通道退役），实际应答
+    /// 走引擎的 `extension_ui_response`（邮箱 respond/cancel）；这里保留
+    /// 注册表语义与测试。
+    #[allow(dead_code)]
     pub fn respond(&self, id: &str, answer: UiAnswer) -> Result<(), String> {
         let pending = self
             .pending
@@ -135,42 +211,85 @@ impl ApprovalRegistry {
 
     /// 会话 discard/切换成功后清理挂起审批（P1-3 防鬼影卡片）：移除全部
     /// pending 项——oneshot Sender 析构后宿主桥的 request_ui 收到 Err，
-    /// 按 cancelled 回灌 pi（§4.4 宿主桥故障语义）。rpi 迁移后暂无调用方
-    /// （discard 链不经过审批注册表），保留语义位。
-    #[allow(dead_code)]
+    /// 按 cancelled 回灌 pi（§4.4 宿主桥故障语义）。rpi 邮箱取出的对话框
+    /// 一并清空（引擎 install_live/discard 已先对旧邮箱 cancel_all）。
     pub fn cleanup(&self) {
         self.pending
+            .lock()
+            .expect("approval registry poisoned")
+            .clear();
+        self.dialogs
             .lock()
             .expect("approval registry poisoned")
             .clear();
     }
 }
 
-/// ask 工具注册表（竖链移植降级：rpi 无 ask 工具——list 恒空）。
-/// 待 rpi-main 长出 ask 能力后按旧形状接回（git df701a4 有原实现）。
+/// ask 工具注册表（rpi runtime action 17 的 ask 对话框投影）。
+///
+/// 真源 = 会话的 `UiDialogMailbox`；这里存**已取出**的请求（邮箱 take 后
+/// pending 队列不再可见，重复拉取必须由宿主回放）。`row` 形状 =
+/// 前端 `PendingAsk`（`{id, request:{questions:[…]}}`）。
 #[derive(Default)]
 pub struct AskRegistry {
-    #[allow(dead_code)] // pending 待 rpi ask 能力接回（list/cleanup 语义位）
-    pending: Mutex<HashMap<String, serde_json::Value>>,
+    rows: Mutex<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 impl AskRegistry {
     /// 引擎构造入口（同 ApprovalRegistry）。
     pub(crate) fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
+            rows: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
-    /// 挂载/刷新时拉取挂起问题——rpi 无 ask 工具，恒空。
+    /// 挂载/刷新时拉取挂起问题——已取出的 ask 请求（按 id 稳定排序）。
     pub fn list(&self) -> Vec<serde_json::Value> {
-        vec![]
+        self.rows
+            .lock()
+            .expect("ask registry poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 
-    /// 会话 discard/切换后清理（保留语义位）。
-    #[allow(dead_code)] // 待 rpi ask 能力接回
+    /// 登记一条从 rpi 邮箱取出的 ask 请求（引擎侧调用）。
+    pub(crate) fn upsert(&self, id: String, row: serde_json::Value) {
+        self.rows
+            .lock()
+            .expect("ask registry poisoned")
+            .insert(id, row);
+    }
+
+    /// 该 id 的前端投影（应答时判 selector/input 与 multi）。
+    pub(crate) fn get(&self, id: &str) -> Option<serde_json::Value> {
+        self.rows
+            .lock()
+            .expect("ask registry poisoned")
+            .get(id)
+            .cloned()
+    }
+
+    /// 应答落账后移除（幂等）。
+    pub(crate) fn remove(&self, id: &str) {
+        let _ = self
+            .rows
+            .lock()
+            .expect("ask registry poisoned")
+            .remove(id);
+    }
+
+    /// 剪掉已答/已取消/已超时的条目（邮箱 `is_pending` = 真相）。
+    pub(crate) fn retain(&self, keep: impl Fn(&str) -> bool) {
+        self.rows
+            .lock()
+            .expect("ask registry poisoned")
+            .retain(|id, _| keep(id));
+    }
+
+    /// 会话 discard/切换后清理（防鬼影卡片）。
     pub fn cleanup(&self) {
-        self.pending.lock().expect("ask registry poisoned").clear();
+        self.rows.lock().expect("ask registry poisoned").clear();
     }
 }
 
