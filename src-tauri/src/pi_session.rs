@@ -6,11 +6,13 @@
 //! - **对话面走 rpi**（真实现）：ensure/open/discard（会话生命周期）、
 //!   prompt/prompt_with_content（流式）、interrupt（abort）、state、
 //!   list_sessions（rpi 会话目录扫描）、rename/delete（set_name/删文件）、
-//!   new_session_with_cwd（指定工作区新建）。
+//!   new_session_with_cwd（指定工作区新建）、模型目录/切换/思考档位
+//!   （models.json 已配置集 → `AgentLane::set_model`/`set_thinking_level`，
+//!   2026-11-14 接真，见「模型 / 思考档位面」段）。
 //! - **旧 pi 独有面如实降级**（Err("rpi 引擎待接：…")——标红纪律，不静默
 //!   不造假）：hub 花名册五面 / todo 重放 / usage 聚合 / 分支线系 / 检查点 /
 //!   rewind / undo / retry_edit / compact / export / timeline / job 面 /
-//!   bot 会话 / 模型切换 / plan-审批模式。rpi-main v0.24.0 尚无对应能力，
+//!   bot 会话 / plan-审批模式。rpi-main v0.24.0 尚无对应能力，
 //!   追平后逐项接回。
 //! - **AG-UI 协议面不变**：agui.rs 只换 map_agent_event 的变体来源 +
 //!   图片转换，前端零改动。
@@ -445,6 +447,11 @@ impl PiEngine {
     }
 
     /// 会话状态快照（形状与旧 pi_get_state 对齐；messageCount 待重放面）。
+    ///
+    /// model / thinkingLevel 读 **harness 真值**（AgentLane::get_model /
+    /// get_thinking_level）：`HarnessLive` 的 provider/model_id 是构建时
+    /// 快照，set_model 之后即过期——拿它回读会让模型选择器跳回旧模型
+    /// （"切换看起来没生效"）。切换后的真值只有 harness 有。
     pub fn state(&self) -> Result<serde_json::Value, String> {
         let live = self.live()?;
         let _model_line = self
@@ -453,14 +460,146 @@ impl PiEngine {
             .lock()
             .map_err(|_| "锁中毒".to_string())?
             .clone();
+        let (model, thinking) = self.shared.rt.block_on(async {
+            let model = AgentLane::get_model(live.harness.as_ref())
+                .await
+                .map_err(|e| format!("读当前模型失败: {e}"))?;
+            let thinking = AgentLane::get_thinking_level(live.harness.as_ref())
+                .await
+                .map_err(|e| format!("读当前思考档位失败: {e}"))?;
+            Ok::<_, String>((model, thinking))
+        })?;
+        // ThinkingLevel 的 serde 拼法 = 上游 wire 拼法（off/minimal/…/xhigh/
+        // max，rpi-ai types.rs 的 rename_all="lowercase"）——前端
+        // composer-wired 按字符串回填档位。
+        let thinking_level = serde_json::to_value(thinking)
+            .map_err(|e| format!("思考档位序列化失败: {e}"))?;
         Ok(serde_json::json!({
             "sessionId": live.session_path.as_ref().map(|p| p.to_string_lossy()).unwrap_or_default(),
-            "provider": live.provider,
-            "modelId": live.model_id,
-            "thinkingLevel": serde_json::Value::Null,
+            "provider": model.provider,
+            "modelId": model.id,
+            "thinkingLevel": thinking_level,
             "messageCount": serde_json::Value::Null,
             "hasExtensions": false,
         }))
+    }
+
+    // ── 模型 / 思考档位面（2026-11-14 接 rpi 真能力）────────────────────────
+
+    /// 模型目录（wire 形状 = 前端 `pi_list_models` 期望的
+    /// `{ "models": [{ provider, id, name }] }`，消费方 =
+    /// src/hermes-shim/hermes.ts 的 getGlobalModelOptions）。
+    ///
+    /// 真源 = `~/.rpi/agent/models.json`（= **用户已配置集**；前端注释同义：
+    /// "pi 的 models.json 就是已配置集"，所以不混入内置目录、不做凭据过滤）。
+    /// 空配置 → 空数组（真实状态，不是兜底）。provider 的 api 协议无法识别
+    /// → Err：静默跳过会让目录整整少一个 provider 而无人知晓（规矩 12）。
+    pub fn list_models(&self) -> Result<serde_json::Value, String> {
+        let cfg = rpi_cli::config::load_models_config()
+            .map_err(|e| format!("读 models.json 失败: {e}"))?;
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for (provider_id, provider_cfg) in &cfg.providers {
+            let models = rpi_cli::config::provider_to_models(provider_id, provider_cfg)
+                .ok_or_else(|| {
+                    format!(
+                        "模型目录读取失败：provider {provider_id:?} 的 api 协议无法识别\
+                         （{:?}；支持 anthropic-messages / openai-completions / \
+                         openai-responses）",
+                        provider_cfg.api
+                    )
+                })?;
+            for m in models {
+                // provider_to_models 已把缺省 name 落成 id（上游语义），这里照搬。
+                rows.push(serde_json::json!({
+                    "provider": m.provider,
+                    "id": m.id,
+                    "name": m.name,
+                }));
+            }
+        }
+        Ok(serde_json::json!({ "models": rows }))
+    }
+
+    /// 模型切换（§4.5 控制面）：在 models.json 已配置集里按 (provider, id)
+    /// 精确取 `rpi_ai::Model`，交给 `AgentLane::set_model`（改 harness 的
+    /// inner.model，下一轮 snapshot_config 起生效；跨 provider 靠 build 时
+    /// 注册的全部已认证 provider 按 id 惰性路由）。
+    ///
+    /// 顺序 = **先 set 后写盘**（写盘 = pi_settings::persist_default_model 的
+    /// settings.json 默认模型）。理由：set 成功后当前会话已按新模型跑，
+    /// 写盘失败的双态是"当前会话新 / 下一条新会话旧"——用户重试即幂等收敛；
+    /// 反序（先写盘）失败的双态是"默认已换 / 当前会话没换"，而前端选择器
+    /// 只在命令成功后更新，界面上完全看不到变化，更难察觉。两条路径的失败
+    /// 都 Err 传播（规矩 12），绝不假装成功。
+    pub fn set_model(&self, provider: &str, model_id: &str) -> Result<(), String> {
+        let live = self.live()?;
+        let cfg = rpi_cli::config::load_models_config()
+            .map_err(|e| format!("读 models.json 失败: {e}"))?;
+        let provider_cfg = cfg.providers.get(provider).ok_or_else(|| {
+            format!(
+                "模型切换失败：models.json 没有 provider {provider:?}（已配置：{}）",
+                cfg.providers.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        let models = rpi_cli::config::provider_to_models(provider, provider_cfg).ok_or_else(|| {
+            format!(
+                "模型切换失败：provider {provider:?} 的 api 协议无法识别\
+                 （{:?}；支持 anthropic-messages / openai-completions / \
+                 openai-responses）",
+                provider_cfg.api
+            )
+        })?;
+        let available: String = models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let model = models
+            .into_iter()
+            .find(|m| m.id == model_id)
+            .ok_or_else(|| {
+                format!(
+                    "模型切换失败：provider {provider:?} 下没有模型 {model_id:?}\
+                     （已配置：{available}）"
+                )
+            })?;
+        self.shared.rt.block_on(async {
+            AgentLane::set_model(live.harness.as_ref(), model)
+                .await
+                .map_err(|e| format!("切换模型失败: {e}"))
+        })?;
+        // 默认值写回：不写 → 新会话回旧默认（2026-10-26 历史坑："选哪个都用
+        // 之前那个"）。失败必须传播——当前会话已切但默认未落，调用方要看得见。
+        crate::pi_settings::persist_default_model(provider, model_id)?;
+        *self
+            .shared
+            .model_line
+            .lock()
+            .map_err(|_| "锁中毒".to_string())? = format!("{provider}/{model_id}");
+        Ok(())
+    }
+
+    /// 思考档位切换（§4.5 控制面）：字符串 → rpi 的 ThinkingLevel（合法值
+    /// 用上游同一张表），经 `AgentLane::set_thinking_level` 落到 harness。
+    ///
+    /// 本轮**不写盘**：rpi 的 settings.json 有 default_thinking_level，但唯一
+    /// 写入口 `rpi_cli::settings::save_settings` 要求传完整的 `Settings`——它
+    /// 会把未覆盖的已知字段按 None 删除（defaultProvider/defaultModel/theme
+    /// 等一起清掉），而 pi_settings 还没有同款"读-改-写"入口。故只改会话
+    /// 真值；新会话仍按 settings.json / 模型 clamp 起跑，持久化待设置页接。
+    pub fn set_thinking_level(&self, level: &str) -> Result<(), String> {
+        let parsed = rpi_cli::args::parse_thinking_level(level).ok_or_else(|| {
+            format!(
+                "非法思考档位 {level:?}（合法值：{}）",
+                rpi_cli::args::VALID_THINKING_LEVELS.join(", ")
+            )
+        })?;
+        let live = self.live()?;
+        self.shared.rt.block_on(async {
+            AgentLane::set_thinking_level(live.harness.as_ref(), parsed)
+                .await
+                .map_err(|e| format!("设置思考档位失败: {e}"))
+        })
     }
 
     // ── 旧 pi 独有面：如实降级（规矩 12——不静默不造假）────────────────────
@@ -483,18 +622,6 @@ impl PiEngine {
 
     pub fn decide_plan(&self, _approve: bool) -> Result<(), String> {
         Err(Self::unavailable("plan 审批决定"))
-    }
-
-    pub fn set_model(&self, _provider: &str, _model_id: &str) -> Result<(), String> {
-        Err(Self::unavailable("模型切换（重建 harness）"))
-    }
-
-    pub fn set_thinking_level(&self, _level: &str) -> Result<(), String> {
-        Err(Self::unavailable("思考档位"))
-    }
-
-    pub fn list_models(&self) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("模型目录"))
     }
 
     pub fn todo_state(&self) -> Result<serde_json::Value, String> {

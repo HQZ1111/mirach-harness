@@ -1502,6 +1502,63 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   `G:\pi-rust-main\target\release\rpi.exe`（engine 同源 ABI v4；crates.io
   的 0.9.0 发布线与本地 0.24.0 开发线不同，**别用 cargo install rpi-cli
   装旧版**——ABI/配置语义可能漂移）。
+- **补装进度**：22 官方 + README 追加的 codemode/background-tasks/server/
+  node/edit-diagnostics 里——`rpi-codemode`/`rpi-server`/`rpi-edit-diagnostics`
+  已入（探针 24/24 绿）；`rpi-node` **不是扩展**（无 cdylib 目标，是可执行
+  件，适用"rpi 引擎待接"以外的排除）；`rpi-background-tasks` 上游未发
+  预编译（rpi-extension.json 缺，`--build` 撞 crates.io DNS 坏窗口）、
+  `rpi-voice` 大包弱网未拉完——两者都在好窗口补 `rpi install <name>` 或
+  `--build` 即可。
+
+## 降级面接线第一轮（2026-11-14 晚，用户"为什么不分子智能体做"→ 3 子代理并行）
+
+- **模型面（pi_session.rs）**：`list_models` 接 rpi models.json
+  （`rpi_cli::config::load_models_config` + `provider_to_models` →
+  `{models:[{provider,id,name}]}`，前端 hermes.ts:546 消费形状）；
+  `set_model`（已配置集里精确找 `rpi_ai::Model` → `AgentLane::set_model`
+  → `persist_default_model` → model_line；顺序先切换后写盘，注释写明两态
+  取舍）；`set_thinking_level`（`rpi_cli::args::parse_thinking_level` +
+  `AgentLane::set_thinking_level`，不写盘并注释理由）；`state()` 的
+  provider/modelId/thinkingLevel 改读 harness 实值（get_model /
+  get_thinking_level——构建期快照在 set_model 后必过期）。
+  **实证坑（重要）**：`persist_default_model` 原写 snake_case
+  `default_provider/default_model`——**rpi Settings 是
+  `rename_all = "camelCase"` 且无 snake alias**（settings.rs:3 注释原文），
+  写盘成功但 rpi 完全读不到 = 新会话仍用旧模型（"模型选择是假的"复发
+  路径）。已改 camelCase 并清旧 snake 键；前端三处同步：composer-wired
+  双键读、providers-settings / settings-overlay 的键组数组改 camelCase
+  优先；settings-overlay 的压缩/重试键组同样 camelCase 优先（rpi
+  RetrySettings/CompactionSettingsJson 全 camelCase）；rpi 无对应字段的
+  旧键（max_delay_ms / failover* / compaction.mode / 顶层 compaction_mode）
+  注明"写入惰性"。
+- **MCP 管理面（pi_mcp.rs 重写，876 行含 9 测试）**：全局
+  `~/.rpi/agent/mcp.json`（顶层 `mcpServers`，与 rpi-mcp-adapter 的
+  configPath 格式一致）list/upsert/remove 真实现（read-modify-write +
+  pi_settings 原子替换 + 坏文件拒绝覆盖）；项目级 `<cwd>/.rpi/mcp.json`
+  只读合并（同名项目级覆盖全局并出 warning）；**test_server 永不
+  ok:true**——只做配置合法性校验（stdio command 可解析/PATH+PATHEXT、
+  http URL 语法），错误文案指向"真实连通性请在会话内用 mcp_list/mcp_call"
+  （宿主进程无法驱动引擎侧适配器，ok:true 就是乐观撒谎）。
+  前端 bridge.ts/hermes.ts 补 error 透传（原来丢弃 ok:false 的原因）。
+  命令名实为 `pi_mcp_remove_server`（非 delete），保持不变。
+- **扩展/包管理面（pi_extensions.rs + pi_pkg.rs 重写）**：`pi_extensions`
+  扫 `~/.rpi/agent/extensions`（判据照抄 install.rs 的 is_dynamic_library）
+  + 反序列化 `~/.rpi/agent/native-packages.json`
+  （`rpi_cli::install::InstalledNativePackage`，schema 零漂移）；
+  旧 wire 8 字段 + abi/repository/target/size/mtime；手工 dll 照实列
+  （registered:false，不编造 version）；`pi_pkg_list` = 全局登记表 +
+  项目 `<cwd>/.rpi/packages.json`（**实查路径：不是
+  .rpi/packages/packages.json**，上游 packages.rs:793 读外层）；
+  install/remove/update 保留 Err 但文案准确（rpi install / rpi package
+  link / rpi extension update；宿主不代跑 exe、不手改登记表——越信任
+  边界）。pkg-manager.tsx UI 同步新行形状。
+- **门禁**：cargo check 0 错 0 警 / cargo test **138**（117 基线 + mcp 9 +
+  extensions/pkg 11 + 并发余量）/ tsc 0 / vitest 全量跑（本轮末）。
+- **已知遗留**：①前端 toMcpServersMap 保存时丢条目 timeout/headers
+  （编辑器层）；②plugins-tab 的 isDesktopRelevantPlugin 恒 false，扩展行
+  不进该标签页（后端数据真、UI 过滤）；③set_model/set_thinking_level 需
+  活动会话（无会话 → Err，规矩 12）；④thinking 档位不写盘（rpi
+  save_settings 无读-改-写入口，会清未覆盖字段）。
 
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 

@@ -197,13 +197,19 @@ export function ComposerWired() {
         // 就是按这两个字段起跑的，所以它才是"下一条消息会用哪个模型"的
         // 真相。不读的话选择器会退回 models[0]（目录第一项）——用户看到的
         // 名字与实际将用的模型不是同一个，正是"模型选择是假的"的观感来源。
-        void invoke<{ default_provider?: string; default_model?: string } | null>(
-          'pi_get_settings',
-        )
+        // 键形式：rpi 只认 camelCase（defaultProvider/defaultModel，settings.rs
+        // `rename_all = "camelCase"`）；snake_case 是旧 pi 时代遗留文档，
+        // 双读只为兼容历史文件（写盘一律 camelCase，见 persist_default_model）。
+        void invoke<{
+          defaultProvider?: string
+          defaultModel?: string
+          default_provider?: string
+          default_model?: string
+        } | null>('pi_get_settings')
           .then((settings) => {
             if (cancelled) return
-            const p = settings?.default_provider
-            const m = settings?.default_model
+            const p = settings?.defaultProvider ?? settings?.default_provider
+            const m = settings?.defaultModel ?? settings?.default_model
             if (p && m) modelCatalogStore.getState().setCurrentModel(`${p}/${m}`)
           })
           .catch((e2) => {

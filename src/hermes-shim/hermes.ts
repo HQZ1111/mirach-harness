@@ -718,11 +718,17 @@ export async function testMcpServer(name: string, _profile?: ProfileScope): Prom
   if (!cwd) {
     return { error: '没有活动工作区：项目级 MCP 服务器需要 cwd 才能测试', ok: false, tools: [] }
   }
-  const result = await invokeOnce<{ ok: boolean; tools: { description: string; name: string }[] }>(
+  const result = await invokeOnce<{ error?: string; ok: boolean; tools: { description: string; name: string }[] }>(
     'pi_mcp_test_server',
     { cwd, name, projectTrusted: false }
   )
-  return { ok: result.ok, tools: result.tools }
+  // pass the backend's explanation through: `ok:false` without `error` would
+  // silently hide why the probe could not connect.
+  return {
+    ...(result.error === undefined ? {} : { error: result.error }),
+    ok: result.ok,
+    tools: result.tools
+  }
 }
 
 export async function getMcpCatalog(_profile?: ProfileScope): Promise<McpCatalogResponse> {

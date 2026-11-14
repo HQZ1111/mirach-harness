@@ -119,11 +119,13 @@ function describeIpcError(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-/** settings.json 默认模型键（pi Config 字段名：serde 序列化写盘 =
-    snake_case，camelCase 是读取别名——写文档优先更新已存在的形式，
-    避免同键双形式并存，与 settings-overlay 的同名常量同策略）。 */
-const DEFAULT_PROVIDER_KEYS = ['default_provider', 'defaultProvider'] as const
-const DEFAULT_MODEL_KEYS = ['default_model', 'defaultModel'] as const
+/** settings.json 默认模型键（**rpi 只认 camelCase**——rpi-cli Settings
+    `#[serde(rename_all = "camelCase")]` 且无 snake_case alias；snake_case
+    是旧 pi 时代遗留文档，双读只为兼容历史文件。写文档优先更新已存在的
+    形式，避免同键双形式并存，与 settings-overlay 的同名常量同策略；
+    新建键时取首选项 = camelCase）。 */
+const DEFAULT_PROVIDER_KEYS = ['defaultProvider', 'default_provider'] as const
+const DEFAULT_MODEL_KEYS = ['defaultModel', 'default_model'] as const
 
 /** 文档中已存在的键形式（snake 优先），不存在则取首选项。 */
 function existingKeyForm(doc: JsonRecord, keys: readonly string[]): string {

@@ -1,6 +1,7 @@
 /**
- * mirach-pkg 插件：pi 包管理 UI（PackageManager 的宿主对偶——hermes 无
- * pkg 概念，此面为 pi install/remove/update/list 的图形化，全真实数据）。
+ * mirach-pkg 插件：rpi 包登记表 UI（hermes 无 pkg 概念）。列表 = 全局原生
+ * 扩展（native-packages.json）+ 项目包（.rpi/packages.json）的只读投影；
+ * 安装/卸载/更新属于引擎侧 CLI（rpi install / uninstall / extension update）。
  */
 import type { HarnessPlugin } from '../../contrib/types'
 import { PkgManagerSection } from './pkg-manager'
@@ -8,7 +9,7 @@ import { PkgManagerSection } from './pkg-manager'
 const plugin: HarnessPlugin = {
   id: 'mirach-pkg',
   name: '包管理',
-  description: 'pi 包管理（install/remove/update/list）——包向会话贡献 extensions/skills/prompts/themes。',
+  description: 'rpi 包登记表（全局原生扩展 + 项目包）只读列表；安装/卸载/更新走引擎 CLI。',
   register: (ctx) => {
     ctx.register({
       id: 'settings-page',

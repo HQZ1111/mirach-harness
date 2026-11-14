@@ -215,8 +215,7 @@ pub fn pi_set_models_config(value: serde_json::Value) -> Result<(), String> {
 /// 语义：**读-改-写**（保留 settings.json 里其余全部字段，只动这两个）。
 /// 读失败 / 校验失败一律 Err（规矩 12：错误就是错误）；文件不存在 = 从
 /// 空对象起（上游缺文件即默认配置，同 read_json_document 语义）。
-/// rpi 迁移后暂无调用方（composer set_model 已降级），模型切换接线时复用。
-#[allow(dead_code)]
+/// 调用方 = pi_session.rs 的 `set_model`（2026-11-14 模型切换接真）。
 pub(crate) fn persist_default_model(provider: &str, model_id: &str) -> Result<(), String> {
     let path = settings_path();
     let mut doc = read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({}));
@@ -226,14 +225,23 @@ pub(crate) fn persist_default_model(provider: &str, model_id: &str) -> Result<()
             path.display()
         ));
     };
-    // 用 pi 的字段别名写（defaultProvider/defaultModel 与 snake_case 上游
-    // 都认；这里写 snake_case，与现有文件一致）
+    // **必须写 camelCase**（defaultProvider/defaultModel）——rpi-cli 的
+    // Settings 是 `#[serde(rename_all = "camelCase")]` 且**没有** snake_case
+    // alias（settings.rs:3 注释原文列的就是 defaultProvider/defaultModel/
+    // defaultThinkingLevel）。旧 pi 时代写的 snake_case 对 rpi 完全不可见：
+    // 写盘成功、新会话仍走旧默认（"模型选择是假的"复发路径，2026-11-14
+    // 模型面接线轮实锤）。前端读取侧两种键都兼容（providers-settings 的
+    // DEFAULT_PROVIDER_KEYS / composer-wired 的双键读取）。
+    // 顺带清掉同一文件里遗留的 snake_case 键，避免两套键并存后互相打架
+    // （rpi 只认 camelCase；留着旧键只会让"改哪个生效"更隐蔽）。
+    obj.remove("default_provider");
+    obj.remove("default_model");
     obj.insert(
-        "default_provider".to_string(),
+        "defaultProvider".to_string(),
         serde_json::Value::String(provider.to_string()),
     );
     obj.insert(
-        "default_model".to_string(),
+        "defaultModel".to_string(),
         serde_json::Value::String(model_id.to_string()),
     );
     write_json_document(&path, &doc, validate_settings_document)

@@ -158,11 +158,13 @@ interface PiAuthStatus {
 
 type SettingsDoc = Record<string, unknown>
 
-/** settings.json 默认模型键（pi Config 字段名，config.rs:44-47——
-    serde 序列化写出 snake_case，camelCase 是读取别名；写文档时优先
-    更新已存在的形式，避免同一键双形式并存造成 serde 顺序歧义）。 */
-const DEFAULT_PROVIDER_KEYS = ['default_provider', 'defaultProvider'] as const
-const DEFAULT_MODEL_KEYS = ['default_model', 'defaultModel'] as const
+/** settings.json 默认模型键（**rpi 只认 camelCase**——rpi-cli Settings
+    `#[serde(rename_all = "camelCase")]` 且无 snake_case alias，settings.rs:3
+    注释列明 defaultProvider/defaultModel/defaultThinkingLevel；snake_case
+    是旧 pi 时代遗留文档。双读兼容历史文件；写文档优先更新已存在的形式，
+    新建键取首选项 = camelCase，避免同一键双形式并存造成歧义）。 */
+const DEFAULT_PROVIDER_KEYS = ['defaultProvider', 'default_provider'] as const
+const DEFAULT_MODEL_KEYS = ['defaultModel', 'default_model'] as const
 
 /** 解析配置原始文本（空文本 = 文件尚未存在，从 {} 起步）。
     label 用于错误消息（settings / models）。 */
@@ -197,30 +199,34 @@ function readDefaultModel(doc: SettingsDoc): { provider: string; modelId: string
 
 // ── 结构化段（压缩/重试）共用原语 ─────────────────────────────────────
 //
-// 键名实锤（vendor pi_agent_rust/src/config.rs）：Config 无 rename_all，
-// serde 序列化写盘 = 字段名的 snake_case（reserve_tokens 等，config.rs:
-// 359-371/380-404），camelCase 只是读取别名（#[serde(alias)]）。因此写
-// 文档一律用 canonical snake_case；文档里已有别名形式则原地更新（与上方
-// DEFAULT_PROVIDER_KEYS 同策略，避免同字段双形式并存——serde 对同名两键
-// 取文档序靠后者，行为含混）。未设置的键 = pi 内置默认（Config 全字段
-// Option，JSON null 与缺键同为 None）。
+// 键名实锤（rpi-cli/src/settings.rs:19-168）：**全部结构体都是
+// `#[serde(rename_all = "camelCase")]`，没有 snake_case alias**——
+// `retry{maxRetries,baseDelayMs,maxAgentDelayMs}`、
+// `compaction{reserveTokens,keepRecentTokens,modelOverrides}`、
+// `branchSummary{reserveTokens,skipPrompt}`。旧 pi 时代的 snake_case 写法
+// 对 rpi 不可见（写盘成功但引擎读不到 = 设置页"改了没效果"的来源）。
+// 因此写文档一律用 canonical camelCase；文档里已有 snake_case 形式则原地
+// 更新（历史文件兼容），避免同字段双形式并存。未设置的键 = rpi 内置默认
+// （全字段 Option，JSON null 与缺键同为 None）。rpi 无对应字段的旧键
+// （max_delay_ms / failover* / compaction 的 mode、顶层 compaction_mode）
+// 写入是惰性无效果——保留 UI 但不要在文档里新增。
 
 const U32_MAX = 4294967295
 /** u64 字段在 JS 侧以安全整数封顶（超过即失去整数精度）。 */
 const SAFE_U64_MAX = 9007199254740991
 
-/** 压缩段键组（config.rs:359-371 CompactionSettings + 顶层
-    compaction_mode，config.rs:231-234——该键无 camelCase 别名，只认
-    snake_case）。 */
+/** 压缩段键组（rpi CompactionSettingsJson；顶层 compaction_mode 在 rpi
+    无对应字段——旧 pi 键，写入惰性）。 */
 const K_ENABLED = ['enabled'] as const
-const K_RESERVE_TOKENS = ['reserve_tokens', 'reserveTokens'] as const
-const K_KEEP_RECENT_TOKENS = ['keep_recent_tokens', 'keepRecentTokens'] as const
+const K_RESERVE_TOKENS = ['reserveTokens', 'reserve_tokens'] as const
+const K_KEEP_RECENT_TOKENS = ['keepRecentTokens', 'keep_recent_tokens'] as const
 const K_MODE = ['mode'] as const
 const K_COMPACTION_MODE = ['compaction_mode'] as const
 
-/** 重试段键组（config.rs:380-404 RetrySettings）。 */
-const K_MAX_RETRIES = ['max_retries', 'maxRetries'] as const
-const K_BASE_DELAY_MS = ['base_delay_ms', 'baseDelayMs'] as const
+/** 重试段键组（rpi RetrySettings：maxRetries/baseDelayMs 为真字段；
+    max_delay_ms/failover* 在 rpi 无对应，写入惰性不变）。 */
+const K_MAX_RETRIES = ['maxRetries', 'max_retries'] as const
+const K_BASE_DELAY_MS = ['baseDelayMs', 'base_delay_ms'] as const
 const K_MAX_DELAY_MS = ['max_delay_ms', 'maxDelayMs'] as const
 const K_FAILOVER_COOLDOWN_SECS = [
   'failover_cooldown_secs',

@@ -1,8 +1,13 @@
 /**
- * 包管理页——pi `install/remove/update/list` 的图形化（全真实数据面
- * pi_pkg.rs）。列表 = settings.json 的 packages 数组（全局 + 项目两 scope，
- * PackageManager::list_packages_blocking 投影）；安装/移除/更新直调 IPC。
- * npm/git 子进程跑在大栈线程，UI 显示 loading 态。
+ * 包管理页——rpi 包登记表的图形化（全真实数据面 pi_pkg.rs）。
+ *
+ * 列表 = 两张登记表的只读投影：
+ * - 全局原生扩展：`~/.rpi/agent/native-packages.json`（`rpi install` 写）
+ * - 项目包：`<cwd>/.rpi/packages.json`（`rpi packages link` 写）
+ *
+ * 安装/卸载/更新是引擎侧 CLI 的事（`rpi install` / `rpi uninstall` /
+ * `rpi extension update`）：宿主只读，按钮保留是为了把 IPC 返回的准确
+ * 指引显示出来（不静默、不假装成功）。
  */
 import { useEffect, useState, type FC } from 'react'
 import { invoke } from '@tauri-apps/api/core'
@@ -10,20 +15,25 @@ import { PackageIcon, PlusIcon, RefreshCwIcon, TrashIcon, Loader2Icon } from 'lu
 import { cn } from '@/lib/utils'
 
 interface PkgEntry {
-  scope: 'user' | 'project' | 'temporary'
-  source: string
-  filter: {
-    extensions?: null | string[]
-    skills?: null | string[]
-    prompts?: null | string[]
-    themes?: null | string[]
-  } | null
+  /** user = 全局原生扩展；project = .rpi/packages.json */
+  scope: 'user' | 'project'
+  kind: 'native' | 'project'
+  name: string
+  version: string
+  /** 来源/出处（cargo registry 构建没有 source → null）。 */
+  source: string | null
+  repository: string | null
+  target: string | null
+  abi: number | null
+  cargoPackage: string | null
+  artifacts: string[]
+  /** 登记了但磁盘上不存在的产物（非空 = 安装不完整）。 */
+  missingArtifacts: string[]
 }
 
 const SCOPE_LABELS: Record<PkgEntry['scope'], string> = {
   user: '全局',
   project: '项目',
-  temporary: '临时',
 }
 
 export const PkgManagerSection: FC = () => {
@@ -39,7 +49,7 @@ export const PkgManagerSection: FC = () => {
       setPackages(result.packages)
       setError(null)
     } catch (e) {
-      setError(String(e).slice(0, 240))
+      setError(String(e).slice(0, 480))
     }
   }
 
@@ -58,7 +68,7 @@ export const PkgManagerSection: FC = () => {
       })
       setPackages(result.packages)
     } catch (e) {
-      setError(String(e).slice(0, 240))
+      setError(String(e).slice(0, 480))
     } finally {
       setBusy(null)
     }
@@ -75,13 +85,13 @@ export const PkgManagerSection: FC = () => {
       </div>
       {error && <div className="set-err">{error}</div>}
       <div className="set-field">
-        <label className="set-field-label" htmlFor="pkg-source">安装包（npm:pkg / git:url / 本地路径）</label>
+        <label className="set-field-label" htmlFor="pkg-source">安装包（引擎侧命令执行）</label>
         <div className="set-field-control">
           <input
             className="set-input"
             id="pkg-source"
             onChange={(e) => setSource(e.target.value)}
-            placeholder="npm:pi-ext-example 或 git:owner/repo"
+            placeholder={scope === 'user' ? 'crate 名，如 rpi-todo' : '扩展源码目录，如 .'}
             value={source}
           />
           <select
@@ -89,8 +99,8 @@ export const PkgManagerSection: FC = () => {
             onChange={(e) => setScope(e.target.value as 'user' | 'project')}
             value={scope}
           >
-            <option value="user">全局（settings.json）</option>
-            <option value="project">项目（.pi/settings.json）</option>
+            <option value="user">全局（rpi install）</option>
+            <option value="project">项目（rpi package link）</option>
           </select>
           <button
             className="set-btn set-btn-primary pressable"
@@ -103,78 +113,94 @@ export const PkgManagerSection: FC = () => {
           </button>
         </div>
         <p className="set-hint">
-          安装 = pi install（npm/git/本地路径）；源列表同步落对应 settings.json（上游
-          add_package_source 通道）。npm/git 子进程跑在大栈线程，安装期间 UI 显示 loading。
+          宿主只读列表：安装/卸载/更新由 rpi 引擎侧 CLI 执行（预编译件下载、cargo
+          构建、sha256 校验、登记表事务都在 rpi-cli 里）。点按钮会显示应执行的命令
+          （rpi install / rpi package link / rpi uninstall / rpi package unlink），
+          不代跑外部进程。
         </p>
       </div>
       <div className="flex flex-col gap-1">
         {packages.length === 0 ? (
           <div className="text-muted-foreground px-1 py-3 text-center text-xs">
-            尚无包——上方输入 source 安装。
+            尚无包——引擎侧 `rpi install &lt;crate&gt;` 安装后刷新。
           </div>
         ) : (
-          packages.map((pkg) => (
-            <div
-              className="border-border/70 flex items-center gap-2 rounded-lg border px-2.5 py-2"
-              key={`${pkg.scope}:${pkg.source}`}
-            >
-              <PackageIcon className="text-muted-foreground size-[var(--size-icon-md)] shrink-0" />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-foreground truncate text-[0.8125rem] font-medium">{pkg.source}</span>
-                  <span
-                    className={cn(
-                      'rounded px-1 py-0.5 text-[0.625rem]',
-                      pkg.scope === 'user'
-                        ? 'bg-(--color-brand)/15 text-(--color-brand)'
-                        : 'bg-muted text-muted-foreground',
+          packages.map((pkg) => {
+            const provenance = pkg.repository ?? pkg.source ?? 'cargo registry'
+            const incomplete = pkg.missingArtifacts.length > 0
+            return (
+              <div
+                className="border-border/70 flex items-center gap-2 rounded-lg border px-2.5 py-2"
+                key={`${pkg.scope}:${pkg.kind}:${pkg.name}`}
+              >
+                <PackageIcon className="text-muted-foreground size-[var(--size-icon-md)] shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-foreground truncate text-[0.8125rem] font-medium">
+                      {pkg.name}
+                    </span>
+                    {pkg.version && (
+                      <span className="text-muted-foreground shrink-0 text-[0.6875rem]">
+                        {pkg.version}
+                      </span>
                     )}
-                  >
-                    {SCOPE_LABELS[pkg.scope]}
-                  </span>
-                </div>
-                {pkg.filter && (
-                  <div className="text-muted-foreground truncate text-xs">
-                    {(
-                      [
-                        ['extensions', pkg.filter.extensions],
-                        ['skills', pkg.filter.skills],
-                        ['prompts', pkg.filter.prompts],
-                        ['themes', pkg.filter.themes],
-                      ] as const
-                    )
-                      .filter(([, v]) => v && v.length > 0)
-                      .map(([k, v]) => `${k}:${(v as string[]).length}`)
-                      .join(' · ') || '全部资源'}
+                    <span
+                      className={cn(
+                        'rounded px-1 py-0.5 text-[0.625rem]',
+                        pkg.scope === 'user'
+                          ? 'bg-(--color-brand)/15 text-(--color-brand)'
+                          : 'bg-muted text-muted-foreground',
+                      )}
+                    >
+                      {SCOPE_LABELS[pkg.scope]}
+                    </span>
+                    {pkg.abi !== null && (
+                      <span className="text-muted-foreground text-[0.625rem]">ABI {pkg.abi}</span>
+                    )}
                   </div>
-                )}
+                  <div className="text-muted-foreground truncate text-xs">
+                    {provenance}
+                    {pkg.target ? ` · ${pkg.target}` : ''}
+                    {pkg.cargoPackage ? ` · cargo:${pkg.cargoPackage}` : ''}
+                    {` · 产物 ${pkg.artifacts.length}`}
+                  </div>
+                  {incomplete && (
+                    <div className="text-destructive truncate text-xs">
+                      产物缺失：{pkg.missingArtifacts.join(', ')}
+                    </div>
+                  )}
+                </div>
+                <button
+                  aria-label={`更新 ${pkg.name}`}
+                  className="text-muted-foreground hover:text-foreground rounded-md p-1.5 transition-colors"
+                  disabled={busy !== null}
+                  onClick={() => void run('update', pkg.name, pkg.scope)}
+                  title="更新（引擎侧 rpi extension update）"
+                  type="button"
+                >
+                  {busy === `update:${pkg.name}` ? (
+                    <Loader2Icon className="size-[var(--size-icon-sm)] animate-spin" />
+                  ) : (
+                    <RefreshCwIcon className="size-[var(--size-icon-sm)]" />
+                  )}
+                </button>
+                <button
+                  aria-label={`移除 ${pkg.name}`}
+                  className="text-muted-foreground hover:text-foreground rounded-md p-1.5 transition-colors"
+                  disabled={busy !== null}
+                  onClick={() => void run('remove', pkg.name, pkg.scope)}
+                  title={
+                    pkg.scope === 'user'
+                      ? '移除（引擎侧 rpi uninstall）'
+                      : '移除（引擎侧 rpi package unlink）'
+                  }
+                  type="button"
+                >
+                  <TrashIcon className="size-[var(--size-icon-sm)]" />
+                </button>
               </div>
-              <button
-                aria-label={`更新 ${pkg.source}`}
-                className="text-muted-foreground hover:text-foreground rounded-md p-1.5 transition-colors"
-                disabled={busy !== null}
-                onClick={() => void run('update', pkg.source, pkg.scope)}
-                title="更新"
-                type="button"
-              >
-                {busy === `update:${pkg.source}` ? (
-                  <Loader2Icon className="size-[var(--size-icon-sm)] animate-spin" />
-                ) : (
-                  <RefreshCwIcon className="size-[var(--size-icon-sm)]" />
-                )}
-              </button>
-              <button
-                aria-label={`移除 ${pkg.source}`}
-                className="text-muted-foreground hover:text-foreground rounded-md p-1.5 transition-colors"
-                disabled={busy !== null}
-                onClick={() => void run('remove', pkg.source, pkg.scope)}
-                title="移除"
-                type="button"
-              >
-                <TrashIcon className="size-[var(--size-icon-sm)]" />
-              </button>
-            </div>
-          ))
+            )
+          })
         )}
       </div>
     </div>

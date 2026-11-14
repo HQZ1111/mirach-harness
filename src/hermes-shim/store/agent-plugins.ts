@@ -5,13 +5,14 @@
  * with manifests declaring settings schemas, app-backed MCP servers, git/catalog
  * provenance and update pins.
  *
- * Host: pi has extensions (~/.pi/agent/extensions/* + project .pi/extensions/*),
- * which are manifests (id/name/version/api/runtime/capabilities/description)
- * loaded at session start. There is no install/uninstall RPC, no settings schema,
- * no update pinning - those are upstream runtime features that do not exist here.
+ * Host: rpi's extensions are native cdylib plugins (`~/.rpi/agent/extensions/*.dll`,
+ * registered in `native-packages.json`). They carry no manifest - no description,
+ * capabilities, settings schema or install/update pinning. The list itself is real
+ * (file metadata merged with the install registry by `pi_extensions`); everything
+ * a manifest would have declared is reported as empty/null rather than invented.
  *
- * So the list is real (mapped from pi_extensions) and every mutation fails loudly
- * with the reason. Nothing invents a plugin.
+ * Every mutation fails loudly with the reason (installs/removals/updates belong to
+ * the engine-side CLI). Nothing invents a plugin.
  */
 
 import { atom } from 'nanostores'
@@ -106,6 +107,7 @@ export const $agentPluginsError = atom<string | null>(null)
 export const $agentPluginBusy = atom<string | null>(null)
 
 interface PiExtensionRow {
+  /** Empty: cdylib extensions have no manifest to declare capabilities. */
   capabilities: string[]
   description: string
   entry: string
@@ -114,13 +116,23 @@ interface PiExtensionRow {
   root: string
   runtime: string
   version: string
+  /** ABI version from `native-packages.json` (null for hand-dropped dlls). */
+  abi?: null | number
+  file?: string
+  modifiedMs?: number
+  registered?: boolean
+  repository?: null | string
+  sizeBytes?: number
+  source?: null | string
+  target?: null | string
 }
 
 /** pi has no runtime plugin registry, so a row cannot be "desktop relevant". */
 export const isDesktopRelevantPlugin = (_row: AgentPluginRow): boolean => false
 
-/** Map a pi extension manifest onto the plugin row shape. status is 'enabled'
- *  because pi loads every manifest it finds - there is no disable flag to read. */
+/** Map an rpi extension row onto the plugin row shape. status is 'enabled'
+ *  because the engine loads every library it finds in the extension directory
+ *  (registered artifacts and hand-dropped ones alike) - there is no disable flag. */
 function toRow(extension: PiExtensionRow): AgentPluginRow {
   return {
     description: extension.description,
@@ -155,7 +167,8 @@ export async function loadAgentPlugins(_request: GatewayRequest, _profile?: null
   }
 }
 
-const NO_RUNTIME = '本宿主没有插件运行时：pi 的扩展在会话启动时装载，没有安装/开关/更新通道'
+const NO_RUNTIME =
+  '本宿主没有插件运行时：rpi 扩展是引擎侧 cdylib 插件，安装/卸载/更新走引擎 CLI（rpi install / rpi uninstall / rpi extension update）'
 
 export async function toggleAgentPlugin(
   _request: GatewayRequest,

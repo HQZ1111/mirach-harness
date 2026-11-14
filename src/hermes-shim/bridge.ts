@@ -186,11 +186,17 @@ const ROUTES: { pattern: RegExp; handle: RouteHandler }[] = [
       const name = decodeURIComponent(ctx.query.get('__name') ?? '')
       const workspace = workspaceCwd()
       if (!workspace) return { error: '没有活动工作区：项目级 MCP 服务器需要 cwd 才能测试', ok: false, tools: [] }
-      const result = await invokeOnce<{ ok: boolean; tools: { description: string; name: string }[] }>(
+      const result = await invokeOnce<{ error?: string; ok: boolean; tools: { description: string; name: string }[] }>(
         'pi_mcp_test_server',
         { cwd: workspace, name, projectTrusted: false }
       )
-      return { ok: result.ok, tools: result.tools }
+      // keep the backend's explanation: a bare `ok:false` would hide why the
+      // probe could not connect.
+      return {
+        ...(result.error === undefined ? {} : { error: result.error }),
+        ok: result.ok,
+        tools: result.tools
+      }
     }
   },
   {
