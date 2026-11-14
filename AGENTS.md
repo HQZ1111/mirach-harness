@@ -1714,6 +1714,63 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   hydrate 4 条（user/assistant 交替、tool 块保留）、fork 点 2 个、
   session usage 41075、state.messageCount 4。
 
+## 插件生态深挖轮（2026-11-15）：对话框桥 / 状态投影 / 新检查点插件
+
+- **插件对话框接真（ask_user / 权限确认）**：`ReloadContext`（session::build
+  第三返回值，原先当 `_reload` 丢弃）里的 `ui_dialog: UiDialogMailbox`
+  存进 HarnessLive 并立即 `try_attach_with_generation()`（不 attach 插件
+  fail-closed）。`pi_ask_pending`/`pi_ask_response`/`pi_pending_approvals`/
+  `pi_extension_ui_response` 全部改接邮箱：
+  - 取用 = `take_pending_filtered(形状谓词)` 循环（ask 与 confirm 互不吞）；
+    `is_pending(id)` 剪掉已答/超时条目。
+  - 应答形状按插件源码契约（rpi-ask-user: `{values,kind}`/`{values,value,
+    text,kind:input}`；permission-gate: `{values:[title]}`，answer 首值
+    eq_ignore_ascii_case("yes")）。
+  - discard/切会话：旧邮箱 `cancel_all()` + 清注册表。
+  - 前端 ask-cards/approval-cards 改 **1s 轮询**（插件对话框不走 AgentEvent
+    流——旧的 CUSTOM ask_request 信号在 rpi 下永不发生）。
+  - **真机 E2E 闭环**：模型调 ask_user → 卡片（今日菜单/米饭/面条）→ 点选
+    提交 → 插件回传 → 模型回复「你选择了：米饭。」（124 tok in / 9 out）。
+- **插件状态投影（pi_plugin_state.rs）**：插件用 `AppendEntry` 写 custom
+  条目，宿主投影只读：
+  - `pi_todo_state` ← rpi-todo `customType="todo-state"`（`{todos:[{id,
+    text,done,status}],nextId}`）→ `todo_list.v1` wire（pending→open /
+    in_progress / completed→done），取当前分支 seq 最大一条；坏条目 Err。
+  - `pi_mode_state` ← rpi-plan-mode `customType="plan-mode"`
+    `{active,plan}` → `planMode` planning/off；approvalMode/planPending
+    如实 null（rpi 无审批模式概念/无待审计划面）。
+  - hub/job 保留 Err 且文案准确：subagents/orchestrator 状态只在插件进程
+    内存（源码实锤无 AppendEntry/SetStatus）；background-tasks 未装且条目
+    wire 缺字段（禁止编默认值）。
+- **新插件 `rpi-checkpoints`（用户"没有的新做插件引入"）**：源码
+  **G:\mirach-plugins\rpi-checkpoints**（cdylib，只依赖 rpi-plugin-sdk +
+  serde_json；931 行，5 单测），DLL 已装 `~/.rpi/agent/extensions/
+  rpi_checkpoints.dll`（探针：OK abi=4 tools=[checkpoint_mark,
+  checkpoint_list, checkpoint_rewind] commands=[checkpoint]）。
+  - mark = AppendEntry `customType="checkpoint.v1"` `{version,id,label,
+    leafId,createdAt}`；list = GetSessionBranch 读分支条目（真读，非内存）；
+    rewind = NavigateTree 跳**检查点条目 id**（不是 mark 前的 leaf——否则
+    检查点被甩到旁支、list 再也看不到），校验 status=completed + 叶指针回读。
+  - **rewind 在轮次内必失败**（lane_busy，宿主规则）：模型调用解释失败并
+    提示在空闲提示符执行 `/checkpoint rewind <id>`；插件命令面就是这个入口。
+  - **undo/redo（文件变更回滚）做不了**：rpi 无 FileMutationRecorder，
+    任何 ABI 都读不回编辑前文件内容——插件源码模块头已写明范围外。
+  - 真机 E2E：模型调 checkpoint_mark + checkpoint_list → 条目落盘 ×2、
+    list 返回两处检查点、UI 正常渲染。
+- **两个真 UI bug（用户实报）**：
+  1. **Duplicate key toolCallId 崩渲染**：多工具调用回合里同一 id 的
+     `tool_execution start` 到两次（SSE 重连重放/水合叠加）→ assistant-ui
+     `useResources` 抛 Duplicate key 整窗炸。turn-actor 归约器改为**合并
+     既有部件**（保留 result、合并 args/toolName）并 console.error 可见。
+  2. **两个刷新钮**：MessageActions 的「重新生成」(↻) 与 regenerate-menu
+     的「换模型重新生成」同为 RefreshCw → 后者改 **Shuffle** 图标 + 中文
+     tooltip；**时间移到操作条末尾**（原先夹在按钮中间）。
+- **成本展示删除（用户要求）**：消息页脚「费用 $0.0000」行与 composer 上方
+  的 CostMeter 面板（`$0.0000 this run / $0.0000 session`）整体移除——
+  rpi 的 usage.cost 恒有值（未配 models.json 价目恒 0）。cost-bridge 数据面
+  保留（将来配价目/恢复展示随时可用）。
+- **门禁**：cargo check 0/0 · cargo test **164** · tsc 0 · vitest **793**。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换
