@@ -30,17 +30,16 @@
  *
  * · 密钥只写不读：pi 凭据没有 reveal 通道——hermes 的「显示值」按钮整体
  *   省略；已配置的输入框只显示「覆盖现有密钥」占位，绝不回显内容。
- * · OAuth 登录流（2026-10-24 接通）：pi::auth 公开完整 OAuth 面——
- *   pi_oauth_providers（四家 localhost 回调流清单）+ pi_oauth_start（授权
- *   URL + 本机回调监听 + complete + 写 auth.json）+ pi_oauth_status（轮询
- *   pending → ok/err）。kimi/copilot/gitlab 是设备码·浏览器流，接线面不同
- *   ——不在清单里，不列假入口。已登录账号可断开（pi_delete_provider_key）。
- * · 端点测试（validate，2026-10-24 接通）：pi_endpoint_validate 用 pi 的
- *   http client GET {base}/models（与提供方请求同一栈），200 且解出模型表
- *   = ok；非 200 / 网络失败如实显示。
- * · API 模式：pi 无 apiMode 字段（协议按模型自动选择）——分段控件渲染为
- *   禁用示意，不持久化。
- * · 发现模型：pi 无模型发现端点——复选框渲染为禁用 + 说明，不持久化。
+ * · OAuth 登录流（rpi 迁移降级）：rpi-cli 的 auth.rs 是交互式 TUI 流程，
+ *   无嵌入库 API——pi_oauth_* 目前返回空清单/Err，凭据走 env key 或
+ *   models.json apiKey（设置页凭据写入已覆盖）。rpi 暴露嵌入式 OAuth
+ *   后接回（旧 pi 实现存档 git df701a4）。
+ * · 端点测试（2026-11-14 接真）：pi_endpoint_validate 用宿主 reqwest
+ *   GET {base}/models，200 且解出模型表 = ok；非 200 / 网络失败如实显示。
+ * · API 模式（2026-11-14 接真）：写 provider 条目的 `api` 字段——rpi 没有
+ *   协议自动检测（缺省 = anthropic-messages，openai-completions /
+ *   openai-responses 必须显式），控制器可点选并持久化。
+ * · 发现模型：rpi 无模型发现端点——复选框渲染为禁用 + 说明，不持久化。
  * · hermes EnvVarInfo 的 category/description/url/redacted_value/advanced/
  *   provider_profiles/channel_managed 字段 pi_auth_status 没有：所有行按
  *   provider 域全列（等价 hermes category==='provider' 的过滤结果），
@@ -596,10 +595,14 @@ function KeysView({
 
 // ── 自定义端点视图（hermes custom-endpoints-settings 的移植）────────
 
-/** 表单形状（hermes EndpointForm 的 pi 对应物：name 并入 id；apiMode /
-    discoverModels 只渲染不持久化——见文件头缺口表）。 */
+/** 表单形状（hermes EndpointForm 的 rpi 对应物：name 并入 id；`apiMode`
+    **持久化**为 provider 条目的 `api` 字段——rpi 没有协议自动检测，
+    `ProviderConfig.api` 缺省 = anthropic-messages、openai-completions/
+    openai-responses 必须显式声明（rpi-runtime/src/config.rs:201-215）。
+    discoverModels 仍只渲染（rpi 无模型发现通道）。 */
 interface EndpointForm {
   apiKey: string
+  apiMode: string
   baseUrl: string
   contextLength: string
   discoverModels: boolean
@@ -610,6 +613,7 @@ interface EndpointForm {
 
 const EMPTY_FORM: EndpointForm = {
   apiKey: '',
+  apiMode: 'openai-completions',
   baseUrl: '',
   contextLength: '',
   discoverModels: true,
@@ -618,14 +622,23 @@ const EMPTY_FORM: EndpointForm = {
   model: '',
 }
 
-/** API 模式选项（hermes API_MODE_OPTIONS 同款四项；pi 无此字段——
-    控件整体禁用，仅示意协议族）。 */
+/** API 模式选项（值 = rpi `ProviderConfig.api` 的合法字符串，逐字）。
+    没有「自动检测」：rpi 缺省就是 Anthropic Messages，把缺省标成"自动"
+    会让 OpenAI 兼容端点静默走错协议（2026-11-14 实锤）。本页表单的定位
+    是"添加兼容 OpenAI 的端点"，默认选 Chat Completions。 */
 const API_MODE_OPTIONS: readonly { id: string; label: string }[] = [
-  { id: '', label: '自动检测' },
-  { id: 'chat_completions', label: 'Chat Completions' },
-  { id: 'codex_responses', label: 'Responses API' },
-  { id: 'anthropic_messages', label: 'Anthropic Messages' },
+  { id: 'openai-completions', label: 'Chat Completions' },
+  { id: 'openai-responses', label: 'Responses API' },
+  { id: 'anthropic-messages', label: 'Anthropic Messages' },
 ]
+
+/** provider 条目 → 表单 API 模式（缺省/未知 = anthropic-messages——
+    与 rpi 的推断一致，如实显示实际会用的协议）。 */
+function apiModeOf(entry: JsonRecord): string {
+  const api = entry['api']
+  if (typeof api === 'string' && API_MODE_OPTIONS.some((o) => o.id === api)) return api
+  return 'anthropic-messages'
+}
 
 /** 列表行摘要（hermes CustomEndpoint 的 pi 对应物：id=provider 键、
     name=id；entry 保留原始条目——「使用」要读 models[0]）。 */
@@ -782,6 +795,7 @@ function CustomEndpointsView() {
   function loadForm(ep: EndpointRow) {
     setForm({
       apiKey: '',
+      apiMode: apiModeOf(ep.entry),
       baseUrl: ep.baseUrl,
       contextLength: ep.modelContextWindow !== null ? String(ep.modelContextWindow) : '',
       discoverModels: true,
@@ -844,6 +858,8 @@ function CustomEndpointsView() {
       const existing = isJsonRecord(raw) ? raw : {}
       const entry: JsonRecord = { ...existing }
       entry['baseUrl'] = baseUrl
+      // 协议必须显式落盘（rpi 无自动检测；缺省 = anthropic-messages）。
+      entry['api'] = form.apiMode
       const apiKey = form.apiKey.trim()
       // 留空 = 保留现有密钥（hermes apiKeyNewPlaceholder 语义）；新条目
       // 留空 = 不写 apiKey 键。密钥内容只写不读。
@@ -1020,19 +1036,28 @@ function CustomEndpointsView() {
               </div>
             </div>
 
-            {/* API 模式：pi 无 apiMode 字段（协议按模型自动选择）——
-                分段控件禁用示意，不持久化（任务指定）。 */}
-            <div className="set-field" title="pi 按模型自动选择协议">
+            {/* API 模式：写 provider 条目的 `api` 字段（rpi 唯一协议开关；
+                没有自动检测——缺省 = Anthropic Messages，OpenAI 兼容端点
+                必须在此选 Chat Completions / Responses API）。 */}
+            <div className="set-field" title="写入 models.json 的 provider.api">
               <span className="set-field-label">API 模式</span>
               <div className="set-field-control">
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                   {API_MODE_OPTIONS.map((o) => (
-                    <button className="set-btn" disabled key={o.id} type="button">
+                    <button
+                      className="set-btn"
+                      key={o.id}
+                      onClick={() => setForm((c) => ({ ...c, apiMode: o.id }))}
+                      style={form.apiMode === o.id ? { outline: '2px solid var(--brand)', outlineOffset: 1 } : undefined}
+                      type="button"
+                    >
                       {o.label}
                     </button>
                   ))}
                 </div>
-                <span className="set-field-note">pi 无 apiMode 配置——协议按模型自动选择，此控件不持久化。</span>
+                <span className="set-field-note">
+                  保存为 provider.api（rpi 无自动检测；缺省即 Anthropic Messages）。
+                </span>
               </div>
             </div>
 

@@ -1560,6 +1560,43 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   活动会话（无会话 → Err，规矩 12）；④thinking 档位不写盘（rpi
   save_settings 无读-改-写入口，会清未覆盖字段）。
 
+## 模型页「模型目录」报错实锤与修复（2026-11-14 深夜，用户截图）
+
+- 截图里的 **"rpi 引擎待接：模型目录（…尚无对应能力）"是旧构建残留**：
+  该 unavailable 分支已在 915178f 删除（list_models 接真）。用户实际
+  运行形态 = `vite preview --outDir %TEMP%\mirach-dist --port 1430` +
+  `src-tauri\target\debug\mirach-harness.exe`（devUrl=1430，vite.config:7
+  与主工程 1420 错开）——**改完必须三步才上屏：重建 dist（vite build
+  --outDir %TEMP%\mirach-dist）→ cargo build → 重启 app**。另外本机
+  debug 二进制**没有 CDP 9222**（9222 是旧 conf 的 additionalBrowserArgs），
+  别再拿 cdp-probe 判定页面。
+- **真缺口 1：API 模式不落盘**。rpi 没有协议自动检测——`ProviderConfig.api`
+  缺省 = anthropic-messages，`openai-completions` / `openai-responses`
+  必须显式（rpi-runtime/src/config.rs:201-215）。原表单"pi 无 apiMode
+  配置——此控件不持久化"是旧 pi 时代假设：**OpenAI 兼容端点保存后会静默
+  走 Anthropic 协议**（请求必失败且难查）。已改：表单 apiMode 可点选并写
+  `entry.api`（选项值 = rpi 合法字符串；默认 openai-completions——本页
+  定位就是"兼容 OpenAI 的端点"；编辑回显缺省 api 的条目显示
+  anthropic-messages，与 rpi 推断一致）。
+- **真缺口 2：pi_endpoint_validate 仍 Err**。已接真：宿主 reqwest
+  GET `{base}/models`（去尾斜杠、可选 Bearer、20s 超时）；**HTTP 成败
+  = 测试结论**（ok/status/models/message 如实返回，不抛 Err），只有空
+  URL/非 http(s) 才 Err（规矩 12 的分界）；模型表解析兼容
+  `{"data":[{id}]}` / `{"models":[{id}]}` / `{"models":["…"]}` 三形状；
+  +2 单测。表单「测试」按钮可用。
+- **端到端探针**（`%TEMP%\rpi-ext-probe\src\bin\models-probe.rs`）：表单
+  形状 JSON → `load_models_config` + `provider_to_models` →
+  `axet-proxy`(api=openai-completions) 正确映射 OpenaiCompletions；
+  无 api 条目 → AnthropicMessages（rpi 缺省语义）——表单写盘与引擎解析
+  形状对齐实锤。
+- **环境实锤**：`~/.pi/agent/models.json` = `{"providers": {}}`（旧时代
+  就是空表），`~/.rpi/agent/` 只有 extensions/registry——用户从未配过
+  模型；截图里的 axet-proxy/gpt-5.4 是待新增。想用模型：设置 → 模型 →
+  自定义端点填表保存（现在会正确写 api 字段 + 写 defaultProvider/
+  defaultModel）。
+- 门禁：cargo check 0 错 0 警；cargo test **140**（+2 pi_login）；tsc 0；
+  dist + debug 二进制已重建、app 已重启。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换
