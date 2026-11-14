@@ -1475,21 +1475,25 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   ②`prebuilt_extensions.rs` 安装 client 15s→**60s**（GitHub TLS 握手在
   弱网下间歇 >15s，"error sending request" 集群）。尺寸上限 + sha256
   仍是完整性守卫，超时只影响传输耐心。
-- **安装结果（rpi.exe v0.24.0 本地构建，ABI v4）**：22 个扩展中 **15 个
+- **安装结果（rpi.exe v0.24.0 本地构建，ABI v4）**：22 个扩展中 **21 个
   入库**，loader 探针（`%TEMP%\rpi-ext-probe`，rpi-extensions::load_one
-  直载 + register + 收 registry）**15/15 全部 OK**：
+  直载 + register + 收 registry）**21/21 全部 OK**：
   - **rpi_mcp_adapter**（MCP 四件套 `mcp_request/mcp_call/mcp_list/
     mcp_resource`，stdio + Streamable HTTP 持久连接）——**MCP 面回归**；
   - rpi_todo（`todo` 工具+命令——宿主状态面板的 todo_list.v1 数据面）、
     rpi_plan_mode（plan_mode_start/complete）、rpi_ask_user（ask_user）、
     rpi_subagents（delegate_task）+ rpi_orchestrator（subagent/plan/
-    dispatch）、rpi_goal、rpi_codegraph（8 工具）、rpi_permissions、
-    rpi_lens（code_lens）、rpi_websearch、rpi_webfetch、rpi_im_message
-    （飞书/Lark）、rpi_btw + rpi_run_stats（命令面）。
-- **待入库 7 个**（GitHub 直连间歇不通——坏窗口整批清单请求连不上，好
-  窗口批次 1 一晚全过）：rpi_langfuse / rpi_voice / rpi_acp /
-  rpi_permission_gate / rpi_ui_adapter / rpi_providers / rpi_web。补装
-  命令同款 `rpi install <name>`（幂等，installed 跳过）。
+    dispatch）、rpi_goal、rpi_codegraph（8 工具）、rpi_permissions +
+    rpi_permission_gate（审批钩子面）、rpi_lens（code_lens）、
+    rpi_websearch、rpi_webfetch、rpi_im_message（飞书/Lark）、
+    rpi_langfuse（score/prompt/trace）、rpi_acp（编辑器接入面）、
+    rpi_providers（DeepSeek/OpenRouter/llama.cpp 目录）、rpi_ui_adapter、
+    rpi_web_extension（RPC 宿主工作区；DLL 名与 crate 名不同：
+    `rpi_web_extension.dll`）、rpi_btw + rpi_run_stats（命令面）。
+- **待入库 1 个**：`rpi_voice`（终端语音扩展——mirach 有自己的
+  MOSS/GPT-Live 桥，非关键；**archive 是全库最大件**，弱网 300s 也没拉完
+  ——好窗口跑 `rpi install rpi-voice` 即可，幂等）。GitHub 直连间歇不通
+  （坏窗口整批清单 443 连不上；21 个都是好窗口进的）。
 - **对宿主的传导路径（零改动原理）**：插件工具进 session 后经 rpi
   AgentEvent 流出 → agui.rs map_agent_event 的 TOOL_CALL_*/CUSTOM
   tool_execution → AG-UI → 前端工具呈现层照常渲染。todo/plan-mode/
