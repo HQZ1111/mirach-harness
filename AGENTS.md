@@ -1457,6 +1457,48 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   100% 保持）；vitest 未跑（本轮无 TS 改动，git status 只动 src-tauri +
   AGENTS.md）。
 
+## rpi 插件库接入（2026-11-14，用户"插件全部用上，有mcp，用插件和pkg解决"）
+
+- **插件库在哪**：`G:\pi-rust-main\website\data\packages.json` = rpi 官方
+  扩展目录（10 个核心 crate + **22 个已发布扩展**），crates.io 发布 +
+  GitHub `pi-rust/rpi-package` 分发预编译 cdylib（per-package release，
+  `rpi-extension.json` v1 清单 + sha256 校验 + 目标三元组字段，绝不从
+  资产名猜——`prebuilt_extensions.rs` 协议）。安装命令 = `rpi install
+  <crate>`，落点 = `~/.rpi/agent/extensions/*.dll`——**session::build 的
+  默认扫描目录**（`load_extensions`：trusted → 项目 `.rpi/extensions` +
+  全局；untrusted → 仅全局。mirach 走 Args::default() + untrusted =
+  全局目录必扫）。宿主侧零改动（规矩：用户明令不动）。
+- **引擎侧修复（G:\pi-rust-main，非 git 树——改动只在磁盘，本节即存档）**：
+  ①`cdn.rs::download_one` 加 **300s per-request 超时**——共享安装 client
+  的 15s 总超时掐断 >15s 的 archive 下载，reqwest 报成
+  "error decoding response body"（curl 同 URL 200/2.5MB 实证网络无罪）；
+  ②`prebuilt_extensions.rs` 安装 client 15s→**60s**（GitHub TLS 握手在
+  弱网下间歇 >15s，"error sending request" 集群）。尺寸上限 + sha256
+  仍是完整性守卫，超时只影响传输耐心。
+- **安装结果（rpi.exe v0.24.0 本地构建，ABI v4）**：22 个扩展中 **15 个
+  入库**，loader 探针（`%TEMP%\rpi-ext-probe`，rpi-extensions::load_one
+  直载 + register + 收 registry）**15/15 全部 OK**：
+  - **rpi_mcp_adapter**（MCP 四件套 `mcp_request/mcp_call/mcp_list/
+    mcp_resource`，stdio + Streamable HTTP 持久连接）——**MCP 面回归**；
+  - rpi_todo（`todo` 工具+命令——宿主状态面板的 todo_list.v1 数据面）、
+    rpi_plan_mode（plan_mode_start/complete）、rpi_ask_user（ask_user）、
+    rpi_subagents（delegate_task）+ rpi_orchestrator（subagent/plan/
+    dispatch）、rpi_goal、rpi_codegraph（8 工具）、rpi_permissions、
+    rpi_lens（code_lens）、rpi_websearch、rpi_webfetch、rpi_im_message
+    （飞书/Lark）、rpi_btw + rpi_run_stats（命令面）。
+- **待入库 7 个**（GitHub 直连间歇不通——坏窗口整批清单请求连不上，好
+  窗口批次 1 一晚全过）：rpi_langfuse / rpi_voice / rpi_acp /
+  rpi_permission_gate / rpi_ui_adapter / rpi_providers / rpi_web。补装
+  命令同款 `rpi install <name>`（幂等，installed 跳过）。
+- **对宿主的传导路径（零改动原理）**：插件工具进 session 后经 rpi
+  AgentEvent 流出 → agui.rs map_agent_event 的 TOOL_CALL_*/CUSTOM
+  tool_execution → AG-UI → 前端工具呈现层照常渲染。todo/plan-mode/
+  ask_user 等降级面从**引擎工具**回归，宿主 UI 面仍待接（status 面板的
+  sidecar 分派已就位）。`rpi install` 用的本地 rpi.exe =
+  `G:\pi-rust-main\target\release\rpi.exe`（engine 同源 ABI v4；crates.io
+  的 0.9.0 发布线与本地 0.24.0 开发线不同，**别用 cargo install rpi-cli
+  装旧版**——ABI/配置语义可能漂移）。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换
