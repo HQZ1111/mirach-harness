@@ -241,6 +241,37 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
             : undefined
         const messages = [...ctx.messages]
         const startedAt = Date.now()
+        // 去重（2026-11-15 实锤）：同一 toolCallId 只允许一个部件。重复
+        // start（SSE 重连重放 / 水合与实时叠加）会让 assistant-ui 的
+        // `useResources` 抛 "Duplicate key toolCallId-…" 并炸掉整个对话
+        // 渲染。发现既有部件时合并（保留已有 result），并 console.error
+        // 让重复可见——不静默。
+        for (let i = 0; i < messages.length; i++) {
+          const c = messages[i].content
+          if (typeof c === 'string') continue
+          if (
+            !c.some(
+              (p) => p.type === 'tool-call' && p.toolCallId === value.toolCallId,
+            )
+          )
+            continue
+          console.error(
+            `[turn] 工具调用 ${value.toolCallId} 重复 start——合并到既有部件（防止重复渲染）`,
+          )
+          messages[i] = {
+            ...messages[i],
+            content: (c as TurnPart[]).map((p) =>
+              p.type === 'tool-call' && p.toolCallId === value.toolCallId
+                ? {
+                    ...p,
+                    toolName: value.toolName ?? p.toolName,
+                    args: args ?? p.args,
+                  }
+                : p,
+            ),
+          }
+          return { ...next, messages }
+        }
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].role !== 'assistant') continue
           const c = messages[i].content

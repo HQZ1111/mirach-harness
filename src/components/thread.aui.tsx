@@ -32,7 +32,6 @@ import { useErrorBridge } from "@/components/assistant-ui/error-bridge";
 import { useUsageBridge } from "@/components/assistant-ui/usage-bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { MessageQueue } from "@/components/assistant-ui/elements/message-queue";
-import { CostMeter } from "@/components/assistant-ui/elements/cost-meter";
 import { ReadAloud } from "@/components/assistant-ui/elements/read-aloud";
 import {
   RegenerateMenu,
@@ -42,11 +41,6 @@ import {
   checkpointBridge,
   formatCheckpointTime,
 } from "@/components/assistant-ui/checkpoint-store";
-import {
-  costBridge,
-  formatUsd,
-  type CostRun,
-} from "@/components/assistant-ui/cost-bridge";
 import { sessionQueue } from "@/components/assistant-ui/session-queue-store";
 import {
   modelCatalogStore,
@@ -511,37 +505,12 @@ const MessageQueueWired: FC = () => {
   );
 };
 
-// ── cost-meter（官方元素）：run 成本 + 会话累计 ────────────────────────
-// 数据 = cost-bridge（runtime 在 run 收尾时经 pi_get_state 入账）。口径：
-// 会话累计 = 本进程内该会话所有 run 的 costUsd 之和（打开历史会话不回算
-// pi 落盘的历史成本——水合面里没有历史 usage，重算即编造）。仅非运行态
-// 且有数据时渲染：流式中数字是上一 run 的旧值，显示会误导；lines = 最近
-// 一次 run 的单模型明细（pi 每 run 单模型）。
-const CostMeterWired: FC = () => {
-  const isRunning = useAuiState((s) => s.thread.isRunning);
-  // 选择器只取稳定引用（zustand v5 Object.is 比较——返回新对象会无限重渲）
-  const lastRun = useStore(costBridge, (s) => s.lastRun);
-  const sessionCost = useStore(costBridge, (s) =>
-    s.activeSessionId ? (s.costBySession[s.activeSessionId] ?? 0) : 0,
-  );
-  if (isRunning || !lastRun) return null;
-  const lines: readonly CostRun[] = [lastRun];
-  return (
-    <CostMeter
-      data-slot="aui_cost-meter"
-      runCost={lastRun.costUsd !== null ? formatUsd(lastRun.costUsd) : "—"}
-      sessionCost={formatUsd(sessionCost)}
-      lines={lines.map((run) => ({
-        model: run.model,
-        inputTokens: run.inputTokens ?? 0,
-        outputTokens: run.outputTokens ?? 0,
-        cost: run.costUsd !== null ? formatUsd(run.costUsd) : "—",
-        share: 1,
-      }))}
-      className="w-full max-w-none rounded-xl p-3"
-    />
-  );
-};
+// ── 运行成本组件已删除（2026-11-15 用户要求）────────────────────────────
+// 原 CostMeterWired（cost-meter 元素：run 成本 + 会话累计）在 composer
+// 上方常驻一行，因为 rpi 的 usage.cost 恒有值（未配价目恒 0）而一直显示
+// "$0.0000 this run / $0.0000 session"。用户判定为噪音，整体移除。
+// cost-bridge（runtime 的入账面）保留不动——将来要恢复成本展示或接入
+// 价目配置时数据面还在。
 
 // ── 检查点（pi checkpoint/rewind 命令面，对话历史编辑）─────────────────
 // 轻量弹出面板（消息区顶部工具位，SessionLineBar 旁）：列出当前会话
@@ -1513,10 +1482,8 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
                       ——运行中压缩会与自动压缩打架，撤销会与工具写入竞争。 */}
                   <SessionMaintenanceBar />
                 </div>
-                {/* 运行成本（cost-meter）与排队消息（message-queue）：composer
-                    上方、ApprovalCards 之下——非运行态显示成本、运行态显示
-                    排队（二者不同时渲染，消息密度最低的挂点） */}
-                <CostMeterWired />
+                {/* 运行成本（cost-meter）已按用户要求移除（2026-11-15）；
+                    排队消息（message-queue）保留在 composer 上方 */}
                 <MessageQueueWired />
               </>
             )}

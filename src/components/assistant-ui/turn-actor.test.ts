@@ -68,6 +68,27 @@ describe('reduceAguiEvent tool-call parts', () => {
     ])
   })
 
+  it('duplicate tool start is merged into the existing part (no duplicate key crash)', () => {
+    // 2026-11-15 实锤：SSE 重连重放/水合与实时叠加会让同一 toolCallId 的
+    // start 到两次 → assistant-ui useResources 抛 "Duplicate key" 并炸掉
+    // 整个对话渲染。归约器必须合并，不得追加第二个部件。
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'CUSTOM', {
+      name: 'tool_execution',
+      value: { phase: 'start', toolCallId: 'dup', toolName: 'checkpoint_mark', args: { label: 'a' } },
+    })
+    c = send(c, 'CUSTOM', {
+      name: 'tool_execution',
+      value: { phase: 'start', toolCallId: 'dup', toolName: 'checkpoint_mark', args: { label: 'b' } },
+    })
+    const content = c.messages[0].content as { type: string; toolCallId?: string; args?: unknown }[]
+    expect(content.filter((p) => p.type === 'tool-call')).toHaveLength(1)
+    expect(content.find((p) => p.toolCallId === 'dup')?.args).toEqual({ label: 'b' })
+    expect(err).toHaveBeenCalled()
+    err.mockRestore()
+  })
+
   it('tool end attaches result by toolCallId; later text opens a new text part', () => {
     let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
     c = send(c, 'CUSTOM', {
