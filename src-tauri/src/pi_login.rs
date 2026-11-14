@@ -16,10 +16,14 @@ use serde_json::{json, Value};
 
 use crate::pi_session::on_big_stack;
 
-/// OAuth 提供方列表（降级：rpi 无 OAuth 启动流——空列表，前端无入口可点）。
+/// OAuth 提供方列表（降级：rpi 无 OAuth 启动流——空清单，前端无入口可点）。
+///
+/// **wire 形状必须是 `{ providers: [...] }`**：前端 providers-settings.tsx
+/// 的账号区读 `r.providers` 再 `.map`；此前降级版错发裸数组 `[]`，导致
+/// `r.providers === undefined` → 设置窗口整体白屏（2026-11-14 实锤）。
 #[tauri::command(async)]
 pub fn pi_oauth_providers() -> Result<Value, String> {
-    Ok(json!([]))
+    Ok(json!({ "providers": [] }))
 }
 
 #[tauri::command(async)]

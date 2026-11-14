@@ -1597,6 +1597,32 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
 - 门禁：cargo check 0 错 0 警；cargo test **140**（+2 pi_login）；tsc 0；
   dist + debug 二进制已重建、app 已重启。
 
+## 设置页白屏 + 「关于」旧标签（2026-11-14 深夜，用户"设置页打不开了"）
+
+- **白屏根因：OAuth 清单 wire 形状**。前端账号区读
+  `setOauthProviders(r.providers)` 再 `.map`（providers-settings.tsx:240/
+  341）；rpi 迁移降级版 `pi_oauth_providers` 错发**裸数组** `[]` →
+  `r.providers === undefined` → `undefined.map` 抛
+  "Cannot read properties of undefined" → 设置窗口整窗白屏（bodyLen 31）。
+  旧 dist 里后端还是 `{providers:[...]}` 真形状所以此前没炸；重建 dist 后
+  暴露。**已修**：返回 `{"providers": []}`（前端无入口可点 = 现状真相）。
+  **教训：降级实现也必须保留旧 wire 形状**，否则前端渲染链整窗崩。
+- **"pi agent rust 怎么没法删除"= 「关于」区硬编码旧引擎名**：
+  settings-overlay.tsx:2049/2061 写死 `引擎 pi_agent_rust {version}`，
+  引擎早换 rpi → 显示 "rpi 0.24.0"。已改标签为 `rpi`（version 来源 =
+  pi_engine_version → rpi 工作区根 Cargo.toml）。注：G:\pi_agent_rust-main
+  （265MB 上游源码树，未进 git）仍在磁盘上——仓库内的 vendor 已删干净
+  （git 零引用），那个目录要不要删由用户定。
+- **会话列表噪音修复**：`list_sessions` 在 `<workspace>/.rpi/sessions`
+  不存在时原先 Err（控制台 "会话列表读取失败 os error 3"）；目录不存在 =
+  从没跑过会话（正常态）→ 返回空数组，其它 IO 错误照常传播。
+- **调试入口**：debug 构建 CDP 在 **9223**（tauri.conf.json
+  additionalBrowserArgs，不是 9222）；`%TEMP%\cdp-settings-probe.mjs`
+  可连目标抓 console/exception + DOM 摘要（Node ≥22 内置 WebSocket，无需
+  ws 依赖）。白屏类问题先看 `Runtime.exceptionThrown`。
+- 门禁：cargo check 0/0；cargo test **140**；tsc 0；dist+二进制重建、app
+  重启（设置窗 bodyLen 31 → 35177 实证恢复）。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换

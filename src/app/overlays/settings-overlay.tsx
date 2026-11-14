@@ -18,11 +18,11 @@
  * 功能、不造假数据）；文案在 NAV_GROUPS 的 placeholder 字段，右栏按
  * IMPLEMENTED_SECTIONS 分流到真实面板 / 占位。
  *
- * 结构化段只收录 pi Config 实锤字段——键名/类型/默认值逐项核对 vendor
- * pi_agent_rust/src/config.rs（见各段注释的行号）；Config 没有的配置面
- * （system_prompt / append_system_prompt 是 CLI/SDK 参数非 settings.json
- * 字段；工具开关的真实机制是 tools.loadMode 自由映射）不造 UI，留原始
- * JSON 段。
+ * 结构化段只收录 rpi Settings 实锤字段——键名/类型/默认值逐项核对
+ * rpi-cli/src/settings.rs（camelCase，见各段注释的行号）；Settings 没有的
+ * 配置面（system_prompt / append_system_prompt 是 CLI/SDK 参数非
+ * settings.json 字段；工具开关的真实机制是 tools.loadMode 自由映射）不造
+ * UI，留原始 JSON 段。
  *
  * 配置真相 = pi 自己的配置文件（§5）：settings.json / models.json 经
  * pi_get_settings / pi_set_models_config 管理——**nested 对象整体替换
@@ -2046,7 +2046,7 @@ export function SettingsOverlay({
               <div>
                 <div className="set-about-name">{pkg.productName}</div>
                 <div className="set-row-env">
-                  应用 {pkg.version} · 引擎 pi_agent_rust {engineVersion ?? '…'}
+                  应用 {pkg.version} · 引擎 rpi {engineVersion ?? '…'}
                 </div>
               </div>
             </div>
@@ -2058,7 +2058,7 @@ export function SettingsOverlay({
               <dt>应用版本</dt>
               <dd>{pkg.version}</dd>
               <dt>引擎版本</dt>
-              <dd>pi_agent_rust {engineVersion ?? '…'}</dd>
+              <dd>rpi {engineVersion ?? '…'}</dd>
               {auth !== null && (
                 <>
                   <dt>settings</dt>

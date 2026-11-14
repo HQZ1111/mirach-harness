@@ -364,12 +364,34 @@ impl PiEngine {
     pub fn list_sessions(&self) -> Result<serde_json::Value, String> {
         let base = default_workspace().join(".rpi").join("sessions");
         let mut rows: Vec<serde_json::Value> = Vec::new();
-        let dirs = std::fs::read_dir(&base).map_err(|e| e.to_string())?;
+        // 会话目录还不存在 = 从没跑过会话（正常态：空列表，不是错误——
+        // 与 cron jobs "文件不存在 = 空表" 同语义）。其它 IO 错误传播。
+        let dirs = match std::fs::read_dir(&base) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(serde_json::Value::Array(Vec::new()));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "会话目录读取失败 {}: {e}",
+                    base.display()
+                ))
+            }
+        };
         for d in dirs.flatten() {
             if !d.path().is_dir() {
                 continue;
             }
-            let files = std::fs::read_dir(d.path()).map_err(|e| e.to_string())?;
+            let files = match std::fs::read_dir(d.path()) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "会话子目录读取失败 {}: {e}",
+                        d.path().display()
+                    ))
+                }
+            };
             for f in files.flatten() {
                 let path = f.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
