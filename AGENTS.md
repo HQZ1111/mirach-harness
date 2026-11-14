@@ -1391,9 +1391,98 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   用）+ rpi-cli/rpi-agent/rpi-ai/rpi-harness path-dep
   `../../pi-rust-main/crates/*`——两引擎并存至迁移完成（迁移完拆旧）。
   **path-dep 工作区成员从外部工程可行**（egui/mirach 双实测）。
+  **【已终结】同日晚「pi_agent_rust 整体删除」轮拆除——见下节。**
 - 待办（rpi-main 侧追平后）：hub/todo/stats/分支/审批桥/水合重放/分栏
   多 lane。rpi 会话目录 = `<workspace>/.rpi/sessions/<sanitized-cwd>/
   *.jsonl`（默认 workspace = USERPROFILE，工作区选择面后续接列头）。
+
+## pi_agent_rust 整体删除（2026-11-14 单引擎定稿，用户"删除所有的pi agent rust，改用rpi"）
+
+- **vendor/ 目录已删**（src-tauri/vendor/pi_agent_rust，~49MB / 数千文件，
+  git 全量 D）；Cargo.toml 的 pi path-dep 与 asupersync 一并移除，新增
+  **rpi-tools** path-dep（`ExecutionEnv`/`OsExecutionEnv`——rpi-harness
+  skills loader 的 env 参数）。同步上游的脱敏补丁、session_index.rs
+  `.read(true)` 补丁随依赖一起退休。
+- **compile 清理轮**（pi dep 摘除后 19 错 → 0）：
+  - **pi_capabilities**：`OsExecutionEnv` 在 **rpi_tools::os_env**（不在
+    env 模块）；`load_all_skills` 改走共享列举运行时
+    （`pi_session::list_runtime`，OnceLock\<PiRuntime\>——rpi 的
+    skills/prompt loaders 都是 async，tokio::fs 底座）；skill_dirs/
+    harness_prefs_path → Result 传播（pi_paths::agent_dir 可失败）；
+    重复 load_all_skills 定义删（上轮遗留）；诊断 json 换 rpi
+    SkillDiagnostic 形状（`code.as_str()`，message/path 是 String）；
+    pi_read_skill 的 `file_path` 是 String（无 .display()），source 从
+    file_path 推导；测试 `KNOWN_TOOL_NAMES` →
+    **`rpi_cli::session::BUILTIN_TOOL_NAMES`**（file 组补 "docs"，
+    DEFAULT_ENABLED_TOOLS 同步 + 注释改为"UI 默认组开关"语义——rpi 工具
+    过滤未接线前此表不进引擎）。
+  - **pi_resources**：重写 = rpi-harness `skills::load_skills` +
+    `prompt_templates::load_prompt_templates`；旧 pi settings.json 的
+    extensions/packages/enableSkillCommands 字段 **rpi schema 没有**
+    （rpi 扩展面 = cdylib 插件 ABI，无 settings 路径清单）——如实去掉
+    （findstr 实测无前端消费者，仅注释提及）。
+  - **pi_cron**：**路径面改 Result**（cron_dir/jobs_path/executions_path/
+    job_output_dir/sessions_dir → `pi_paths::agent_dir()?` 传播；
+    CRON_DIR_OVERRIDE 测试短路保留——rpi 无旧 pi 的 Known Folder 坑）；
+    `run_in_session` 重写 = rpi-cli `resolve(job.provider/model)` +
+    **`Args.session_id = 文件 stem`**（rpi ByExactId 契约"文件以给定 id
+    命名"→ 落盘路径与调用方 session_path 严格一致）+ `Args.session_dir` =
+    cron sessions + `build(cwd=workdir||current, trusted=workdir.is_some())`
+    + `AgentLane::prompt_text` + **TurnEnd 排水抓最后一条 assistant**
+    （`AgentMessage::as_assistant` → `Content::text_only`）；assistant_text
+    同函数（error_message 追加语义保持）。落盘由 rpi durable session 自管，
+    旧 save_and_index 手动钩子无对应物。
+  - 小修：pi_settings `ModelsConfig` → `rpi_cli::config::ModelsConfig`
+    （rpi-runtime 再导出，rpi_ai::types 没有）；pi_keys 重复 PathBuf 导入
+    删；pi_voice_moss 未用 on_big_stack 导入删；**pi_engine_version 的
+    include_str 换源**——vendor 清单删除后编译期嵌入改指 rpi 工作区根
+    Cargo.toml（`../../../pi-rust-main/Cargo.toml`；rpi-cli 是
+    `version.workspace = true`，真值在根 `[workspace.package]`，解析器
+    收下该节名；include_str 相对**源文件**而非 Cargo.toml，三层 `../`）。
+    注意 **vendor 删除后 Cargo.lock 要重新解析**（metadata 触发重解析，
+    pi 系 ~200 条目剪除 + rpi-tools 系补入）；本地 target 里 pi 的
+    陈旧 fingerprint 也随之过期（进程内已清）。
+- **死代码清零**（13 处旧消费者随引擎消失）：**真删** =
+  `flush_active_session`（rpi 逐条落盘，无 flush 概念）、
+  `pi_paths::cron_sessions_dir`（与 pi_cron::sessions_dir 重复）；
+  **allow(dead_code) 留接线点**（全部带注释）= UiBridgeHandle（事件转发
+  待接）/ 审批注册表 register+cleanup+UiAnswer 字段（§7-5 面，rpi 无
+  extension_ui_handler 产出面）/ AskRegistry pending+cleanup /
+  persona_prompt_for_session（SOUL 注入点）/ persist_default_model（模型
+  切换已降级）/ 工具过滤链 session_enabled_tools→enabled_tools_for→
+  enabled_tools_for_session + skills_prompt_for_session（rpi 工具过滤/
+  资源注入待接回）。
+- **门禁**：cargo check **0 错 0 警**；cargo test **117/117**（cron 29 +
+  capabilities + agui 40 + 全量回归）；tsc **0**（前端零改动——AG-UI 面
+  100% 保持）；vitest 未跑（本轮无 TS 改动，git status 只动 src-tauri +
+  AGENTS.md）。
+
+## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
+
+- **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换
+  `~/.cargo/bin/cargo.exe`，旧 rustup 代理保留为 `cargo.rustup.exe`。核心
+  能力 = 每项目一个共享构建目录（`~/.cargo/targets/<name>-<hash>`，按主
+  .git 键控，全 worktree 复用）+ registry/git 依赖全机编译一次（shared-deps）
+  + 自清理 GC（闲置 1 天/总量上限）+ nightly Cranelift。**已实测**：fork-smoke
+  构建落共享目录 ✓；mirach-harness 全量 check 入共享缓存（shared-deps
+  3.4GB + 项目 1.15GB），增量 check 32.6s ✓。
+- **安装事故与修复（重要）**：①rustup 的垫片（cargo/rustc/rustdoc/clippy 全
+  家）是**同一二进制的硬链接**——直接 Copy-Item fork→cargo.exe 会**写穿硬链
+  接**污染 rustc.exe 全家（特征：`rustc -V` 打印 cargo 版本）。修复 = 全部
+  垫片从 `cargo.rustup.exe`（改名保留的原件）Remove+Copy 重放。**手工装
+  fork 必须用 Staged Move-Item 而非 Copy-Item**。②fork 的**后台自动更新器**
+  首跑把 cargo.exe 截断成 0MB——已永久禁用（User env
+  `CARGO_FORK_AUTO_UPDATE=0`）。③最终用官方 install.ps1 打补丁（跳过下载步
+  骤、用本地已验证资产）安装——其 Staged Move-Item + Restore-Rustup 垫片舞
+  步才是正确姿势。④rustup 代理每次运行**自动修复垫片**——fork 就位后任何
+  rustc/rustup 调用都可能把 cargo.exe 写回代理（huacnlee fork 自身如何长期
+  保持 cargo.exe = fork 未深究，出问题重跑 install.ps1 即可）。
+- **egui 组件库调研（用户问"有没有 dockview/assistant-ui 类"）**：
+  dockview 类 = **egui_tiles**（rerun 出品，树形 tiles/tabs/拖拽/grid，
+  生产级）+ egui_dock（仅二分）+ grimdock（2026-05 新）；assistant-ui 类
+  **无对应物**——markdown = egui_commonmark(+extended)，chat widgets 有
+  egui-components（gpui-component 移植）可看，对话流本质手写。清单已同步
+  mirach-egui AGENTS.md 路线图口径。
 
 ## 内存排查轮（2026-11-14，用户："加了机器人和双全工的语音，运行内存暴涨
 了很多"——点名两模块）

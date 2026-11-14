@@ -169,36 +169,27 @@ pub fn create_webrtc_session(sdp_offer: &str, history: Option<Vec<Value>>) -> Re
     let url = format!("{base_url}/live/sessions");
     let payload = serde_json::to_vec(&body).map_err(|e| format!("请求体序列化失败: {e}"))?;
 
-    let reactor = asupersync::runtime::reactor::create_reactor().map_err(|e| e.to_string())?;
-    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
-        .with_reactor(reactor)
-        .build()
-        .map_err(|e| e.to_string())?;
-    runtime
-        .block_on(async move {
-            let client = pi::http::client::Client::new();
-            let resp = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .body(payload)
-                .send()
-                .await
-                .map_err(|e| format!("GPT-Live 会话请求失败: {e}"))?;
-            let status = resp.status();
-            let text = resp.text().await.map_err(|e| format!("响应读取失败: {e}"))?;
-            if status != 200 && status != 201 {
-                let detail: String = text.chars().take(600).collect();
-                return Err(format!("GPT-Live session creation failed ({status}): {detail}"));
-            }
-            let parsed: Value =
-                serde_json::from_str(&text).map_err(|e| format!("响应不是 JSON: {e}"))?;
-            if parsed.get("transport").and_then(|t| t.get("sdp")).is_none() {
-                return Err("GPT-Live session creation failed: vendor response missing transport.sdp".into());
-            }
-            Ok(json!({ "ok": true, "session": parsed.get("session"), "transport": parsed.get("transport") }))
-        })
-        .map_err(|e: String| e)
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .timeout(std::time::Duration::from_secs(45))
+        .send()
+        .map_err(|e| format!("GPT-Live 会话请求失败: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().map_err(|e| format!("响应读取失败: {e}"))?;
+    if status.as_u16() != 200 && status.as_u16() != 201 {
+        let detail: String = text.chars().take(600).collect();
+        return Err(format!("GPT-Live session creation failed ({status}): {detail}"));
+    }
+    let parsed: Value =
+        serde_json::from_str(&text).map_err(|e| format!("响应不是 JSON: {e}"))?;
+    if parsed.get("transport").and_then(|t| t.get("sdp")).is_none() {
+        return Err("GPT-Live session creation failed: vendor response missing transport.sdp".into());
+    }
+    Ok(json!({ "ok": true, "session": parsed.get("session"), "transport": parsed.get("transport") }))
 }
 
 // ── IPC（宿主桥接层对前端的三个口） ──────────────────────────────────────

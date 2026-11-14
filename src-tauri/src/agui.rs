@@ -71,6 +71,9 @@ pub struct PendingApproval {
 }
 
 /// 前端对一条扩展 UI 请求的应答（ExtensionUiResponse 的传输形状）。
+/// rpi 迁移后暂无读取方——扩展 UI 请求的产出面（engine 侧
+/// extension_ui_handler）待 rpi 扩展生态接回，形状保留。
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct UiAnswer {
     pub value: Option<serde_json::Value>,
@@ -90,6 +93,9 @@ impl ApprovalRegistry {
         }
     }
 
+    /// 注册挂起审批——rpi 迁移后暂无调用方（引擎侧无 extension_ui_handler
+    /// 产出面），respond/list 语义保留，待 rpi 扩展生态接回。
+    #[allow(dead_code)]
     pub(crate) fn register(
         &self,
         id: String,
@@ -129,7 +135,9 @@ impl ApprovalRegistry {
 
     /// 会话 discard/切换成功后清理挂起审批（P1-3 防鬼影卡片）：移除全部
     /// pending 项——oneshot Sender 析构后宿主桥的 request_ui 收到 Err，
-    /// 按 cancelled 回灌 pi（§4.4 宿主桥故障语义）。
+    /// 按 cancelled 回灌 pi（§4.4 宿主桥故障语义）。rpi 迁移后暂无调用方
+    /// （discard 链不经过审批注册表），保留语义位。
+    #[allow(dead_code)]
     pub fn cleanup(&self) {
         self.pending
             .lock()
@@ -138,21 +146,12 @@ impl ApprovalRegistry {
     }
 }
 
-/// 前端待应答的 ask 工具问题（docs/pi-coverage.md：ask 交互卡）。
-/// 与 ApprovalRegistry 同款：请求进 AG-UI 流（CUSTOM name=ask_request，
-/// 只带 id 作信号），详情以本注册表为唯一真相（重放流不复活已答卡片）。
-/// **应答不走 oneshot**：pi 的 `install_channel_ui` 内部持有 oneshot，
-/// 宿主经 `AskTool::respond_ui(id, response)` 回灌（返回 bool）。
-/// 故本表只存请求详情 + 该会话的 AskTool 克隆。
-#[derive(Clone)]
-pub struct PendingAsk {
-    pub request: serde_json::Value,
-    pub ask_tool: pi::ask::AskTool,
-}
-
+/// ask 工具注册表（竖链移植降级：rpi 无 ask 工具——list 恒空）。
+/// 待 rpi-main 长出 ask 能力后按旧形状接回（git df701a4 有原实现）。
 #[derive(Default)]
 pub struct AskRegistry {
-    pending: Mutex<HashMap<String, PendingAsk>>,
+    #[allow(dead_code)] // pending 待 rpi ask 能力接回（list/cleanup 语义位）
+    pending: Mutex<HashMap<String, serde_json::Value>>,
 }
 
 impl AskRegistry {
@@ -163,40 +162,13 @@ impl AskRegistry {
         }
     }
 
-    pub(crate) fn register(&self, id: String, request: serde_json::Value, ask_tool: pi::ask::AskTool) {
-        self.pending
-            .lock()
-            .expect("ask registry poisoned")
-            .insert(id, PendingAsk { request, ask_tool });
-    }
-
-    /// 挂载/刷新时拉取挂起问题（应答后移除——不复活）
+    /// 挂载/刷新时拉取挂起问题——rpi 无 ask 工具，恒空。
     pub fn list(&self) -> Vec<serde_json::Value> {
-        self.pending
-            .lock()
-            .expect("ask registry poisoned")
-            .values()
-            .map(|p| p.request.clone())
-            .collect()
+        vec![]
     }
 
-    /// 应答回灌：pi `AskTool::respond_ui` 返回 false（对端已超时/关闭）
-    /// = 错误（不静默成功）。
-    pub fn respond(&self, id: &str, response: pi::ask::AskResponse) -> Result<(), String> {
-        let pending = self
-            .pending
-            .lock()
-            .expect("ask registry poisoned")
-            .remove(id)
-            .ok_or_else(|| format!("no pending ask with id {id}"))?;
-        if pending.ask_tool.respond_ui(id, response) {
-            Ok(())
-        } else {
-            Err(format!("ask {id} 应答未送达（上游已超时或 picker 已关闭）"))
-        }
-    }
-
-    /// 会话 discard/切换后清理（防鬼影卡片；pi 侧超时自行收回）
+    /// 会话 discard/切换后清理（保留语义位）。
+    #[allow(dead_code)] // 待 rpi ask 能力接回
     pub fn cleanup(&self) {
         self.pending.lock().expect("ask registry poisoned").clear();
     }

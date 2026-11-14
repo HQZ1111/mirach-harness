@@ -18,13 +18,14 @@
 
 use std::path::PathBuf;
 
+use crate::pi_paths;
 use crate::pi_session::on_big_stack;
 use crate::pi_settings::read_json_document;
 
 /// auth.json 实际路径（pi Config::auth_path = `~/.pi/agent/auth.json`，
 /// PI_CONFIG_PATH 覆盖时 pi 读的也是覆盖路径——与 pi_settings 同语义）。
 fn auth_path() -> PathBuf {
-    pi::config::Config::auth_path()
+    pi_paths::auth_path().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// provider 名合法性：非空、无路径分隔/控制字符（auth.json 的键是
@@ -104,17 +105,19 @@ pub fn pi_delete_provider_key(provider: String) -> Result<bool, String> {
     })?
 }
 
-/// 引擎（pi_agent_rust vendor crate）版本：编译期从 vendored Cargo.toml
-/// 取（构建期真值，与实际链接的代码同源）。hermes about-settings 的
-/// 「版本英雄区」移植（2026-10-24）。
+/// 引擎（rpi-main，rpi-cli = SDK 门面）版本：编译期从 rpi 工作区根
+/// Cargo.toml 取（构建期真值，与实际链接的代码同源——path-dep 直指引擎
+/// 工作区；rpi-cli 的 version 是 `version.workspace = true`，真值在工作区
+/// 根的 `[workspace.package]`）。hermes about-settings 的「版本英雄区」
+/// 移植（2026-10-24）。
 #[tauri::command]
 pub fn pi_engine_version() -> Result<String, String> {
-    const MANIFEST: &str = include_str!("../vendor/pi_agent_rust/Cargo.toml");
+    const MANIFEST: &str = include_str!("../../../pi-rust-main/Cargo.toml");
     let mut in_package = false;
     for line in MANIFEST.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_package = trimmed == "[package]";
+            in_package = trimmed == "[package]" || trimmed == "[workspace.package]";
             continue;
         }
         if in_package && trimmed.starts_with("version") {

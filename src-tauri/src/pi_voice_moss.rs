@@ -29,8 +29,6 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Message as WsMessage};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::pi_session::on_big_stack;
-
 const DEFAULT_MOSS_WSS: &str = "wss://api.mosi.cn/v1/realtime";
 const DEFAULT_MOSS_MODEL: &str = "moss-live-1.0";
 

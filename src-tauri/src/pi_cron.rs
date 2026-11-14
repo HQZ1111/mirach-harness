@@ -65,39 +65,38 @@ use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveDateTime, TimeZone,
     Timelike,
 };
-use pi::config::Config;
+use rpi_agent::AgentEvent;
+use rpi_harness::agent_harness::AgentLane;
+
+use crate::pi_paths;
 
 // ── 存储落点 ────────────────────────────────────────────────────────────
 
 /// cron 目录的**显式覆盖**（只给测试用，生产恒 `None`）。
 ///
-/// 为什么需要它：`Config::global_dir()` 在 Windows 上走 Known Folder API，
-/// 改 `USERPROFILE` 不生效；即使改 `PI_CODING_AGENT_DIR`（`config.rs:1599`
-/// 认它），pi 内部建会话时还会走它自己的 `Config` 快照，测试里出现
-/// "作业写进临时目录、会话写进真实 `~/.pi`"的半隔离（实测污染过
-/// `~/.pi/agent/cron/sessions`）。
-///
-/// 所以测试用**进程级显式路径**：`with_temp_cron_dir` 设它，所有路径函数
-/// 优先读它。生产代码从不设，行为与"只有 `Config::global_dir()`"完全一致。
+/// 为什么需要它：`~/.rpi/agent` 在生产里从 `USERPROFILE` 解析；测试里改
+/// 环境变量有并发污染风险（其余测试共享进程环境）。所以测试用**进程级
+/// 显式路径**：`with_temp_cron_dir` 设它，所有路径函数优先读它。
+/// 生产代码从不设，行为与"只有 `pi_paths::agent_dir`"完全一致。
 static CRON_DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// cron 目录：`<global_dir>/cron`（与 pi 的 `~/.pi/agent` 同根）。
+/// cron 目录：`<agent_dir>/cron`（rpi 配置根 `~/.rpi/agent` 之下）。
 ///
 /// 为什么与 hermes 同构（`<home>/cron/jobs.json`）：用户要求"照抄 hermes"，
-/// 且这样路径语义一目了然。但**不进 pi 的 settings.json**——那是 pi 的
-/// schema，塞私有键会被它的写回覆盖（`pi_capabilities.rs:51` 同款理由）。
-pub fn cron_dir() -> PathBuf {
+/// 且这样路径语义一目了然。但**不进 rpi 的 settings.json**——那是 rpi 的
+/// schema，塞私有键会被它的写回覆盖（`pi_capabilities.rs` 同款理由）。
+pub fn cron_dir() -> Result<PathBuf, String> {
     if let Ok(guard) = CRON_DIR_OVERRIDE.lock() {
         if let Some(dir) = guard.as_ref() {
-            return dir.clone();
+            return Ok(dir.clone());
         }
     }
-    Config::global_dir().join("cron")
+    Ok(pi_paths::agent_dir()?.join("cron"))
 }
 
 /// 作业存储：`<cron>/jobs.json`。
-pub fn jobs_path() -> PathBuf {
-    cron_dir().join("jobs.json")
+pub fn jobs_path() -> Result<PathBuf, String> {
+    Ok(cron_dir()?.join("jobs.json"))
 }
 
 /// 执行台账：`<cron>/executions.jsonl`（**追加式 JSONL**，不是 SQLite）。
@@ -106,13 +105,13 @@ pub fn jobs_path() -> PathBuf {
 /// 部分索引。宿主是单进程（Tauri 主进程）+ 单 ticker 线程，用不上那套；
 /// 追加式 JSONL 的好处是崩溃安全（半行可跳过）、无新依赖、可直接读。
 /// 代价是没有跨进程并发保护——所以 tick 锁（[`TickerState`]）是必须的。
-pub fn executions_path() -> PathBuf {
-    cron_dir().join("executions.jsonl")
+pub fn executions_path() -> Result<PathBuf, String> {
+    Ok(cron_dir()?.join("executions.jsonl"))
 }
 
 /// 单个作业的输出目录：`<cron>/output/<job_id>`。
-pub fn job_output_dir(job_id: &str) -> PathBuf {
-    cron_dir().join("output").join(sanitize_id(job_id))
+pub fn job_output_dir(job_id: &str) -> Result<PathBuf, String> {
+    Ok(cron_dir()?.join("output").join(sanitize_id(job_id)))
 }
 
 /// job id 只允许 `[a-z0-9-]`——它是目录名的一部分，绝不能让 `..` 或路径
@@ -779,7 +778,7 @@ pub fn read_jobs() -> Result<Vec<Job>, String> {
 }
 
 fn read_jobs_unlocked() -> Result<Vec<Job>, String> {
-    let path = jobs_path();
+    let path = jobs_path()?;
     match std::fs::read_to_string(&path) {
         Ok(raw) if raw.trim().is_empty() => Ok(Vec::new()),
         Ok(raw) => {
@@ -793,9 +792,9 @@ fn read_jobs_unlocked() -> Result<Vec<Job>, String> {
 }
 
 fn write_jobs_unlocked(jobs: &[Job]) -> Result<(), String> {
-    let dir = cron_dir();
+    let dir = cron_dir()?;
     ensure_dir(&dir)?;
-    let path = jobs_path();
+    let path = jobs_path()?;
     let file = JobsFile {
         version: 1,
         jobs: jobs.to_vec(),
@@ -832,9 +831,9 @@ pub fn mutate_jobs<T>(f: impl FnOnce(&mut Vec<Job>) -> Result<T, String>) -> Res
 
 /// 追加一行台账。失败传播（台账丢行 = 运行历史不可信）。
 pub fn append_execution(exec: &Execution) -> Result<(), String> {
-    let dir = cron_dir();
+    let dir = cron_dir()?;
     ensure_dir(&dir)?;
-    let path = executions_path();
+    let path = executions_path()?;
     let mut line = serde_json::to_string(exec).map_err(|e| format!("台账序列化失败: {e}"))?;
     line.push('\n');
     let mut f = std::fs::OpenOptions::new()
@@ -854,7 +853,7 @@ pub fn append_execution(exec: &Execution) -> Result<(), String> {
 /// 文件**：只有末尾半行才允许跳过，中间行解析失败要报错（那说明文件被
 /// 外力破坏了）。
 pub fn read_executions(limit: usize) -> Result<Vec<Execution>, String> {
-    let path = executions_path();
+    let path = executions_path()?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -907,7 +906,7 @@ pub fn write_output_doc(
     prompt: &str,
     response: &str,
 ) -> Result<PathBuf, String> {
-    let dir = job_output_dir(&job.id);
+    let dir = job_output_dir(&job.id)?;
     ensure_dir(&dir)?;
     let stamp = started_at.format("%Y-%m-%d_%H-%M-%S").to_string();
     let path = dir.join(format!("{stamp}.md"));
@@ -976,9 +975,9 @@ pub struct RunOutcome {
 /// **为什么单独一个目录**：cron run 是独立会话（hermes 的
 /// `cron_{job}_{时间戳}` 同款语义），不能污染用户的聊天会话列表语义——
 /// 但也必须能被会话索引看到（否则前端「打开这次运行」读不到）。
-/// pi 的 `SessionOptions.session_dir` 正好是这个钩子。
-pub fn sessions_dir() -> PathBuf {
-    cron_dir().join("sessions")
+/// rpi 的 `Args.session_dir` 正好是这个钩子（`--session-dir` 同语义）。
+pub fn sessions_dir() -> Result<PathBuf, String> {
+    Ok(cron_dir()?.join("sessions"))
 }
 
 // ── 执行 ────────────────────────────────────────────────────────────────
@@ -1077,12 +1076,25 @@ pub fn run_job(job: &Job) -> RunOutcome {
 
 /// 实际的执行体（[`run_job`] 的台账包裹之内）。
 fn run_job_inner(job: &Job, exec: &mut Execution, started: DateTime<chrono::FixedOffset>) -> RunOutcome {
-    let session_path = sessions_dir().join(format!(
+    let sessions_dir = match sessions_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            return RunOutcome {
+                success: false,
+                skipped: false,
+                response: String::new(),
+                error: Some(e),
+                session_path: None,
+                output_path: None,
+            };
+        }
+    };
+    let session_path = sessions_dir.join(format!(
         "{}_{}.jsonl",
         sanitize_id(&job.id),
         started.format("%Y%m%d_%H%M%S")
     ));
-    if let Err(e) = ensure_dir(&sessions_dir()) {
+    if let Err(e) = ensure_dir(&sessions_dir) {
         return RunOutcome {
             success: false,
             skipped: false,
@@ -1162,67 +1174,96 @@ fn build_prompt(job: &Job) -> Result<String, String> {
 
 /// 在独立会话里跑一次 prompt，返回最终响应文本。
 ///
-/// **会话隔离**：用 `session_dir` + 独立 `session_path`，不复用
-/// `PiEngine` 的活动 handle（那是用户的聊天会话）。所以这里直接
-/// `create_agent_session`，不经过 `PiEngine`。
+/// **会话隔离**：用 rpi 的固定会话 id（`Args.session_id`——"exact id,
+/// creating it if missing"契约）+ `Args.session_dir`（[`sessions_dir`]），
+/// 不复用 `PiEngine` 的活动 handle（那是用户的聊天会话）。id 取
+/// `session_path` 的文件 stem——rpi 的 `--session-id` 契约是"文件以给定
+/// id 命名"，所以落盘路径与调用方传入的 `session_path` 严格一致。
+///
+/// 无人值守：扩展 UI 请求没有前端卡片可答 → 不挂任何审批桥，引擎侧
+/// fail-closed（这是**有意的**：挂一个假 handler 会让 run 永久挂起等一个
+/// 不存在的用户）。
 fn run_in_session(job: &Job, prompt: &str, session_path: &Path) -> Result<String, String> {
     let session_path = session_path.to_path_buf();
+    // rpi 的 ByExactId 按 id 建文件——stem 即 id，两端一致
+    let session_id = session_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("cron 会话路径非法: {}", session_path.display()))?
+        .to_string();
     let provider = job.provider.clone();
     let model = job.model.clone();
     let workdir = job.workdir.clone();
     let prompt = prompt.to_string();
+    let session_dir = sessions_dir()?;
 
     crate::pi_session::on_big_stack(move || {
         let runtime = crate::pi_session::PiRuntime::new();
-        let options = pi::sdk::SessionOptions {
-            provider,
-            model,
-            // 作业级技能已拼进 prompt（build_prompt），这里不再重复喂
-            skills_prompt: None,
-            // 会话持久化到 cron 自己的目录（不污染用户会话列表语义，
-            // 但仍进索引——前端「打开这次运行」要读得到）
-            no_session: false,
-            session_path: Some(session_path),
-            session_dir: Some(sessions_dir()),
-            // cron run 是无人值守的：工作区信任 = 用户建作业时给了 workdir
-            // 就等于信任那个目录（hermes 同款：workdir 是显式选择）
-            workspace_trusted: workdir.is_some(),
-            working_directory: workdir.map(PathBuf::from),
-            // 无人值守：扩展 UI 请求没有前端卡片可答 → 不挂 handler，
-            // pi 走上游 fail-closed（能力提示直接 deny）。这是**有意的**：
-            // 挂一个假 handler 会让 run 永久挂起等一个不存在的用户。
-            extension_ui_handler: None,
-            persist_extension_permissions: false,
-            ..pi::sdk::SessionOptions::default()
-        };
-
-        let handle = runtime
-            .block_on(async { pi::sdk::create_agent_session(options).await })
-            .map_err(|e| format!("cron 会话创建失败: {e}"))?;
 
         // 不活动看门狗：run 在独立线程上，主线程按 WATCHDOG_POLL_SECS
         // 轮询。超时 = 报错（不假装成功）。
         let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
-        let mut handle = handle;
         std::thread::Builder::new()
             .name("cron-run".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                let (_abort_handle, abort_signal) = pi::sdk::AgentSessionHandle::new_abort_handle();
                 let out = runtime.block_on(async {
-                    // prompt_with_abort 在 AgentSessionHandle 上（recovery.rs:314
-                    // 的 impl AgentSessionHandle），不是 session_mut() 的 AgentSession
-                    let msg = handle
-                        .prompt_with_abort(prompt.as_str(), abort_signal, |_ev| {})
+                    // 作业级 provider/model 是用户建作业时的明确选择；
+                    // 没给就走 rpi 默认解析（settings + 内置目录）。
+                    let resolved = rpi_cli::provider::resolve(
+                        provider.as_deref(),
+                        model.as_deref(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .map_err(|e| format!("cron 模型解析失败: {e}"))?;
+                    let cwd = workdir
+                        .clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        });
+                    // cron run 是无人值守的：工作区信任 = 用户建作业时给了
+                    // workdir 就等于信任那个目录（hermes 同款：workdir 是显式选择）
+                    let trusted = workdir.is_some();
+
+                    let mut args = rpi_cli::args::Args::default();
+                    args.session_id = Some(session_id);
+                    args.session_dir = Some(session_dir);
+                    let (harness, mut events, _reload) =
+                        rpi_cli::session::build(&resolved, &args, &cwd, trusted)
+                            .await
+                            .map_err(|e| format!("cron 会话创建失败: {e}"))?;
+
+                    // 排水任务：抓**最后一条** assistant 消息（TurnEnd.message =
+                    // 每轮的 assistant 回复；最后一轮就是整轮的最终响应）。
+                    // prompt_text await 到整轮结束，之后 sender 关闭、任务退出。
+                    let drain = tokio::spawn(async move {
+                        let mut last: Option<rpi_ai::types::AssistantMessage> = None;
+                        while let Ok(ev) = events.recv().await {
+                            if let AgentEvent::TurnEnd { message, .. } = ev {
+                                if let Some(a) = message.as_assistant() {
+                                    last = Some(a.clone());
+                                }
+                            }
+                        }
+                        last
+                    });
+
+                    let result = AgentLane::prompt_text(&harness, &prompt, Vec::new()).await;
+                    // 尾部事件泵完再返回（最终 TurnEnd 已在流里）；排水任务
+                    // panic = 失败可见，不吞
+                    let last = drain
                         .await
-                        .map_err(|e| format!("cron run 失败: {e}"))?;
-                    // flush 落盘（不 flush 则会话文件不进索引）
-                    if let Err(e) = handle.session_mut().save_and_index().await {
-                        // flush 失败不掩盖 run 结果（下一次 flush 会补救），
-                        // 但必须可见
-                        eprintln!("[cron] 会话落盘失败: {e}");
+                        .map_err(|e| format!("cron 事件排水失败: {e}"))?;
+                    result.map_err(|e| format!("cron run 失败: {e}"))?;
+                    // 落盘由 rpi durable session 自管（jsonl 逐条落盘），
+                    // 无旧 pi 的 save_and_index 手动钩子。
+                    match last {
+                        Some(msg) => Ok(assistant_text(&msg)),
+                        None => Err("cron run 未收到 assistant 消息".into()),
                     }
-                    Ok::<String, String>(assistant_text(&msg))
                 });
                 let _ = tx.send(out);
             })
@@ -1250,22 +1291,15 @@ fn run_in_session(job: &Job, prompt: &str, session_path: &Path) -> Result<String
     })?
 }
 
-/// 从 `AssistantMessage` 取纯文本（跳过 thinking / tool_call 块）。
-fn assistant_text(msg: &pi::model::AssistantMessage) -> String {
-    let mut out = String::new();
-    for block in &msg.content {
-        if let pi::model::ContentBlock::Text(t) = block {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&t.text);
-        }
-    }
+/// 从 rpi 的 `AssistantMessage` 取纯文本（`Content::text_only`——上游同款
+/// 提取：跳过 thinking / tool_call / image 块）。
+fn assistant_text(msg: &rpi_ai::types::AssistantMessage) -> String {
+    let out = rpi_ai::types::Content::text_only(&msg.content, "\n");
     if let Some(err) = &msg.error_message {
         if out.is_empty() {
             return format!("**Provider 错误：** {err}");
         }
-        out.push_str(&format!("\n\n**Provider 错误：** {err}"));
+        return format!("{out}\n\n**Provider 错误：** {err}");
     }
     out
 }
@@ -3311,7 +3345,7 @@ mod tests {
             assert_eq!(rows[0].id, "e1");
 
             // 模拟崩溃写的半行：必须跳过（追加式日志的合法尾部形态）
-            let path = executions_path();
+            let path = executions_path().unwrap();
             let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
             f.write_all(b"{\"id\":\"torn\",\"job_id\":\"j1\"").unwrap();
             drop(f);

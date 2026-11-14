@@ -18,27 +18,23 @@ tauri-runtime-wry = "3.0.0-alpha.4"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 
-# pi SDK 集成（docs/pi-integration.md §7-1）：vendored 副本（src-tauri/vendor/，
-# 白名单拷贝自上游 zip 解包目录：src/examples/benches/themes + build.rs 嵌入资源，
-# 上游 265MB→vendor ~48MB）。上游真源在 G:\pi_agent_rust-main（未进 git，已镜像
-# v0.8.0），同步上游时重拷白名单并**重打 2 个脱敏补丁**（GitHub push protection；
-# 见 AGENTS.md「pi 升级」段：src/auth.rs OAuth 元数据 4 处 + src/secrets.rs
-# 测试假密钥 2 处 → MIRACH-VENDOR-REDACTED）。旧 session_index.rs .read(true)
-# 补丁已退休（v0.6.0 上游修复，gh #239）。
-# default-features=false 去 TUI 栈；nightly 钉版见 rust-toolchain.toml
-pi = { package = "pi_agent_rust", path = "vendor/pi_agent_rust", default-features = false, features = ["sqlite-sessions"] }
-# rpi-main 引擎（2026-11-14 竖链移植：核心对话链换 rpi 工作区，cron 暂留 vendored pi）
+# pi SDK 集成（2026-11-14 单引擎定稿）：pi_agent_rust vendored 依赖与
+# vendor/ 目录已整体删除（历史存档 = git df701a4 前后各提交；上游真源
+# G:\pi_agent_rust-main 未进 git）。同步上游的脱敏补丁、session_index.rs
+# .read(true) 补丁随之一并退休（v0.6.0 上游已修 gh #239）。
+# 引擎 = rpi-main 工作区（路径依赖，无 nightly 钉版需求）
 rpi-cli = { path = "../../pi-rust-main/crates/rpi-cli" }
 rpi-agent = { path = "../../pi-rust-main/crates/rpi-agent" }
 rpi-ai = { path = "../../pi-rust-main/crates/rpi-ai" }
 rpi-harness = { path = "../../pi-rust-main/crates/rpi-harness" }
-asupersync = "0.5"
+rpi-tools = { path = "../../pi-rust-main/crates/rpi-tools" }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["sync", "time", "net", "macros"] }
 serde_json = "1"
 tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # ExtensionUiHandler 是 #[async_trait] trait（pi extension_dispatcher），
 # impl 侧必须同宏展开签名（E0195 实证）

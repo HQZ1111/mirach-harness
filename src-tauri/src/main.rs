@@ -12,6 +12,7 @@ mod fs;
 // pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
 mod pi_session;
 mod agui;
+mod pi_paths;
 
 // pi 设置页配置面（docs/pi-integration.md §7-7/§4.5）：settings/models/
 // auth 三个配置文件的读改命令——配置真相 = pi 自己的配置文件（§5）
@@ -1223,18 +1224,13 @@ fn pi_ask_pending(
     Ok(serde_json::Value::Array(state.asks.list()))
 }
 
-/// 应答 ask 问题（回灌 pi `AskTool::respond_ui`）。answers 为空 +
-/// dismissed=true = 用户关掉卡片。应答未送达 = Err（不静默成功）。
+/// 应答 ask 问题（竖链移植降级：rpi 无 ask 工具——如实 Err）。
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_ask_response(
-    state: tauri::State<std::sync::Arc<agui::AguiState>>,
-    id: String,
-    answers: Vec<pi::ask::AskAnswer>,
-    dismissed: bool,
+    _state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    _id: String,
 ) -> Result<(), String> {
-    state
-        .asks
-        .respond(&id, pi::ask::AskResponse { answers, dismissed })
+    Err("rpi 引擎待接：ask 工具".into())
 }
 
 /// 子代理 transcript（活动面板 TaskCard 展开）：pi `transcript_page`。

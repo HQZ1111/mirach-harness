@@ -73,9 +73,12 @@ pub(crate) fn on_big_stack<T: Send + 'static>(
 }
 
 // ── UiBridgeHandle（形状不变——agui.rs/main.rs 继续构造传递）────────────────
+// rpi 迁移后字段暂无读取方：事件转发（broadcast → ThreadBuffers）与审批桥
+// 待 rpi 面接回，形状保留。
 // rpi 阶段 1 引擎不消费它（审批桥下一轮经 before_tool_call 接回），参数
 // 保留以保调用点签名。
 
+#[allow(dead_code)] // 字段暂无读取方——事件转发/审批桥待 rpi 面接回
 pub struct UiBridgeHandle {
     pub buffers: Arc<Mutex<ThreadBuffers>>,
     pub approvals: Arc<ApprovalRegistry>,
@@ -101,6 +104,14 @@ impl PiRuntime {
     pub fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
         self.rt.block_on(fut)
     }
+}
+
+/// 共享的**资源列举**运行时（skills/prompts 装载用——pi_capabilities /
+/// pi_resources 的 UI 列举调用，与 PiEngine 的会话运行时分开，避免锁耦合；
+/// tokio Runtime 本身 Send + Sync）。
+pub(crate) fn list_runtime() -> &'static PiRuntime {
+    static RT: std::sync::OnceLock<PiRuntime> = std::sync::OnceLock::new();
+    RT.get_or_init(PiRuntime::new)
 }
 
 // ── 引擎 ────────────────────────────────────────────────────────────────────
@@ -625,11 +636,8 @@ impl PiEngine {
         Err(Self::unavailable("分栏中断（rpi 非 main lane 只读）"))
     }
 
-    // ── flush（旧调用点兼容——rpi 每轮落盘，无需 flush）────────────────────
+    // ── flush（旧调用点兼容）──────────────────────────────────────────────
 
-    /// 旧链路的 flush 调用点（usage/list 前 flush）——rpi 每轮已持久化，
-    /// 无操作保留签名。
-    fn flush_active_session(&self) -> Result<(), String> {
-        Ok(())
-    }
+    // rpi 的 durable session 逐条落盘，旧链路的 flush_active_session 无操作
+    // 且已无调用点——随 pi_agent_rust 删除轮一并移除。
 }

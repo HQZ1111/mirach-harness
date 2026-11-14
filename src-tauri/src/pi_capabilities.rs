@@ -6,53 +6,91 @@
 //! 其数据面是 REST（`/api/skills`、`/api/tools/toolsets`）。宿主把同一套
 //! 视图搬过来，数据面换成 IPC。
 //!
-//! ## 与 pi 的关系（先查事实，再动手）
+//! ## 与引擎（rpi）的关系（先查事实，再动手）
 //!
-//! - **技能**：pi 从 `<global_dir>/skills/*/SKILL.md`、项目 `.pi/skills`、
-//!   packages、以及 settings.json 的 `skills` 显式路径装载
-//!   （`resources.rs:load_skills`）。pi **没有**"技能开关"概念——它只有
+//! - **技能**：rpi 从 `~/.rpi/agent/skills`、项目 `.rpi/skills` 装载
+//!   （rpi-harness `skills::load_skills`）。rpi **没有**"技能开关"概念——它只有
 //!   `disable_model_invocation`（frontmatter，隐藏单个技能不让模型看到）。
-//!   所以"启用/禁用"由宿主实现：禁用集存 `~/.pi/agent/harness-skills.json`
-//!   （不进 settings.json——那是 pi 的 schema，塞私有键会被它忽略但污染
+//!   所以"启用/禁用"由宿主实现：禁用集存 `~/.rpi/agent/harness-capabilities.json`
+//!   （不进 settings.json——那是 rpi 的 schema，塞私有键会被它忽略但污染
 //!   用户配置），装载后过滤 + 重算系统提示。
-//! - **工具集**：pi 没有 toolset 概念，只有 `KNOWN_TOOL_NAMES`
-//!   （`tools.rs:5607`）与 `--tools` 选择。宿主的 toolset = **按语义把 pi
-//!   的内置工具分组**（file / search / edit / shell / web / code-intel /
-//!   media / plan / memory），组的启停映射到 `SessionOptions.enabled_tools`。
-//!   分组表是本文件里的常量，与 pi 的工具清单一一对应——`tools.rs` 加新
-//!   工具时这里要同步（有测试守着：每个 pi 工具必须落在某个组里）。
+//! - **工具集**：rpi 没有 toolset 概念，只有内置工具面
+//!   （`rpi_cli::session::BUILTIN_TOOL_NAMES`）与 `--tools` 选择。宿主的
+//!   toolset = **按语义把引擎工具分组**（file / search / edit / shell /
+//!   web / code-intel / media / plan / memory），分组表是本文件里的常量
+//!   （hermes 时代的形状保留）——引擎加新工具时这里要同步（有测试守着：
+//!   每个引擎内置工具必须落在某个组里）。
 //!
 //! ## 为什么技能提示由宿主渲染
 //!
-//! pi 的 `SessionOptions.skills_prompt` 是**宿主提供的字符串**
-//! （`sdk.rs:399`，ACP 路径同样由调用方渲染，见 `acp.rs:1825`）。pi 自己
-//! 不会去扫 skills 目录拼系统提示。所以宿主必须：
-//! 1. 用 `pi::resources::load_skills` 装载（loader 语义零漂移）；
+//! rpi 的资源注入是**宿主提供的字符串**（AgentHarnessResources.system_prompt
+//! / skills）。引擎自己不会按宿主的开关状态扫 skills 目录拼系统提示。所以
+//! 宿主必须：
+//! 1. 用 rpi-harness `skills::load_skills` 装载（loader 语义零漂移）；
 //! 2. 按禁用集过滤；
-//! 3. `pi::resources::format_skills_for_prompt` 渲染成 `<available_skills>`；
-//! 4. 建会话时喂 `SessionOptions.skills_prompt`。
+//! 3. `skills::format_skills_for_system_prompt` 渲染成 `<available_skills>`；
+//! 4. 建会话时注入。
 //!
-//! 这也是"技能开关"能真正生效的唯一位置——pi 侧无此概念。
+//! 这也是"技能开关"能真正生效的唯一位置——rpi 侧无此概念。
 //!
 //! ## 纪律
 //!
 //! 错误一律传播（规矩 12）：读配置失败、写文件失败、名字非法都不吞。
-//! 技能名走 pi 自己的校验器（`resources::validate_name`），与 loader 同源。
+//! 技能名走 rpi 自己的校验器（rpi-harness `skills::validate_name`，pub(crate)
+//! 宿主拿不到，本文件按同一规则复刻），与 loader 同源。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use pi::config::Config;
+use rpi_harness::skills::{self, LoadSkillsResult};
+use rpi_tools::os_env::OsExecutionEnv;
 
-use crate::pi_session::on_big_stack;
+use crate::pi_paths;
+use crate::pi_session::{list_runtime, on_big_stack};
+
+/// 技能装载所需的 ExecutionEnv（rpi-harness skills.rs 的 env 参数）。
+fn skills_env() -> Arc<dyn rpi_tools::ExecutionEnv> {
+    Arc::new(OsExecutionEnv::with_cwd(std::env::current_dir().unwrap_or_else(
+        |_| PathBuf::from("."),
+    )))
+}
+
+/// 技能目录集（workspace skills + global skills）。
+fn skill_dirs() -> Result<Vec<String>, String> {
+    let mut dirs = Vec::new();
+    // 项目级 .rpi/skills
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join(".rpi").join("skills").to_string_lossy().to_string());
+    }
+    // 全局 ~/.rpi/agent/skills
+    dirs.push(
+        pi_paths::agent_dir()?
+            .join("skills")
+            .to_string_lossy()
+            .to_string(),
+    );
+    Ok(dirs)
+}
+
+/// 技能装载（rpi-harness load_skills——语义与旧 pi::resources 同名同职责）。
+/// rpi 的 loader 是 async（tokio::fs 底座）——经共享列举运行时 block_on。
+fn load_all_skills() -> Result<LoadSkillsResult, String> {
+    let env = skills_env();
+    let dirs = skill_dirs()?;
+    Ok(list_runtime()
+        .block_on(async { skills::load_skills(&env, &dirs).await }))
+}
+
+/// 宿主侧的技能禁用集 / 工具集启用集的落点。
 
 /// 宿主侧的技能禁用集 / 工具集启用集的落点。
 ///
-/// **不放 settings.json**：那是 pi 的 schema（`Config` 是 `#[serde(default)]`
-/// 的强类型结构，塞私有键会被忽略，但会污染用户的配置文件、也会在 pi 版本
-/// 升级时被它的写回覆盖）。放同目录的独立文件，与 `harness-*` 前缀对齐。
-fn harness_prefs_path() -> PathBuf {
-    Config::global_dir().join("harness-capabilities.json")
+/// **不放 settings.json**：那是 rpi 的 schema（强类型结构，塞私有键会被
+/// 忽略，但会污染用户的配置文件、也会在 rpi 版本升级时被它的写回覆盖）。
+/// 放 `~/.rpi/agent/` 同目录的独立文件，与 `harness-*` 前缀对齐。
+fn harness_prefs_path() -> Result<PathBuf, String> {
+    Ok(pi_paths::agent_dir()?.join("harness-capabilities.json"))
 }
 
 /// 技能禁用集 + 工具集开关（`harness-capabilities.json` 的形状）。
@@ -81,6 +119,11 @@ pub struct CapabilityPrefs {
 
 impl CapabilityPrefs {
     /// 工具集当前是否启用（见类型注释的语义式）。
+    ///
+    /// rpi 迁移注记：工具过滤尚未接线到 rpi 会话（build 不再收
+    /// enabled_tools）——开关落盘照常，接线后由 session_enabled_tools /
+    /// enabled_tools_for 消费。
+    #[allow(dead_code)] // session_enabled_tools 链待 rpi 工具过滤接线
     fn toolset_enabled(&self, key: &str) -> bool {
         if self.enabled_toolsets.iter().any(|k| k == key) {
             return true;
@@ -89,10 +132,12 @@ impl CapabilityPrefs {
             && !self.disabled_toolsets.iter().any(|k| k == key)
     }
 
-    /// 当前会话应传给 pi 的 `enabled_tools`。
+    /// 当前会话应传给引擎的 `enabled_tools`。
     ///
     /// `None` = 用户没动过任何开关（禁用集与显式启用集都空）——此时不传，
-    /// 让 pi 用自己的默认集（pi 升级加了新默认工具时自动跟上）。
+    /// 让引擎用自己的默认集（引擎升级加了新默认工具时自动跟上）。
+    /// rpi 迁移后暂无调用方（工具过滤未接线），接线点保留。
+    #[allow(dead_code)]
     fn session_enabled_tools(&self) -> Option<Vec<String>> {
         if self.disabled_toolsets.is_empty() && self.enabled_toolsets.is_empty() {
             return None;
@@ -109,7 +154,7 @@ impl CapabilityPrefs {
 }
 
 fn read_prefs() -> Result<CapabilityPrefs, String> {
-    let path = harness_prefs_path();
+    let path = harness_prefs_path()?;
     match std::fs::read_to_string(&path) {
         Ok(raw) if raw.trim().is_empty() => Ok(CapabilityPrefs::default()),
         Ok(raw) => serde_json::from_str(&raw)
@@ -120,7 +165,7 @@ fn read_prefs() -> Result<CapabilityPrefs, String> {
 }
 
 fn write_prefs(prefs: &CapabilityPrefs) -> Result<(), String> {
-    let path = harness_prefs_path();
+    let path = harness_prefs_path()?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("能力偏好目录创建失败 {}: {e}", parent.display()))?;
@@ -163,8 +208,8 @@ pub const TOOLSETS: &[ToolsetDef] = &[
     ToolsetDef {
         key: "file",
         label: "文件",
-        description: "读写文件、列目录、按 glob 找文件",
-        tools: &["read", "write", "ls", "find"],
+        description: "读写文件、列目录、按 glob 找文件、查官方文档",
+        tools: &["read", "write", "ls", "find", "docs"],
     },
     ToolsetDef {
         key: "edit",
@@ -264,12 +309,17 @@ pub const TOOLSETS: &[ToolsetDef] = &[
     },
 ];
 
-/// pi CLI 的默认工具集（`cli.rs:538` 的 `default_value`，逐字）。
+/// 默认工具集（hermes/旧 pi CLI 默认的超集形状保留 + rpi 的 `docs`）。
+///
+/// rpi 引擎自身的默认 = `BUILTIN_TOOL_NAMES`（read/bash/edit/write/docs）；
+/// 工具过滤接线到 rpi 之前，此表只驱动 **UI 默认组开关**
+/// （`default_enabled_toolsets`），不影响引擎实际工具面。
 pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
     "read",
     "bash",
     "edit",
     "write",
+    "docs",
     "grep",
     "find",
     "ls",
@@ -294,8 +344,10 @@ pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
 /// pi 的默认集；其余组（memory/media/browser/computer/github/python/
 /// security/skills）默认关闭，开启后其工具名才进列表。
 ///
-/// 顺序按 `TOOLSETS` 声明序 + 组内声明序（pi 的 `enabled_tools` 是
+/// 顺序按 `TOOLSETS` 声明序 + 组内声明序（`enabled_tools` 是
 /// `Vec<&str>`，顺序不影响语义，但稳定序便于日志比对）。
+/// rpi 迁移后 bin 构建暂无调用方（工具过滤未接线；测试仍消费），接线点保留。
+#[allow(dead_code)]
 pub fn enabled_tools_for(enabled_keys: &BTreeSet<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for toolset in TOOLSETS {
@@ -320,11 +372,13 @@ pub fn default_enabled_toolsets() -> BTreeSet<String> {
         .collect()
 }
 
-/// 会话创建用：当前应传给 `SessionOptions.enabled_tools` 的工具名。
+/// 会话创建用：当前应传给引擎 `enabled_tools` 的工具名。
 ///
 /// 委托给 `CapabilityPrefs::session_enabled_tools`（双向语义：禁用集 +
 /// 显式启用集）。`None` = 用户没动过任何开关——**不传比传一份算出来的
-/// 列表更安全**：pi 升级加了新默认工具时，不传能自动拿到。
+/// 列表更安全**：引擎升级加了新默认工具时，不传能自动拿到。
+/// rpi 迁移后暂无调用方（工具过滤未接线），接线点保留。
+#[allow(dead_code)]
 pub(crate) fn enabled_tools_for_session() -> Result<Option<Vec<String>>, String> {
     let prefs = read_prefs()?;
     Ok(prefs.session_enabled_tools())
@@ -380,53 +434,33 @@ fn validate_skill_description(description: &str) -> Vec<String> {
     errors
 }
 
-/// 技能目录（`<global_dir>/skills`；项目级 `.pi/skills` 由 loader 自己加）。
+/// 技能目录（`<agent_dir>/skills`；项目级 `.rpi/skills` 由 loader 自己加）。
 fn global_skills_dir() -> PathBuf {
-    Config::global_dir().join("skills")
+    pi_paths::agent_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("skills")
 }
 
-/// 一个技能行（hermes `SkillInfo` 的宿主对应物：name/description/enabled/
-/// category/source/path）。
-fn skill_rows(loaded: &pi::resources::LoadSkillsResult, disabled: &[String]) -> Vec<serde_json::Value> {
+/// 一个技能行（rpi Skill 的宿主投影：name/description/enabled/path）。
+/// rpi Skill 无 source 字段——source 从 file_path 推导。
+fn skill_rows(loaded: &LoadSkillsResult, disabled: &[String]) -> Vec<serde_json::Value> {
     loaded
         .skills
         .iter()
         .map(|s| {
             let is_disabled = disabled.iter().any(|d| d.eq_ignore_ascii_case(&s.name));
+            let source = if s.file_path.contains(".rpi") { "global" } else { "project" };
             serde_json::json!({
                 "name": s.name,
                 "description": s.description,
-                "path": s.file_path.display().to_string(),
-                "source": s.source,
+                "path": s.file_path,
+                "source": source,
                 "enabled": !is_disabled,
-                // hermes 的 category 来自技能目录层级；pi 的 source 是
-                // "user"/"project"/"package:<name>"，没有 category 概念。
-                // 这里用 source 当分类（诚实：不编造一个 pi 没有的维度）。
-                "category": s.source,
+                "category": source,
                 "disableModelInvocation": s.disable_model_invocation,
             })
         })
         .collect()
-}
-
-fn load_all_skills() -> Result<pi::resources::LoadSkillsResult, String> {
-    let config = Config::load().map_err(|e| format!("pi 配置读取失败: {e}"))?;
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let skill_paths: Vec<PathBuf> = config
-        .skills
-        .clone()
-        .unwrap_or_default()
-        .iter()
-        .map(PathBuf::from)
-        .collect();
-    Ok(pi::resources::load_skills(
-        pi::resources::LoadSkillsOptions {
-            cwd,
-            agent_dir: Config::global_dir(),
-            skill_paths,
-            include_defaults: true,
-        },
-    ))
 }
 
 /// 技能 + 工具集的完整快照（页面首屏一次拉全，与 hermes 的
@@ -462,15 +496,15 @@ pub fn pi_capabilities() -> Result<serde_json::Value, String> {
             .iter()
             .map(|d| {
                 serde_json::json!({
-                    "kind": format!("{:?}", d.kind),
-                    "message": d.message,
-                    "path": d.path.display().to_string(),
+                    "kind": d.code.as_str(),
+                    "message": d.message.clone(),
+                    "path": d.path.clone(),
                 })
             })
             .collect();
 
         Ok(serde_json::json!({
-            "agentDir": Config::global_dir().display().to_string(),
+            "agentDir": pi_paths::agent_dir()?.display().to_string(),
             "skillsDir": global_skills_dir().display().to_string(),
             "skills": skills,
             "toolsets": toolsets,
@@ -531,12 +565,13 @@ pub fn pi_read_skill(name: String) -> Result<serde_json::Value, String> {
             .find(|s| s.name == name)
             .ok_or_else(|| format!("找不到技能：{name}"))?;
         let contents = std::fs::read_to_string(&skill.file_path)
-            .map_err(|e| format!("技能文件读取失败 {}: {e}", skill.file_path.display()))?;
+            .map_err(|e| format!("技能文件读取失败 {}: {e}", skill.file_path))?;
+        let source = if skill.file_path.contains(".rpi") { "global" } else { "project" };
         Ok(serde_json::json!({
             "name": skill.name,
             "description": skill.description,
-            "path": skill.file_path.display().to_string(),
-            "source": skill.source,
+            "path": skill.file_path,
+            "source": source,
             "contents": contents,
         }))
     })?
@@ -612,10 +647,12 @@ pub fn pi_validate_skill(name: String, description: String) -> serde_json::Value
 ///
 /// 返回 `Ok(None)` = 没有可见技能（不注入空块）；读配置/装载失败一律 Err
 /// （用户以为技能生效了、实际没生效，比报错难查得多）。
+/// rpi 迁移后暂无调用方——注入点（rpi AgentHarnessResources 组装）待接回。
+#[allow(dead_code)]
 pub(crate) fn skills_prompt_for_session() -> Result<Option<String>, String> {
     let prefs = read_prefs()?;
     let loaded = load_all_skills()?;
-    let visible: Vec<pi::resources::Skill> = loaded
+    let visible: Vec<rpi_harness::types::Skill> = loaded
         .skills
         .into_iter()
         .filter(|s| !prefs.disabled_skills.iter().any(|d| d.eq_ignore_ascii_case(&s.name)))
@@ -623,7 +660,7 @@ pub(crate) fn skills_prompt_for_session() -> Result<Option<String>, String> {
     if visible.is_empty() {
         return Ok(None);
     }
-    let block = pi::resources::format_skills_for_prompt(&visible);
+    let block = skills::format_skills_for_system_prompt(&visible);
     Ok(if block.trim().is_empty() { None } else { Some(block) })
 }
 
@@ -640,7 +677,7 @@ pub(crate) fn load_skills_for_prompt(names: &[String]) -> Result<String, String>
         return Ok(String::new());
     }
     let loaded = load_all_skills()?;
-    let mut picked: Vec<pi::resources::Skill> = Vec::new();
+    let mut picked: Vec<rpi_harness::types::Skill> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     for name in names {
         match loaded
@@ -658,34 +695,36 @@ pub(crate) fn load_skills_for_prompt(names: &[String]) -> Result<String, String>
             missing.join("、")
         ));
     }
-    Ok(pi::resources::format_skills_for_prompt(&picked))
+    Ok(skills::format_skills_for_system_prompt(&picked))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 不变量：pi 的每个已知工具都必须落在某个工具集里。
+    /// 不变量：rpi 引擎的内置工具都必须落在某个工具集里。
     ///
-    /// `tools.rs:KNOWN_TOOL_NAMES` 加新工具而这里漏掉 → 那个工具在 UI 里
-    /// 既不能开也不能关（永远按 pi 默认走），用户会以为"开关坏了"。
+    /// `rpi-cli::session::BUILTIN_TOOL_NAMES` 加新工具而这里漏掉 → 那个
+    /// 工具在 UI 里既不能开也不能关（永远按引擎默认走），用户会以为
+    /// "开关坏了"。
     #[test]
-    fn every_pi_tool_belongs_to_a_toolset() {
+    fn every_engine_tool_belongs_to_a_toolset() {
         let covered: BTreeSet<&str> = TOOLSETS
             .iter()
             .flat_map(|ts| ts.tools.iter().copied())
             .collect();
-        for name in pi::tools::ToolRegistry::KNOWN_TOOL_NAMES {
+        for name in rpi_cli::session::BUILTIN_TOOL_NAMES {
             assert!(
                 covered.contains(name),
-                "pi 工具 `{name}` 没有归属任何工具集——请在 TOOLSETS 里登记"
+                "rpi 内置工具 `{name}` 没有归属任何工具集——请在 TOOLSETS 里登记"
             );
         }
     }
 
-    /// 默认工具集必须精确覆盖 pi CLI 的默认 `--tools`（`cli.rs:538`）。
+    /// 默认工具集必须精确覆盖 [`DEFAULT_ENABLED_TOOLS`]（表内一致性）。
     ///
-    /// 多一个 = 用户没开就拿到了额外能力；少一个 = pi 的默认能力被静默砍掉。
+    /// 多一个 = 工具集并集里混进了默认不开的工具；少一个 = 默认能力在
+    /// UI 组开关层被静默砍掉。
     #[test]
     fn default_toolsets_match_pi_cli_default() {
         let enabled = enabled_tools_for(&default_enabled_toolsets());

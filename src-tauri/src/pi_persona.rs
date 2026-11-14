@@ -64,7 +64,9 @@ const DEFAULT_SOUL: &str = "# Mirach\n\nYou are Mirach, the user's AI teammate o
 /// 用 pi 自己的 `Config::global_dir()` 而不是手拼 `~/.pi/agent`——`PI_CODING_
 /// AGENT_DIR` 覆盖时两者会分叉，而会话注入读的是前者。
 fn persona_file_path() -> PathBuf {
-    pi::config::Config::global_dir().join(PERSONA_FILE_SOUL)
+    crate::pi_paths::agent_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(PERSONA_FILE_SOUL)
 }
 
 /// 读出的个性文件（形状对齐上游 `WorkspaceFile`：filename/contents/is_default）。
@@ -156,6 +158,8 @@ pub fn pi_persona_reset() -> Result<serde_json::Value, String> {
 /// **读不到 = 不注入**（返回 Ok(None)）：文件不存在是正常态（用户从没打开过
 /// 个性页），不是错误；但读取失败（权限/IO）必须传播——那才是真错误。
 /// 内容为空（用户清空了 SOUL.md）同样视为"不注入"。
+/// rpi 迁移后暂无调用方——注入点（system_prompt 组装）待 rpi 资源面接回。
+#[allow(dead_code)]
 pub(crate) fn persona_prompt_for_session() -> Result<Option<String>, String> {
     let path = persona_file_path();
     match std::fs::read_to_string(&path) {

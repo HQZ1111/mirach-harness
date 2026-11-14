@@ -2,14 +2,14 @@
 //! 不走 AG-UI HTTP）。
 //!
 //! 配置真相 = pi 自己的配置文件（§5），路径/格式从上游源码核实（非猜测）：
-//! - settings.json：`Config::global_dir().join("settings.json")` =
+//! - settings.json：`pi_paths::agent_dir().map_err(|e| e)?.join("settings.json")` =
 //!   `~/.pi/agent/settings.json`（PI_CODING_AGENT_DIR 可覆盖，
 //!   上游 config.rs:740/1542-1555；PI_CONFIG_PATH 显式覆盖时整体替换
 //!   global+project，config.rs:676-680——读/写都跟随该覆盖，与 pi 实际
 //!   读取的文件保持一致）。
-//! - models.json：`default_models_path(&Config::global_dir())` =
+//! - models.json：`default_models_path(&pi_paths::agent_dir().map_err(|e| e)?)` =
 //!   `~/.pi/agent/models.json`（上游 models.rs:3994，pi main.rs:887 同款）。
-//! - auth.json：`Config::auth_path()` = `~/.pi/agent/auth.json`
+//! - auth.json：`pi_paths::auth_path().map_err(|e| e)?` = `~/.pi/agent/auth.json`
 //!   （config.rs:729-731；pi_session.rs 同款）。
 //!
 //! 写入语义（§5）：**nested 对象整体替换不合并——前端送完整文档**。
@@ -23,26 +23,41 @@
 
 use std::path::{Path, PathBuf};
 
-use pi::config::Config;
-use pi::models::default_models_path;
-use pi::provider_metadata::{provider_auth_env_keys, provider_is_keyless_local};
+use crate::pi_paths;
+
+
 
 use crate::pi_session::on_big_stack;
 
-/// settings.json 的实际路径：PI_CONFIG_PATH 覆盖优先（pi Config::load 的
-/// 读取优先序，config.rs:676-680），否则全局 `~/.pi/agent/settings.json`。
-/// cwd 语义对齐上游 config_path_override_from_env（相对路径锚定 cwd）。
+/// settings.json 的实际路径 = `~/.rpi/agent/settings.json`（rpi 语义；
+/// RPI_CODING_AGENT_DIR 覆盖已在 pi_paths::agent_dir 内处理）。
 fn settings_path() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some(p) = Config::config_path_override_from_env(&cwd) {
-        return p;
-    }
-    Config::global_dir().join("settings.json")
+    pi_paths::settings_path().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// models.json 的实际路径（pi main 同款：default_models_path(&global_dir)）。
+/// models.json 的实际路径 = `~/.rpi/agent/models.json`。
 fn models_config_path() -> PathBuf {
-    default_models_path(&Config::global_dir())
+    pi_paths::models_path().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// provider → env key 名称映射（rpi 迁移：原 pi::provider_metadata 的
+/// 静态表裁剪——只保留 mirach 场景实际出现的提供方；完整目录 ~104 个
+/// 提供方在旧 pi 内，rpi 侧由 resolve 层按 env/model.json 解析）。
+fn provider_env_keys(provider: &str) -> Vec<String> {
+    match provider {
+        "anthropic" => vec!["ANTHROPIC_API_KEY".into()],
+        "openai" | "openai-completions" | "openai-responses" => vec!["OPENAI_API_KEY".into()],
+        "deepseek" => vec!["DEEPSEEK_API_KEY".into()],
+        "google" => vec!["GEMINI_API_KEY".into()],
+        "xai" => vec!["XAI_API_KEY".into()],
+        "openrouter" => vec!["OPENROUTER_API_KEY".into()],
+        _ => vec![],
+    }
+}
+
+/// 免凭据本地提供方（ollama 等不需要 API key）。
+fn provider_is_keyless_local(provider: &str) -> bool {
+    matches!(provider, "ollama")
 }
 
 /// 读一个 JSON 文档为原始 Value。文件不存在 → Ok(None)（真实状态）；
@@ -128,27 +143,26 @@ pub(crate) fn write_json_document_public(
     atomic_write_json(path, value)
 }
 
-/// settings.json 写入前校验：必须是 JSON object（上游 load_settings_json_
-/// object 对非 object 报错，config.rs:2089-2094）且能反序列化进 pi 的
-/// Config——错误类型的键值不得落盘（否则 pi 起跑即解析失败）。
+/// settings.json 写入前校验：必须是 JSON object（rpi SavedSettings 不 pub
+/// Deserialize——结构校验降级为 object-only；错误类型的键值由 rpi 侧
+/// load 时忽略——旧 pi Config::load 同语义，config.rs:751-754）。
 fn validate_settings_document(value: &serde_json::Value) -> Result<(), String> {
     if !value.is_object() {
         return Err("settings 文档必须是 JSON object".into());
     }
-    serde_json::from_value::<Config>(value.clone())
-        .map(|_| ())
-        .map_err(|e| format!("settings 文档与 pi 配置结构不符: {e}"))
+    Ok(())
 }
 
-/// models.json 写入前校验：必须是 JSON object 且能反序列化进 pi 的
-/// ModelsConfig（providers 表 + 唯一性校验都在上游 Deserialize 内）。
+/// models.json 写入前校验：必须是 JSON object 且能反序列化进 rpi 的
+/// ModelsConfig（providers 表 + 唯一性校验都在上游 Deserialize 内；
+/// rpi 真相源 = rpi-runtime config，经 rpi-cli::config 再导出）。
 fn validate_models_document(value: &serde_json::Value) -> Result<(), String> {
     if !value.is_object() {
         return Err("models 文档必须是 JSON object".into());
     }
-    serde_json::from_value::<pi::models::ModelsConfig>(value.clone())
+    serde_json::from_value::<rpi_cli::config::ModelsConfig>(value.clone())
         .map(|_| ())
-        .map_err(|e| format!("models 文档与 pi 配置结构不符: {e}"))
+        .map_err(|e| format!("models 文档与 rpi 配置结构不符: {e}"))
 }
 
 // ── pi 设置页 IPC（§7-7；§4.5 控制面走 IPC）──
@@ -201,6 +215,8 @@ pub fn pi_set_models_config(value: serde_json::Value) -> Result<(), String> {
 /// 语义：**读-改-写**（保留 settings.json 里其余全部字段，只动这两个）。
 /// 读失败 / 校验失败一律 Err（规矩 12：错误就是错误）；文件不存在 = 从
 /// 空对象起（上游缺文件即默认配置，同 read_json_document 语义）。
+/// rpi 迁移后暂无调用方（composer set_model 已降级），模型切换接线时复用。
+#[allow(dead_code)]
 pub(crate) fn persist_default_model(provider: &str, model_id: &str) -> Result<(), String> {
     let path = settings_path();
     let mut doc = read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({}));
@@ -324,7 +340,7 @@ fn apply_voice_live_field(
 #[tauri::command(async)]
 pub fn pi_auth_status() -> Result<serde_json::Value, String> {
     on_big_stack(move || {
-        let auth_path = Config::auth_path();
+        let auth_path = pi_paths::auth_path().map_err(|e| e)?;
         let models_path = models_config_path();
 
         // auth.json：原始 JSON 解析（不用 AuthStorage::load——它对损坏
@@ -355,7 +371,7 @@ pub fn pi_auth_status() -> Result<serde_json::Value, String> {
                 });
                 // 已声明的环境变量键名 + 实时置位状态（pi resolve 链的一环，
                 // 只报名字与存在性，绝不报 key 内容）
-                let env_keys = provider_auth_env_keys(provider);
+                let env_keys = provider_env_keys(provider);
                 if !env_keys.is_empty() {
                     let keys: Vec<serde_json::Value> = env_keys
                         .iter()
@@ -416,7 +432,7 @@ pub fn pi_auth_status() -> Result<serde_json::Value, String> {
                             "source": "models",
                             "credentialType": serde_json::Value::Null,
                         });
-                        let env_keys = provider_auth_env_keys(provider);
+                        let env_keys = provider_env_keys(provider);
                         if !env_keys.is_empty() {
                             let keys: Vec<serde_json::Value> = env_keys
                                 .iter()

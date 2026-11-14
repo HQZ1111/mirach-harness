@@ -92,7 +92,9 @@ fn default_true() -> bool {
 }
 
 fn connections_path() -> PathBuf {
-    pi::config::Config::global_dir().join(CONNECTIONS_FILE)
+    crate::pi_paths::agent_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(CONNECTIONS_FILE)
 }
 
 fn read_registry() -> ConnectionRegistry {
