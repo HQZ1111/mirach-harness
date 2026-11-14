@@ -24,6 +24,8 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
       toolCallId?: string
       toolName?: string
       isError?: boolean
+      /** pi ToolOutput.details（edit 的 diff、submit_plan 的审批态等） */
+      details?: unknown
       timestamp?: unknown
     }
     const createdAt =
@@ -76,7 +78,7 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
       const blocks = Array.isArray(m.content) ? m.content : []
       const parts: TurnPart[] = []
       for (const b of blocks) {
-        const blk = b as { type?: string; text?: string; id?: string; name?: string; arguments?: unknown; data?: unknown; mimeType?: unknown }
+        const blk = b as { type?: string; text?: string; thinking?: string; id?: string; name?: string; arguments?: unknown; data?: unknown; mimeType?: unknown }
         if (blk.type === 'text' && typeof blk.text === 'string') {
           parts.push({ type: 'text', text: blk.text })
         } else if (blk.type === 'image' && typeof blk.data === 'string' && typeof blk.mimeType === 'string') {
@@ -95,22 +97,37 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
                 ? (blk.arguments as Record<string, unknown>)
                 : undefined,
           })
+        } else if (blk.type === 'thinking' && typeof blk.thinking === 'string') {
+          // pi 的 thinking 块（session jsonl：`{"type":"thinking","thinking":"…"}`）
+          // → TurnPart thinking → convertTurnMessage 的 reasoning 部件。
+          // **2026-11-02 修复**：此前这里直接丢弃，导致历史会话里的思考整块
+          // 消失（只有实时流式才显示），与 ZCode "Thought · N 秒" 折叠行
+          // 的行为不一致。空串不产部件（空思考不占一行）。
+          if (blk.thinking.trim().length > 0) {
+            parts.push({ type: 'thinking', text: blk.thinking })
+          }
+        } else if (blk.type === 'thinking' || blk.type === 'redacted_thinking') {
+          // redacted_thinking 无正文（pi 只给签名占位），不造假文本。
+          console.error(`[pi] 历史 assistant 思考块无可渲染正文（type=${blk.type}）——跳过`)
         }
-        // thinking/redacted_thinking/media：MVP 不渲染（等 reasoning 面）
       }
       out.push({ id: `hydrate-${i}-assistant`, role: 'assistant', content: parts, ...(createdAt ? { createdAt } : {}) })
     } else if (m.role === 'toolResult' && typeof m.toolCallId === 'string') {
       // 工具结果归并：挂到前一条 assistant 匹配 toolCallId 的部件
       const resultBlocks = Array.isArray(m.content) ? m.content : []
-      const resultText = resultBlocks
-        .map((b) =>
-          typeof b === 'string'
-            ? b
-            : typeof (b as { text?: unknown })?.text === 'string'
-              ? (b as { text: string }).text
-              : '',
-        )
-        .join('')
+      // **result 与流式路径同形**（2026-11-03 修）：pi 的 ToolExecutionEnd
+      // 携带的是完整 ToolOutput 对象 `{content, details?, isError}`（agent.rs
+      // :1428 + agui.rs:318 原样透传），此前水合把 content 拼成纯文本字符串
+      // ——details（edit 的 diff、submit_plan 的审批态）全部丢失，历史会话
+      // 的 edit 卡片退回通用卡、文件汇总拿不到行数。修成对象形状后两条
+      // 路径一致；渲染层 `toolResultText` 兼容两种形状。
+      const result: Record<string, unknown> = {
+        content: resultBlocks,
+        isError: m.isError === true,
+      }
+      if (m.details !== undefined && m.details !== null) {
+        result.details = m.details
+      }
       for (let j = out.length - 1; j >= 0; j--) {
         const msg = out[j]
         if (msg.role !== 'assistant' || typeof msg.content === 'string') continue
@@ -119,7 +136,7 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
         if (idx >= 0) {
           const p = parts[idx]
           if (p.type !== 'tool-call') continue
-          parts[idx] = { ...p, result: resultText, isError: m.isError === true }
+          parts[idx] = { ...p, result, isError: m.isError === true }
           break
         }
       }

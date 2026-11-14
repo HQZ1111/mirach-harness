@@ -8,6 +8,7 @@ import {
   RefreshCwIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
+  TrendingUpDownIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ghostButton, iconSwap, iconSwapIn, iconSwapOut } from "./surfaces";
@@ -25,6 +26,13 @@ export interface MessageActionsProps extends Omit<
   onReactionChange: (reaction: Reaction) => void;
   onRegenerate: () => void;
   onMore: () => void;
+  /**
+   * 从这条回复分叉（ZCode `chat.message.fork`）。宿主 = 在该轮最后一条
+   * user 消息的 fork 点上开新会话；`forkable` 为 false 时按钮禁用（fork
+   * 点尚未落盘 / 投影与 pi 路径不一致，不假装可点）。
+   */
+  onFork?: (() => void) | undefined;
+  forkable?: boolean | undefined;
 }
 
 export function MessageActions({
@@ -35,6 +43,8 @@ export function MessageActions({
   onReactionChange,
   onRegenerate,
   onMore,
+  onFork,
+  forkable = true,
   className,
   ...props
 }: MessageActionsProps) {
@@ -83,7 +93,7 @@ export function MessageActions({
             "bg-foreground/[0.06] text-foreground/90 dark:bg-foreground/[0.09]",
         )}
       >
-        <ThumbsUpIcon className="size-3.5" />
+        <ThumbsUpIcon className="size-[var(--size-icon-md)]" />
       </button>
       <button
         type="button"
@@ -96,8 +106,19 @@ export function MessageActions({
             "bg-foreground/[0.06] text-foreground/90 dark:bg-foreground/[0.09]",
         )}
       >
-        <ThumbsDownIcon className="size-3.5" />
+        <ThumbsDownIcon className="size-[var(--size-icon-md)]" />
       </button>
+      {onFork ? (
+        <button
+          type="button"
+          aria-label="从这条回复分叉"
+          disabled={!forkable}
+          onClick={onFork}
+          className={cn(buttonClassName, !forkable && "opacity-40")}
+        >
+          <TrendingUpDownIcon className="size-[var(--size-icon-md)]" />
+        </button>
+      ) : null}
       <button
         type="button"
         aria-label="Regenerate response"
@@ -117,7 +138,7 @@ export function MessageActions({
         onClick={onMore}
         className={buttonClassName}
       >
-        <EllipsisIcon className="size-3.5" />
+        <EllipsisIcon className="size-[var(--size-icon-md)]" />
       </button>
     </div>
   );

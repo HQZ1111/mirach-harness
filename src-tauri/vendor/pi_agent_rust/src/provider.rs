@@ -230,11 +230,34 @@ pub struct StreamOptions {
     /// `app::resolve_prompt_cache_key`); `None` omits the field so the wire
     /// format is unchanged for backends that reject unknown params.
     pub prompt_cache_key: Option<String>,
+    /// Requested service tier (`/fast` sets `"priority"`). Only backends that
+    /// honor a tier receive it: OpenAI, Codex and OpenRouter as
+    /// `service_tier` (see [`openai_service_tier`]), and direct Anthropic,
+    /// which realizes only `priority`, as `speed: "fast"`. Every other
+    /// provider ignores it, so the request is unchanged there.
+    pub service_tier: Option<String>,
     pub headers: HashMap<String, String>,
     pub thinking_level: Option<ThinkingLevel>,
     pub thinking_budgets: Option<ThinkingBudgets>,
     /// Optional `before_provider_request` interceptor (gh #167 / bd-1q31s).
     pub before_provider_request: Option<BeforeProviderRequestHook>,
+}
+
+/// The `service_tier` value an OpenAI-shaped request to `provider` should
+/// carry, or `None` to omit the field.
+///
+/// Mirrors OMP's `shouldSendServiceTier`. OpenAI and Codex accept every tier
+/// except `auto` (their default, so sending it is pointless). OpenRouter
+/// forwards only `flex`, `scale` and `priority`. Every other OpenAI-compatible
+/// backend gets nothing, because many of them reject unknown parameters.
+pub fn openai_service_tier(provider: &str, tier: Option<&str>) -> Option<String> {
+    let tier = tier.filter(|tier| !tier.is_empty() && *tier != "auto")?;
+    let sends = match provider {
+        "openai" | "openai-codex" => true,
+        "openrouter" => matches!(tier, "flex" | "scale" | "priority"),
+        _ => false,
+    };
+    sends.then(|| tier.to_string())
 }
 
 /// Cache retention policy.
@@ -378,6 +401,35 @@ impl ModelCost {
 }
 
 impl Model {
+    /// Human-facing label for status messages: the `provider/id` identity,
+    /// followed by the catalog/`models.json` `name` when it says something the
+    /// id does not (`deepseek/deepseek-v4-pro (DeepSeek V4 Pro)`). The identity
+    /// stays first so anything matching on `provider/id` keeps working;
+    /// selection and lookup never read this (gh #214; upstream shows
+    /// `name || id` in its model-switch status).
+    pub fn display_label(&self) -> String {
+        let identity = format!("{}/{}", self.provider, self.id);
+        let name = self.name.trim();
+        if name.is_empty() || name == self.id || name == identity {
+            identity
+        } else {
+            format!("{identity} ({name})")
+        }
+    }
+
+    /// The model as the status line shows it, following OMP's model segment:
+    /// the catalog/`models.json` name, else the id, with a leading "Claude "
+    /// dropped because the provider is already evident ("Opus 4.6").
+    pub fn status_label(&self) -> String {
+        let name = self.name.trim();
+        let label = if name.is_empty() {
+            self.id.as_str()
+        } else {
+            name
+        };
+        label.strip_prefix("Claude ").unwrap_or(label).to_string()
+    }
+
     /// Calculate cost for usage.
     #[allow(clippy::cast_precision_loss)] // Token counts within practical range won't lose precision
     pub fn calculate_cost(
@@ -704,6 +756,34 @@ mod tests {
             max_tokens: 8192,
             headers: HashMap::new(),
         }
+    }
+
+    /// gh #214: a distinct name leads the label and the identity follows; a
+    /// name that is empty or just repeats the id adds nothing.
+    #[test]
+    fn display_label_shows_a_distinct_name_and_keeps_the_identity() {
+        let mut model = test_model();
+        assert_eq!(model.display_label(), "anthropic/test-model (Test Model)");
+        model.name = "test-model".to_string();
+        assert_eq!(model.display_label(), "anthropic/test-model");
+        model.name = "  ".to_string();
+        assert_eq!(model.display_label(), "anthropic/test-model");
+        model.name = "anthropic/test-model".to_string();
+        assert_eq!(model.display_label(), "anthropic/test-model");
+    }
+
+    /// gh #214 under the OMP rule: the name wins, the id is the fallback, and
+    /// only a leading "Claude " is trimmed.
+    #[test]
+    fn status_label_prefers_the_name_like_omp() {
+        let mut model = test_model();
+        assert_eq!(model.status_label(), "Test Model");
+        model.name = "Claude Opus 4.6".to_string();
+        assert_eq!(model.status_label(), "Opus 4.6");
+        model.name = "Not Claude Opus".to_string();
+        assert_eq!(model.status_label(), "Not Claude Opus");
+        model.name = "  ".to_string();
+        assert_eq!(model.status_label(), "test-model");
     }
 
     /// gh #221: usage pricing fills every cost component from catalog rates.

@@ -240,7 +240,7 @@ function FileDownload({
       aria-label={!children ? `Download ${filename || "file"}` : undefined}
       {...props}
     >
-      {children || <DownloadIcon className="size-4" />}
+      {children || <DownloadIcon className="size-[var(--size-icon-lg)]" />}
     </a>
   );
 }

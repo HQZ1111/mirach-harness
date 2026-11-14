@@ -4,11 +4,10 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bubbletea::{Cmd, KeyMsg, KeyType, Message, Program, quit};
+use bubbletea::{Cmd, KeyMsg, KeyType, Message, Program, WindowSizeMsg, quit};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -16,6 +15,9 @@ use crate::session::{Session, encode_cwd};
 use crate::session_index::session_file_stats;
 use crate::session_index::{SessionIndex, SessionMeta, build_meta_from_file, is_session_file_path};
 use crate::theme::{Theme, TuiStyles};
+
+mod browse;
+use browse::BrowserState;
 
 /// Format a timestamp for display.
 pub fn format_time(timestamp: &str) -> String {
@@ -41,6 +43,7 @@ pub fn truncate_session_id(session_id: &str, max_chars: usize) -> &str {
 /// The session picker TUI model.
 #[derive(bubbletea::Model)]
 pub struct SessionPicker {
+    browser: BrowserState,
     sessions: Vec<SessionMeta>,
     selected: usize,
     chosen: Option<usize>,
@@ -59,6 +62,7 @@ impl SessionPicker {
         let theme = Theme::dark();
         let styles = theme.tui_styles();
         Self {
+            browser: BrowserState::new(sessions.len()),
             sessions,
             selected: 0,
             chosen: None,
@@ -74,6 +78,7 @@ impl SessionPicker {
     pub fn with_theme(sessions: Vec<SessionMeta>, theme: &Theme) -> Self {
         let styles = theme.tui_styles();
         Self {
+            browser: BrowserState::new(sessions.len()),
             sessions,
             selected: 0,
             chosen: None,
@@ -93,6 +98,7 @@ impl SessionPicker {
     ) -> Self {
         let styles = theme.tui_styles();
         Self {
+            browser: BrowserState::new(sessions.len()),
             sessions,
             selected: 0,
             chosen: None,
@@ -123,46 +129,18 @@ impl SessionPicker {
 
     #[allow(clippy::needless_pass_by_value)] // Required by Model trait
     pub fn update(&mut self, msg: Message) -> Option<Cmd> {
+        if let Some(size) = msg.downcast_ref::<WindowSizeMsg>() {
+            self.resize_browser(size.width, size.height);
+            return None;
+        }
         if let Some(key) = msg.downcast_ref::<KeyMsg>() {
             if self.confirm_delete.is_some() {
+                if key.paste {
+                    return None;
+                }
                 return self.handle_delete_prompt(key);
             }
-            match key.key_type {
-                KeyType::Up if self.selected > 0 => {
-                    self.selected -= 1;
-                }
-                KeyType::Down if self.selected < self.sessions.len().saturating_sub(1) => {
-                    self.selected += 1;
-                }
-                KeyType::Runes if key.runes == ['k'] && self.selected > 0 => {
-                    self.selected -= 1;
-                }
-                KeyType::Runes
-                    if key.runes == ['j']
-                        && self.selected < self.sessions.len().saturating_sub(1) =>
-                {
-                    self.selected += 1;
-                }
-                KeyType::Enter => {
-                    if !self.sessions.is_empty() {
-                        self.chosen = Some(self.selected);
-                    }
-                    return Some(quit());
-                }
-                KeyType::Esc | KeyType::CtrlC => {
-                    self.cancelled = true;
-                    return Some(quit());
-                }
-                KeyType::Runes if key.runes == ['q'] => {
-                    self.cancelled = true;
-                    return Some(quit());
-                }
-                KeyType::CtrlD if !self.sessions.is_empty() => {
-                    self.confirm_delete = Some(self.selected);
-                    self.status_message = Some("Delete session? Press y/n to confirm.".to_string());
-                }
-                _ => {}
-            }
+            return self.handle_browse_key(key);
         }
         None
     }
@@ -186,7 +164,7 @@ impl SessionPicker {
                 self.confirm_delete = None;
                 self.status_message = None;
             }
-            KeyType::Esc | KeyType::CtrlC => {
+            _ if self.browser_cancel_key(key) => {
                 self.confirm_delete = None;
                 self.status_message = None;
             }
@@ -206,88 +184,12 @@ impl SessionPicker {
             let _ = index.delete_session_path(&path);
         }
         self.sessions.remove(index);
-        if self.selected >= self.sessions.len() {
-            self.selected = self.sessions.len().saturating_sub(1);
-        }
+        self.refresh_browser_after_delete();
         Ok(())
     }
 
     pub fn view(&self) -> String {
-        let mut output = String::new();
-
-        // Header
-        let _ = writeln!(
-            output,
-            "\n  {}\n",
-            self.styles.title.render("Select a session to resume")
-        );
-
-        if self.sessions.is_empty() {
-            let _ = writeln!(
-                output,
-                "  {}",
-                self.styles
-                    .muted
-                    .render("No sessions found for this project.")
-            );
-        } else {
-            // Column headers
-            let _ = writeln!(
-                output,
-                "  {:<20}  {:<30}  {:<8}  {}",
-                self.styles.muted_bold.render("Time"),
-                self.styles.muted_bold.render("Name"),
-                self.styles.muted_bold.render("Messages"),
-                self.styles.muted_bold.render("Session ID")
-            );
-            output.push_str("  ");
-            output.push_str(&"-".repeat(78));
-            output.push('\n');
-
-            // Session rows
-            for (i, session) in self.sessions.iter().enumerate() {
-                let is_selected = i == self.selected;
-
-                let prefix = if is_selected { ">" } else { " " };
-                let time = format_time(&session.timestamp);
-                let name = session
-                    .name
-                    .as_deref()
-                    .unwrap_or("-")
-                    .chars()
-                    .take(28)
-                    .collect::<String>();
-                let messages = session.message_count.to_string();
-                let id = truncate_session_id(&session.id, 8);
-
-                let _ = writeln!(
-                    output,
-                    "{prefix} {}",
-                    if is_selected {
-                        self.styles
-                            .selection
-                            .render(&format!(" {time:<20}  {name:<30}  {messages:<8}  {id}"))
-                    } else {
-                        format!(" {time:<20}  {name:<30}  {messages:<8}  {id}")
-                    }
-                );
-            }
-        }
-
-        // Help text
-        output.push('\n');
-        let _ = writeln!(
-            output,
-            "  {}",
-            self.styles
-                .muted
-                .render("↑/↓/j/k: navigate  Enter: select  Ctrl+D: delete  Esc/q: cancel")
-        );
-        if let Some(message) = &self.status_message {
-            let _ = writeln!(output, "  {}", self.styles.warning_bold.render(message));
-        }
-
-        output
+        self.render_browser()
     }
 }
 
@@ -318,7 +220,12 @@ pub async fn pick_session(override_dir: Option<&Path>) -> Option<Session> {
 
     let config = Config::load().unwrap_or_default();
     let theme = Theme::resolve(&config, &cwd);
-    let picker = SessionPicker::with_theme_and_root(sessions, &theme, base_dir.clone());
+    let keys = crate::keybindings::KeyBindings::load_from_user_config();
+    for warning in &keys.warnings {
+        tracing::warn!(?warning, "Session picker keybinding configuration warning");
+    }
+    let picker = SessionPicker::with_theme_and_root(sessions, &theme, base_dir.clone())
+        .with_keybindings(keys.bindings);
 
     // Run the TUI
     let result = Program::new(picker).with_alt_screen().run();
@@ -346,12 +253,7 @@ pub fn list_sessions_for_project(cwd: &Path, override_dir: Option<&Path>) -> Vec
     let project_session_dir = base_dir.join(encode_cwd(cwd));
     let cwd_key = cwd.display().to_string();
     let index = SessionIndex::for_sessions_root(&base_dir);
-    let mut sessions = index.list_sessions(Some(&cwd_key)).unwrap_or_default();
-    let project_session_dir_missing = indexed_session_path_is_missing(&project_session_dir);
-
-    if !project_session_dir_missing && sessions.is_empty() && index.reindex_all().is_ok() {
-        sessions = index.list_sessions(Some(&cwd_key)).unwrap_or_default();
-    }
+    let mut sessions = index.discover_sessions(&cwd_key);
 
     let mut missing_paths = Vec::new();
     let mut by_path = HashMap::new();
@@ -366,10 +268,6 @@ pub fn list_sessions_for_project(cwd: &Path, override_dir: Option<&Path>) -> Vec
 
     for path in &missing_paths {
         let _ = index.delete_session_path(path);
-    }
-
-    if project_session_dir_missing {
-        return Vec::new();
     }
 
     let scanned = scan_sessions_on_disk(&project_session_dir, &by_path);
@@ -393,6 +291,12 @@ pub fn list_sessions_for_project(cwd: &Path, override_dir: Option<&Path>) -> Vec
     let mut by_id: HashMap<String, SessionMeta> = HashMap::new();
     let mut anonymous = Vec::new();
     for meta in by_path.into_values() {
+        // The storage folder is historical provenance. Reattachment moves
+        // discovery to the latest binding even when this file was found by
+        // scanning its original project's folder.
+        if Path::new(&meta.cwd) != cwd {
+            continue;
+        }
         if meta.id.is_empty() {
             anonymous.push(meta);
             continue;
@@ -417,8 +321,13 @@ pub fn list_sessions_for_project(cwd: &Path, override_dir: Option<&Path>) -> Vec
     }
 
     sessions = by_id.into_values().chain(anonymous).collect();
-    sessions.sort_by_key(|m| Reverse(m.last_modified_ms));
-    sessions.truncate(50);
+    // Pagination belongs in the UI, not the data source. Older sessions must
+    // remain resumable/searchable, with deterministic ordering for mtime ties.
+    sessions.sort_by(|a, b| {
+        Reverse(a.last_modified_ms)
+            .cmp(&Reverse(b.last_modified_ms))
+            .then_with(|| a.path.cmp(&b.path))
+    });
     sessions
 }
 
@@ -480,26 +389,28 @@ fn scan_sessions_on_disk(
 ) -> ScanSessionsResult {
     let mut out = Vec::new();
     let mut failed_paths = Vec::new();
-    if let Err(err) = crate::session::ensure_session_directory_readable(project_session_dir) {
-        tracing::warn!(
-            path = %project_session_dir.display(),
-            error = %err,
-            "Failed to read project session directory; retaining indexed rows"
-        );
-        return ScanSessionsResult {
-            metas: out,
-            failed_paths,
-        };
+    let mut paths = cached_by_path
+        .keys()
+        .map(PathBuf::from)
+        .collect::<std::collections::HashSet<_>>();
+    if !indexed_session_path_is_missing(project_session_dir) {
+        if let Err(err) = crate::session::ensure_session_directory_readable(project_session_dir) {
+            tracing::warn!(
+                path = %project_session_dir.display(),
+                error = %err,
+                "Failed to read project session directory; retaining indexed rows"
+            );
+            return ScanSessionsResult {
+                metas: out,
+                failed_paths,
+            };
+        }
+        if let Ok(entries) = fs::read_dir(project_session_dir) {
+            paths.extend(entries.flatten().map(|entry| entry.path()));
+        }
     }
-    let Ok(entries) = fs::read_dir(project_session_dir) else {
-        return ScanSessionsResult {
-            metas: out,
-            failed_paths,
-        };
-    };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in paths {
         if is_session_file_path(&path) {
             let path_key = path.display().to_string();
             if cached_by_path
@@ -551,6 +462,10 @@ fn delete_session_file_with_trash_cmd(path: &Path, trash_cmd: &str) -> Result<()
         }
         remove_sqlite_sidecars_best_effort(path, trash_cmd)?;
         remove_sidecar_dir_best_effort(&crate::session_store_v2::v2_sidecar_path(path), trash_cmd)?;
+        remove_sidecar_dir_best_effort(
+            &crate::session::attachments::sidecar_path(path),
+            trash_cmd,
+        )?;
         return ensure_session_artifacts_removed(path);
     }
 
@@ -567,6 +482,7 @@ fn delete_session_file_with_trash_cmd(path: &Path, trash_cmd: &str) -> Result<()
 
     remove_sqlite_sidecars_best_effort(path, trash_cmd)?;
     remove_sidecar_dir_best_effort(&crate::session_store_v2::v2_sidecar_path(path), trash_cmd)?;
+    remove_sidecar_dir_best_effort(&crate::session::attachments::sidecar_path(path), trash_cmd)?;
     ensure_session_artifacts_removed(path)
 }
 
@@ -586,6 +502,9 @@ fn session_artifacts_exist(path: &Path) -> Result<bool> {
     let v2_exists =
         crate::session::session_path_entry_exists(&crate::session_store_v2::v2_sidecar_path(path))
             .map_err(|err| Error::Io(Box::new(err)))?;
+    let blobs_exist =
+        crate::session::session_path_entry_exists(&crate::session::attachments::sidecar_path(path))
+            .map_err(|err| Error::Io(Box::new(err)))?;
     #[cfg(feature = "sqlite-sessions")]
     let sqlite_sidecar_exists = sqlite_auxiliary_paths(path)
         .into_iter()
@@ -595,7 +514,7 @@ fn session_artifacts_exist(path: &Path) -> Result<bool> {
         .map_err(|err| Error::Io(Box::new(err)))?;
     #[cfg(not(feature = "sqlite-sessions"))]
     let sqlite_sidecar_exists = false;
-    Ok(primary_exists || v2_exists || sqlite_sidecar_exists)
+    Ok(primary_exists || v2_exists || blobs_exist || sqlite_sidecar_exists)
 }
 
 fn sqlite_auxiliary_paths(path: &Path) -> [PathBuf; 7] {
@@ -1718,28 +1637,55 @@ mod tests {
         let session_path = tmp.path().join("noop-trash.sqlite");
         let [wal_path, shm_path, journal_path, ..] = sqlite_auxiliary_paths(&session_path);
         let v2_path = crate::session_store_v2::v2_sidecar_path(&session_path);
+        let blobs_path = crate::session::attachments::sidecar_path(&session_path);
         fs::write(&session_path, "db").expect("write SQLite primary");
         fs::write(&wal_path, "wal").expect("write SQLite WAL");
         fs::write(&shm_path, "shm").expect("write SQLite SHM");
         fs::write(&journal_path, "journal").expect("write SQLite rollback journal");
         fs::create_dir(&v2_path).expect("create V2 sidecar");
         fs::write(v2_path.join("manifest.json"), "manifest").expect("write V2 manifest");
+        fs::create_dir(&blobs_path).expect("create attachment sidecar");
+        fs::write(blobs_path.join("retained-media"), "media").expect("write attachment");
 
         let trash_script = tmp.path().join("successful-noop-trash.sh");
-        fs::write(&trash_script, "#!/bin/sh\nexit 0\n").expect("write trash script");
+        // The script records that it ran. Without that, a spawn failure — fork
+        // exhaustion or ETXTBSY on a loaded host — sends
+        // `delete_session_file_with_trash_cmd` down its fallback path, which
+        // deletes directly and returns Ok, and this test then fails claiming
+        // sidecar deletion was authorized. It was not: the command never ran,
+        // and that is a different fact deserving a different message.
+        let trash_ran = tmp.path().join("trash-ran");
+        fs::write(
+            &trash_script,
+            format!("#!/bin/sh\ntouch '{}'\nexit 0\n", trash_ran.display()),
+        )
+        .expect("write trash script");
         let mut permissions = fs::metadata(&trash_script)
             .expect("trash script metadata")
             .permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&trash_script, permissions).expect("chmod trash script");
 
-        let error = delete_session_file_with_trash_cmd(
+        let outcome = delete_session_file_with_trash_cmd(
             &session_path,
             trash_script.to_string_lossy().as_ref(),
-        )
-        .expect_err("an exit-zero no-op trash command must not authorize sidecar deletion");
+        );
+        assert!(
+            trash_ran.exists(),
+            "the trash command never ran, so this exercised the direct-removal \
+             fallback rather than the no-op trash path it is named for"
+        );
+        let error = outcome
+            .expect_err("an exit-zero no-op trash command must not authorize sidecar deletion");
         assert!(error.to_string().contains("left the session in place"));
-        for artifact in [&session_path, &wal_path, &shm_path, &journal_path, &v2_path] {
+        for artifact in [
+            &session_path,
+            &wal_path,
+            &shm_path,
+            &journal_path,
+            &v2_path,
+            &blobs_path,
+        ] {
             assert!(
                 crate::session::session_path_entry_exists(artifact)
                     .expect("inspect preserved artifact"),
@@ -1747,6 +1693,38 @@ mod tests {
                 artifact.display()
             );
         }
+    }
+
+    #[test]
+    fn delete_jsonl_removes_owned_attachments_and_preserves_other_sessions() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let session_path = directory.path().join("deleted.jsonl");
+        let blob_root = crate::session::attachments::sidecar_path(&session_path);
+        let kept_path = directory.path().join("kept.jsonl");
+        let kept_blobs = crate::session::attachments::sidecar_path(&kept_path);
+        for path in [&session_path, &kept_path] {
+            fs::write(path, "session\n").expect("session fixture");
+        }
+        for path in [&blob_root, &kept_blobs] {
+            fs::create_dir(path).expect("attachment directory");
+            fs::write(path.join("media"), "attachment bytes").expect("attachment fixture");
+        }
+        delete_session_file_with_trash_cmd(
+            &session_path,
+            directory
+                .path()
+                .join("missing-trash-command")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .expect("delete session and its attachments");
+        assert!(!session_path.exists());
+        assert!(!blob_root.exists());
+        assert!(kept_path.is_file());
+        assert_eq!(
+            fs::read(kept_blobs.join("media")).unwrap(),
+            b"attachment bytes"
+        );
     }
 
     #[cfg(all(unix, feature = "sqlite-sessions"))]
@@ -2044,7 +2022,7 @@ esac
                 invocation_marker.display()
             ),
         )
-        .expect("write trash script");
+        .expect("write script");
         let mut script_permissions = fs::metadata(&trash_script)
             .expect("trash script metadata")
             .permissions();

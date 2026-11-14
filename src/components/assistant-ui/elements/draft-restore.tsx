@@ -32,7 +32,7 @@ export function DraftRestore({
 
       {...props}
     >
-      <PencilLineIcon className="text-foreground/30 size-3.5 shrink-0" />
+      <PencilLineIcon className="text-foreground/30 size-[var(--size-icon-md)] shrink-0" />
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="text-foreground/70 truncate text-[13px]">{draft}</span>
         <span className={cn(mono, "text-foreground/30")}>
@@ -52,7 +52,7 @@ export function DraftRestore({
         onClick={onDiscard}
         className={cn(ghostButton, "size-7 shrink-0")}
       >
-        <XIcon className="size-3.5" />
+        <XIcon className="size-[var(--size-icon-md)]" />
       </button>
     </div>
   );

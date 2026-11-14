@@ -1,15 +1,9 @@
-//! LSP protocol client: initialize handshake, document synchronization,
-//! typed requests, diagnostics cache, and graceful shutdown.
-//!
-//! Built on [`super::jsonrpc::JsonRpcClient`]. Requests are serialized per
-//! server (spec: "serialize requests per server"); the async wait loop polls
-//! the completion channel on a tick so per-request timeouts and ambient
-//! cancellation both fire promptly and always send `$/cancelRequest`
-//! (bd-cv653.1.1).
+//! LSP initialization, synchronized document versions, requests and diagnostics.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -18,20 +12,18 @@ use super::jsonrpc::{JsonRpcClient, TransportError};
 use crate::agent_cx::AgentCx;
 use crate::error::{Error, Result};
 
-/// Poll tick for request completion waits (matches the bash tool's cadence).
-const WAIT_TICK: Duration = Duration::from_millis(10);
-/// Cadence for retrying the server-warmup error signature.
-const WARMUP_RETRY_CADENCE: Duration = Duration::from_millis(250);
-/// Window after connect during which empty position-lookup results may be
-/// the server still indexing rather than a truthful "not found".
-const WARMUP_EMPTY_RESULT_WINDOW: Duration = Duration::from_secs(60);
+mod document_sync;
+mod file_uri;
+mod pull_diagnostics;
+mod request;
+#[cfg(test)]
+mod test_server;
+pub use file_uri::{path_to_uri, try_path_to_uri, uri_to_path};
 
-/// Methods whose empty result during warmup may be indexing lag rather than
-/// truth. Narrow on purpose: symbols/diagnostics are never retried (an
-/// empty symbol list is a legitimate answer). `rename` is included because
-/// rust-analyzer answers valid positions with a null/empty edit while the
-/// crate graph is still loading; retrying only ever DELAYS an empty answer,
-/// never fabricates one.
+const WAIT_TICK: Duration = Duration::from_millis(10);
+const WARMUP_RETRY_CADENCE: Duration = Duration::from_millis(250);
+const WARMUP_EMPTY_RESULT_WINDOW: Duration = Duration::from_secs(180);
+
 fn is_warmup_empty_retryable(method: &str) -> bool {
     matches!(
         method,
@@ -40,12 +32,12 @@ fn is_warmup_empty_retryable(method: &str) -> bool {
             | "textDocument/implementation"
             | "textDocument/references"
             | "textDocument/hover"
+            | "textDocument/prepareRename"
             | "textDocument/rename"
+            | "workspace/willRenameFiles"
     )
 }
 
-/// Whether a result is "empty" in the not-found sense: null, `[]`, `{}`, or
-/// a WorkspaceEdit with no changes.
 fn is_empty_result(value: &Value) -> bool {
     if value.is_null() {
         return true;
@@ -67,27 +59,20 @@ fn is_empty_result(value: &Value) -> bool {
         _ => false,
     }
 }
-/// Default per-request timeout.
+
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-/// Timeout for the graceful `shutdown` request during stop.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long `diagnostics` waits for a fresh publish after opening a file.
 pub const DEFAULT_DIAGNOSTICS_WAIT: Duration = Duration::from_millis(2000);
 
-/// Why an LSP call failed.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LspCallError {
-    /// Request exceeded its deadline; `$/cancelRequest` was sent.
     Timeout { timeout_ms: u64 },
-    /// Ambient cancellation interrupted the wait; `$/cancelRequest` was sent.
     Cancelled,
-    /// Transport-level failure (server error object, closed pipe, I/O).
     Transport(TransportError),
 }
 
 impl LspCallError {
-    /// Machine-readable taxonomy code for logs and tool details.
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
@@ -97,7 +82,6 @@ impl LspCallError {
         }
     }
 
-    /// Human-readable summary.
     #[must_use]
     pub fn message(&self) -> String {
         match self {
@@ -114,106 +98,61 @@ impl From<LspCallError> for Error {
     }
 }
 
-/// Percent-encode a path segment for a `file://` URI.
-///
-/// Encodes everything outside the URI-unreserved set plus `/` (kept as the
-/// path separator). Good enough for POSIX paths; Windows drive letters are
-/// out of scope for the v1 surface.
-#[must_use]
-pub fn path_to_uri(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    let mut out = String::with_capacity(raw.len() + 8);
-    out.push_str("file://");
-    for byte in raw.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(byte as char);
-            }
-            _ => {
-                use std::fmt::Write as _;
-                out.push('%');
-                let _ = write!(out, "{byte:02X}");
-            }
-        }
-    }
-    out
-}
-
-/// Decode a `file://` URI back to a path. Returns `None` for non-file URIs.
-#[must_use]
-pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    let mut out = Vec::with_capacity(rest.len());
-    let bytes = rest.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            let value = u8::from_str_radix(hex, 16).ok()?;
-            out.push(value);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Some(PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
-}
-
-/// FNV-1a hash of file content (drift detection; not cryptographic).
-#[must_use]
 fn content_hash(content: &str) -> u64 {
     super::text::content_hash_for_drift(content)
 }
 
-/// One open text document's sync state.
+/// A request-time view used to reject edits against a different document version.
+#[derive(Debug, Clone, Copy)]
+pub struct DocumentSnapshot {
+    pub version: u64,
+    pub hash: u64,
+}
+
 #[derive(Debug, Clone)]
 struct OpenDoc {
     version: u64,
     disk_hash: u64,
     language_id: String,
+    text: std::sync::Arc<str>,
+    opened: bool,
+    // Accepted pushes for this document incarnation. An exhausted counter
+    // never authorizes a pull, so saturation cannot make old output current.
+    push_generation: u64,
 }
 
-/// Server capability snapshot captured from `initialize`.
 #[derive(Debug, Clone, Default)]
 pub struct ServerCapabilities {
-    /// Raw `capabilities` object from the initialize result.
     pub raw: Value,
-    /// `workspace.fileOperations.willRenameFiles` advertised.
     pub will_rename_files: bool,
-    /// The server's text-document sync kind (1 = full, 2 = incremental).
     pub sync_kind: u64,
-    /// Server display name (`serverInfo.name`).
     pub server_name: Option<String>,
 }
 
-/// A connected, initialized language server.
 pub struct LspClient {
     rpc: JsonRpcClient,
     root: PathBuf,
     root_uri: String,
     open_docs: Mutex<HashMap<String, OpenDoc>>,
     diagnostics: Mutex<HashMap<String, Vec<Value>>>,
+    // Serialize draining and applying notifications, retaining the loss
+    // generation so older queued reports cannot restore invalidated state.
+    notification_generation: Mutex<u64>,
+    // Request-owned fragments share the ordered notification router; snapshot
+    // readers must not silently consume another caller's partial results.
+    partial_results: Mutex<request::PartialResults>,
+    pull_reports: Mutex<pull_diagnostics::ReportCache>,
     request_lane: std::sync::Arc<asupersync::sync::Mutex<()>>,
     capabilities: Mutex<ServerCapabilities>,
     connected_at: std::time::Instant,
-    /// rust-analyzer's `experimental/serverStatus` quiescent flag (true when
-    /// the server reports no pending work). Stays false for servers that
-    /// never send the notification.
-    quiescent: std::sync::atomic::AtomicBool,
+    pub(in crate::lsp) quiescent: std::sync::atomic::AtomicBool,
+    // Never reuse version 1 after closing/reopening a file. Delayed versioned
+    // edits must not accidentally match a new incarnation of that document.
+    next_document_version: AtomicU64,
 }
 
 impl LspClient {
-    /// Spawn and initialize a server.
-    ///
-    /// `server_request_handler` receives server→client requests the generic
-    /// transport would otherwise answer with null; returning `Some(result)`
-    /// overrides the response (used for `workspace/applyEdit`).
-    ///
-    /// # Errors
-    ///
-    /// Fails when the process cannot spawn, the transport dies during the
-    /// handshake, or `initialize` returns an error.
+    #[allow(clippy::too_many_lines)]
     pub async fn connect(
         command: &str,
         args: &[String],
@@ -222,88 +161,110 @@ impl LspClient {
         initialization_options: Option<&Value>,
         timeout: Duration,
     ) -> Result<Self> {
-        let rpc = JsonRpcClient::spawn(command, args, env, root)?;
-        let root = root.to_path_buf();
-        let root_uri = path_to_uri(&root);
+        // Resolve the workspace before spawning; never send an ambiguous or
+        // relative native path as the server's document root.
+        let root = root.canonicalize()?;
+        let root_uri = try_path_to_uri(&root)?;
+        let rpc = JsonRpcClient::spawn(command, args, env, &root)?;
         let client = Self {
             rpc,
             root,
             root_uri: root_uri.clone(),
             open_docs: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
+            notification_generation: Mutex::new(0),
+            partial_results: Mutex::new(request::PartialResults::default()),
+            pull_reports: Mutex::new(pull_diagnostics::ReportCache::default()),
             request_lane: std::sync::Arc::new(asupersync::sync::Mutex::new(())),
             capabilities: Mutex::new(ServerCapabilities::default()),
             connected_at: std::time::Instant::now(),
             quiescent: std::sync::atomic::AtomicBool::new(false),
+            next_document_version: AtomicU64::new(1),
         };
-
-        let mut initialize_params = serde_json::json!({
-            "processId": std::process::id(),
-            "rootUri": root_uri,
-            "workspaceFolders": [{ "uri": root_uri, "name": "workspace" }],
-            "clientInfo": {
-                "name": "pi_agent_rust",
-                "version": crate::platform::VERSION,
-            },
-            "capabilities": {
-                "textDocument": {
-                    "synchronization": { "didSave": true, "dynamicRegistration": false },
-                    "publishDiagnostics": { "relatedInformation": true, "versionSupport": false },
-                    "hover": { "contentFormat": ["markdown", "plaintext"] },
-                    "definition": { "linkSupport": false },
-                    "typeDefinition": { "linkSupport": false },
-                    "implementation": { "linkSupport": false },
-                    "references": {},
-                    "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                    "rename": { "prepareSupport": false, "honorsChangeAnnotations": false },
-                    "codeAction": {
-                        "dynamicRegistration": false,
-                        "codeActionLiteralSupport": {
-                            "codeActionKind": {
-                                "valueSet": [
-                                    "quickfix", "refactor", "refactor.extract",
-                                    "refactor.inline", "refactor.rewrite", "source"
-                                ]
-                            }
+        let mut params = serde_json::json!({
+            "processId":std::process::id(),"rootUri":root_uri,
+            "workspaceFolders":[{"uri":root_uri,"name":"workspace"}],
+            "clientInfo":{"name":"pi_agent_rust","version":crate::platform::VERSION},
+            "capabilities":{
+                "general":{"positionEncodings":["utf-16"]},
+                "textDocument":{
+                    "synchronization":{"didSave":true,"dynamicRegistration":false},
+                    "publishDiagnostics":{"relatedInformation":true,"versionSupport":true},
+                    "diagnostic":{"dynamicRegistration":false,"relatedDocumentSupport":false},
+                    "hover":{"contentFormat":["markdown","plaintext"]},
+                    "inlayHint":{
+                        "dynamicRegistration":false,
+                        "resolveSupport":{"properties":["tooltip","label.tooltip","label.location"]}
+                    },
+                    "signatureHelp":{
+                        "dynamicRegistration":false,"contextSupport":true,
+                        "signatureInformation":{
+                            "documentationFormat":["markdown","plaintext"],
+                            "parameterInformation":{"labelOffsetSupport":true},
+                            "activeParameterSupport":true
+                        }
+                    },
+                    "completion":{
+                        "dynamicRegistration":false,"contextSupport":true,"insertTextMode":1,
+                        "completionItem":{
+                            "snippetSupport":true,"insertReplaceSupport":true,
+                            "documentationFormat":["markdown","plaintext"],
+                            "insertTextModeSupport":{"valueSet":[1]},
+                            "resolveSupport":{"properties":["detail","documentation","additionalTextEdits"]}
                         },
-                        "resolveSupport": { "properties": ["edit"] }
+                        "completionList":{"itemDefaults":["editRange","insertTextFormat","insertTextMode","data"]}
+                    },
+                    "definition":{"linkSupport":true},"typeDefinition":{"linkSupport":true},
+                    "implementation":{"linkSupport":true},"references":{},
+                    "callHierarchy":{"dynamicRegistration":false},
+                    "typeHierarchy":{"dynamicRegistration":false},
+                    "documentSymbol":{"hierarchicalDocumentSymbolSupport":true},
+                    "rename":{"prepareSupport":true,"honorsChangeAnnotations":false},
+                    "codeAction":{
+                        "dynamicRegistration":false,"dataSupport":true,
+                        "disabledSupport":true,"isPreferredSupport":true,
+                        "codeActionLiteralSupport":{"codeActionKind":{"valueSet":[
+                            "quickfix","refactor","refactor.extract","refactor.inline","refactor.rewrite","source"
+                        ]}},
+                        "resolveSupport":{"properties":["edit"]}
                     }
                 },
-                "workspace": {
-                    "applyEdit": true,
-                    "workspaceEdit": {
-                        "documentChanges": true,
-                        "resourceOperations": ["create", "rename", "delete"]
+                "workspace":{
+                    "diagnostics":{"refreshSupport":false},
+                    "applyEdit":true,"workspaceEdit":{
+                        "documentChanges":true,"resourceOperations":["create","rename","delete"]
                     },
-                    "symbol": {},
-                    "workspaceFolders": true,
-                    "fileOperations": { "didRename": true, "willRename": true }
+                    "symbol":{
+                        "dynamicRegistration":false,
+                        "symbolKind":{"valueSet":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]},
+                        "tagSupport":{"valueSet":[1]},
+                        "resolveSupport":{"properties":["location.range"]}
+                    },"workspaceFolders":true,
+                    "fileOperations":{"didRename":true,"willRename":true}
                 },
-                "window": { "workDoneProgress": true }
+                "window":{"workDoneProgress":true},
+                "experimental":{"serverStatusNotification":true}
             }
         });
         if let Some(options) = initialization_options {
-            initialize_params["initializationOptions"] = options.clone();
+            params["initializationOptions"] = options.clone();
         }
-
         let result = client
-            .call("initialize", initialize_params, timeout)
+            .call("initialize", params, timeout)
             .await
             .map_err(|err| {
                 client.rpc.kill();
                 Error::from(err)
             })?;
-
         let caps = result.get("capabilities").cloned().unwrap_or(Value::Null);
-        let will_rename = caps
+        let will_rename_files = caps
             .pointer("/workspace/fileOperations/willRenameFiles")
             .is_some();
-        let sync_kind = caps.get("textDocumentSync").map_or(1, |sync| {
-            sync.get("change")
-                .and_then(Value::as_u64)
-                .or_else(|| sync.as_u64())
-                .unwrap_or(1)
-        });
+        let sync_kind = document_sync::SyncPolicy::parse(&caps)
+            .inspect_err(|_| {
+                client.rpc.kill();
+            })?
+            .change;
         let server_name = result
             .get("serverInfo")
             .and_then(|info| info.get("name"))
@@ -311,11 +272,10 @@ impl LspClient {
             .map(str::to_string);
         *Self::lock(&client.capabilities) = ServerCapabilities {
             raw: caps,
-            will_rename_files: will_rename,
+            will_rename_files,
             sync_kind,
             server_name,
         };
-
         client
             .rpc
             .notify("initialized", serde_json::json!({}))
@@ -329,98 +289,137 @@ impl LspClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Server capabilities from the initialize handshake.
     #[must_use]
     pub fn capabilities(&self) -> ServerCapabilities {
         Self::lock(&self.capabilities).clone()
     }
 
-    /// Workspace root this server is bound to.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Whether the underlying transport is still alive.
     #[must_use]
     pub fn is_alive(&self) -> bool {
         self.rpc.is_alive() && !self.rpc.child_exited()
     }
 
-    /// Bounded tail of server stderr (diagnostics surface).
     #[must_use]
     pub fn stderr_tail(&self) -> String {
         self.rpc.stderr_tail()
     }
 
-    /// Notifications dropped due to queue overflow.
     #[must_use]
     pub fn dropped_notifications(&self) -> u64 {
         self.rpc.dropped_notifications()
     }
 
-    /// URIs with cached diagnostics (from `textDocument/publishDiagnostics`).
     #[must_use]
     pub fn diagnostics_snapshot(&self) -> HashMap<String, Vec<Value>> {
         self.poll_notifications();
         Self::lock(&self.diagnostics).clone()
     }
 
-    /// Number of currently open documents (status surface).
     #[must_use]
     pub fn open_document_count(&self) -> usize {
         Self::lock(&self.open_docs).len()
     }
 
-    /// Merge queued notifications into the diagnostics cache and track
-    /// server quiescence (`experimental/serverStatus`).
+    #[must_use]
+    pub fn document_snapshots(&self) -> HashMap<PathBuf, DocumentSnapshot> {
+        Self::lock(&self.open_docs)
+            .iter()
+            .filter(|(_, doc)| doc.version != 0)
+            .filter_map(|(uri, doc)| {
+                uri_to_path(uri).map(|path| {
+                    (
+                        path,
+                        DocumentSnapshot {
+                            version: doc.version,
+                            hash: doc.disk_hash,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Immutable identity of the current local document incarnation. Keeping
+    /// this Arc lets a read workflow detect close/reopen even without a wire
+    /// version. Callers retaining it must bound their own source working set.
+    pub(in crate::lsp) fn synchronized_text(&self, uri: &str) -> Option<std::sync::Arc<str>> {
+        let uri = file_uri::normalize_uri(uri)?;
+        Self::lock(&self.open_docs)
+            .get(&uri)
+            .map(|document| std::sync::Arc::clone(&document.text))
+    }
+
+    // The generation guard covers the whole drain-and-apply, so a concurrent
+    // poller cannot publish an older batch after a newer one was applied.
+    #[allow(clippy::significant_drop_tightening)]
     pub fn poll_notifications(&self) {
+        // Hold one owner across drain and apply: concurrent callers must not
+        // publish an earlier batch after a newer one has already been applied.
+        let mut generation = Self::lock(&self.notification_generation);
+        self.observe_notification_loss(&mut generation, self.rpc.dropped_notifications());
         for notification in self.rpc.drain_notifications() {
-            if notification.method == "textDocument/publishDiagnostics"
-                && let (Some(uri), Some(diags)) = (
-                    notification.params.get("uri").and_then(Value::as_str),
-                    notification
-                        .params
-                        .get("diagnostics")
-                        .and_then(Value::as_array),
-                )
-            {
-                Self::lock(&self.diagnostics).insert(uri.to_string(), diags.clone());
+            if notification.dropped_before < *generation {
+                continue;
+            }
+            self.observe_notification_loss(&mut generation, notification.dropped_before);
+            if notification.method == "$/progress" {
+                Self::lock(&self.partial_results).accept(notification.params);
+            } else if notification.method == "textDocument/publishDiagnostics" {
+                self.accept_diagnostics(&notification.params);
             } else if notification.method == "experimental/serverStatus"
                 && let Some(quiescent) = notification
                     .params
                     .get("quiescent")
                     .and_then(Value::as_bool)
             {
-                self.quiescent
-                    .store(quiescent, std::sync::atomic::Ordering::SeqCst);
+                self.quiescent.store(quiescent, Ordering::SeqCst);
             }
+        }
+        // A producer can overflow while this batch is being consumed. None
+        // of the reports before that gap can remain evidence of a clean file.
+        self.observe_notification_loss(&mut generation, self.rpc.dropped_notifications());
+    }
+
+    fn observe_notification_loss(&self, generation: &mut u64, dropped: u64) {
+        if dropped > *generation {
+            Self::lock(&self.diagnostics).clear();
+            self.quiescent.store(false, Ordering::SeqCst);
+            *generation = dropped;
+            // Retain pull_reports: a later pull sends its exact previous
+            // resultId and requires a fresh full/unchanged server response
+            // tied to the current document and latest request. Clearing the
+            // visible cache alone makes push-only readers report unknown
+            // until a new report arrives; it never manufactures zero issues.
         }
     }
 
-    /// Block (async, tick-polled) until diagnostics for `uri` are fresh
-    /// enough to trust, or `wait` elapses. Returns true when a publish
-    /// arrived.
-    ///
-    /// "Fresh enough" means a publish for `uri` arrived AND at least one of:
-    /// the publish was non-empty, the server reported quiescence
-    /// (rust-analyzer's `experimental/serverStatus`), or the warmup window
-    /// has passed. An EMPTY publish inside the warmup window keeps waiting —
-    /// rust-analyzer publishes empty diagnostics for freshly opened files
-    /// before its first analysis completes.
     pub async fn wait_for_diagnostics(&self, uri: &str, wait: Duration) -> bool {
+        let Some(uri) = file_uri::normalize_uri(uri) else {
+            return false;
+        };
+        if self.has_pull_diagnostics() && !wait.is_zero() {
+            return self.refresh_document_diagnostics(&uri, wait).await.is_ok();
+        }
         let cx = AgentCx::for_current_or_request();
         let start = cx
             .cx()
             .timer_driver()
             .map_or_else(asupersync::time::wall_now, |timer| timer.now());
         loop {
+            if cx.checkpoint().is_err() || !self.is_alive() {
+                return false;
+            }
             self.poll_notifications();
             {
                 let cache = Self::lock(&self.diagnostics);
-                if let Some(diags) = cache.get(uri) {
+                if let Some(diags) = cache.get(&uri) {
                     let settled = !diags.is_empty()
-                        || self.quiescent.load(std::sync::atomic::Ordering::SeqCst)
+                        || self.quiescent.load(Ordering::SeqCst)
                         || self.connected_at.elapsed() >= WARMUP_EMPTY_RESULT_WINDOW;
                     if settled {
                         return true;
@@ -431,240 +430,27 @@ impl LspClient {
                 .cx()
                 .timer_driver()
                 .map_or_else(asupersync::time::wall_now, |timer| timer.now());
-            if std::time::Duration::from_nanos(now.duration_since(start)) >= wait {
-                return Self::lock(&self.diagnostics).contains_key(uri);
+            if Duration::from_nanos(now.duration_since(start)) >= wait {
+                return Self::lock(&self.diagnostics).contains_key(&uri);
             }
-            asupersync::time::sleep(now, WAIT_TICK).await;
+            let remaining = wait.saturating_sub(Duration::from_nanos(now.duration_since(start)));
+            cx.time().sleep(WAIT_TICK.min(remaining)).await;
         }
     }
 
-    /// Serialized, timeout- and cancellation-aware request.
-    ///
-    /// Retries the narrow "server still warming up" signature (rust-analyzer
-    /// answers `-32602 No references found` for valid positions while it is
-    /// still indexing) on a 250 ms cadence within the caller's timeout; all
-    /// other errors return immediately. The match is message-specific so
-    /// real usage errors are never retried away.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LspCallError`] on timeout, ambient cancellation, or
-    /// transport failure. Timeout and cancellation both send
-    /// `$/cancelRequest` before returning.
-    pub async fn call(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> std::result::Result<Value, LspCallError> {
-        let cx = AgentCx::for_current_or_request();
-        let start = cx
-            .cx()
-            .timer_driver()
-            .map_or_else(asupersync::time::wall_now, |timer| timer.now());
-        let mut attempt = self.call_once(method, params.clone(), timeout).await;
-        loop {
-            // Retryable warmup/transient signatures:
-            // - `-32602 No references found`: rust-analyzer answers valid
-            //   positions with this while still indexing.
-            // - `-32801 ContentModified`: the LSP spec's designated
-            //   retryable error; here it is the same warmup race (the doc
-            //   was synced from disk milliseconds earlier, so genuine drift
-            //   is impossible inside one tool call).
-            let retryable = matches!(
-                &attempt,
-                Err(LspCallError::Transport(TransportError::Server(err)))
-                    if (err.code == -32602 && err.message.contains("No references found"))
-                        || err.code == -32801
-            );
-            // Empty position-lookup results inside the warmup window may be
-            // indexing lag; retrying only ever DELAYS an empty answer, it
-            // can never fabricate a result.
-            let empty_during_warmup = matches!(&attempt, Ok(value) if is_empty_result(value))
-                && is_warmup_empty_retryable(method)
-                && self.connected_at.elapsed() < WARMUP_EMPTY_RESULT_WINDOW;
-            if !retryable && !empty_during_warmup {
-                return attempt;
-            }
-            let now = cx
-                .cx()
-                .timer_driver()
-                .map_or_else(asupersync::time::wall_now, |timer| timer.now());
-            let elapsed = std::time::Duration::from_nanos(now.duration_since(start));
-            let remaining = timeout.saturating_sub(elapsed);
-            if remaining < WARMUP_RETRY_CADENCE * 2 {
-                return attempt;
-            }
-            asupersync::time::sleep(now, WARMUP_RETRY_CADENCE).await;
-            if cx.checkpoint().is_err() {
-                return Err(LspCallError::Cancelled);
-            }
-            attempt = self.call_once(method, params.clone(), remaining).await;
-        }
-    }
-
-    /// One serialized request round-trip.
-    async fn call_once(
-        &self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> std::result::Result<Value, LspCallError> {
-        let cx = AgentCx::for_current_or_request();
-        // Serialize requests per server (spec). The owned guard is Send, so
-        // the wait loop below can await while holding it; the guard releases
-        // on drop.
-        let _lane = asupersync::sync::OwnedMutexGuard::lock(
-            std::sync::Arc::clone(&self.request_lane),
-            cx.cx(),
-        )
-        .await
-        .map_err(|_| LspCallError::Cancelled)?;
-        let (id, rx) = self
-            .rpc
-            .request(method, params)
-            .map_err(LspCallError::Transport)?;
-        let start = cx
-            .cx()
-            .timer_driver()
-            .map_or_else(asupersync::time::wall_now, |timer| timer.now());
-        loop {
-            match rx.try_recv() {
-                Ok(Ok(value)) => return Ok(value),
-                Ok(Err(err)) => return Err(LspCallError::Transport(err)),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(LspCallError::Transport(TransportError::Closed(
-                        "completion channel dropped".to_string(),
-                    )));
-                }
-            }
-            let now = cx
-                .cx()
-                .timer_driver()
-                .map_or_else(asupersync::time::wall_now, |timer| timer.now());
-            if std::time::Duration::from_nanos(now.duration_since(start)) >= timeout {
-                self.rpc.cancel_request(id);
-                return Err(LspCallError::Timeout {
-                    timeout_ms: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                });
-            }
-            if cx.checkpoint().is_err() {
-                self.rpc.cancel_request(id);
-                return Err(LspCallError::Cancelled);
-            }
-            asupersync::time::sleep(now, WAIT_TICK).await;
-        }
-    }
-
-    /// Ensure the server's view of `path` matches disk: open the document,
-    /// or close + reopen when the on-disk content changed since we opened it.
-    ///
-    /// Close/reopen is used instead of incremental `didChange` so the resync
-    /// is correct under every server sync kind (full or incremental).
-    ///
-    /// # Errors
-    ///
-    /// Fails when the file cannot be read or notifications cannot be sent.
-    pub fn ensure_synced(&self, path: &Path, language_id: &str) -> Result<String> {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let uri = path_to_uri(&canonical);
-        let content = std::fs::read_to_string(&canonical).map_err(|err| {
-            Error::tool(
-                "lsp",
-                format!(
-                    "[LSP_FILE_UNREADABLE] cannot read {}: {err}",
-                    canonical.display()
-                ),
-            )
-        })?;
-        let disk_hash = content_hash(&content);
-        let prior = Self::lock(&self.open_docs).get(&uri).cloned();
-        match prior {
-            Some(doc) if doc.disk_hash == disk_hash => Ok(uri),
-            Some(_) => {
-                // Drifted: close + reopen with the current disk content.
-                let _ = self.rpc.notify(
-                    "textDocument/didClose",
-                    serde_json::json!({ "textDocument": { "uri": uri } }),
-                );
-                Self::lock(&self.open_docs).remove(&uri);
-                self.open_document(&uri, &content, disk_hash, language_id)
-            }
-            None => self.open_document(&uri, &content, disk_hash, language_id),
-        }
-    }
-
-    fn open_document(
-        &self,
-        uri: &str,
-        content: &str,
-        disk_hash: u64,
-        language_id: &str,
-    ) -> Result<String> {
-        self.rpc
-            .notify(
-                "textDocument/didOpen",
-                serde_json::json!({
-                    "textDocument": {
-                        "uri": uri,
-                        "languageId": language_id,
-                        "version": 1,
-                        "text": content,
-                    }
-                }),
-            )
-            .map_err(|err| Error::tool("lsp", format!("[{}] {}", err.code(), err.message())))?;
-        Self::lock(&self.open_docs).insert(
-            uri.to_string(),
-            OpenDoc {
-                version: 1,
-                disk_hash,
-                language_id: language_id.to_string(),
-            },
-        );
-        Ok(uri.to_string())
-    }
-
-    /// Forget a document locally; the next `ensure_synced` reopens it from
-    /// disk. Used after external (WorkspaceEdit) mutation.
-    pub fn invalidate(&self, uri: &str) {
-        if Self::lock(&self.open_docs).remove(uri).is_some() {
-            let _ = self.rpc.notify(
-                "textDocument/didClose",
-                serde_json::json!({ "textDocument": { "uri": uri } }),
-            );
-        }
-    }
-
-    /// Forget every open document (used after rename_file moves).
-    pub fn invalidate_all(&self) {
-        let uris: Vec<String> = Self::lock(&self.open_docs).keys().cloned().collect();
-        for uri in uris {
-            self.invalidate(&uri);
-        }
-    }
-
-    /// Graceful stop: `shutdown` request, `exit` notification, then kill if
-    /// the process does not exit within a short grace window.
     pub async fn stop(&self) {
         let _ = self.call("shutdown", Value::Null, SHUTDOWN_TIMEOUT).await;
         self.rpc.shutdown();
     }
 
-    /// Hard kill.
     pub fn kill(&self) {
         self.rpc.kill();
     }
 
-    /// Install the server→client request hook (see
-    /// [`JsonRpcClient::set_server_request_handler`]).
     pub fn set_server_request_handler(&self, handler: super::jsonrpc::ServerRequestHandler) {
         self.rpc.set_server_request_handler(handler);
     }
 
-    /// Fire-and-forget notification wrapper (errors intentionally dropped by
-    /// callers on best-effort paths like `didRenameFiles`).
     pub fn call_no_wait_notify(
         &self,
         method: &str,
@@ -674,8 +460,6 @@ impl LspClient {
     }
 }
 
-/// Parse a `Location | Location[] | LocationLink[] | null` result into a
-/// flat list of `(uri, range)` pairs.
 #[must_use]
 pub fn parse_locations(result: &Value) -> Vec<(String, super::text::Range)> {
     let mut out = Vec::new();
@@ -685,12 +469,12 @@ pub fn parse_locations(result: &Value) -> Vec<(String, super::text::Range)> {
         _ => return out,
     };
     for item in items {
-        // LocationLink carries targetUri/targetSelectionRange.
         let (uri, range) = if let Some(uri) = item.get("targetUri").and_then(Value::as_str) {
-            let range = item
-                .get("targetSelectionRange")
-                .or_else(|| item.get("targetRange"));
-            (uri, range)
+            (
+                uri,
+                item.get("targetSelectionRange")
+                    .or_else(|| item.get("targetRange")),
+            )
         } else {
             let Some(uri) = item.get("uri").and_then(Value::as_str) else {
                 continue;
@@ -704,8 +488,6 @@ pub fn parse_locations(result: &Value) -> Vec<(String, super::text::Range)> {
     out
 }
 
-/// Extract text from a `MarkedString` (`"..."` or `{language, value}`) or
-/// `MarkupContent` (`{kind, value}`).
 fn marked_string_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -714,13 +496,12 @@ fn marked_string_text(value: &Value) -> Option<String> {
     }
 }
 
-/// Extract displayable text from a hover result.
 #[must_use]
 pub fn hover_to_text(result: &Value) -> Option<String> {
     let contents = result.get("contents")?;
     match contents {
         Value::Array(items) => {
-            let parts: Vec<String> = items.iter().filter_map(marked_string_text).collect();
+            let parts: Vec<_> = items.iter().filter_map(marked_string_text).collect();
             if parts.is_empty() {
                 None
             } else {
@@ -736,6 +517,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn uri_roundtrip_plain() {
         let path = PathBuf::from("/tmp/workspace/src/main.rs");
         let uri = path_to_uri(&path);
@@ -744,14 +526,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn uri_encodes_specials() {
         let path = PathBuf::from("/tmp/my project/fi#1?.rs");
         let uri = path_to_uri(&path);
         assert_eq!(uri, "file:///tmp/my%20project/fi%231%3F.rs");
-        assert_eq!(
-            uri_to_path(&uri),
-            Some(PathBuf::from("/tmp/my project/fi#1?.rs"))
-        );
+        assert_eq!(uri_to_path(&uri), Some(path));
     }
 
     #[test]
@@ -761,52 +541,245 @@ mod tests {
 
     #[test]
     fn parse_locations_handles_all_shapes() {
-        // Single Location object.
-        let single = serde_json::json!({
-            "uri": "file:///a.rs",
-            "range": { "start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 5} }
-        });
+        let single = serde_json::json!({"uri":"file:///a.rs","range":{"start":{"line":1,"character":2},"end":{"line":1,"character":5}}});
         let got = parse_locations(&single);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, "file:///a.rs");
         assert_eq!(got[0].1.start.line, 1);
-
-        // Array.
-        let array = serde_json::json!([single]);
-        assert_eq!(parse_locations(&array).len(), 1);
-
-        // LocationLink.
-        let link = serde_json::json!({
-            "targetUri": "file:///b.rs",
-            "targetRange": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3} },
-            "targetSelectionRange": { "start": {"line": 0, "character": 1}, "end": {"line": 0, "character": 2} }
-        });
+        assert_eq!(parse_locations(&serde_json::json!([single])).len(), 1);
+        let link = serde_json::json!({"targetUri":"file:///b.rs","targetRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"targetSelectionRange":{"start":{"line":0,"character":1},"end":{"line":0,"character":2}}});
         let got = parse_locations(&link);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, "file:///b.rs");
         assert_eq!(got[0].1.start.character, 1);
-
-        // Null and garbage.
         assert!(parse_locations(&Value::Null).is_empty());
         assert!(parse_locations(&serde_json::json!(42)).is_empty());
     }
 
     #[test]
     fn hover_text_handles_markup_and_marked() {
-        let markup = serde_json::json!({
-            "contents": { "kind": "markdown", "value": "```rust\nfn x()\n```" }
-        });
+        let markup =
+            serde_json::json!({"contents":{"kind":"markdown","value":"```rust\nfn x()\n```"}});
         assert_eq!(
             hover_to_text(&markup),
             Some("```rust\nfn x()\n```".to_string())
         );
-        let marked_array = serde_json::json!({
-            "contents": [{ "language": "rust", "value": "fn x()" }, "docs here"]
-        });
+        let marked =
+            serde_json::json!({"contents":[{"language":"rust","value":"fn x()"},"docs here"]});
         assert_eq!(
-            hover_to_text(&marked_array),
+            hover_to_text(&marked),
             Some("fn x()\n\ndocs here".to_string())
         );
         assert_eq!(hover_to_text(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn command_errors_are_not_warmup_retries() {
+        assert!(!is_warmup_empty_retryable("workspace/executeCommand"));
+        assert!(!is_warmup_empty_retryable("codeAction/resolve"));
+        assert!(is_warmup_empty_retryable("textDocument/definition"));
+        assert!(is_warmup_empty_retryable("workspace/willRenameFiles"));
+    }
+
+    #[test]
+    fn notification_overflow_invalidates_clean_reports_and_recovers() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let path = temp.path().join("source.rs");
+        std::fs::write(&path, "fn main() {}\n").expect("source");
+        let Some(peer) =
+            test_server::Fixture::connect(temp.path(), serde_json::json!({"textDocumentSync": 1}))
+        else {
+            return;
+        };
+        let uri = peer.client.ensure_synced(&path, "rust").expect("document");
+        let snapshots = peer.client.document_snapshots();
+        let version = snapshots.values().next().expect("synced snapshot").version;
+        let clean = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+            "params": {"uri": uri, "version": version, "diagnostics": []}
+        });
+        let settled = serde_json::json!({
+            "jsonrpc": "2.0", "method": "experimental/serverStatus",
+            "params": {"quiescent": true}
+        });
+        peer.notifications(&[clean.clone(), settled.clone()]);
+        assert!(
+            peer.runtime
+                .block_on(peer.client.document_diagnostics(&uri, Duration::ZERO))
+                .expect("explicit initial clean report")
+                .is_empty()
+        );
+        let diagnostic = serde_json::json!({
+            "message": "dependency now fails", "severity": 1,
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": 0, "character": 1}}
+        });
+        let failed = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+            "params": {"uri": uri, "version": version, "diagnostics": [diagnostic]}
+        });
+        // Keep both an old clean report and old quiescence in the backlog.
+        // The final error report must overflow the production queue without
+        // any client drain until the peer's following response acknowledges it.
+        let mut flood = vec![clean.clone(), settled.clone()];
+        flood.resize(
+            1024,
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "window/logMessage",
+                "params": {"type": 3, "message": "server is analyzing"}
+            }),
+        );
+        flood.push(failed.clone());
+        peer.notifications(&flood);
+        assert_eq!(peer.client.dropped_notifications(), 1);
+        assert!(peer.client.diagnostics_snapshot().is_empty());
+        assert!(!peer.client.quiescent.load(Ordering::SeqCst));
+        let error = peer
+            .runtime
+            .block_on(peer.client.document_diagnostics(&uri, Duration::ZERO))
+            .expect_err("a lost report must not preserve a clean result");
+        assert!(error.to_string().contains("LSP_DIAGNOSTICS_PENDING"));
+        assert!(peer.client.is_alive());
+
+        peer.notifications(&[failed]);
+        assert_eq!(
+            peer.runtime
+                .block_on(peer.client.document_diagnostics(&uri, Duration::ZERO))
+                .expect("fresh error report"),
+            vec![diagnostic]
+        );
+        peer.notifications(&[clean, settled]);
+        assert!(
+            peer.runtime
+                .block_on(peer.client.document_diagnostics(&uri, Duration::ZERO))
+                .expect("fresh explicit clean report")
+                .is_empty()
+        );
+        assert_eq!(
+            peer.runtime
+                .block_on(
+                    peer.client
+                        .call("test/success", Value::Null, Duration::from_secs(5))
+                )
+                .expect("unrelated requests remain usable"),
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(peer.client.dropped_notifications(), 1);
+        assert!(peer.client.is_alive());
+    }
+
+    fn workspace_peer(root: &Path) -> Option<test_server::Fixture> {
+        test_server::Fixture::connect(
+            root,
+            serde_json::json!({"diagnosticProvider": {
+                "interFileDependencies": true, "workspaceDiagnostics": true
+            }}),
+        )
+    }
+
+    #[test]
+    fn workspace_diagnostic_handshake_advertises_pull_but_not_automatic_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let Some(peer) = workspace_peer(temp.path()) else {
+            return;
+        };
+        let frames = peer.frames();
+        let initialize = frames
+            .iter()
+            .find(|frame| frame["method"] == "initialize")
+            .unwrap();
+        assert_eq!(
+            initialize["params"]["capabilities"]["workspace"]["diagnostics"],
+            serde_json::json!({"refreshSupport": false})
+        );
+        assert_eq!(
+            initialize["params"]["capabilities"]["textDocument"]["diagnostic"]["dynamicRegistration"],
+            false
+        );
+    }
+
+    #[test]
+    fn workspace_pull_cancelled_owner_never_posts_a_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let Some(peer) = workspace_peer(temp.path()) else {
+            return;
+        };
+        let owner = AgentCx::for_request();
+        owner.cancel_with(asupersync::types::CancelKind::User, Some("test cancelled"));
+        let error = peer
+            .runtime
+            .block_on(owner.with_current(peer.client.workspace_diagnostics(Duration::from_secs(5))))
+            .unwrap_err();
+        assert!(error.to_string().contains("LSP_CANCELLED"), "{error}");
+        assert!(
+            !peer
+                .frames()
+                .iter()
+                .any(|frame| frame["method"] == "workspace/diagnostic")
+        );
+        assert!(peer.client.is_alive());
+    }
+
+    #[test]
+    fn abandoned_written_workspace_pull_cancels_once_and_releases_the_request_lane() {
+        let temp = tempfile::tempdir().unwrap();
+        let Some(peer) = workspace_peer(temp.path()) else {
+            return;
+        };
+        peer.configure(serde_json::json!({"workspace/diagnostic": [{"hold": true}]}));
+        peer.runtime.block_on(async {
+            let mut request = Box::pin(peer.client.workspace_diagnostics(Duration::from_secs(30)));
+            assert!(futures::poll!(request.as_mut()).is_pending());
+            // The first pending poll proves only queue admission. Obtain a
+            // real peer acknowledgement using an independent transport slot
+            // before dropping the owner of the written workspace request.
+            let (id, response) = peer.client.rpc.request("test/frames", Value::Null).unwrap();
+            let observed =
+                crate::lsp::jsonrpc::await_completion(response, Duration::from_secs(5), || {
+                    peer.client.rpc.cancel_request(id);
+                })
+                .await
+                .expect("peer observation arrived")
+                .expect("peer observation succeeded");
+            assert!(
+                observed
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|frame| frame["method"] == "workspace/diagnostic")
+            );
+            drop(request);
+            assert_eq!(
+                peer.client
+                    .call("test/success", Value::Null, Duration::from_secs(5))
+                    .await
+                    .unwrap(),
+                serde_json::json!({"ok": true})
+            );
+        });
+        let frames = peer.frames();
+        let posted = frames
+            .iter()
+            .position(|frame| frame["method"] == "workspace/diagnostic")
+            .unwrap();
+        let cancelled = frames
+            .iter()
+            .position(|frame| frame["method"] == "$/cancelRequest")
+            .unwrap();
+        let successor = frames
+            .iter()
+            .position(|frame| frame["method"] == "test/success")
+            .unwrap();
+        assert!(posted < cancelled && cancelled < successor);
+        assert_eq!(frames[cancelled]["params"]["id"], frames[posted]["id"]);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame["method"] == "$/cancelRequest")
+                .count(),
+            1
+        );
+        assert!(peer.client.diagnostics_snapshot().is_empty());
+        assert!(peer.client.is_alive());
     }
 }

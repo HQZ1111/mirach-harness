@@ -58,7 +58,7 @@ export function AgentCard({
     >
       <div className="flex items-start gap-3">
         <span className="bg-foreground/[0.05] text-foreground/45 flex size-9 shrink-0 items-center justify-center rounded-xl">
-          <BotIcon className="size-4" />
+          <BotIcon className="size-[var(--size-icon-lg)]" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="flex items-baseline gap-2">
@@ -118,7 +118,7 @@ export function AgentCard({
       >
         {connected ? (
           <>
-            <CheckIcon className="size-3.5 text-emerald-500" />
+            <CheckIcon className="size-[var(--size-icon-md)] text-emerald-500" />
             Connected
           </>
         ) : (

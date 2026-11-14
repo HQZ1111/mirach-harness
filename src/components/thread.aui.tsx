@@ -1,6 +1,11 @@
 "use client";
 
 import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired';
+import { WorkspaceComposerMenu } from '@/components/panes/hermes-sidebar/workspace-composer-menu';
+import { statusPanelStore } from '@/components/assistant-ui/status-panel-store';
+import { PlanReviewCard } from '@/components/assistant-ui/mode-switch';
+import { VoiceLivePanel } from '@/components/assistant-ui/voice-live-panel';
+import { VoiceLiveConversationDrive } from '@/components/assistant-ui/voice-live-conversation';
 import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
 import { AskCards } from '@/components/assistant-ui/ask-cards'
@@ -70,12 +75,7 @@ import { ToolError } from "@/components/assistant-ui/elements/tool-error";
 import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
 import { WebSearch, type WebSearchResult } from "@/components/assistant-ui/elements/web-search";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
-import { TypingIndicator } from "@/components/assistant-ui/elements/typing-indicator";
 import { QuoteBlock } from "@/components/assistant-ui/elements/quote.aui";
-import {
-  ToolTimeline,
-  type TimelineStep,
-} from "@/components/assistant-ui/elements/tool-timeline";
 import { MessageStallIndicator } from "@/components/assistant-ui/elements/message-stall-indicator";
 import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
 import { AgentPlan } from "@/components/assistant-ui/elements/agent-plan";
@@ -94,20 +94,23 @@ import {
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
-import { MarkdownText } from "@/components/markdown-text";
-import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningRoot,
-  ReasoningText,
-  ReasoningTrigger,
-} from "@/components/assistant-ui/elements/reasoning.aui";
-import { ThreadThinkingIndicator } from "@/components/assistant-ui/elements/thinking-indicator.aui";import {
-  ToolGroupContent,
-  ToolGroupRoot,
-  ToolGroupTrigger,
-} from "@/components/assistant-ui/elements/tool-group.aui";
+import { ThreadThinkingIndicator } from "@/components/assistant-ui/elements/thinking-indicator.aui";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
+import {
+  AssistantWorkParts,
+  type WorkGroupPart,
+} from "@/components/assistant-ui/elements/work-parts.aui";
+import { TurnNavigator } from "@/components/assistant-ui/elements/turn-navigator.aui";
+import { SelectionToolbar } from "@/components/assistant-ui/elements/selection-toolbar.aui";
+import { ConversationFind } from "@/components/assistant-ui/elements/conversation-find.aui";
+import { SubagentLine } from "@/components/assistant-ui/elements/subagent-line";
+import { TurnFileSummary } from "@/components/assistant-ui/elements/turn-file-summary";
+import { TimelineMarkerRow, bucketMarkers } from "@/components/assistant-ui/elements/timeline-marker";
+import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-store";
+import {
+  groupMessagesIntoTurns,
+  isLastContentAssistantOfTurn,
+} from "@/components/assistant-ui/turn-units";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -119,10 +122,10 @@ import {
   BranchPickerPrimitive,
   ComposerPrimitive,
   ErrorPrimitive,
-  groupPartByType,
   MessagePrimitive,
   SuggestionPrimitive,
   ThreadPrimitive,
+  unstable_useThreadMessageIds,
   useAui,
   useAuiState,
   useToolCallElapsed,
@@ -146,7 +149,6 @@ import {
   PencilIcon,
   Redo2Icon,
   Undo2Icon,
-  WrenchIcon,
   PhoneIcon,
   Volume2Icon,
 } from "lucide-react";
@@ -164,7 +166,7 @@ import {
 } from "react";
 import { useStore } from "zustand";
 
-export type ThreadGroupPart = MessagePrimitive.GroupedParts.GroupPart;
+export type ThreadGroupPart = WorkGroupPart;
 
 /**
  * Optional component overrides for the thread. `AssistantMessage` and
@@ -179,44 +181,18 @@ export type ThreadComponents = {
   AssistantMessage?: ComponentType | undefined;
   Welcome?: ComponentType | undefined;
   ToolFallback?: ToolCallMessagePartComponent | undefined;
-  ToolGroup?:
-    | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
-    | undefined;
   ReasoningGroup?:
-    | ComponentType<PropsWithChildren<{ group: ThreadGroupPart }>>
+    | ComponentType<PropsWithChildren<{ group: WorkGroupPart }>>
     | undefined;
-  TaskGroup?: ComponentType<{ group: ThreadGroupPart }> | undefined;
+  TaskGroup?: ComponentType<{ group: WorkGroupPart }> | undefined;
 };
 
-const messageGroupBy = groupPartByType({
-  reasoning: ["group-chainOfThought", "group-reasoning"],
-  "tool-call": ["group-chainOfThought", "group-tool"],
-  "standalone-tool-call": [],
-});
-
-type ThreadGroupKey =
-  | "group-chainOfThought"
-  | "group-reasoning"
-  | "group-tool"
-  | "group-task";
-
-const TASK_GROUP_PATH: readonly ThreadGroupKey[] = [
-  "group-chainOfThought",
-  "group-task",
-];
-
-const taskAwareGroupBy = (
-  part: Parameters<typeof messageGroupBy>[0],
-  context?: Parameters<typeof messageGroupBy>[1],
-): readonly ThreadGroupKey[] => {
-  const path = messageGroupBy(part, context);
-  return part.type === "tool-call" &&
-    part.messages !== undefined &&
-    path.length > 0 &&
-    !context?.toolUIs?.[part.toolName]?.length
-    ? TASK_GROUP_PATH
-    : path;
-};
+// ── 分组路径（旧实现，2026-11-07 已被 work-parts.aui.tsx 替换）─────────
+// 此前用 `groupPartByType` + 自建 groupBy（带 GROUPBY_MEMO_KEY 指纹）做
+// 相邻合并；GroupedParts 的合并会被任何插入部件断组（思考行拆散工具族组），
+// 现改为 `assistant-work-items.ts` 的 ZCode 扫描 + `work-parts.aui.tsx`
+// 渲染器。族分类（classifyToolFamily）与父组摘要（buildFamilySummary）
+// 仍在 `tool-grouping.ts`，渲染器直接消费。
 
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
@@ -396,7 +372,7 @@ const SessionLineBar: FC = () => {
       // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）——bg-muted/40 底色承担层次
       className="mb-2 flex w-full items-center gap-2 rounded-(--composer-radius) bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground"
     >
-      <GitBranchIcon className="size-3.5 shrink-0" />
+      <GitBranchIcon className="size-[var(--size-icon-md)] shrink-0" />
       <span className="min-w-0 truncate">会话分支 · 分叉自「{displayName}」</span>
       <button
         type="button"
@@ -616,7 +592,7 @@ const CheckpointBar: FC = () => {
         onClick={() => setOpen((o) => !o)}
         className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
       >
-        <HistoryIcon className="size-3.5" aria-hidden />
+        <HistoryIcon className="size-[var(--size-icon-md)]" aria-hidden />
         检查点
         {checkpoints.length > 0 && (
           <span className="font-mono text-[10px] tabular-nums">
@@ -737,16 +713,40 @@ const summarizeArgs = (args: unknown): string => {
   return String(args);
 };
 
-/** 工具结果文本化：string 原样；其余 JSON 格式化（失败 String()） */
+/** 工具结果文本化（两种形状都认，2026-11-03 统一后流式与水合都是
+ * ToolOutput 对象；字符串是旧投影残留，保留兼容）：
+ * - string 原样；
+ * - ToolOutput 对象 `{content: blocks, details?, isError}` → blocks 拼文本；
+ * - 其余 JSON 格式化（失败 String()）。 */
 const toolResultText = (result: unknown): string => {
   if (typeof result === "string") return result;
   if (result === undefined || result === null) return "";
+  if (isToolOutputLike(result)) {
+    return result.content
+      .map((b) =>
+        typeof b === "string"
+          ? b
+          : typeof (b as { text?: unknown })?.text === "string"
+            ? (b as { text: string }).text
+            : "",
+      )
+      .join("");
+  }
   try {
     return JSON.stringify(result, null, 2) ?? String(result);
   } catch {
     return String(result);
   }
 };
+
+/** pi `ToolOutput` 的序列化形状（tools.rs:303，camelCase）。流式
+ * （agui.rs:318 原样透传）与水合（pi-hydrate 同形构造）共用。 */
+const isToolOutputLike = (
+  result: unknown,
+): result is { content: unknown[]; details?: unknown; isError?: boolean } =>
+  typeof result === "object" &&
+  result !== null &&
+  Array.isArray((result as { content?: unknown }).content);
 
 /** web_search 结果严格解析：数组或 {results:[...]},单项 {title|url,
  * domain|url}；任何一项不符整体返回 null（回退通用渲染） */
@@ -838,6 +838,22 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
   const { toolName, args, result, status, isError, argsText } = part;
   const running = status?.type === "running";
 
+  // subagent（pi 子代理工具，subagents.rs:440）：单行摘要（ZCode agent.tsx
+  // 的 collapsed 形态——bot 图标 + "子代理" + agent 名 + 任务摘要）。ZCode
+  // 不可展开（详情在它的侧栏子会话面板）；宿主没有下钻面，展开 = 看工具
+  // 输出（唯一详情面，不放假下钻）。失败态走行内「失败」字（ZCode 同：
+  // showFailureStatus 在摘要行上，不换错误卡）——**先于 isError 分流**。
+  if (toolName === "subagent") {
+    return (
+      <SubagentLine
+        args={args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined}
+        result={result}
+        isError={isError === true}
+        running={running}
+      />
+    );
+  }
+
   if (isError === true) {
     return (
       <ToolError
@@ -856,9 +872,14 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
       args && typeof args === "object" && !Array.isArray(args)
         ? (args as Record<string, unknown>).command
         : undefined;
-    // 形状契约：command 为 string、result 为 string/未到——否则回退通用
-    if (typeof command === "string" && (result === undefined || typeof result === "string")) {
-      const lines = typeof result === "string" && result.length > 0 ? result.split("\n") : [];
+    // 形状契约：command 为 string、result 为 string / ToolOutput 对象 / 未到
+    // ——其余（畸形容器）回退通用卡
+    if (
+      typeof command === "string" &&
+      (result === undefined || typeof result === "string" || isToolOutputLike(result))
+    ) {
+      const text = toolResultText(result);
+      const lines = text.length > 0 ? text.split("\n") : [];
       return (
         <TerminalBlock
           command={command}
@@ -892,7 +913,9 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
         ? (args as Record<string, unknown>).query ?? (args as Record<string, unknown>).q
         : undefined;
     if (typeof query === "string" && query) {
-      const results = parseWebSearchResults(result);
+      // web_search 的结果 JSON 在 content 文本里（ToolOutput 形状经
+      // toolResultText 取文本；两种形状都能解析）
+      const results = parseWebSearchResults(toolResultText(result));
       // 运行中（result 未到）即可渲染搜索条；结果解析失败回退通用
       if (results || result === undefined) {
         return (
@@ -1023,10 +1046,10 @@ const SessionMaintenanceBar: FC = () => {
   return (
     <div
       data-slot="aui_session-maintenance"
-      className="flex w-full items-center gap-1.5"
+      className="flex min-w-0 flex-1 items-center gap-1.5"
     >
       <button type="button" className={btn} disabled={busy !== null} onClick={() => void run('compact')}>
-        <MinimizeIcon className="size-3.5" aria-hidden />
+        <MinimizeIcon className="size-[var(--size-icon-md)]" aria-hidden />
         压缩上下文
       </button>
       <button
@@ -1035,11 +1058,11 @@ const SessionMaintenanceBar: FC = () => {
         disabled={busy !== null || undoable === 0}
         onClick={() => void run('undo')}
       >
-        <Undo2Icon className="size-3.5" aria-hidden />
+        <Undo2Icon className="size-[var(--size-icon-md)]" aria-hidden />
         撤销{undoable > 0 ? ` (${undoable})` : ''}
       </button>
       <button type="button" className={btn} disabled={busy !== null} onClick={() => void run('redo')}>
-        <Redo2Icon className="size-3.5" aria-hidden />
+        <Redo2Icon className="size-[var(--size-icon-md)]" aria-hidden />
         重做
       </button>
       {note !== null && (
@@ -1048,63 +1071,6 @@ const SessionMaintenanceBar: FC = () => {
         </span>
       )}
     </div>
-  );
-};
-
-// ── run 级工具时间线（官方 tool-timeline 元素）─────────────────────────
-// 本 assistant 消息的 tool-call 部件 → 步骤线。verb = 工具名、chip = 主参数
-// 摘要（与工具卡同一 summarizeArgs）；状态取部件的 result/isError。
-// 运行中（最后一个部件无 result）= streaming。
-const TOOL_STEP_ICON = WrenchIcon;
-
-const RunToolTimeline: FC = () => {
-  const role = useAuiState((s) => s.message.role);
-  const running = useAuiState((s) => s.thread.isRunning);
-  // 选择器只取引用稳定的原始值（message 对象）。**不得在选择器里造数组**
-  // ——useAuiState 的 getSnapshot 每次返回新引用会让 useSyncExternalStore
-  // 判定快照变化 → forceStoreRerender 无限循环 → "Maximum update depth
-  // exceeded" → RuntimeBoundary 兜住整棵聊天树（2026-10-18 实测：发消息后
-  // 黑屏的根因，栈顶就是本组件的 mountSyncExternalStore）。派生放 useMemo。
-  const content = useAuiState((s) => s.thread.messages[s.message.index]?.content);
-  const parts = useMemo(() => {
-    if (content === undefined || typeof content === "string") return null;
-    const out: { toolName: string; chip: string; done: boolean; error: boolean }[] = [];
-    for (const p of content) {
-      if (p.type !== "tool-call") continue;
-      out.push({
-        toolName: p.toolName,
-        chip: summarizeArgs(p.args).slice(0, 48),
-        done: p.result !== undefined,
-        error: p.isError === true,
-      });
-    }
-    return out;
-  }, [content]);
-  const [open, setOpen] = useState(false);
-  if (role !== "assistant" || !parts || parts.length === 0) return null;
-
-  const steps: TimelineStep[] = parts.map((p) => ({
-    verb: p.toolName,
-    chip: p.chip,
-    icon: TOOL_STEP_ICON,
-  }));
-  const streaming = running && parts.some((p) => !p.done);
-  const doneCount = parts.filter((p) => p.done).length;
-  const failedCount = parts.filter((p) => p.error).length;
-
-  return (
-    <ToolTimeline
-      data-slot="aui_tool-timeline"
-      className="ms-2 mt-1"
-      steps={steps}
-      visibleSteps={parts.length}
-      streaming={streaming}
-      open={open}
-      onOpenChange={setOpen}
-      activeLabel={`${parts.length} 个工具调用`}
-      restingLabel={`${doneCount}/${parts.length} 个工具调用${failedCount > 0 ? ` · ${failedCount} 失败` : ""}`}
-      stats={[]}
-    />
   );
 };
 
@@ -1171,6 +1137,101 @@ const MessageWithDaySeparator: FC = () => {
     <>
       {showSeparator && day && time && <DaySeparatorRow day={day} time={time} />}
       <ThreadMessage />
+    </>
+  );
+};
+
+/**
+ * 轮容器列表（ZCode `ConversationTurnRenderUnit` 的宿主投影，2026-11-02）。
+ *
+ * 替换原来的扁平 `<ThreadPrimitive.Messages>`：消息仍逐条渲染（
+ * `Unstable_MessageById` 按 id 挂载，跨重排/插入保持同一节点），但外面多
+ * 了一层**轮**——一条 user 消息 + 其后的 assistant 工作。分组规则是纯函数
+ * （`turn-units.ts`，11 条单测）。
+ *
+ * ## 为什么需要这层
+ *
+ * 轮级能力全部以"这一轮从哪到哪"为前提：轮级操作条（一轮一条，已接）、
+ * 轮尾文件变更汇总、轮导航器、轮尾 boundary marker。扁平列表做不出来。
+ *
+ * ## 不重渲染的取法
+ *
+ * `unstable_useThreadMessageIds` 返回的数组在**只有内容变化**时引用不变
+ * （官方注释明说，正是为虚拟列表准备的）。轮结构只需要 id 序列 + role
+ * 序列，所以 role 也压成一个字符串签名（`u`/`a` 串）——流式每帧 store 都
+ * 会通知，但签名不变 → `Object.is` 命中 → 不重渲染、不重算分组。
+ *
+ * ## 间距保持宿主既有节奏
+ *
+ * 轮与轮之间、消息与消息之间都是 `gap-y-6`（宿主定稿；ZCode 的
+ * pt-14+pb-5 是有意差异，见 AGENTS.md「确认为有意差异」表）。加这层**不改
+ * 视觉**，只加结构。
+ */
+const MessageTurnList: FC = () => {
+  const ids = unstable_useThreadMessageIds();
+  const roleSig = useAuiState((s) =>
+    s.thread.messages.map((m) => (m.role === "user" ? "u" : "a")).join(""),
+  );
+  const turns = useMemo(
+    () =>
+      groupMessagesIntoTurns(
+        ids.map((id, i) => ({
+          id,
+          role: roleSig[i] === "u" ? "user" : "assistant",
+        })),
+      ),
+    [ids, roleSig],
+  );
+  // 时间线标记按「第几条消息之前」分桶（ZCode `lightBoundary` 语义：模型
+  // 切换落在轮顶，渲染在该轮 user 气泡之前）。
+  const markers = useTimelineMarkers();
+  const buckets = useMemo(() => bucketMarkers(markers), [markers]);
+
+  // 消息 id → thread 全局下标。`beforeMessageIndex` 与 `pi_get_messages`
+  // 的顺序对齐，而 `ids` 就是同一序列（水合 + 流式追加都按序），所以
+  // 直接用下标即可，不必再查 Map。
+  // `beforeMessageIndex === ids.length` 的标记落在**全部消息之后**（最后
+  // 一轮收尾后的模型切换，为下一轮准备的）——挂在列表末尾，不静默丢弃。
+  const tailMarkers = buckets.get(ids.length);
+  return (
+    <>
+      {turns.map((turn, turnIndex) => {
+        // 该轮首条消息的全局下标
+        const firstIdx = ids.indexOf(turn.messageIds[0] ?? "");
+        const turnMarkers = firstIdx >= 0 ? buckets.get(firstIdx) : undefined;
+        return (
+          <div
+            key={turn.key}
+            data-slot="aui_turn"
+            data-turn-key={turn.key}
+            data-turn-has-user={turn.userId ? "true" : "false"}
+            data-turn-last={turnIndex === turns.length - 1 ? "true" : "false"}
+            className="group/turn flex flex-col gap-y-6"
+          >
+            {turnMarkers?.map((m, i) => (
+              <TimelineMarkerRow
+                key={`${m.marker.kind}-${m.marker.beforeMessageIndex}-${i}`}
+                marker={m.marker}
+                prevModel={m.prevModel}
+              />
+            ))}
+            {turn.messageIds.map((id) => (
+              <ThreadPrimitive.Unstable_MessageById
+                key={id}
+                messageId={id}
+                components={{ Message: MessageWithDaySeparator }}
+              />
+            ))}
+          </div>
+        );
+      })}
+      {tailMarkers?.map((m, i) => (
+        <TimelineMarkerRow
+          key={`tail-${m.marker.kind}-${m.marker.beforeMessageIndex}-${i}`}
+          marker={m.marker}
+          prevModel={m.prevModel}
+        />
+      ))}
     </>
   );
 };
@@ -1243,6 +1304,23 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
   // 增删不摇晃阅读位）。
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const restoreRequest = useStore(threadScrollBridge, (s) => s.scrollRestoreRequest);
+  // 活动状态面板让位（见内容列的类注释）：panel 钉死 = 恒让位；auto =
+  // ≥1280 让位（CSS 容器查询）；mini = 不让位（改用顶部余隙）。
+  // statusPanelPresent = 面板组件在场（hasContent 且非 draft，含 mini 胶囊）。
+  //
+  // **让位必须以"面板真的在场"为前提**（2026-11-02 修）：override 只记录
+  // 用户的显示模式偏好，面板本身在草稿态/无内容时根本不渲染——只看
+  // override 会让"选了钉死形态但面板没渲染"的会话把整列往左推 157.5px
+  // 且右侧留一片空白（用户："对话区怎么靠左边了，间距也没有了"）。
+  const statusPanelVariant = useStore(statusPanelStore, (s) => s.override ?? "auto");
+  const statusPanelPresent = useStore(statusPanelStore, (s) => s.mounted);
+  const statusPanelShift: "always" | "wide" | "none" = !statusPanelPresent
+    ? "none"
+    : statusPanelVariant === "panel"
+      ? "always"
+      : statusPanelVariant === "auto"
+        ? "wide"
+        : "none";
   const sessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!restoreRequest) return;
@@ -1290,6 +1368,15 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
     <ThreadPrimitive.Root asChild>
       <div
         ref={widthAxis.rootResizeRef}
+        // 让位形态写在这里：panes.css 的 --dsh-column-width / --dsh-panel-offset
+        // 由它选择（panel 恒让位 / auto 仅 ≥1280），内容列与宽度手柄共用。
+        data-status-panel-shift={
+          scoped || statusPanelShift === "none"
+            ? undefined
+            : statusPanelShift === "always"
+              ? "panel"
+              : "auto"
+        }
         className="aui-root aui-thread-root bg-transparent @container relative flex h-full flex-col"
         style={{
           // 可读列宽 = dsh 对话宽度轴（width-handle.tsx：拖拽手柄发布
@@ -1311,9 +1398,44 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           >
         <div
           className={cn(
+            // 基础列：居中 + 行长上限（--dsh-chat-content-width 由宽度手柄
+            // 的拖拽偏好/列宽自适应决定，见 panes.css）。
             "mx-auto flex w-full max-w-(--dsh-chat-content-width) flex-1 flex-col px-4 pt-4",
+            // 活动状态面板让位（ZCode conversationLayout 双类，2026-11-01 用户：
+            // "活动状态面板在一定宽度的时候不是能把对话区往左挤吗"）。
+            //
+            // **ZCode 是「收窄 + 左移」两步，不是只左移**（2026-11-02 修，
+            // 用户："对话区怎么靠左边了，间距也没有了"）：
+            // 上游 = `w-[calc(100%-24rem)] max-w-6xl` + `-translate-x-42`。
+            // 宿主原先只做 `-translate-x-42`：852px 的居中块被左推 157.5px
+            // 后右缘到 1148，而面板左缘 1135 —— 内容压在面板上，左边距
+            // 同时被吃成负数（实测列 x=293 < 视口 310）。
+            // 现在收窄与位移都由 panes.css 的 `--dsh-column-width` /
+            // `--dsh-panel-offset` 提供（同一来源也给宽度手柄用）。
+            //
+            // - panel 钉死形态（INLINE_OFFSET）= **无断点**永远让位——窄窗下
+            //   面板照样浮在右上，不让位就盖正文（实测盖住用户气泡）；
+            // - auto 形态（WIDE_OFFSET）= 仅容器 ≥1280 让位（窄屏是胶囊）。
+            // 断点判定在 panes.css 的 @container thread 里。
+            // 顶部余隙（ZCode pt-14 同语义，conversationLayout.ts:14-19）：
+            // 胶囊形态下面板挂在列右上角（mini 底边 ~50px），首条内容的顶部
+            // 要给它留高度——panel 钉死形态靠横向让位，不需要纵向余隙。
+            !scoped &&
+              statusPanelShift === "wide" &&
+              "@max-[1279px]/thread:pt-20",
+            !scoped &&
+              statusPanelShift === "none" &&
+              statusPanelPresent &&
+              "pt-20",
             isEmpty && "justify-center",
           )}
+          data-column-shift={
+            scoped || statusPanelShift === "none"
+              ? undefined
+              : statusPanelShift === "always"
+                ? "panel"
+                : "auto"
+          }
         >
           <AuiIf condition={isNewChatView}>
             <Welcome />
@@ -1338,13 +1460,21 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
               经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
           <CompactionBanner />
 
+          {/* 计划审批卡（2026-11-01 模式切换的全链路一环）：模型 submit_plan
+              后出现，批准 = 计划钉入上下文并放行、驳回 = 按反馈修改。轮询
+              planPending（仅计划模式期间），数据面 mode-store。 */}
+          <PlanReviewCard />
+
+          {/* GPT-Live 委托回路驱动（2026-11-12）：面板写 pendingDelegation →
+              这里消费（busy 先 cancelRun → aui.thread.append 提交）→ 回复经
+              200ms tick 句界 speak 回语音。无会话 = no-op。 */}
+          <VoiceLiveConversationDrive />
+
           <div
             data-slot="aui_message-group"
             className="mb-14 flex flex-col gap-y-6 empty:hidden"
           >
-            <ThreadPrimitive.Messages>
-              {() => <MessageWithDaySeparator />}
-            </ThreadPrimitive.Messages>
+            <MessageTurnList />
           </div>
 
           <ThreadPrimitive.ViewportFooter
@@ -1366,10 +1496,21 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
                 <StoppedRunBanner />
                 <ApprovalCards />
                 <AskCards />
-                {/* 会话维护条（手动压缩 / 撤销 / 重做）：pi 有这些能力但
-                    此前无入口（docs/pi-coverage.md 缺口）。只在非运行态显示
-                    ——运行中压缩会与自动压缩打架，撤销会与工具写入竞争。 */}
-                <SessionMaintenanceBar />
+                {/* 新建任务行（2026-11-01 用户："选择文件夹和压缩会话应该在
+                    一排，压缩在选择文件夹后面不是上面"）：文件夹位置 chip 在
+                    前、会话维护条在后。chip 组件内部按 activeId===null 自我
+                    裁剪（有会话时行里只剩维护条）；运行态维护条渲染 null。 */}
+                <div className="flex w-full flex-wrap items-center gap-1.5" data-slot="aui_composer-side-row">
+                  <WorkspaceComposerMenu />
+                  {/* 双工语音字幕条（2026-11-14：入口钮迁列头 workspace 行——
+                      用户定稿"项目名右边，像微信语音通话钮"；字幕条/红显留
+                      composer，钮与字幕条经 voiceLiveStore 传话）。 */}
+                  <VoiceLivePanel />
+                  {/* 会话维护条（手动压缩 / 撤销 / 重做）：pi 有这些能力但
+                      此前无入口（docs/pi-coverage.md 缺口）。只在非运行态显示
+                      ——运行中压缩会与自动压缩打架，撤销会与工具写入竞争。 */}
+                  <SessionMaintenanceBar />
+                </div>
                 {/* 运行成本（cost-meter）与排队消息（message-queue）：composer
                     上方、ApprovalCards 之下——非运行态显示成本、运行态显示
                     排队（二者不同时渲染，消息密度最低的挂点） */}
@@ -1392,12 +1533,24 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             <WidthHandle
               key={side}
               side={side}
+              // 让位时的位移/收窄由 panes.css 按 --dsh-column-width 与
+              // --dsh-panel-offset 计算（与内容列同源），这里不再传类——
+              // 传了就成第二个写入者，两边必然漂移。
               onStart={widthAxis.onHandleStart}
               onDrag={widthAxis.onHandleDrag}
               onCommit={widthAxis.onHandleCommit}
               onEnd={widthAxis.onHandleEnd}
             />
           ))}
+        {/* 轮导航器（ZCode ConversationTurnNavigator）：左缘竖条 mini-map，
+            悬停预览、点击跳轮；≥864px 容器宽且 ≥2 条 query 才显示 */}
+        {!isEmpty && <TurnNavigator />}
+        {/* 框选工具条（ZCode ConversationSelectionTooltip）：选中文字浮出
+            复制 / 引用到输入框（ZCode 的任务/侧聊动作宿主没有，不放假入口） */}
+        {!isEmpty && <SelectionToolbar />}
+        {/* 会话内查找（ZCode TaskFindDialog）：Ctrl/Cmd+F，CSS Custom
+            Highlight 高亮，n/m 计数 + ↑↓ 导航 */}
+        <ConversationFind />
       </div>
     </ThreadPrimitive.Root>
   );
@@ -1409,10 +1562,18 @@ const ThreadMessage: FC = () => {
   const role = useAuiState((s) => s.message.role);
   const isEditing = useAuiState((s) => s.message.composer.isEditing);
   const isSpoken = useAuiState((s) => s.message.metadata.modality === "voice");
+  // **空 assistant 消息整条不渲染**（2026-11-02）：`RUN_STARTED` 无条件
+  // push 一条 `content: ''` 的 assistant 消息占位；run 直接失败（如
+  // SESSION_PERSISTENCE_FAILED / provider 401）时它永远拿不到内容，却仍
+  // 占一整条气泡的高度（-mb-7.5/pb-7.5 + footer），视觉上就是"ai 没回复
+  // 却留了一块空行"。等第一个 part 到达再渲染（流式首 token 前由底部
+  // thinking indicator 表达"在跑"）。
+  const hasParts = useAuiState((s) => s.message.parts.length > 0);
 
   if (isEditing) return <EditComposer />;
   if (isSpoken) return <SpokenMessage />;
   if (role === "user") return <UserMessage />;
+  if (!hasParts) return null;
   return <AssistantMessageComponent />;
 };
 
@@ -1459,7 +1620,7 @@ const SpokenMessage: FC = () => {
           data-slot="aui_spoken-exchange-header"
           className="text-muted-foreground mb-1.5 flex items-center gap-1.5 text-xs"
         >
-          <PhoneIcon className="size-3" aria-hidden />
+          <PhoneIcon className="size-[var(--size-icon-sm)]" aria-hidden />
           <span>Voice conversation</span>
         </div>
       )}
@@ -1469,9 +1630,9 @@ const SpokenMessage: FC = () => {
       >
         <span className="text-muted-foreground mt-1 shrink-0" aria-hidden>
           {role === "user" ? (
-            <MicIcon className="size-3.5" />
+            <MicIcon className="size-[var(--size-icon-md)]" />
           ) : (
-            <AudioLinesIcon className="size-3.5" />
+            <AudioLinesIcon className="size-[var(--size-icon-md)]" />
           )}
         </span>
         <span className="sr-only">
@@ -1704,13 +1865,24 @@ const AssistantMessage: FC = () => {
     // 工具渲染默认 = PiToolUI 分流（bash/web_search/isError/通用；形状
     // 不符回退官方 ToolFallback）——消费者传入的 ToolFallback 槽位仍优先
     ToolFallback: ToolFallbackComponent = PiToolUI,
-    ToolGroup,
     ReasoningGroup,
     TaskGroup: TaskGroupComponent,
   } = useContext(ThreadComponentsContext);
-  const groupBy = TaskGroupComponent ? taskAwareGroupBy : messageGroupBy;
   // 朗读面板开合（footer 朗读钮 ↔ 消息底部 ReadAloud 面板）
   const [readAloudOpen, setReadAloudOpen] = useState(false);
+
+  // ── 轮级操作条：一轮只挂一条（2026-11-02，ZCode
+  //    `hideAssistantActions={!item.latest}` 同款）────────────────────
+  // 一个 turn 里可以有多条 assistant 消息（工具调用前后各一段文本、
+  // 重试产生的兄弟段）。此前**每条**都渲染复制/赞踩/分叉/重试，用户在
+  // 一个多轮工具的回复下面看到三四排一样的按钮。
+  // ZCode 的口径：只有「本轮最后一条有正文的 assistant」挂操作条，
+  // 中途段不挂。判定见 `turn-units.ts::isLastContentAssistantOfTurn`
+  // ——直接吃 MessageState 数组（它自带 role/parts），不额外 map 一遍。
+  const isTurnTail = useAuiState((s) =>
+    isLastContentAssistantOfTurn(s.thread.messages, s.message.index),
+  );
+  const hasParts = useAuiState((s) => s.message.parts.length > 0);
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1720,93 +1892,36 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="fade-in slide-in-from-bottom-1 animate-in relative -mb-7.5 pb-7.5 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+      className={cn(
+        "fade-in slide-in-from-bottom-1 animate-in relative duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        // 只有挂操作条的（轮尾）消息才为 footer 预留 30px——不预留会让
+        // 中途段与下一段之间多出一段空气。
+        isTurnTail && hasParts && "-mb-7.5 pb-7.5",
+      )}
     >
       <div
         data-slot="aui_assistant-message-content"
         className="text-foreground px-2 leading-relaxed wrap-break-word"
       >
-        <MessagePrimitive.GroupedParts groupBy={groupBy}>
-          {({ part, children }) => {
-            switch (part.type) {
-              case "group-chainOfThought":
-                return <div data-slot="aui_chain-of-thought">{children}</div>;
-              case "group-task":
-                return TaskGroupComponent ? (
-                  <TaskGroupComponent group={part} />
-                ) : null;
-              case "group-tool":
-                if (ToolGroup) {
-                  return <ToolGroup group={part}>{children}</ToolGroup>;
-                }
-                return (
-                  <ToolGroupRoot variant="ghost">
-                    <ToolGroupTrigger
-                      count={part.indices.length}
-                      active={part.status.type === "running"}
-                    />
-                    <ToolGroupContent>{children}</ToolGroupContent>
-                  </ToolGroupRoot>
-                );
-              case "group-reasoning": {
-                if (ReasoningGroup) {
-                  return (
-                    <ReasoningGroup group={part}>{children}</ReasoningGroup>
-                  );
-                }
-                const running = part.status.type === "running";
-                return (
-                  <ReasoningRoot streaming={running}>
-                    <ReasoningTrigger active={running} />
-                    <ReasoningContent aria-busy={running}>
-                      <ReasoningText>{children}</ReasoningText>
-                    </ReasoningContent>
-                  </ReasoningRoot>
-                );
-              }
-              case "text":
-                return <MarkdownText />;
-              case "reasoning":
-                return <Reasoning {...part} />;
-              case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
-              case "data":
-                return part.dataRendererUI;
-              case "file":
-                return (
-                  <div data-slot="aui_assistant-message-file" className="py-1">
-                    <File {...part} />
-                  </div>
-                );
-              case "image":
-                return (
-                  <div data-slot="aui_assistant-message-image" className="py-1">
-                    <Image {...part} />
-                  </div>
-                );
-              case "indicator":
-                // 官方 typing-indicator 元素（bare 变体：三点 bounce）——
-                // 取代此前手写的 "●" 脉冲字符（同一语义、官方动画）。
-                return (
-                  <span
-                    data-slot="aui_assistant-message-indicator"
-                    className="inline-flex items-center py-1"
-                  >
-                    <TypingIndicator variant="bare" />
-                  </span>
-                );
-              default:
-                return null;
-            }
-          }}
-        </MessagePrimitive.GroupedParts>
+        {/* 工作项渲染器（2026-11-07）：替换 MessagePrimitive.GroupedParts。
+            ZCode 扫描语义——隐藏的思考行（非首条）在扫描前剔除，工具族组
+            因此能跨思考行（[思考,bash,思考,bash] → 一个「终端」组）。
+            叶子机制与官方逐条对齐（part scope / 注册工具 UI / data 渲染器 /
+            indicator），见 work-parts.aui.tsx 模块头。 */}
+        <AssistantWorkParts
+          ToolFallback={ToolFallbackComponent}
+          ReasoningGroup={ReasoningGroup}
+          TaskGroup={TaskGroupComponent}
+        />
         <MessageError />
       </div>
 
-      {/* run 级工具时间线（官方 tool-timeline 元素）：本消息的 tool-call 部件
-          聚合成一条可折叠的步骤线（verb = 工具名、chip = 主参数摘要）。只在
-          有工具调用时渲染——无工具调用则整块缺席。 */}
-      <RunToolTimeline />
+      {/* **已删除 run 级工具时间线**（2026-11-02）：GroupedParts 的
+          `group-explore/execute/changes` 分支已经渲染了本消息的全部工具行
+          （ToolFamilyGroup → 子工具行），再挂一条聚合时间线就是**同一批
+          工具调用渲染两遍**（用户："ass上百个消息组件……现在消息显示的有问题"）。
+          ZCode 的对照口径：工具只以分组父行 + 子行出现一次，没有额外的
+          run 级时间线摘要。 */}
 
       {/* 停滞指示（官方 unstable_useMessageStallDetection）：正文/工具已流出
           但内容 2s 未变（工具思考期/provider 卡住）时重新浮出"仍在工作"。
@@ -1816,15 +1931,33 @@ const AssistantMessage: FC = () => {
       {/* run 级 usage（官方 message-timing 元素）——只在最后一条 assistant */}
       <RunTiming />
 
+      {/* 轮尾文件变更汇总（ZCode `ConversationFileSummaryPanel`）：只在
+          轮尾消息渲染（isTurnTail 与操作条同门），**排在操作条之前**——
+          ZCode 的明确排序理由：summary 在 bar 前面，读起来 summary 才是
+          本轮收尾。数据面 turn-file-changes.ts（从本 turn 的工具结果现场
+          聚合，不编造）。 */}
+      {isTurnTail && hasParts && <TurnFileSummary />}
+
       <div
         data-slot="aui_assistant-message-footer"
+        data-turn-tail={isTurnTail ? "1" : "0"}
+        data-has-parts={hasParts ? "1" : "0"}
         className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
       >
-        <MessageTimeLabel />
-        <AssistantActionBar
-          readAloudOpen={readAloudOpen}
-          onReadAloudToggle={() => setReadAloudOpen((o) => !o)}
-        />
+      {/* **空消息不挂操作条**（2026-11-02）：`RUN_STARTED` 会无条件 push
+          一条 `content: ''` 的 assistant 消息，run 直接失败（如
+          SESSION_PERSISTENCE_FAILED）时这条消息永远拿不到内容，却照样
+          渲染复制/赞踩/分叉/重试一排按钮——用户看到的就是"ai 没回复，
+          下面还是一串按钮，而且是乱的"。
+          ZCode 同判：`latestAssistantTextRow?.state === "complete" &&
+          assistantCopyText !== undefined`（没有正文 = 没有操作条）。
+          第二道门 `isTurnTail`：一轮只挂一条（中途 assistant 段不挂）。 */}
+        <AuiIf condition={(s) => s.message.parts.length > 0 && isTurnTail}>
+          <AssistantActionBar
+            readAloudOpen={readAloudOpen}
+            onReadAloudToggle={() => setReadAloudOpen((o) => !o)}
+          />
+        </AuiIf>
       </div>
 
       {/* 朗读面板（官方 read-aloud 元素）：footer 朗读钮展开，挂消息底部 */}
@@ -1835,13 +1968,15 @@ const AssistantMessage: FC = () => {
   );
 };
 
-// 消息操作条（官方 message-actions 元素）：复制（copied 态）/ 反馈 /
-// 重新生成 / 更多。重新生成与 ActionBarPrimitive.Reload 同一机制
-// （aui.message.reload → startRun → runtime onReload）——不重复造重发
-// 管道；onReload 接通后 Reload 能力即活（capabilities.reload = true）。
-// feedback 能力未接入（无 FeedbackAdapter）时隐藏反馈钮（aui-no-feedback，
+// 消息操作条（官方 message-actions 元素）。顺序照 ZCode
+// `ConversationAssistantTextActions`：复制 → 赞 → 踩 → 分叉 → 时间。
+// - 重新生成/更多是宿主的补充入口（ZCode 产品面没有 retry 与 `…` 菜单，
+//   但宿主已有 regenerate-menu 与 ExportMarkdown 落地，保留在本条后面）。
+// - 分叉 = 该轮最后一条 user 消息的 fork 点开新会话（ZCode 的
+//   `forkAssistant` 语义）；fork 点未落盘时按钮禁用，不假装可点。
+// - 时间放本条末尾（ZCode：只读元数据，不增加可点击区域）。
+// feedback 能力未接入（无 FeedbackAdapter）时隐藏反馈钮（aui-hide-reactions，
 // overlays.css）——与旧版 AuiIf capabilities.feedback 门控等价。
-// 消息时间（ZCode/hermes hover 栏尾同款）：createdAt 存在才显示，只读
 const MessageTimeLabel: FC = () => {
   const createdAt = useAuiState(
     (s) => s.thread.messages[s.message.index]?.createdAt,
@@ -1856,10 +1991,51 @@ const MessageTimeLabel: FC = () => {
   }, [createdAt]);
   if (!label) return null;
   return (
-    <span className="text-muted-foreground/70 mr-auto text-[0.6875rem] select-none">
+    <span
+      data-slot="aui_message-time"
+      className="text-muted-foreground/70 select-none px-1 text-[0.6875rem] tabular-nums"
+    >
       {label}
     </span>
   );
+};
+
+/** 本轮分叉目标 = 本 assistant 消息之前最近的一条 user 消息。 */
+const useTurnForkTarget = () => {
+  const userOrdinal = useAuiState((s) => {
+    let count = 0;
+    const msgs = s.thread.messages;
+    for (let i = 0; i < s.message.index && i < msgs.length; i++) {
+      if (msgs[i]?.role === "user") count++;
+    }
+    return count - 1;
+  });
+  const messageText = useAuiState((s) => {
+    const msgs = s.thread.messages;
+    for (let i = s.message.index - 1; i >= 0; i--) {
+      const m = msgs[i];
+      if (!m || m.role !== "user") continue;
+      if (typeof m.content === "string") return m.content;
+      return m.content
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+    }
+    return null;
+  });
+  const forkable = useStore(branchBridge, (s) => {
+    if (userOrdinal < 0 || messageText === null) return false;
+    const point = s.forkPoints[userOrdinal];
+    return point !== undefined && point.text === messageText;
+  });
+  const fork = () => {
+    if (userOrdinal < 0 || messageText === null) {
+      console.error("[aui] fork：无法定位本轮 user 消息的序号/文本——取消");
+      return;
+    }
+    branchBridge.getState().requestFork(userOrdinal, messageText);
+  };
+  return { forkable, fork };
 };
 
 const AssistantActionBar: FC<{
@@ -1869,6 +2045,7 @@ const AssistantActionBar: FC<{
   const aui = useAui();
   const isCopied = useAuiState((s) => s.message.isCopied);
   const feedbackEnabled = useAuiState((s) => s.thread.capabilities.feedback);
+  const { forkable, fork } = useTurnForkTarget();
   const [reaction, setReaction] = useState<Reaction>(null);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -1935,8 +2112,11 @@ const AssistantActionBar: FC<{
         onReactionChange={onReactionChange}
         onRegenerate={onRegenerate}
         onMore={onMore}
+        onFork={fork}
+        forkable={forkable}
         className={cn(!feedbackEnabled && "aui-hide-reactions")}
       />
+      <MessageTimeLabel />
       {/* 换模型重生成（官方 regenerate-menu 元素）：reload 带
           runConfig.custom.modelOverride → runtime onReload 探测后
           pi_set_model + 重发 */}
@@ -1968,7 +2148,7 @@ const AssistantActionBar: FC<{
         >
           <ActionBarPrimitive.ExportMarkdown asChild>
             <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
-              <DownloadIcon className="size-4" />
+              <DownloadIcon className="size-[var(--size-icon-lg)]" />
               Export as Markdown
             </ActionBarMorePrimitive.Item>
           </ActionBarPrimitive.ExportMarkdown>
@@ -2048,15 +2228,24 @@ const UserMessage: FC = () => {
     >
       <UserMessageAttachments />
 
-      <div className="aui-user-message-content-wrapper relative col-start-2 min-w-0">
-        <div className="aui-user-message-content peer bg-muted text-foreground rounded-(--composer-radius) px-4 py-2 wrap-break-word empty:hidden">
+      <div className="aui-user-message-content-wrapper col-start-2 min-w-0">
+        <div className="aui-user-message-content bg-muted text-foreground rounded-(--composer-radius) px-4 py-2 wrap-break-word empty:hidden">
           <MessagePrimitive.Parts
             components={{ File: UserFilePart, Image: UserImagePart, Quote: QuoteBlock }}
           />
         </div>
-        <div className="aui-user-action-bar-wrapper absolute start-0 top-1/2 -translate-x-full -translate-y-1/2 pe-2 peer-empty:hidden rtl:translate-x-full">
-          <UserActionBar />
-        </div>
+      </div>
+
+      {/* 用户消息操作条（复制/编辑）：**气泡下方、右对齐**（ZCode
+          `ConversationRowView` 的 user row 同款——RowShell 是
+          `flex flex-col items-end`，MessageActions 直接排在气泡之后）。
+          旧实现在气泡左侧垂直居中（`absolute start-0 top-1/2
+          -translate-x-full`），鼠标要先移到气泡左边才找得到，与 ZCode 不符。 */}
+      <div
+        data-slot="aui_user-action-bar"
+        className="col-start-2 mt-1 flex justify-end"
+      >
+        <UserActionBar />
       </div>
 
       {/* 变体条独立成行：限定在气泡所在列（col-start-2）并跟随气泡右缘
@@ -2144,8 +2333,14 @@ const UserActionBar: FC = () => {
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
-      autohide="not-last"
-      className="aui-user-action-bar-root flex flex-col items-end"
+      // ZCode 的用户消息操作条**一律悬停才显示**（`opacity-0
+      // group-hover/user-row:opacity-100`），不看它是不是最后一条。
+      // 原 `autohide="not-last"` 会让最后一条用户消息的按钮常显——
+      // 与本轮刚发出的气泡并排一排图标，视觉上像常驻控件。
+      autohide="always"
+      // ZCode `MessageActions` 是**横排**（复制 → 编辑），旧实现 `flex-col`
+      // 把两枚钮竖着叠在气泡左侧。
+      className="aui-user-action-bar-root text-muted-foreground flex items-center gap-1"
     >
       <TooltipIconButton
         tooltip={copied ? "已复制" : "复制"}
@@ -2155,7 +2350,7 @@ const UserActionBar: FC = () => {
         {copied ? <CheckIcon /> : <CopyIcon />}
       </TooltipIconButton>
       <ActionBarPrimitive.Edit asChild>
-        <TooltipIconButton tooltip="Edit" className="aui-user-action-edit">
+        <TooltipIconButton tooltip="编辑" className="aui-user-action-edit">
           <PencilIcon />
         </TooltipIconButton>
       </ActionBarPrimitive.Edit>

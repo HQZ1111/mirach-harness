@@ -119,6 +119,7 @@ fn known_long_option(name: &str) -> Option<LongOptionSpec> {
         | "system-prompt"
         | "append-system-prompt"
         | "session"
+        | "session-workdir"
         | "session-dir"
         | "add-dir"
         | "session-durability"
@@ -428,6 +429,18 @@ pub struct Cli {
     #[arg(long)]
     pub session: Option<String>,
 
+    /// Explicitly attach an existing --session to this workspace before resuming
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "session",
+        conflicts_with_all = [
+            "no_session", "export", "acp", "list_models", "list_providers",
+            "fetch_models", "explain_extension_policy", "explain_repair_policy"
+        ]
+    )]
+    pub session_workdir: Option<PathBuf>,
+
     /// Directory for session storage/lookup
     #[arg(long)]
     pub session_dir: Option<String>,
@@ -437,8 +450,13 @@ pub struct Cli {
     pub no_session: bool,
 
     /// Launch the FrankenTUI interactive stack (default when built with `ftui`).
+    ///
+    /// Conflicts with `--classic`: the two select opposite stacks, and until
+    /// this conflict was declared, nothing read this flag at all — `--ftui`
+    /// appeared to work only because it names the default, and
+    /// `pi --classic --ftui` silently gave you classic.
     #[cfg(feature = "ftui")]
-    #[arg(long)]
+    #[arg(long, conflicts_with = "classic")]
     pub ftui: bool,
 
     /// Force the classic charmed_rust TUI stack instead of the default ftui stack.
@@ -759,9 +777,119 @@ mod tests {
     }
 
     #[test]
+    fn session_workdir_is_explicit_and_survives_extension_flag_parsing() {
+        let parsed = parse_with_extension_flags(
+            [
+                "pi",
+                "--session",
+                "saved.jsonl",
+                "--session-workdir",
+                "../moved project",
+                "--custom-feature",
+                "enabled",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        )
+        .expect("parse explicit attachment with an extension flag");
+        assert_eq!(parsed.cli.session.as_deref(), Some("saved.jsonl"));
+        assert_eq!(
+            parsed.cli.session_workdir.as_deref(),
+            Some(std::path::Path::new("../moved project"))
+        );
+        assert_eq!(parsed.extension_flags.len(), 1);
+        assert_eq!(parsed.extension_flags[0].name, "custom-feature");
+        assert!(Cli::try_parse_from(["pi", "--session-workdir", "/new/project"]).is_err());
+        for conflicting in ["--no-session", "--acp"] {
+            assert!(
+                Cli::try_parse_from([
+                    "pi",
+                    "--session",
+                    "saved.jsonl",
+                    "--session-workdir",
+                    "/new/project",
+                    conflicting,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn parse_session_dir() {
         let cli = Cli::parse_from(["pi", "--session-dir", "/tmp/sessions"]);
         assert_eq!(cli.session_dir.as_deref(), Some("/tmp/sessions"));
+    }
+
+    /// bd-print-session-path-persists-nothing: the exact print-mode argv, since
+    /// `parse_session_path` above proves only the two-token form.
+    ///
+    /// `args` is `trailing_var_arg`, so everything from the first positional on
+    /// is a message — including things that look like flags. This pins that
+    /// `--session` placed BEFORE the message still binds, and that the message
+    /// does not end up in `session`.
+    /// `--ftui` and `--classic` pick opposite stacks, so asking for both is a
+    /// mistake worth reporting rather than resolving silently. Before this,
+    /// `pi --classic --ftui` ran classic and said nothing.
+    #[cfg(feature = "ftui")]
+    #[test]
+    fn ftui_and_classic_cannot_both_be_requested() {
+        let cli = Cli::parse_from(["pi", "--ftui"]);
+        assert!(cli.ftui);
+        assert!(!cli.classic);
+
+        let cli = Cli::parse_from(["pi", "--classic"]);
+        assert!(!cli.ftui);
+        assert!(cli.classic);
+
+        assert!(
+            Cli::try_parse_from(["pi", "--classic", "--ftui"]).is_err(),
+            "two stack selectors at once must be refused, not silently ordered"
+        );
+        assert!(
+            Cli::try_parse_from(["pi", "--ftui", "--classic"]).is_err(),
+            "and in the other order too"
+        );
+        // The documented aliases for --classic conflict as well.
+        assert!(Cli::try_parse_from(["pi", "--ftui", "--classic-tui"]).is_err());
+    }
+
+    #[test]
+    fn parse_session_path_in_a_full_print_mode_argv() {
+        let cli = Cli::parse_from([
+            "pi",
+            "--print",
+            "--mode",
+            "json",
+            "--session",
+            "/tmp/session.jsonl",
+            "--provider",
+            "e2eprimary",
+            "--model",
+            "primary-model",
+            "hello",
+        ]);
+        assert_eq!(cli.session.as_deref(), Some("/tmp/session.jsonl"));
+        assert!(cli.print);
+        assert_eq!(cli.mode.as_deref(), Some("json"));
+        assert_eq!(cli.message_args(), vec!["hello".to_string()]);
+    }
+
+    /// The same argv without the trailing message, which is the shape that
+    /// showed `--session` having no effect at runtime.
+    #[test]
+    fn parse_session_path_without_a_message() {
+        let cli = Cli::parse_from([
+            "pi",
+            "--print",
+            "--mode",
+            "json",
+            "--session",
+            "/tmp/s.jsonl",
+        ]);
+        assert_eq!(cli.session.as_deref(), Some("/tmp/s.jsonl"));
+        assert!(cli.message_args().is_empty());
     }
 
     #[test]

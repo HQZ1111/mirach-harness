@@ -309,6 +309,29 @@ fn render_header_titles_terminal_after_session_name() {
     );
 }
 
+/// gh #214: a models.json `name` shows in the header, the terminal title and
+/// the powerline, while the identity string used for selection stays
+/// provider/id. An entry without a distinct name still shows provider/id.
+#[test]
+fn a_model_display_name_renders_but_identity_stays_provider_id() {
+    let dir = tempdir();
+    let mut app = build_test_app(dir.path().to_path_buf());
+    app.set_terminal_size(200, 40);
+    app.startup_welcome.clear();
+    assert_eq!(model_display_label(&app.model_entry), "openai/gpt-5.2");
+    assert_eq!(session_model_line(&app.model_entry), "openai/gpt-5.2");
+
+    app.model_entry.model.name = "GPT Five Two".to_string();
+    let view = app.view();
+    assert!(view.contains("(GPT Five Two)"), "header: {view}");
+    assert!(view.contains("Pi · GPT Five Two"), "terminal title: {view}");
+    assert_eq!(app.model, "openai/gpt-5.2", "identity is untouched");
+    assert_eq!(
+        session_model_line(&app.model_entry),
+        "GPT Five Two (openai/gpt-5.2)"
+    );
+}
+
 #[test]
 fn live_view_renders_default_welcome_and_powerline_status() {
     let dir = tempdir();
@@ -1229,6 +1252,79 @@ fn pending_ask_card_keeps_editor_visible_while_turn_is_running() {
     app.agent_state = AgentState::Idle;
 }
 
+/// gh #229: with an ask card pending mid-turn the classic stack rendered the
+/// editor (see the test above) but still routed every keystroke to the
+/// spinner, so the "enter a number" instruction could not be followed. Typed
+/// characters must reach the editor while the card is pending, and the
+/// answer must resolve the card through the ordinary Enter path.
+#[test]
+fn pending_ask_card_routes_typed_keys_to_the_editor_mid_turn() {
+    let dir = tempdir();
+    let mut app = build_test_app(dir.path().to_path_buf());
+    app.set_terminal_size(100, 30);
+    app.ask_tool = Some(crate::ask::AskTool::new(crate::ask::AskPolicy::Recommended));
+    app.agent_state = AgentState::ToolRunning;
+    app.current_tool = Some("bash".to_string());
+
+    // No card yet: a running turn swallows keystrokes (the editor is hidden).
+    let _ = app.update(Message::new(KeyMsg::from_char('x')));
+    assert_eq!(app.input.value(), "", "keys must not reach a hidden editor");
+
+    let request: crate::ask::AskRequest = serde_json::from_value(json!({
+        "questions": [{
+            "question": "Allow the `bash` tool to run?",
+            "options": [{"label": "Allow"}, {"label": "Deny"}]
+        }]
+    }))
+    .expect("ask request");
+    if let Some(tool) = app.ask_tool.as_ref() {
+        tool.register_channel_ui_request_for_tests("a-approval-keys");
+    }
+    app.handle_pi_message(PiMsg::AskUiRequest(crate::ask::AskUiRequest {
+        id: "a-approval-keys".to_string(),
+        request,
+    }));
+    assert_eq!(app.active_input_card_kind, Some(InputCardKind::Ask));
+    assert_eq!(app.agent_state, AgentState::ToolRunning);
+
+    // Spinner ticks still belong to the spinner while the card is pending.
+    let _ = app.update(app.spinner.tick());
+    assert_eq!(
+        app.input.value(),
+        "",
+        "a spinner tick must not touch the editor"
+    );
+
+    let _ = app.update(Message::new(KeyMsg::from_char('1')));
+    assert_eq!(
+        app.input.value(),
+        "1",
+        "typed characters must reach the editor while a card is pending mid-turn"
+    );
+
+    let _ = app.update(Message::new(KeyMsg::from_type(KeyType::Enter)));
+    assert!(
+        app.active_ask_ui.is_none(),
+        "Enter answers the pending card"
+    );
+    assert!(app.active_input_card_kind.is_none());
+    assert_eq!(
+        app.input.value(),
+        "",
+        "the answer is consumed from the editor"
+    );
+    assert_eq!(app.agent_state, AgentState::ToolRunning);
+
+    // Card resolved, turn still running: keystrokes go back to the spinner.
+    let _ = app.update(Message::new(KeyMsg::from_char('y')));
+    assert_eq!(
+        app.input.value(),
+        "",
+        "keys must not reach the editor once the card resolves"
+    );
+    app.agent_state = AgentState::Idle;
+}
+
 /// bd-q66i1: turn-end invalidation treats partial card input as consumed and
 /// restores the genuine draft captured before the card burst.
 #[test]
@@ -1312,5 +1408,50 @@ fn agent_done_invalidates_all_outstanding_cards_before_idle() {
                 .is_some_and(|msg| msg.starts_with("Ask request expired")),
         "dismissal surfaced: {:?}",
         app.status_message
+    );
+}
+
+#[test]
+fn export_paths_are_chosen_the_same_way_for_both_stacks() {
+    // These two are free functions rather than `PiApp` methods so the ftui
+    // stack's `/export` lands the same file in the same place. Pin the naming
+    // here, where both callers can be broken by one change.
+    use super::{default_export_path, resolve_output_path};
+
+    let cwd = std::path::Path::new("/work/project");
+
+    let mut saved = crate::session::Session::in_memory();
+    saved.path = Some(std::path::PathBuf::from("/sessions/2026-09-20-abc.jsonl"));
+    assert_eq!(
+        default_export_path(cwd, &saved),
+        std::path::PathBuf::from("/work/project/pi-session-2026-09-20-abc.html"),
+        "a saved session is named after its file stem"
+    );
+
+    let unsaved = crate::session::Session::in_memory();
+    let expected = format!(
+        "/work/project/pi-session-unsaved-{}.html",
+        crate::session_picker::truncate_session_id(&unsaved.header.id, 8)
+    );
+    assert_eq!(
+        default_export_path(cwd, &unsaved),
+        std::path::PathBuf::from(expected),
+        "an unsaved session falls back to a truncated id, not a bare name"
+    );
+
+    assert_eq!(
+        resolve_output_path(cwd, "report.html"),
+        std::path::PathBuf::from("/work/project/report.html"),
+        "a relative argument resolves against the working directory"
+    );
+    assert_eq!(
+        resolve_output_path(cwd, "  /tmp/elsewhere.html  "),
+        std::path::PathBuf::from("/tmp/elsewhere.html"),
+        "an absolute argument is taken as given, after trimming"
+    );
+    assert_eq!(
+        resolve_output_path(cwd, "   "),
+        std::path::PathBuf::from("/work/project/pi-session.html"),
+        "whitespace is not a filename"
     );
 }

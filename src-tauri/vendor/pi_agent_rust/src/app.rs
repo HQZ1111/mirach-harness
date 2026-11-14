@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::auth::AuthStorage;
 use crate::cli;
 use crate::config::Config;
-use crate::model::{self, AssistantMessage, ContentBlock, ImageContent, TextContent};
+use crate::model::{self, AssistantMessage, ContentBlock, TextContent};
 use crate::models::{
     ModelEntry, ModelRegistry, ModelRole, default_models_path, model_entry_is_ready,
     model_requires_configured_credential, normalize_api_key_opt,
@@ -29,7 +29,8 @@ use crate::tools::process_file_arguments;
 #[derive(Debug, Clone)]
 pub struct InitialMessage {
     pub text: String,
-    pub images: Vec<ImageContent>,
+    /// Native image/audio/video attachments in command-line argument order.
+    pub attachments: Vec<ContentBlock>,
     /// Prose eligible for behavior-changing magic-keyword scans. Generated
     /// attachment wrappers and file bytes are deliberately excluded.
     pub keyword_scan_source: String,
@@ -88,13 +89,36 @@ pub fn apply_piped_stdin(cli: &mut cli::Cli, stdin_content: Option<String>) {
     }
 }
 
+/// Did the caller name a session, in any of the four ways pi accepts?
+///
+/// `--session <file>` and `--session-dir <dir>` name one directly; `--continue`
+/// and `--resume` name one indirectly, by asking for the most recent or for a
+/// picker. Any of them means "persist", including in print mode.
+#[must_use]
+pub const fn requested_a_session(cli: &cli::Cli) -> bool {
+    cli.session.is_some() || cli.session_dir.is_some() || cli.r#continue || cli.resume
+}
+
 #[allow(clippy::missing_const_for_fn)]
 pub fn normalize_cli(cli: &mut cli::Cli) {
     if cli.rpc && cli.mode.is_none() {
         cli.mode = Some("rpc".to_string());
     }
 
-    if cli.print {
+    // Print mode is ephemeral by default and NOT when the caller asked for a
+    // session. This used to be an unconditional `if cli.print`, which made
+    // `--session`, `--session-dir`, `--continue` and `--resume` inert on the
+    // print surface: the flags parsed, main.rs stopped short of forcing
+    // `no_session` for exactly these four cases — the same condition, written
+    // out there — and then this line overrode that decision before main.rs ever
+    // looked. `Session::new` took its `if cli.no_session` branch, returned an
+    // in-memory session, and a `pi -p --session run.jsonl` wrote nothing and
+    // said nothing.
+    //
+    // Keep the two conditions identical. main.rs's copy is now a no-op that
+    // documents the policy at the point of use; this one is what enforces it,
+    // because it runs first.
+    if cli.print && !requested_a_session(cli) {
         cli.no_session = true;
     }
 
@@ -135,13 +159,13 @@ pub fn prepare_initial_message(
     };
     initial_message.push_str(&keyword_scan_source);
 
-    if initial_message.is_empty() && processed.images.is_empty() && !has_message {
+    if initial_message.is_empty() && processed.attachments.is_empty() && !has_message {
         return Ok(None);
     }
 
     Ok(Some(InitialMessage {
         text: initial_message,
-        images: processed.images,
+        attachments: processed.attachments,
         keyword_scan_source,
     }))
 }
@@ -149,9 +173,7 @@ pub fn prepare_initial_message(
 pub fn build_initial_content(initial: &InitialMessage) -> Vec<ContentBlock> {
     let mut content = Vec::new();
     content.push(ContentBlock::Text(TextContent::new(initial.text.clone())));
-    for image in &initial.images {
-        content.push(ContentBlock::Image(image.clone()));
-    }
+    content.extend_from_slice(&initial.attachments);
     content
 }
 
@@ -170,10 +192,13 @@ pub fn build_system_prompt(
 ) -> Result<String> {
     use std::fmt::Write as _;
 
-    let custom_prompt = resolve_prompt_input(cli.system_prompt.as_deref(), "system prompt")?;
+    let custom_prompt = resolve_prompt_input(cli.system_prompt.as_deref(), "system prompt", cwd)?;
     let has_custom_prompt = custom_prompt.is_some();
-    let append_prompt =
-        resolve_prompt_input(cli.append_system_prompt.as_deref(), "append system prompt")?;
+    let append_prompt = resolve_prompt_input(
+        cli.append_system_prompt.as_deref(),
+        "append system prompt",
+        cwd,
+    )?;
     // `--no-context-files` (gh #216): the host owns the whole prompt, so no
     // AGENTS.md / CLAUDE.md from the global dir, the cwd, or any ancestor.
     let context_files = if test_mode || cli.no_context_files {
@@ -226,9 +251,11 @@ pub fn build_system_prompt(
     // project's top active facts/lessons on the first turn. Appended (never
     // inserted mid-history) so provider prompt caches stay valid.
     if !test_mode
-        && config.memory_backend() == "local"
+        && matches!(config.memory_backend(), "local" | "cass")
         && let Ok(store) = crate::memory::MemoryStore::open(cwd)
-        && let Ok(model) = store.mental_model()
+        && let Ok(model) = store
+            .with_secrets_settings(config.secrets.as_ref())
+            .mental_model()
         && !model.is_empty()
     {
         prompt.push_str("\n\n# Project Memory\n\nWhat you remember about this project:\n\n");
@@ -257,14 +284,28 @@ pub fn build_system_prompt(
     Ok(prompt)
 }
 
-fn resolve_prompt_input(input: Option<&str>, description: &str) -> Result<Option<String>> {
+fn resolve_prompt_input(
+    input: Option<&str>,
+    description: &str,
+    cwd: &Path,
+) -> Result<Option<String>> {
     let Some(value) = input else {
         return Ok(None);
     };
 
+    // An empty prompt is literal text. Joining it to the runtime cwd would
+    // turn it into an existing directory and incorrectly try to read it.
+    if value.is_empty() {
+        return Ok(Some(String::new()));
+    }
     let path = Path::new(value);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
     if path.exists() {
-        let content = std::fs::read_to_string(path)
+        let content = std::fs::read_to_string(&path)
             .map_err(|err| anyhow::anyhow!("Could not read {description} file {value}: {err}"))?;
         Ok(Some(content))
     } else {
@@ -774,7 +815,14 @@ pub fn select_model_and_thinking(
     // none configured, prefer falling back to any ready model instead of forcing
     // an immediate setup prompt. (Explicit CLI selection should still error.)
     let explicit_model_selection = cli.provider.is_some() || cli.model.is_some();
-    let missing_creds = if explicit_model_selection {
+    // A scoped/configured entry can be unready in the catalog while --api-key
+    // already supplies this run's credential. Keep the selected destination;
+    // falling back here would send that explicit key to a different provider.
+    let has_api_key_override = cli
+        .api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty());
+    let missing_creds = if explicit_model_selection || has_api_key_override {
         None
     } else {
         selected_model.as_ref().and_then(|entry| {
@@ -1459,6 +1507,62 @@ pub fn parse_models_arg(models: &str) -> Vec<String> {
         .collect()
 }
 
+/// Resolve scoped startup candidates under the current directory's provider policy.
+///
+/// Explicit and resumed identities remain the normal selector's responsibility,
+/// while disabled providers are removed from the scoped selection/cycling pool.
+/// A new automatic selection must not turn a scope emptied by policy into an
+/// unrestricted fallback.
+pub fn resolve_startup_model_scope(
+    cli: &cli::Cli,
+    session: &Session,
+    patterns: &[String],
+    registry: &ModelRegistry,
+    config: &Config,
+    cwd: &Path,
+) -> Result<Vec<ScopedModel>> {
+    let allow_missing_keys = cli
+        .api_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty());
+    let resolved = resolve_model_scope(patterns, registry, allow_missing_keys);
+    let had_candidates = !resolved.is_empty();
+    let scope_override = config
+        .model_scope_overrides
+        .as_deref()
+        .and_then(|overrides| crate::failover::best_scope_override(overrides, cwd));
+    let disabled = config.disabled_providers.as_deref().unwrap_or_default();
+    let scoped_models: Vec<_> = resolved
+        .into_iter()
+        .filter(|scoped| {
+            !crate::failover::provider_is_disabled(
+                disabled,
+                scope_override,
+                &scoped.model.model.provider,
+            )
+        })
+        .collect();
+    if had_candidates
+        && scoped_models.is_empty()
+        && cli.provider.is_none()
+        && cli.model.is_none()
+        // Resume flags can open an empty/new session. Preserve only a model
+        // the normal selector can actually restore from this branch, before
+        // its unrelated-default fallback. Match restore_model_from_session.
+        && !model_from_session_state(session).is_some_and(|(provider, model_id)| {
+            registry
+                .find(&provider, &model_id)
+                .or_else(|| crate::models::ad_hoc_model_entry(&provider, &model_id))
+                .is_some()
+        })
+    {
+        bail!(
+            "[MODEL_SCOPE_DISABLED] All models matching the requested scope are disabled by provider settings"
+        );
+    }
+    Ok(scoped_models)
+}
+
 pub fn resolve_model_scope(
     patterns: &[String],
     registry: &ModelRegistry,
@@ -1746,6 +1850,292 @@ mod tests {
     }
 
     #[test]
+    fn startup_scope_combines_global_and_winning_workspace_provider_policy() {
+        let mut cli = cli::Cli::parse_from(["pi", "--api-key", "scope-override"]);
+        cli.provider = None;
+        cli.model = None;
+        let entries = [
+            ("openai/gpt-4o-mini", "openrouter"),
+            ("gpt-4o", "openai"),
+            ("first", "anthropic"),
+            ("second", "anthropic"),
+        ]
+        .into_iter()
+        .map(|(id, provider)| {
+            let mut entry = test_model_entry(id, provider, true);
+            // The explicit key makes these candidates available, but must not
+            // exempt their providers from either disabled-provider list.
+            entry.api_key = None;
+            entry
+        })
+        .collect();
+        let registry = registry_with_entries(entries);
+        let config = Config {
+            default_provider: Some("openai".to_string()),
+            default_model: Some("gpt-4o".to_string()),
+            disabled_providers: Some(vec![" OPEN-ROUTER ".to_string()]),
+            model_scope_overrides: Some(vec![
+                crate::config::ModelScopeOverride {
+                    path: "/scope-policy".to_string(),
+                    enabled_models: None,
+                    disabled_providers: Some(vec!["anthropic".to_string()]),
+                },
+                crate::config::ModelScopeOverride {
+                    path: "/scope-policy/project".to_string(),
+                    enabled_models: None,
+                    disabled_providers: Some(vec!["OpEnAi".to_string()]),
+                },
+            ]),
+            ..Default::default()
+        };
+        let patterns = vec![
+            "openrouter/*:low".to_string(),
+            "anthropic/second:high".to_string(),
+            "openai/*:medium".to_string(),
+            "anthropic/first:low".to_string(),
+        ];
+        let cwd = Path::new("/scope-policy/project/src");
+        let scoped = resolve_startup_model_scope(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+            &cli,
+            &Session::in_memory(),
+            &patterns,
+            &registry,
+            &config,
+            cwd,
+        )
+        .expect("allowed workspace candidates");
+
+        // The parent override is replaced by the more specific workspace
+        // override; the global alias remains disabled in both workspaces.
+        let identities = scoped
+            .iter()
+            .map(|entry| {
+                (
+                    entry.model.model.provider.as_str(),
+                    entry.model.model.id.as_str(),
+                    entry.thinking_level,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            identities,
+            vec![
+                ("anthropic", "second", Some(model::ThinkingLevel::High)),
+                ("anthropic", "first", Some(model::ThinkingLevel::Low)),
+            ]
+        );
+        let selection = select_model_and_thinking(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+            &cli,
+            &config,
+            &Session::in_memory(),
+            &registry,
+            &scoped,
+            cwd,
+        )
+        .expect("automatic selection respects the filtered scope");
+        assert_eq!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            (
+                selection.model_entry.model.provider.as_str(),
+                selection.model_entry.model.id.as_str(),
+                selection.thinking_level,
+            ),
+            ("anthropic", "second", model::ThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn startup_scope_cannot_fall_back_when_provider_policy_removes_every_candidate() {
+        let mut cli = cli::Cli::parse_from(["pi", "--api-key", "scope-override"]);
+        cli.provider = None;
+        cli.model = None;
+        let registry = registry_with_entries(vec![
+            test_model_entry("scoped", "openai", true),
+            test_model_entry("outside-scope", "anthropic", true),
+        ]);
+        let config = Config {
+            default_provider: Some("anthropic".to_string()),
+            default_model: Some("outside-scope".to_string()),
+            disabled_providers: Some(vec!["openai".to_string()]),
+            ..Default::default()
+        };
+        let patterns = vec!["openai/scoped".to_string()];
+        let cwd = Path::new("/scope-policy");
+        let error = resolve_startup_model_scope(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Rejection is the regression oracle.
+            &cli,
+            &Session::in_memory(),
+            &patterns,
+            &registry,
+            &config,
+            cwd,
+        )
+        .expect_err("a disabled requested scope must not select an unrelated default");
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            error.to_string().contains("[MODEL_SCOPE_DISABLED]")
+        );
+
+        // An absent or explicitly cleared scope is different: ordinary
+        // configured-default selection must remain available.
+        let scoped = resolve_startup_model_scope(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+            &cli,
+            &Session::in_memory(),
+            &[],
+            &registry,
+            &config,
+            cwd,
+        )
+        .expect("an empty requested scope remains unrestricted");
+        assert!(scoped.is_empty()); // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+        let selection = select_model_and_thinking(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+            &cli,
+            &config,
+            &Session::in_memory(),
+            &registry,
+            &scoped,
+            cwd,
+        )
+        .expect("configured default without a scope");
+        assert_eq!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            selection.model_entry.model.id,
+            "outside-scope"
+        );
+    }
+
+    #[test]
+    fn startup_scope_preserves_explicit_and_resumed_model_selection() {
+        let registry = registry_with_entries(vec![test_model_entry("fixture", "openai", true)]);
+        let config = Config {
+            disabled_providers: Some(vec!["openai".to_string()]),
+            ..Default::default()
+        };
+        let patterns = vec!["openai/fixture:high".to_string()];
+        let mut session = Session::in_memory();
+        session.header.provider = Some("openai".to_string());
+        session.header.model_id = Some("fixture".to_string());
+        let cwd = Path::new("/scope-policy");
+        for args in [
+            vec!["pi", "--provider", "openai", "--model", "fixture"],
+            vec!["pi", "--provider", "openai"],
+            vec!["pi", "--model", "openai/fixture"],
+            vec!["pi", "--continue"],
+            vec!["pi", "--resume"],
+            vec!["pi", "--session", "saved-scope.jsonl"],
+        ] {
+            let explicit_provider = args.contains(&"--provider");
+            let explicit_model = args.contains(&"--model");
+            let mut cli = cli::Cli::parse_from(args);
+            if !explicit_provider {
+                cli.provider = None;
+            }
+            if !explicit_model {
+                cli.model = None;
+            }
+            cli.api_key = Some("scope-override".to_string());
+            let scoped = resolve_startup_model_scope(
+                // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+                &cli, &session, &patterns, &registry, &config, cwd,
+            )
+            .expect("explicit and resumed identities retain their selection precedence");
+            assert!(scoped.is_empty()); // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            let selection = select_model_and_thinking(
+                // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+                &cli, &config, &session, &registry, &scoped, cwd,
+            )
+            .expect("the selected or saved identity remains usable");
+            assert_eq!(
+                // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+                (
+                    selection.model_entry.model.provider.as_str(),
+                    selection.model_entry.model.id.as_str(),
+                ),
+                ("openai", "fixture")
+            );
+        }
+    }
+
+    #[test]
+    fn startup_scope_requires_an_actual_restorable_branch_identity() {
+        let registry = registry_with_entries(vec![
+            test_model_entry("scoped", "openai", true),
+            test_model_entry("outside-scope", "anthropic", true),
+        ]);
+        let config = Config {
+            default_provider: Some("anthropic".to_string()),
+            default_model: Some("outside-scope".to_string()),
+            disabled_providers: Some(vec!["openai".to_string()]),
+            ..Default::default()
+        };
+        let patterns = vec!["openai/scoped".to_string()];
+        let cwd = Path::new("/scope-policy");
+        let empty = Session::in_memory();
+        let mut missing = Session::in_memory();
+        missing.header.provider = Some("removed-custom-provider".to_string());
+        missing.header.model_id = Some("gone".to_string());
+        let mut stale_header = Session::in_memory();
+        stale_header.header.provider = Some("openai".to_string());
+        stale_header.header.model_id = Some("scoped".to_string());
+        stale_header.append_model_change("removed-custom-provider".to_string(), "gone".to_string());
+
+        for args in [
+            vec!["pi", "--continue"],
+            vec!["pi", "--resume"],
+            vec!["pi", "--session", "new-session.jsonl"],
+        ] {
+            let mut cli = cli::Cli::parse_from(args);
+            cli.provider = None;
+            cli.model = None;
+            cli.api_key = Some("scope-override".to_string());
+            for session in [&empty, &missing, &stale_header] {
+                let error = resolve_startup_model_scope(
+                    // ubs:ignore[rust.ownership.unwrap-expect] -- Rejection is the regression oracle.
+                    &cli, session, &patterns, &registry, &config, cwd,
+                )
+                .expect_err("resume intent must not authorize an unrelated default");
+                assert!(
+                    // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+                    error.to_string().contains("[MODEL_SCOPE_DISABLED]")
+                );
+            }
+        }
+
+        // The current branch, not a stale header or a resume flag, owns the
+        // restore destination. Native ad-hoc identities remain restorable.
+        let mut cli = cli::Cli::parse_from(["pi", "--api-key", "scope-override"]);
+        cli.provider = None;
+        cli.model = None;
+        let mut restored = Session::in_memory();
+        restored.header.provider = Some("removed-custom-provider".to_string());
+        restored.header.model_id = Some("gone".to_string());
+        restored.append_model_change("openai".to_string(), "saved-ad-hoc".to_string());
+        let scoped = resolve_startup_model_scope(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+            &cli, &restored, &patterns, &registry, &config, cwd,
+        )
+        .expect("a restorable branch keeps its exact destination");
+        let selected = select_model_and_thinking(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must succeed.
+            &cli, &config, &restored, &registry, &scoped, cwd,
+        )
+        .expect("restore the native ad-hoc branch identity");
+        assert_eq!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            (
+                selected.model_entry.model.provider.as_str(),
+                selected.model_entry.model.id.as_str(),
+            ),
+            ("openai", "saved-ad-hoc")
+        );
+    }
+
+    #[test]
     fn parse_models_arg_splits_and_trims() {
         assert_eq!(
             parse_models_arg("gpt-4*, claude* ,,"),
@@ -1872,6 +2262,36 @@ mod tests {
 
         assert!(cli.no_session);
         assert_eq!(cli.provider.as_deref(), Some("openai"));
+    }
+
+    /// bd-print-session-path-persists-nothing: a print run that NAMED a session
+    /// keeps it.
+    ///
+    /// This used to be unconditional, which made all four session flags inert
+    /// on the print surface — the flag parsed, `Session::new` took its
+    /// `if cli.no_session` branch, and `pi -p --session run.jsonl` wrote nothing
+    /// and said nothing. Each case below is a user asking for persistence in a
+    /// different way.
+    #[test]
+    fn normalize_cli_keeps_the_session_a_print_run_asked_for() {
+        for argv in [
+            vec!["pi", "--print", "--session", "/tmp/run.jsonl", "hello"],
+            vec!["pi", "--print", "--session-dir", "/tmp/sessions", "hello"],
+            vec!["pi", "--print", "--continue", "hello"],
+            vec!["pi", "--print", "--resume", "hello"],
+        ] {
+            let mut cli = cli::Cli::parse_from(argv.clone());
+            normalize_cli(&mut cli);
+            assert!(
+                !cli.no_session,
+                "{argv:?} asked for a session and must get one"
+            );
+        }
+
+        // ...and a print run that asked for nothing is still ephemeral.
+        let mut bare = cli::Cli::parse_from(["pi", "--print", "hello"]);
+        normalize_cli(&mut bare);
+        assert!(bare.no_session, "print mode stays ephemeral by default");
     }
 
     #[test]
@@ -2789,6 +3209,44 @@ mod tests {
     }
 
     #[test]
+    fn scoped_cli_key_keeps_the_selected_provider_even_without_stored_credentials() {
+        let mut scoped_entry = test_model_entry("scoped-private", "scoped-provider", true);
+        scoped_entry.api_key = None;
+        scoped_entry.auth_header = true;
+        let registry = registry_with_entries(vec![
+            test_model_entry("ready-alternative", "other-provider", true),
+            scoped_entry.clone(),
+        ]);
+        let scope = vec![ScopedModel {
+            model: scoped_entry,
+            thinking_level: Some(model::ThinkingLevel::Low),
+        }];
+        for (key, expected_provider) in [
+            ("  explicit-fixture-key  ", "scoped-provider"),
+            (" \t ", "other-provider"),
+        ] {
+            let mut cli = cli::Cli::parse_from(["pi"]);
+            cli.provider = None;
+            cli.model = None;
+            cli.api_key = Some(key.to_string());
+            let selection = select_model_and_thinking(
+                &cli,
+                &Config::default(),
+                &Session::in_memory(),
+                &registry,
+                &scope,
+                Path::new("/tmp"),
+            )
+            .expect("select scoped model with credential precedence");
+            assert_eq!(selection.model_entry.model.provider, expected_provider);
+            if expected_provider == "scoped-provider" {
+                assert_eq!(selection.thinking_level, model::ThinkingLevel::Low);
+                assert!(selection.fallback_message.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn parse_model_pattern_picks_latest_dated_when_no_alias_exists() {
         let available = vec![
             test_model_entry("gpt-5.1-codex-20250101", "openai", true),
@@ -2994,6 +3452,9 @@ mod tests {
                 normalize_cli(&mut cli);
 
                 let expected_provider = provider.map(|value: String| value.to_ascii_lowercase());
+                // `Cli::parse_from(["pi"])` names no session, so a print run
+                // here is the ephemeral-by-default case
+                // (bd-print-session-path-persists-nothing covers the other).
                 let expected_no_session = if print { true } else { initial_no_session };
 
                 prop_assert_eq!(cli.provider, expected_provider);
@@ -3141,6 +3602,72 @@ mod tests {
             assert!(models_equal(&left, &right));
         }
     }
+    #[test]
+    fn explicit_prompt_files_follow_runtime_workspace() {
+        let root = tempdir().expect("fixture root");
+        let cli = cli::Cli::parse_from([
+            "pi",
+            "--system-prompt",
+            "prompts/system.md",
+            "--append-system-prompt",
+            "prompts/append.md",
+        ]);
+        for name in ["first", "second"] {
+            let cwd = root.path().join(name);
+            std::fs::create_dir_all(cwd.join("prompts")).expect("prompt directory");
+            let system = format!("System instructions for {name}.");
+            let append = format!("Additional instructions for {name}.");
+            std::fs::write(cwd.join("prompts/system.md"), &system).expect("system file");
+            std::fs::write(cwd.join("prompts/append.md"), &append).expect("append file");
+
+            let prompt = build_system_prompt(
+                &cli,
+                &cwd,
+                &[],
+                None,
+                root.path(),
+                root.path(),
+                true,
+                false,
+                None,
+                &Config::default(),
+            )
+            .expect("build prompt against selected workspace");
+            assert!(prompt.starts_with(&system), "{prompt}");
+            assert!(prompt.contains(&append), "{prompt}");
+            assert!(!prompt.contains("prompts/system.md"), "{prompt}");
+            assert!(!prompt.contains("prompts/append.md"), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn explicit_prompt_file_resolution_preserves_absolute_paths_and_literal_text() {
+        let cwd = tempdir().expect("runtime workspace");
+        let external = tempdir().expect("external prompt directory");
+        let file = external.path().join("instructions.md");
+        std::fs::write(&file, "Absolute prompt content.").expect("external prompt file");
+        assert_eq!(
+            resolve_prompt_input(file.to_str(), "system prompt", cwd.path())
+                .expect("absolute prompt")
+                .as_deref(),
+            Some("Absolute prompt content.")
+        );
+
+        for value in ["", "Literal prompt text.", "missing-prompt.md"] {
+            assert_eq!(
+                resolve_prompt_input(Some(value), "system prompt", cwd.path())
+                    .expect("literal prompt")
+                    .as_deref(),
+                Some(value)
+            );
+        }
+        assert!(
+            resolve_prompt_input(None, "system prompt", cwd.path())
+                .expect("absent prompt")
+                .is_none()
+        );
+    }
+
     /// gh #183 + bd-jtehj: the default prompt must list each documentation
     /// surface and topic file only when it actually exists.
     #[test]

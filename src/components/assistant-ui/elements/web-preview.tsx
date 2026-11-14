@@ -71,7 +71,7 @@ export function WebPreview({
           onClick={onOpenExternal}
           className={cn(ghostButton, "size-7 shrink-0")}
         >
-          <ExternalLinkIcon className="size-3.5" />
+          <ExternalLinkIcon className="size-[var(--size-icon-md)]" />
         </button>
       </div>
 

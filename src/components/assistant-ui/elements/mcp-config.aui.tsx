@@ -92,7 +92,7 @@ export const McpConfigDialog: FC<McpConfigDialog.Props> = ({ children }) => {
             size="sm"
             className="aui-mcp-config-trigger gap-2"
           >
-            <PlugIcon className="size-4" />
+            <PlugIcon className="size-[var(--size-icon-lg)]" />
             MCP servers
           </Button>
         )}
@@ -195,7 +195,7 @@ const CustomServersSection: FC = () => {
             className="aui-mcp-add-trigger h-9 justify-start gap-2 rounded-lg px-3 text-sm"
             onClick={() => setShowForm(true)}
           >
-            <PlusIcon className="size-4" />
+            <PlusIcon className="size-[var(--size-icon-lg)]" />
             Add server
           </Button>
         </McpManagerPrimitive.AddCustomTrigger>
@@ -235,7 +235,7 @@ const ServerCard: FC = () => {
               size="icon"
               className="aui-mcp-server-remove text-muted-foreground hover:text-destructive size-7"
             >
-              <Trash2Icon className="size-4" />
+              <Trash2Icon className="size-[var(--size-icon-lg)]" />
               <span className="sr-only">Remove</span>
             </Button>
           </McpServerPrimitive.RemoveButton>
@@ -255,7 +255,7 @@ const ServerAvatar: FC = () => {
       {icon ? (
         <img src={icon} alt={name} className="size-full object-cover" />
       ) : (
-        <ServerIcon className="size-4" />
+        <ServerIcon className="size-[var(--size-icon-lg)]" />
       )}
     </div>
   );
@@ -290,7 +290,7 @@ const StatusLine: FC = () => {
     <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
       <Badge variant={variant}>
         {status === "connecting" && (
-          <Loader2Icon className="size-3 animate-spin" />
+          <Loader2Icon className="size-[var(--size-icon-sm)] animate-spin" />
         )}
         {label}
       </Badge>
@@ -331,7 +331,7 @@ const ServerError: FC = () => {
   if (!message) return null;
   return (
     <div className="border-destructive/40 bg-destructive/5 text-destructive flex items-start gap-2 rounded-md border px-2 py-1.5 text-xs">
-      <ShieldAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+      <ShieldAlertIcon className="mt-0.5 size-[var(--size-icon-md)] shrink-0" />
       <span className="break-words">{message}</span>
     </div>
   );
@@ -363,7 +363,7 @@ const ServerActions: FC = () => {
           variant="default"
           className="aui-mcp-server-connect h-8 gap-2 text-xs"
         >
-          <PlugZapIcon className="size-3.5" />
+          <PlugZapIcon className="size-[var(--size-icon-md)]" />
           Connect
         </Button>
       </McpServerPrimitive.ConnectButton>
@@ -409,7 +409,7 @@ const AddServerForm: FC<{ onClose: () => void }> = ({ onClose }) => {
               size="icon"
               className="text-muted-foreground size-7"
             >
-              <XIcon className="size-4" />
+              <XIcon className="size-[var(--size-icon-lg)]" />
               <span className="sr-only">Close form</span>
             </Button>
           </McpAddFormPrimitive.Cancel>

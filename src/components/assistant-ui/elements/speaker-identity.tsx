@@ -46,11 +46,11 @@ export function SpeakerIdentity({
             )}
           >
             {turn.kind === "user" ? (
-              <UserIcon className="size-3" />
+              <UserIcon className="size-[var(--size-icon-sm)]" />
             ) : turn.kind === "tool" ? (
-              <WrenchIcon className="size-3" />
+              <WrenchIcon className="size-[var(--size-icon-sm)]" />
             ) : (
-              <BotIcon className="size-3" />
+              <BotIcon className="size-[var(--size-icon-sm)]" />
             )}
           </span>
 

@@ -53,12 +53,13 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { ContextMenu as ContextMenuPrimitive, DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
+import { ContextMenu as ContextMenuPrimitive } from "radix-ui";
 import { useStore } from "zustand";
 import { KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import { branchBridge } from "@/components/assistant-ui/branch-store";
+import { mainViewStore } from "@/components/panes/main-view-store";
 import { approvalBridge } from "@/components/assistant-ui/approval-bridge";
 import {
   isRowUnread,
@@ -68,6 +69,7 @@ import {
   useSessionUnread,
   type SessionRowGroup,
 } from "@/components/panes/session-manage/session-catalog";
+import { botChatPaths, useBotsStore } from "@/components/panes/hub/bots-store";
 import {
   projectSessionActions,
   type SessionActionId,
@@ -122,6 +124,20 @@ import {
   type SidebarSortKey,
 } from "@/components/panes/session-manage/sidebar-view";
 import { Tooltip } from "@/components/motion/tooltip";
+import {
+  ContextMenu,
+  ContextMenuAnchor,
+  ContextMenuCheckboxItem,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuRadioGroup,
+  ContextMenuRadioItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+} from "@/components/motion/context-menu";
 
 /**
  * 会话侧栏（左栏会话列表）——hermes app/chat/sidebar 一链到底对齐版：
@@ -227,7 +243,7 @@ export const ThreadListSearch = forwardRef<
           onClick={() => onValueChange("")}
           type="button"
         >
-          <XIcon className="size-3.5" />
+          <XIcon className="size-[var(--size-icon-md)]" />
         </button>
       ) : null}
     </div>
@@ -325,9 +341,18 @@ const useThreadDisplay = (searchQuery: string) => {
 
   // 归档过滤（hermes $sidebarShowArchived 关 = 归档行整个不渲染；开 =
   // 归位显示，行 lead 换归档字形）。搜索同样只搜未归档面。
+  // bot 永久会话隐藏（hermes canonical chat 宿主对偶——pi 无 hidden 会话
+  // 面，隐藏在前端显示层做：花名册是唯一入口）。只认 path+id 双锚记录
+  // （bots-store botChatPaths 的信任规则——旧名字匹配记录重新锚定后才
+  // 参与，防误藏同名用户会话）。
+  const bots = useBotsStore((s) => s.bots);
+  const botPathSet = useMemo(() => botChatPaths(bots), [bots]);
   const metas = useMemo(
-    () => (showArchived ? allMetas : allMetas.filter((m) => !archived.includes(m.id))),
-    [allMetas, archived, showArchived],
+    () =>
+      (showArchived ? allMetas : allMetas.filter((m) => !archived.includes(m.id))).filter(
+        (m) => !(m.path !== undefined && botPathSet.has(m.path)),
+      ),
+    [allMetas, archived, showArchived, botPathSet],
   );
 
   // 状态桶判定（session-status.ts：needs-input > working > unread > draft >
@@ -419,36 +444,20 @@ const useThreadDisplay = (searchQuery: string) => {
 // ── 侧栏选项钮（hermes SidebarFilterMenu 对齐：段头 + 右侧的常驻视图
 //    选项菜单——只搬数据面支持的选项；其余 hermes 选项的取舍见交接报告）──
 
-/** hermes「Every option row leaves the menu open」——单/多选行不关菜单，
- *  只有底部动作项（收起/展开全部、重置为默认）关。 */
-const keepViewMenuOpen = (event: Event) => event.preventDefault();
+/** 侧栏选项菜单的外壳类：底色/圆角/投影/进出场**全部由 beui
+ *  ContextMenu 的 goo 表面提供**（2026-10-26 归拢——与右键菜单、会话行
+ *  ⋯ 菜单、模型选择器同一套动效），这里只留最小宽度。 */
+const VIEW_MENU_CONTENT_CLASS = "min-w-52";
 
-/** 菜单进出场动画（2026-10-16 用户：「悬停显示的窗口动画怎么没有，不是
- *  下载了 beui 组件了吗，不是加到令牌里了吗」）——beUI 时序早已进令牌
- *  （tailwind.css：animate-in/out 曲线/时长换 beUI EASE_OUT + 0.18/0.12s），
- *  但应用自家菜单的内容类**没挂 animate-in/out 类**（Radix 变体缺失 =
- *  无动画帧）——此常量补上（对齐 ui/popover.tsx 的标准挂法）。 */
-const MENU_ANIM_CLASS =
-  "origin-(--radix-dropdown-menu-content-transform-origin) data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95";
-
-const VIEW_MENU_CONTENT_CLASS = cn(
-  // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-(--shadow-pop) 承担
-  "bg-popover text-popover-foreground z-50 min-w-52 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)",
-  // 进出场动画（MENU_ANIM_CLASS 头注；子菜单同用）
-  MENU_ANIM_CLASS,
-);
-
-const VIEW_MENU_ITEM_BASE =
-  "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-(--hover-wash)";
+const VIEW_MENU_ITEM_BASE = "gap-2 text-[13px]";
 
 const VIEW_OPTION_GLYPH = "text-(--text-3) size-3.5 shrink-0";
 
-/** 禁用但带 title 说明的行（Show 子菜单 PR/配置档案）：不用
- *  VIEW_MENU_ITEM_BASE——其 data-[disabled]:pointer-events-none 会让
- *  native title 无法触发（说明文字必须可 hover）；观感（opacity-50）与
- *  非交互（cursor-default）固定，onSelect 由 Radix 对 disabled 项短路。 */
-const VIEW_DISABLED_HINT_ITEM =
-  "flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none opacity-50 cursor-default";
+/** 禁用但带 title 说明的行（Show 子菜单 PR/配置档案）：观感固定为
+ *  opacity-50 + cursor-default；native title 要能 hover 才显示，所以不能
+ *  带 pointer-events-none（beui ContextMenuItem 对带 title 的 disabled 项
+ *  已按此处理）。 */
+const VIEW_DISABLED_HINT_ITEM = "opacity-50 cursor-default";
 
 /** 排序/分组选项行（图标 + 文案；hermes OptionGlyph 的 lucide 等价物）。 */
 const ViewOptionRow: FC<{ icon: FC<{ className?: string }>; label: string }> = ({ icon: Icon, label }) => (
@@ -468,11 +477,6 @@ const STATUS_FILTER_OPTIONS: readonly SessionStatusBucket[] = [
   "draft",
   "idle",
 ];
-
-/** 选中指示槽：未选中也要占位（指示器卸载时行内文字不横移）。 */
-const ViewIndicatorSlot: FC<{ children: ReactNode }> = ({ children }) => (
-  <span className="flex size-3.5 shrink-0 items-center justify-center">{children}</span>
-);
 
 const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boolean }> = ({
   dividerKeys,
@@ -510,470 +514,338 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   };
 
   return (
-    <DropdownMenuPrimitive.Root>
+    <ContextMenu
+      align="start"
+      anchor="trigger"
+      side="bottom"
+      sideOffset={6}
+    >
       {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——嵌套序
           Tooltip 在外、Trigger asChild 在内，两层克隆到 button） */}
       <Tooltip content="侧栏选项" side="bottom">
-        <DropdownMenuPrimitive.Trigger asChild>
+        <ContextMenuAnchor>
           {/* hermes 触发钮：list-filter 图标 ghost icon-xs（HEADER_NAV_BTN
               形态——常驻可见 70%，open 态点亮）。 */}
           <button
             aria-label="侧栏选项"
-            className="pressable-sm text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+            // 盒子/图标分离（2026-10-26）：`size-7`(28) 是**命中区**，图标
+            // 只占 12px —— 中间那圈透明就是余量（原先 size-5 且 display:block，
+            // 实测命中盒仅 19×19、图标贴边，用户"圆太小了不好点中"）。
+            // `inline-flex items-center justify-center` 同时修掉图标偏位。
+            className="pressable-sm text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-full p-0 opacity-70 transition-opacity hover:opacity-100 focus-visible:opacity-100"
             data-slot="aui_thread-list-view-menu-trigger"
             type="button"
           >
-            <ListFilterIcon className="mx-auto size-3" />
+            <ListFilterIcon className="size-[var(--size-icon-sm)]" />
             <span className="sr-only">侧栏选项</span>
           </button>
-        </DropdownMenuPrimitive.Trigger>
+        </ContextMenuAnchor>
       </Tooltip>
-      <DropdownMenuPrimitive.Portal>
-        <DropdownMenuPrimitive.Content
-          align="start"
-          className={VIEW_MENU_CONTENT_CLASS}
-          data-slot="aui_thread-list-view-menu-content"
-          sideOffset={6}
-        >
-          {/* 1. 分组 ▸（触发行显示当前值 + chevron-right；子菜单四项 =
-              用户截图：更新时间✓/项目/状态/网关与配置——无「平铺」）。
-              网关与配置（hermes grouping='profile' 的菜单标签）pi 单配置
-              档案无语义 → disabled radio 不发。 */}
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-              <span>分组</span>
-              <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-                {grouping === "date" ? "更新时间" : grouping === "project" ? "工作区" : "状态"}
-                <ChevronRightIcon className="size-3" />
-              </span>
-            </DropdownMenuPrimitive.SubTrigger>
-            <DropdownMenuPrimitive.SubContent
-              className={VIEW_MENU_CONTENT_CLASS}
-              sideOffset={6}
+      <ContextMenuContent
+        ariaLabel="侧栏选项"
+        className={VIEW_MENU_CONTENT_CLASS}
+      >
+        {/* 1. 分组 ▸（触发行显示当前值 + chevron-right；子菜单四项 =
+            用户截图：更新时间✓/项目/状态/网关与配置——无「平铺」）。
+            网关与配置（hermes grouping='profile' 的菜单标签）pi 单配置
+            档案无语义 → disabled radio 不发。 */}
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
+            <span>分组</span>
+            <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
+              {grouping === "date" ? "更新时间" : grouping === "project" ? "工作区" : "状态"}
+              <ChevronRightIcon className="size-[var(--size-icon-sm)]" />
+            </span>
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            <ContextMenuRadioGroup
+              onValueChange={(value) =>
+                sidebarViewStore.getState().setGrouping(value as SidebarGroupingMode)
+              }
+              value={grouping}
             >
-              <DropdownMenuPrimitive.RadioGroup
-                onValueChange={(value) =>
-                  sidebarViewStore.getState().setGrouping(value as SidebarGroupingMode)
-                }
-                value={grouping}
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="date">
+                <ViewOptionRow icon={ClockIcon} label="更新时间" />
+              </ContextMenuRadioItem>
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="project">
+                <ViewOptionRow icon={FolderIcon} label="工作区" />
+              </ContextMenuRadioItem>
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="status">
+                <ViewOptionRow icon={ActivityIcon} label="状态" />
+              </ContextMenuRadioItem>
+              <ContextMenuRadioItem
+                className={VIEW_DISABLED_HINT_ITEM}
+                disabled
+                textValue="网关与配置"
+                title="pi 单配置档案，无可分组的网关与配置"
+                value="gateway"
               >
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="date"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ClockIcon} label="更新时间" />
-                </DropdownMenuPrimitive.RadioItem>
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="project"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={FolderIcon} label="工作区" />
-                </DropdownMenuPrimitive.RadioItem>
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="status"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ActivityIcon} label="状态" />
-                </DropdownMenuPrimitive.RadioItem>
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_DISABLED_HINT_ITEM}
-                  disabled
-                  title="pi 单配置档案，无可分组的网关与配置"
-                  value="gateway"
-                >
-                  <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
-                  <ViewOptionRow icon={UserIcon} label="网关与配置" />
-                </DropdownMenuPrimitive.RadioItem>
-              </DropdownMenuPrimitive.RadioGroup>
-            </DropdownMenuPrimitive.SubContent>
-          </DropdownMenuPrimitive.Sub>
+                <ViewOptionRow icon={UserIcon} label="网关与配置" />
+              </ContextMenuRadioItem>
+            </ContextMenuRadioGroup>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
 
-          {/* 2. 排序 ▸（子菜单四项 = 用户截图：更新时间✓/创建时间/状态/
-              词元数——无「标题字母序」无「手动」：hermes 拖拽排序不经此
-              菜单，拖拽声明 manual 时 radio 无命中项不高亮，选任意排序键
-              = 退出手动并清掉保存的手动序）。status 键 = 五桶 rank 升序
-              （needs-input > working > unread > draft > idle）；tokens 键 =
-              session-usage 懒拉（未拉到按 0 沉底）。 */}
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-              <span>排序</span>
-            </DropdownMenuPrimitive.SubTrigger>
-            <DropdownMenuPrimitive.SubContent
-              className={VIEW_MENU_CONTENT_CLASS}
-              sideOffset={6}
+        {/* 2. 排序 ▸（子菜单四项 = 用户截图：更新时间✓/创建时间/状态/
+            词元数——无「标题字母序」无「手动」：hermes 拖拽排序不经此
+            菜单，拖拽声明 manual 时 radio 无命中项不高亮，选任意排序键
+            = 退出手动并清掉保存的手动序）。status 键 = 五桶 rank 升序
+            （needs-input > working > unread > draft > idle）；tokens 键 =
+            session-usage 懒拉（未拉到按 0 沉底）。 */}
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
+            <span>排序</span>
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            <ContextMenuRadioGroup
+              onValueChange={(value) =>
+                sidebarViewStore
+                  .getState()
+                  .setOrdering(value as SidebarSortKey)
+              }
+              value={ordering}
             >
-              <DropdownMenuPrimitive.RadioGroup
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="updated">
+                <ViewOptionRow icon={ClockIcon} label="更新时间" />
+              </ContextMenuRadioItem>
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="created">
+                {/* hermes ORDERINGS.created 的图标字面量 = 'add' */}
+                <ViewOptionRow icon={PlusIcon} label="创建时间" />
+              </ContextMenuRadioItem>
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="status">
+                <ViewOptionRow icon={ActivityIcon} label="状态" />
+              </ContextMenuRadioItem>
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="tokens">
+                <ViewOptionRow icon={HashIcon} label="词元数" />
+              </ContextMenuRadioItem>
+            </ContextMenuRadioGroup>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+
+        {/* 3. 显示 ▸（子菜单 = 用户截图：更新时间/词元数 + PR/配置档案
+            disabled——无「成本」无「紧凑行高」。PR = pi 未集成 gh、配置
+            档案 = pi 单配置档案：disabled + title 说明，不许假可点。） */}
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
+            <span>显示</span>
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            {(
+              [
+                { id: "updated", label: "更新时间", icon: ClockIcon },
+                { id: "tokens", label: "词元数", icon: HashIcon },
+              ] as const satisfies readonly { id: SidebarRowMeta; label: string; icon: FC<{ className?: string }> }[]
+            ).map((option) => (
+              <ContextMenuCheckboxItem
+                checked={rowMeta.includes(option.id)}
+                className={VIEW_MENU_ITEM_BASE}
+                key={option.id}
+                onCheckedChange={() =>
+                  sidebarViewStore.getState().toggleRowMeta(option.id)
+                }
+              >
+                <ViewOptionRow icon={option.icon} label={option.label} />
+              </ContextMenuCheckboxItem>
+            ))}
+            {/* PR/配置档案（hermes ROW_META 的 pr/profile 两项，图标
+                git-pull-request/account → lucide GitPullRequest/User）：
+                专用 class 固定 disabled 观感（不用 VIEW_MENU_ITEM_BASE 的
+                data-[disabled]:pointer-events-none——native title 需要
+                hover，说明文字必须可触发）。 */}
+            <ContextMenuCheckboxItem
+              checked={false}
+              className={VIEW_DISABLED_HINT_ITEM}
+              disabled
+              title="pi 未集成 gh，PR 数据不可用"
+            >
+              <ViewOptionRow icon={GitPullRequestIcon} label="PR" />
+            </ContextMenuCheckboxItem>
+            <ContextMenuCheckboxItem
+              checked={false}
+              className={VIEW_DISABLED_HINT_ITEM}
+              disabled
+              title="pi 单配置档案，无可展示项"
+            >
+              <ViewOptionRow icon={UserIcon} label="配置档案" />
+            </ContextMenuCheckboxItem>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+
+        {/* 4. 收件箱样式（hermes「Inbox style」：卡片行形态开关——中文
+            措辞按用户截图）。 */}
+        <ContextMenuCheckboxItem
+          checked={inboxStyle}
+          className={VIEW_MENU_ITEM_BASE}
+          onCheckedChange={(checked) => sidebarViewStore.getState().setInboxStyle(Boolean(checked))}
+        >
+          <ViewOptionRow icon={InboxIcon} label="收件箱样式" />
+        </ContextMenuCheckboxItem>
+
+        {/* 5. 配置档案栏（hermes $profileRailVisible：侧栏左缘的 profile
+            rail）——pi 单配置档案无 rail 数据面 → disabled（诚实）。 */}
+        <ContextMenuCheckboxItem
+          checked={false}
+          className={VIEW_DISABLED_HINT_ITEM}
+          disabled
+          title="pi 单配置档案，无配置档案栏"
+        >
+          <ViewOptionRow icon={NetworkIcon} label="配置档案栏" />
+        </ContextMenuCheckboxItem>
+
+        {/* 6. ── 筛选（hermes「Filters」label 组：Status/PR/Profile/
+            AllProfiles/Archived；分组区与筛选区之间的分隔线。 */}
+        <ContextMenuSeparator />
+        <ContextMenuLabel>筛选</ContextMenuLabel>
+        {/* 7. 状态 ▸（子菜单 = 用户截图五桶 checkbox 多选：需要输入●橙 /
+            运行中●蓝 / 未读●绿 / 草稿○ / 空闲○——色点 =
+            STATUS_DOT_CLASS，文案 = STATUS_BUCKET_LABELS。筛选 =
+            只显示命中桶的行，空选 = 不过滤；pi 前端全可判定。） */}
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
+            <ViewOptionRow icon={ActivityIcon} label="状态" />
+            <ChevronRightIcon className="text-(--text-3) ml-auto size-[var(--size-icon-sm)]" />
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            {STATUS_FILTER_OPTIONS.map((bucket) => (
+              <ContextMenuCheckboxItem
+                checked={statusFilter.includes(bucket)}
+                className={VIEW_MENU_ITEM_BASE}
+                key={bucket}
+                onCheckedChange={() =>
+                  sidebarViewStore.getState().toggleStatusBucket(bucket)
+                }
+              >
+                {/* 色点在指示位之外（hermes OptionGlyph：glyph 在行首、
+                    选中指示在其左——checkbox 的 ✓ 槽与色点并存）。 */}
+                <span aria-hidden className={STATUS_DOT_CLASS[bucket]} />
+                <span>{STATUS_BUCKET_LABELS[bucket]}</span>
+              </ContextMenuCheckboxItem>
+            ))}
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+        {/* 8. 拉取请求 ▸（子菜单：打开/草稿/已合并/已关闭/无 PR）——
+            pi 无 gh → 整个 SubTrigger disabled（诚实：无数据面）。 */}
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+            <ViewOptionRow icon={GitPullRequestIcon} label="拉取请求" />
+            <ChevronRightIcon className="text-(--text-3) ml-auto size-[var(--size-icon-sm)]" />
+          </ContextMenuSubTrigger>
+        </ContextMenuSub>
+        {/* 9. 配置档案 ▸（子菜单：新建配置档案/导入配置档案…，hermes
+            t.profiles 文案）——pi 单配置档案无 profiles 桥面 → disabled。
+            10. 全部配置档案 checkbox：pi 单配置档案恒 ✓（诚实——所有
+            profile 就是这一个，永远全显示，不可取消）。 */}
+        <ContextMenuSub>
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
+            <ViewOptionRow icon={UserIcon} label="配置档案" />
+            <ChevronRightIcon className="text-(--text-3) ml-auto size-[var(--size-icon-sm)]" />
+          </ContextMenuSubTrigger>
+        </ContextMenuSub>
+        <ContextMenuCheckboxItem
+          checked
+          className={VIEW_DISABLED_HINT_ITEM}
+          disabled
+          title="pi 单配置档案——始终显示全部"
+        >
+          <span>全部配置档案</span>
+        </ContextMenuCheckboxItem>
+        {/* 项目过滤（hermes Filters>Project 子菜单的条件形态：
+            filter-menu.tsx:388 只在多于一个候选时出现——用户截图只有一个
+            工作区所以没有这项；harness 候选 = distinct cwd（Home 桶=
+            空串），condition 同构）。 */}
+        {projectChoices.length > 1 && (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
+              <ViewOptionRow icon={FolderIcon} label="工作区" />
+              <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
+                {projectFilter ? workspaceGroupLabel(projectFilter) : "全部"}
+                <ChevronRightIcon className="size-[var(--size-icon-sm)]" />
+              </span>
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent>
+              <ContextMenuRadioGroup
                 onValueChange={(value) =>
                   sidebarViewStore
                     .getState()
-                    .setOrdering(value as SidebarSortKey)
+                    .setProjectFilter(
+                      value === "__all__"
+                        ? null
+                        : value === "__home__"
+                          ? ""
+                          : value,
+                    )
                 }
-                value={ordering}
+                value={
+                  projectFilter === null
+                    ? "__all__"
+                    : projectFilter === ""
+                      ? "__home__"
+                      : projectFilter
+                }
               >
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="updated"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ClockIcon} label="更新时间" />
-                </DropdownMenuPrimitive.RadioItem>
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="created"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  {/* hermes ORDERINGS.created 的图标字面量 = 'add' */}
-                  <ViewOptionRow icon={PlusIcon} label="创建时间" />
-                </DropdownMenuPrimitive.RadioItem>
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="status"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={ActivityIcon} label="状态" />
-                </DropdownMenuPrimitive.RadioItem>
-                <DropdownMenuPrimitive.RadioItem
-                  className={VIEW_MENU_ITEM_BASE}
-                  onSelect={keepViewMenuOpen}
-                  value="tokens"
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={HashIcon} label="词元数" />
-                </DropdownMenuPrimitive.RadioItem>
-              </DropdownMenuPrimitive.RadioGroup>
-            </DropdownMenuPrimitive.SubContent>
-          </DropdownMenuPrimitive.Sub>
-
-          {/* 3. 显示 ▸（子菜单 = 用户截图：更新时间/词元数 + PR/配置档案
-              disabled——无「成本」无「紧凑行高」。PR = pi 未集成 gh、配置
-              档案 = pi 单配置档案：disabled + title 说明，不许假可点。） */}
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-              <span>显示</span>
-            </DropdownMenuPrimitive.SubTrigger>
-            <DropdownMenuPrimitive.SubContent
-              className={VIEW_MENU_CONTENT_CLASS}
-              sideOffset={6}
-            >
-              {(
-                [
-                  { id: "updated", label: "更新时间", icon: ClockIcon },
-                  { id: "tokens", label: "词元数", icon: HashIcon },
-                ] as const satisfies readonly { id: SidebarRowMeta; label: string; icon: FC<{ className?: string }> }[]
-              ).map((option) => (
-                <DropdownMenuPrimitive.CheckboxItem
-                  checked={rowMeta.includes(option.id)}
-                  className={VIEW_MENU_ITEM_BASE}
-                  key={option.id}
-                  onCheckedChange={() =>
-                    sidebarViewStore.getState().toggleRowMeta(option.id)
-                  }
-                  onSelect={keepViewMenuOpen}
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <CheckIcon className="size-3" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  <ViewOptionRow icon={option.icon} label={option.label} />
-                </DropdownMenuPrimitive.CheckboxItem>
-              ))}
-              {/* PR/配置档案（hermes ROW_META 的 pr/profile 两项，图标
-                  git-pull-request/account → lucide GitPullRequest/User）：
-                  专用 class 固定 disabled 观感（不用 VIEW_MENU_ITEM_BASE 的
-                  data-[disabled]:pointer-events-none——native title 需要
-                  hover，说明文字必须可触发）；onSelect 由 Radix 对 disabled
-                  项短路，不假可点。 */}
-              <DropdownMenuPrimitive.CheckboxItem
-                checked={false}
-                className={VIEW_DISABLED_HINT_ITEM}
-                disabled
-                title="pi 未集成 gh，PR 数据不可用"
-              >
-                <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
-                <ViewOptionRow icon={GitPullRequestIcon} label="PR" />
-              </DropdownMenuPrimitive.CheckboxItem>
-              <DropdownMenuPrimitive.CheckboxItem
-                checked={false}
-                className={VIEW_DISABLED_HINT_ITEM}
-                disabled
-                title="pi 单配置档案，无可展示项"
-              >
-                <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
-                <ViewOptionRow icon={UserIcon} label="配置档案" />
-              </DropdownMenuPrimitive.CheckboxItem>
-            </DropdownMenuPrimitive.SubContent>
-          </DropdownMenuPrimitive.Sub>
-
-          {/* 4. 收件箱样式（hermes「Inbox style」：卡片行形态开关——中文
-              措辞按用户截图）。 */}
-          <DropdownMenuPrimitive.CheckboxItem
-            checked={inboxStyle}
-            className={VIEW_MENU_ITEM_BASE}
-            onCheckedChange={(checked) => sidebarViewStore.getState().setInboxStyle(Boolean(checked))}
-            onSelect={keepViewMenuOpen}
-          >
-            <ViewIndicatorSlot>
-              <DropdownMenuPrimitive.ItemIndicator>
-                <CheckIcon className="size-3" />
-              </DropdownMenuPrimitive.ItemIndicator>
-            </ViewIndicatorSlot>
-            <ViewOptionRow icon={InboxIcon} label="收件箱样式" />
-          </DropdownMenuPrimitive.CheckboxItem>
-
-          {/* 5. 配置档案栏（hermes $profileRailVisible：侧栏左缘的 profile
-              rail）——pi 单配置档案无 rail 数据面 → disabled（诚实）。 */}
-          <DropdownMenuPrimitive.CheckboxItem
-            checked={false}
-            className={VIEW_DISABLED_HINT_ITEM}
-            disabled
-            title="pi 单配置档案，无配置档案栏"
-          >
-            <ViewIndicatorSlot>{null}</ViewIndicatorSlot>
-            <ViewOptionRow icon={NetworkIcon} label="配置档案栏" />
-          </DropdownMenuPrimitive.CheckboxItem>
-
-          {/* 6. ── 筛选（hermes「Filters」label 组：Status/PR/Profile/
-              AllProfiles/Archived；分组区与筛选区之间的分隔线。 */}
-          <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
-          <DropdownMenuPrimitive.Label className="text-(--text-3) px-2 pt-1.5 pb-1 text-[11px]">
-            筛选
-          </DropdownMenuPrimitive.Label>
-          {/* 7. 状态 ▸（子菜单 = 用户截图五桶 checkbox 多选：需要输入●橙 /
-              运行中●蓝 / 未读●绿 / 草稿○ / 空闲○——色点 =
-              STATUS_DOT_CLASS，文案 = STATUS_BUCKET_LABELS。筛选 =
-              只显示命中桶的行，空选 = 不过滤；pi 前端全可判定。） */}
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-              <ViewOptionRow icon={ActivityIcon} label="状态" />
-              <ChevronRightIcon className="text-(--text-3) ml-auto size-3" />
-            </DropdownMenuPrimitive.SubTrigger>
-            <DropdownMenuPrimitive.SubContent
-              className={VIEW_MENU_CONTENT_CLASS}
-              sideOffset={6}
-            >
-              {STATUS_FILTER_OPTIONS.map((bucket) => (
-                <DropdownMenuPrimitive.CheckboxItem
-                  checked={statusFilter.includes(bucket)}
-                  className={VIEW_MENU_ITEM_BASE}
-                  key={bucket}
-                  onCheckedChange={() =>
-                    sidebarViewStore.getState().toggleStatusBucket(bucket)
-                  }
-                  onSelect={keepViewMenuOpen}
-                >
-                  <ViewIndicatorSlot>
-                    <DropdownMenuPrimitive.ItemIndicator>
-                      <CheckIcon className="size-3" />
-                    </DropdownMenuPrimitive.ItemIndicator>
-                  </ViewIndicatorSlot>
-                  {/* 色点在指示位之外（hermes OptionGlyph：glyph 在行首、
-                      选中指示在其左——checkbox 的 ✓ 槽与色点并存）。 */}
-                  <span aria-hidden className={STATUS_DOT_CLASS[bucket]} />
-                  <span>{STATUS_BUCKET_LABELS[bucket]}</span>
-                </DropdownMenuPrimitive.CheckboxItem>
-              ))}
-            </DropdownMenuPrimitive.SubContent>
-          </DropdownMenuPrimitive.Sub>
-          {/* 8. 拉取请求 ▸（子菜单：打开/草稿/已合并/已关闭/无 PR）——
-              pi 无 gh → 整个 SubTrigger disabled（诚实：无数据面）。 */}
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-              <ViewOptionRow icon={GitPullRequestIcon} label="拉取请求" />
-              <ChevronRightIcon className="text-(--text-3) ml-auto size-3" />
-            </DropdownMenuPrimitive.SubTrigger>
-          </DropdownMenuPrimitive.Sub>
-          {/* 9. 配置档案 ▸（子菜单：新建配置档案/导入配置档案…，hermes
-              t.profiles 文案）——pi 单配置档案无 profiles 桥面 → disabled。
-              10. 全部配置档案 checkbox：pi 单配置档案恒 ✓（诚实——所有
-              profile 就是这一个，永远全显示，不可取消）。 */}
-          <DropdownMenuPrimitive.Sub>
-            <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-              <ViewOptionRow icon={UserIcon} label="配置档案" />
-              <ChevronRightIcon className="text-(--text-3) ml-auto size-3" />
-            </DropdownMenuPrimitive.SubTrigger>
-          </DropdownMenuPrimitive.Sub>
-          <DropdownMenuPrimitive.CheckboxItem
-            checked
-            className={VIEW_DISABLED_HINT_ITEM}
-            disabled
-            title="pi 单配置档案——始终显示全部"
-          >
-            <ViewIndicatorSlot>
-              <DropdownMenuPrimitive.ItemIndicator>
-                <CheckIcon className="size-3" />
-              </DropdownMenuPrimitive.ItemIndicator>
-            </ViewIndicatorSlot>
-            <span>全部配置档案</span>
-          </DropdownMenuPrimitive.CheckboxItem>
-          {/* 项目过滤（hermes Filters>Project 子菜单的条件形态：
-              filter-menu.tsx:388 只在多于一个候选时出现——用户截图只有一个
-              工作区所以没有这项；harness 候选 = distinct cwd（Home 桶=
-              空串），condition 同构）。 */}
-          {projectChoices.length > 1 && (
-            <DropdownMenuPrimitive.Sub>
-              <DropdownMenuPrimitive.SubTrigger className={VIEW_MENU_ITEM_BASE}>
-                <ViewOptionRow icon={FolderIcon} label="工作区" />
-                <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-                  {projectFilter ? workspaceGroupLabel(projectFilter) : "全部"}
-                  <ChevronRightIcon className="size-3" />
-                </span>
-              </DropdownMenuPrimitive.SubTrigger>
-              <DropdownMenuPrimitive.SubContent
-                className={VIEW_MENU_CONTENT_CLASS}
-                sideOffset={6}
-              >
-                <DropdownMenuPrimitive.RadioGroup
-                  onValueChange={(value) =>
-                    sidebarViewStore
-                      .getState()
-                      .setProjectFilter(
-                        value === "__all__"
-                          ? null
-                          : value === "__home__"
-                            ? ""
-                            : value,
-                      )
-                  }
-                  value={
-                    projectFilter === null
-                      ? "__all__"
-                      : projectFilter === ""
-                        ? "__home__"
-                        : projectFilter
-                  }
-                >
-                  <DropdownMenuPrimitive.RadioItem
+                <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="__all__">
+                  <span>全部</span>
+                </ContextMenuRadioItem>
+                {projectFilter !== null && projectFilter !== "" && !projectChoices.includes(projectFilter) && (
+                  <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value={projectFilter}>
+                    <span className="truncate">{workspaceGroupLabel(projectFilter)}</span>
+                  </ContextMenuRadioItem>
+                )}
+                {projectChoices.map((cwd) => (
+                  <ContextMenuRadioItem
                     className={VIEW_MENU_ITEM_BASE}
-                    onSelect={keepViewMenuOpen}
-                    value="__all__"
+                    key={cwd || "__home__"}
+                    value={cwd || "__home__"}
                   >
-                    <ViewIndicatorSlot>
-                      <DropdownMenuPrimitive.ItemIndicator>
-                        <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                      </DropdownMenuPrimitive.ItemIndicator>
-                    </ViewIndicatorSlot>
-                    <span>全部</span>
-                  </DropdownMenuPrimitive.RadioItem>
-                  {projectFilter !== null && projectFilter !== "" && !projectChoices.includes(projectFilter) && (
-                    <DropdownMenuPrimitive.RadioItem
-                      className={VIEW_MENU_ITEM_BASE}
-                      onSelect={keepViewMenuOpen}
-                      value={projectFilter}
-                    >
-                      <ViewIndicatorSlot>
-                        <DropdownMenuPrimitive.ItemIndicator>
-                          <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                        </DropdownMenuPrimitive.ItemIndicator>
-                      </ViewIndicatorSlot>
-                      <span className="truncate">{workspaceGroupLabel(projectFilter)}</span>
-                    </DropdownMenuPrimitive.RadioItem>
-                  )}
-                  {projectChoices.map((cwd) => (
-                    <DropdownMenuPrimitive.RadioItem
-                      className={VIEW_MENU_ITEM_BASE}
-                      key={cwd || "__home__"}
-                      onSelect={keepViewMenuOpen}
-                      value={cwd || "__home__"}
-                    >
-                      <ViewIndicatorSlot>
-                        <DropdownMenuPrimitive.ItemIndicator>
-                          <span aria-hidden className="bg-current size-1.5 rounded-full" />
-                        </DropdownMenuPrimitive.ItemIndicator>
-                      </ViewIndicatorSlot>
-                      <span className="truncate">{workspaceGroupLabel(cwd)}</span>
-                    </DropdownMenuPrimitive.RadioItem>
-                  ))}
-                </DropdownMenuPrimitive.RadioGroup>
-              </DropdownMenuPrimitive.SubContent>
-            </DropdownMenuPrimitive.Sub>
-          )}
-          {/* 11. 已归档（hermes $sidebarShowArchived）。 */}
-          <DropdownMenuPrimitive.CheckboxItem
-            checked={showArchived}
+                    <span className="truncate">{workspaceGroupLabel(cwd)}</span>
+                  </ContextMenuRadioItem>
+                ))}
+              </ContextMenuRadioGroup>
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        )}
+        {/* 11. 已归档（hermes $sidebarShowArchived）。 */}
+        <ContextMenuCheckboxItem
+          checked={showArchived}
+          className={VIEW_MENU_ITEM_BASE}
+          onCheckedChange={(checked) => sidebarViewStore.getState().setShowArchived(Boolean(checked))}
+        >
+          <ViewOptionRow icon={ArchiveIcon} label="已归档" />
+        </ContextMenuCheckboxItem>
+        {/* hermes「Reset to defaults」（filter-menu.tsx:430 的条件形态：
+            viewCustomized 才出现——用户截图是出厂态所以没有）。一并复原
+            分组与排序，这是唯一的回程（hermes 注释同语义）。 */}
+        {customized && (
+          <ContextMenuItem
             className={VIEW_MENU_ITEM_BASE}
-            onCheckedChange={(checked) => sidebarViewStore.getState().setShowArchived(Boolean(checked))}
-            onSelect={keepViewMenuOpen}
+            onSelect={() => sidebarViewStore.getState().resetView()}
           >
-            <ViewIndicatorSlot>
-              <DropdownMenuPrimitive.ItemIndicator>
-                <CheckIcon className="size-3" />
-              </DropdownMenuPrimitive.ItemIndicator>
-            </ViewIndicatorSlot>
-            <ViewOptionRow icon={ArchiveIcon} label="已归档" />
-          </DropdownMenuPrimitive.CheckboxItem>
-          {/* hermes「Reset to defaults」（filter-menu.tsx:430 的条件形态：
-              viewCustomized 才出现——用户截图是出厂态所以没有）。一并复原
-              分组与排序，这是唯一的回程（hermes 注释同语义）。 */}
-          {customized && (
-            <DropdownMenuPrimitive.Item
-              className={VIEW_MENU_ITEM_BASE}
-              onSelect={() => sidebarViewStore.getState().resetView()}
-            >
-              <RotateCcwIcon className={VIEW_OPTION_GLYPH} />
-              <span>重置为默认</span>
-            </DropdownMenuPrimitive.Item>
-          )}
+            <RotateCcwIcon className={VIEW_OPTION_GLYPH} />
+            <span>重置为默认</span>
+          </ContextMenuItem>
+        )}
 
-          {/* 12. ──（分隔线）13. 全部折叠 14. 全部标记为已读 */}
-          <DropdownMenuPrimitive.Separator className="bg-(--stroke-soft) mx-1 my-1 h-px" />
+        {/* 12. ──（分隔线）13. 全部折叠 14. 全部标记为已读 */}
+        <ContextMenuSeparator />
 
-          {dividerKeys.length > 0 && (
-            <DropdownMenuPrimitive.Item className={VIEW_MENU_ITEM_BASE} onSelect={onCollapseAll}>
-              {foldCollapsed ? "全部展开" : "全部折叠"}
-            </DropdownMenuPrimitive.Item>
-          )}
-          <DropdownMenuPrimitive.Item
-            className={VIEW_MENU_ITEM_BASE}
-            disabled={unreadCount === 0}
-            onSelect={() => {
-              sessionCatalog.getState().ackAll(
-                metas.map((m) => ({ id: m.id, messageCount: m.messageCount ?? 0 })),
-              );
-            }}
-          >
-            全部标记为已读
-          </DropdownMenuPrimitive.Item>
-        </DropdownMenuPrimitive.Content>
-      </DropdownMenuPrimitive.Portal>
-    </DropdownMenuPrimitive.Root>
+        {dividerKeys.length > 0 && (
+          <ContextMenuItem className={VIEW_MENU_ITEM_BASE} onSelect={onCollapseAll}>
+            {foldCollapsed ? "全部展开" : "全部折叠"}
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem
+          className={VIEW_MENU_ITEM_BASE}
+          disabled={unreadCount === 0}
+          onSelect={() => {
+            sessionCatalog.getState().ackAll(
+              metas.map((m) => ({ id: m.id, messageCount: m.messageCount ?? 0 })),
+            );
+          }}
+        >
+          全部标记为已读
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 };
 
@@ -1169,7 +1041,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number
 const PinnedEmptyState: FC = () => (
   <div className="text-(--text-3) flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-xs">
     <span className="text-(--text-4) grid w-3.5 shrink-0 place-items-center">
-      <PinIcon aria-hidden className="size-3" />
+      <PinIcon aria-hidden className="size-[var(--size-icon-sm)]" />
     </span>
     <span>Shift+ 单击对话以置顶 · 拖动以重新排序</span>
   </div>
@@ -1579,10 +1451,13 @@ const ThreadListNewAria: FC = () => (
     <ThreadListPrimitive.New asChild>
       <button
         aria-label="新建会话"
-        className="pressable-sm text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
+        // 盒子/图标分离（2026-10-26）：`size-7`(28) 命中区、图标 14——
+        // 原 size-5 + display:block，实测命中盒仅 19×19、图标 14 贴边
+        // （用户"左侧栏会话右边的新建按钮圆太小，不好点中"）。
+        className="pressable-sm text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-full p-0 opacity-0 transition-opacity group-hover/section:opacity-100 focus-visible:opacity-100"
         type="button"
       >
-        <PlusIcon className="mx-auto size-3.5" />
+        <PlusIcon className="size-[var(--size-icon-md)]" />
       </button>
     </ThreadListPrimitive.New>
   </Tooltip>
@@ -1650,17 +1525,14 @@ function disarmMarquee(event: ReactPointerEvent<HTMLElement>) {
   delete event.currentTarget.dataset.marquee;
 }
 
-const MENU_CONTENT_CLASS = cn(
-  // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）——层次由 shadow-(--shadow-pop) 承担
-  "bg-popover text-popover-foreground z-50 w-40 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)",
-  MENU_ANIM_CLASS,
-);
+// 会话行菜单（⋯ 与右键共用一份）：底色/圆角/投影/进出场**全部由 beui
+// ContextMenu 的 goo 表面提供**（2026-10-26 归拢——与全局右键菜单、模型
+// 选择器同一套动效），这里只留宽度与项文字色。
+const MENU_CONTENT_CLASS = "w-40";
 
-const MENU_ITEM_BASE =
-  "flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
+const MENU_ITEM_BASE = "gap-2 text-[13px]";
 
-const DESTRUCTIVE_ITEM_CLASS =
-  "text-destructive hover:bg-destructive/10 hover:text-destructive focus:bg-destructive/10 focus:text-destructive";
+const DESTRUCTIVE_ITEM_CLASS = "text-destructive";
 
 const ACTION_ICONS: Record<SessionActionId, FC<{ className?: string }>> = {
   rename: PencilIcon,
@@ -1705,22 +1577,18 @@ export const ThreadListItem: FC = () => {
 
   const [renameOpen, setRenameOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  // 菜单关闭时 Radix 把焦点还给触发钮（行/kebab）——重命名对话框的输入框
-  // 就抢不到焦点（Space 会激活行、方向键会移动列表）。这一次还原被吞掉
-  // （hermes suppressCloseFocusRef 同款）。
-  const suppressCloseFocusRef = useRef(false);
-  const onCloseAutoFocus = (event: Event) => {
-    if (suppressCloseFocusRef.current) {
-      suppressCloseFocusRef.current = false;
-      event.preventDefault();
-    }
-  };
+  // 菜单开合状态（⋯ 与右键共用同一个菜单实例，只是锚点不同）。
+  // beui ContextMenu 关闭时不抢焦点，所以不需要 hermes 的
+  // suppressCloseFocusRef（重命名/删除对话框的输入框不会被行抢走焦点）。
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<"trigger" | "point">("trigger");
+  const [menuPoint, setMenuPoint] = useState({ x: 0, y: 0 });
+  const kebabRef = useRef<HTMLButtonElement | null>(null);
 
   // ── 动作实现（⋯ 与右键共用；数据面真相在 runtime 适配器/桥，失败在那
   //    里 console.error 可见）──
   const handlers: Record<SessionActionId, () => void> = {
     rename: () => {
-      suppressCloseFocusRef.current = true;
       setRenameOpen(true);
     },
     pin: () => sessionCatalog.getState().togglePin(threadId),
@@ -1754,7 +1622,6 @@ export const ThreadListItem: FC = () => {
     },
     archive: () => sessionCatalog.getState().toggleArchive(threadId),
     delete: () => {
-      suppressCloseFocusRef.current = true;
       setDeleteOpen(true);
     },
   };
@@ -1797,19 +1664,17 @@ export const ThreadListItem: FC = () => {
   // Inbox style：第二行承载时间·消息数，行尾标注让位（hermes 卡片行）
   const hasTrailing = !inboxStyle && (head !== "" || tailText !== null);
 
-  const renderDropdownItems = () =>
+
+  // ⋯ 菜单与右键菜单**同一份投影**（hermes SessionContextMenu 同源机制）：
+  // 两个入口都走 beui ContextMenu，只是锚点不同（⋯ = 触发钮，右键 = 落点），
+  // 观感与全局右键菜单、模型选择器完全一致（2026-10-26 归拢）。
+  const renderMenuItems = () =>
     specs.map((spec) =>
       spec.kind === "separator" ? (
-        <ThreadListItemMorePrimitive.Separator
-          className="bg-(--stroke-soft)"
-          key={spec.id}
-        />
+        <ContextMenuSeparator key={spec.id} />
       ) : (
-        <ThreadListItemMorePrimitive.Item
-          className={cn(
-            MENU_ITEM_BASE,
-            spec.destructive && DESTRUCTIVE_ITEM_CLASS,
-          )}
+        <ContextMenuItem
+          className={cn(MENU_ITEM_BASE, spec.destructive && DESTRUCTIVE_ITEM_CLASS)}
           disabled={spec.disabled}
           key={spec.id}
           onSelect={() => handlers[spec.id]()}
@@ -1823,38 +1688,23 @@ export const ThreadListItem: FC = () => {
             return <Icon className="size-3.5 shrink-0" />;
           })()}
           <span>{spec.label}</span>
-        </ThreadListItemMorePrimitive.Item>
-      ),
-    );
-
-  const renderContextItems = () =>
-    specs.map((spec) =>
-      spec.kind === "separator" ? (
-        <ContextMenuPrimitive.Separator className="bg-(--stroke-soft)" key={spec.id} />
-      ) : (
-        <ContextMenuPrimitive.Item
-          className={cn(
-            MENU_ITEM_BASE,
-            spec.destructive && DESTRUCTIVE_ITEM_CLASS,
-          )}
-          disabled={spec.disabled}
-          key={spec.id}
-          onSelect={() => handlers[spec.id]()}
-        >
-          {(() => {
-            // read-state 项动态图标（同 renderDropdownItems）
-            const Icon =
-              spec.id === "unread" && isUnread ? MailOpenIcon : ACTION_ICONS[spec.id];
-            return <Icon className="size-3.5 shrink-0" />;
-          })()}
-          <span>{spec.label}</span>
-        </ContextMenuPrimitive.Item>
+        </ContextMenuItem>
       ),
     );
 
   return (
-    <ContextMenuPrimitive.Root>
-      <ContextMenuPrimitive.Trigger asChild>
+    <>
+      <ContextMenu
+        align="end"
+        anchor={menuAnchor}
+        onOpenChange={(next) => {
+          if (!next) setMenuOpen(false);
+        }}
+        open={menuOpen}
+        point={menuPoint}
+        side="bottom"
+        sideOffset={6}
+      >
         <ThreadListItemPrimitive.Root
           ref={sortable?.ref}
           className={cn(
@@ -1873,6 +1723,15 @@ export const ThreadListItem: FC = () => {
           )}
           data-slot="aui_thread-list-item"
           style={sortable?.style}
+          onContextMenu={(e) => {
+            // 行上右键 = 落点式菜单（与全局右键同一形态）；preventDefault
+            // 压掉 WebView2 原生菜单。
+            e.preventDefault();
+            e.stopPropagation();
+            setMenuAnchor("point");
+            setMenuPoint({ x: e.clientX, y: e.clientY });
+            setMenuOpen(true);
+          }}
           onClickCapture={(e) => {
             // 修饰键手势解析（hermes resolveSessionRowClick）：⇧ = 置顶；
             // ⌥+⇧ = 归档（客户端归档——重审计 #6 落地）；纯点击 = 恢复会话
@@ -1884,7 +1743,11 @@ export const ThreadListItem: FC = () => {
               { altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey, shiftKey: e.shiftKey },
               { canOpenWindow: false },
             );
-            if (action === "pin") {
+            if (action === "resume") {
+              // 主区在技能页时点会话行 = 回到聊天（hermes 路由语义：点会话
+              // = 回 /chat）。见 main-view-store.ts 的"回到聊天的路径"。
+              mainViewStore.getState().showChat();
+            } else if (action === "pin") {
               e.preventDefault();
               e.stopPropagation();
               sessionCatalog.getState().togglePin(threadId);
@@ -1892,7 +1755,7 @@ export const ThreadListItem: FC = () => {
               e.preventDefault();
               e.stopPropagation();
               sessionCatalog.getState().toggleArchive(threadId);
-            } else if (action !== "resume") {
+            } else {
               e.preventDefault();
               e.stopPropagation();
             }
@@ -1959,7 +1822,7 @@ export const ThreadListItem: FC = () => {
               onClick={sortable ? (e) => e.stopPropagation() : undefined}
             >
               {isArchived ? (
-                <ArchiveIcon className="text-(--text-4) size-3 transition-opacity group-hover/row:opacity-0" />
+                <ArchiveIcon className="text-(--text-4) size-[var(--size-icon-sm)] transition-opacity group-hover/row:opacity-0" />
               ) : (
                 <span
                   className={cn(
@@ -1973,7 +1836,7 @@ export const ThreadListItem: FC = () => {
                   data-slot="aui_thread-list-item-running"
                 />
               )}
-              <GripVerticalIcon className="text-(--text-4) absolute size-3 opacity-0 transition group-hover/row:opacity-80" />
+              <GripVerticalIcon className="text-(--text-4) absolute size-[var(--size-icon-sm)] opacity-0 transition group-hover/row:opacity-80" />
             </span>
             {isUnread && !isRunning && <span className="sr-only">已完成 — 未读</span>}
             <span className="min-w-0 flex-1 self-center">
@@ -2026,47 +1889,35 @@ export const ThreadListItem: FC = () => {
                 </time>
               </span>
             )}
-            <ThreadListItemMorePrimitive.Root sharedFocusGroup>
-              <ThreadListItemMorePrimitive.Trigger asChild>
-                <button
-                  aria-label="会话操作"
-                  className={cn(
-                    "text-transparent group-hover/row:text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) focus-visible:bg-(--hover-wash) focus-visible:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) size-5 shrink-0 cursor-pointer rounded-full p-0 transition-colors duration-100 pressable-sm",
-                    hasTrailing && "absolute right-0",
-                  )}
-                  data-slot="aui_thread-list-item-more"
-                  type="button"
-                >
-                  <MoreVerticalIcon className="size-3.5" />
-                  <span className="sr-only">会话操作</span>
-                </button>
-              </ThreadListItemMorePrimitive.Trigger>
-              <ThreadListItemMorePrimitive.Content
-                align="end"
-                onCloseAutoFocus={onCloseAutoFocus}
-                sideOffset={6}
-                className={MENU_CONTENT_CLASS}
-                data-slot="aui_thread-list-item-more-content"
+            {/* ⋯ 触发钮：锚点 = 自己（anchor='trigger'），左键开合由
+                ContextMenuAnchor 接管。命中盒 size-7(28) 与侧栏选项钮同档，
+                图标 14px 居中——用户"圆太小了不好点中"的定稿值。 */}
+            <ContextMenuAnchor>
+              <button
+                aria-label="会话操作"
+                className={cn(
+                  "text-transparent group-hover/row:text-(--text-3) hover:bg-(--hover-wash) hover:text-(--text) focus-visible:bg-(--hover-wash) focus-visible:text-(--text) data-[state=open]:bg-(--hover-wash) data-[state=open]:text-(--text) inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-full p-0 transition-colors duration-100 pressable-sm",
+                  hasTrailing && "absolute right-0",
+                )}
+                data-slot="aui_thread-list-item-more"
+                ref={kebabRef}
+                type="button"
               >
-                {renderDropdownItems()}
-              </ThreadListItemMorePrimitive.Content>
-            </ThreadListItemMorePrimitive.Root>
+                <MoreVerticalIcon className="size-[var(--size-icon-md)]" />
+                <span className="sr-only">会话操作</span>
+              </button>
+            </ContextMenuAnchor>
           </div>
         </ThreadListItemPrimitive.Root>
-      </ContextMenuPrimitive.Trigger>
-      {/* 右键上下文菜单：与 ⋯ 同一份 spec 投影（hermes SessionContextMenu
-          同源机制——两份菜单永不漂移）；行上右击由 Radix 吞掉 WebView2
-          默认菜单。 */}
-      <ContextMenuPrimitive.Portal>
-        <ContextMenuPrimitive.Content
-          aria-label="会话操作"
+        {/* ⋯ 与右键共用同一个菜单：锚点在打开时决定（trigger = 按钮下挂，
+            point = 右键落点）。两份菜单同一份 spec 投影，永不漂移。 */}
+        <ContextMenuContent
+          ariaLabel="会话操作"
           className={MENU_CONTENT_CLASS}
-          data-slot="aui_thread-list-item-context"
-          onCloseAutoFocus={onCloseAutoFocus}
         >
-          {renderContextItems()}
-        </ContextMenuPrimitive.Content>
-      </ContextMenuPrimitive.Portal>
+          {renderMenuItems()}
+        </ContextMenuContent>
+      </ContextMenu>
       <RenameSessionDialog
         currentTitle={title ?? ""}
         onOpenChange={setRenameOpen}
@@ -2083,6 +1934,6 @@ export const ThreadListItem: FC = () => {
         open={deleteOpen}
         sessionTitle={title ?? "New Chat"}
       />
-    </ContextMenuPrimitive.Root>
+    </>
   );
 };

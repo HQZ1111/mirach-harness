@@ -9,8 +9,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+#[cfg(test)]
+mod shutdown_tests;
+mod streams;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -61,12 +66,6 @@ struct NativeRustLoadedExtension {
     provider_streams: HashMap<String, Arc<[Value]>>,
 }
 
-#[derive(Debug, Clone)]
-struct NativeRustProviderStreamCursor {
-    chunks: Arc<[Value]>,
-    next_index: usize,
-}
-
 #[derive(Debug, Default)]
 struct NativeRustRuntimeState {
     extensions: Vec<NativeRustLoadedExtension>,
@@ -76,8 +75,7 @@ struct NativeRustRuntimeState {
     provider_stream_extension_index: HashMap<String, usize>,
     event_hook_extension_indexes: HashMap<String, Vec<usize>>,
     registered_tools: Vec<ExtensionToolDef>,
-    streams: HashMap<String, NativeRustProviderStreamCursor>,
-    next_stream_id: u64,
+    streams: streams::StreamRegistry,
     flags: HashMap<(String, String), Value>,
     repair_events: Vec<ExtensionRepairEvent>,
 }
@@ -92,8 +90,7 @@ impl NativeRustRuntimeState {
             .map(|extension| extension.snapshot.clone())
             .collect::<Vec<_>>();
         self.extensions = loaded;
-        self.streams.clear();
-        self.next_stream_id = 0;
+        self.reset_transient_state();
         self.rebuild_indexes();
         snapshots
     }
@@ -215,6 +212,7 @@ impl NativeRustRuntimeState {
 #[derive(Clone)]
 pub struct NativeRustExtensionRuntimeHandle {
     state: Arc<RwLock<NativeRustRuntimeState>>,
+    closed: Arc<AtomicBool>,
 }
 
 // The native runtime handle mirrors the async JS runtime handle so
@@ -230,34 +228,77 @@ impl NativeRustExtensionRuntimeHandle {
         );
         Ok(Self {
             state: Arc::new(RwLock::new(NativeRustRuntimeState::default())),
+            closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
+    /// Permanently close admission through every clone and try to retire state.
+    /// Native descriptors have no worker to join. Never park the executor on a
+    /// contended synchronous lock: return false, remaining closed, so the owner
+    /// can retry. Even a zero budget attempts an immediate drain. Destruction
+    /// is synchronous; this is not a hard real-time deallocation guarantee.
     pub async fn shutdown(&self, _budget: Duration) -> bool {
+        self.closed.store(true, Ordering::Release);
+        let mut state = match self.state.try_write() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
+        let retired = std::mem::take(&mut *state);
+        drop(state);
+        drop(retired);
         true
+    }
+
+    fn ensure_running(&self) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::extension(
+                "PI_NATIVE_RUNTIME_CLOSED: native extension runtime is shut down; start a new runtime",
+            ));
+        }
+        Ok(())
+    }
+
+    fn read_running(&self) -> Result<std::sync::RwLockReadGuard<'_, NativeRustRuntimeState>> {
+        self.ensure_running()?;
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+        // Admission may have closed while this caller waited for the lock.
+        self.ensure_running()?;
+        Ok(state)
+    }
+
+    fn write_running(&self) -> Result<std::sync::RwLockWriteGuard<'_, NativeRustRuntimeState>> {
+        self.ensure_running()?;
+        let state = self
+            .state
+            .write()
+            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+        self.ensure_running()?;
+        Ok(state)
     }
 
     async fn load_extensions_snapshots(
         &self,
         specs: Vec<NativeRustExtensionLoadSpec>,
     ) -> Result<Vec<JsExtensionSnapshot>> {
+        // Check both before filesystem work and at installation. A descriptor
+        // read already in flight may finish, but cannot reopen a closed runtime.
+        self.ensure_running()?;
         let loaded = load_native_extensions_from_specs(&specs)?;
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+        let mut state = self.write_running()?;
         Ok(state.load_extensions(loaded))
     }
 
     pub async fn get_registered_tools(&self) -> Result<Vec<ExtensionToolDef>> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+        let state = self.read_running()?;
         Ok(state.registered_tools.clone())
     }
 
     pub async fn pump_once(&self) -> Result<bool> {
+        self.ensure_running()?;
         Ok(false)
     }
 
@@ -268,10 +309,7 @@ impl NativeRustExtensionRuntimeHandle {
         ctx_payload: Arc<Value>,
         _timeout_ms: u64,
     ) -> Result<Value> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+        let state = self.read_running()?;
         Ok(state.dispatch_event(&event_name, &event_payload, ctx_payload.as_ref()))
     }
 
@@ -282,10 +320,7 @@ impl NativeRustExtensionRuntimeHandle {
         _timeout_ms: u64,
     ) -> Result<Vec<Result<Value>>> {
         let out = {
-            let state = self
-                .state
-                .read()
-                .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+            let state = self.read_running()?;
             let mut out = Vec::with_capacity(events.len());
             for (event_name, payload) in events {
                 out.push(Ok(state.dispatch_event(
@@ -326,10 +361,7 @@ impl NativeRustExtensionRuntimeHandle {
         }
 
         let lookup = {
-            let state = self
-                .state
-                .read()
-                .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+            let state = self.read_running()?;
             if let Some(extension) = state.find_tool_extension(tool_name) {
                 extension
                     .tool_outputs
@@ -376,10 +408,7 @@ impl NativeRustExtensionRuntimeHandle {
         }
 
         let lookup = {
-            let state = self
-                .state
-                .read()
-                .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+            let state = self.read_running()?;
             state
                 .find_command_extension(&command_name)
                 .map_or(Lookup::Missing, |extension| {
@@ -412,10 +441,7 @@ impl NativeRustExtensionRuntimeHandle {
         }
 
         let lookup = {
-            let state = self
-                .state
-                .read()
-                .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+            let state = self.read_running()?;
             state
                 .find_shortcut_extension(&key_id)
                 .map_or(Lookup::Missing, |extension| {
@@ -445,9 +471,7 @@ impl NativeRustExtensionRuntimeHandle {
         flag_name: String,
         value: Value,
     ) -> Result<()> {
-        self.state
-            .write()
-            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?
+        self.write_running()?
             .flags
             .insert((extension_id, flag_name), value);
         Ok(())
@@ -463,10 +487,7 @@ impl NativeRustExtensionRuntimeHandle {
     }
 
     pub async fn reset_transient_state(&self) -> Result<()> {
-        self.state
-            .write()
-            .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?
-            .reset_transient_state();
+        self.write_running()?.reset_transient_state();
         Ok(())
     }
 
@@ -479,25 +500,14 @@ impl NativeRustExtensionRuntimeHandle {
         _timeout_ms: u64,
     ) -> Result<String> {
         let (stream_id, chunk_count) = {
-            let mut state = self
-                .state
-                .write()
-                .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
+            let mut state = self.write_running()?;
             let stream_chunks = state.provider_stream_chunks(&provider_id).ok_or_else(|| {
                 Error::extension(format!(
                     "native-rust provider `{provider_id}` has no streamSimple handler"
                 ))
             })?;
             let chunk_count = stream_chunks.len();
-            state.next_stream_id = state.next_stream_id.saturating_add(1);
-            let stream_id = format!("native-stream-{}", state.next_stream_id);
-            state.streams.insert(
-                stream_id.clone(),
-                NativeRustProviderStreamCursor {
-                    chunks: stream_chunks,
-                    next_index: 0,
-                },
-            );
+            let stream_id = state.streams.start(stream_chunks)?;
             drop(state);
             (stream_id, chunk_count)
         };
@@ -516,27 +526,10 @@ impl NativeRustExtensionRuntimeHandle {
         stream_id: String,
         _timeout_ms: u64,
     ) -> Result<Option<Value>> {
-        let next_value = {
-            let mut state = self
-                .state
-                .write()
-                .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?;
-            let Some(cursor) = state.streams.get_mut(&stream_id) else {
-                return Ok(None);
-            };
-            let next = cursor.chunks.get(cursor.next_index).cloned();
-            let exhausted = if next.is_some() {
-                cursor.next_index = cursor.next_index.saturating_add(1);
-                cursor.next_index >= cursor.chunks.len()
-            } else {
-                true
-            };
-            if exhausted {
-                state.streams.remove(&stream_id);
-            }
-            next
-        };
-        Ok(next_value)
+        // Unknown/retired handles are errors, never ordinary EOF. The provider
+        // adapter may complete a raw-text response at EOF, so conflating reset
+        // or cancellation with exhaustion would publish truncated text.
+        self.write_running()?.streams.next(&stream_id)
     }
 
     pub async fn provider_stream_simple_cancel(
@@ -548,14 +541,14 @@ impl NativeRustExtensionRuntimeHandle {
             .write()
             .map_err(|_| Error::extension("native-rust runtime state lock poisoned"))?
             .streams
-            .remove(&stream_id);
+            .cancel(&stream_id);
         Ok(())
     }
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn provider_stream_simple_cancel_best_effort(&self, stream_id: String) {
         if let Ok(mut state) = self.state.write() {
-            state.streams.remove(&stream_id);
+            state.streams.cancel(&stream_id);
         }
     }
 }
@@ -894,9 +887,13 @@ impl ExtensionRuntimeHandle {
     ) -> Result<Option<Value>> {
         match self {
             Self::Js(runtime) => {
-                runtime
+                let mut next = runtime
                     .provider_stream_simple_next(stream_id, timeout_ms)
-                    .await
+                    .await?;
+                if let Some(value) = next.as_mut() {
+                    normalize_js_stream_numbers(value);
+                }
+                Ok(next)
             }
             Self::NativeRust(runtime) => {
                 runtime
@@ -935,6 +932,40 @@ impl ExtensionRuntimeHandle {
     }
 }
 
+/// Restore integer-valued JS numbers before typed provider-event decoding.
+///
+/// QuickJS represents numbers outside i32 as doubles, including `Date.now()`
+/// timestamps (gh #238). The JSON bridge preserves that tag, but serde's i64,
+/// u64 and usize fields require integer JSON numbers. Normalize safe integers
+/// throughout the event, without rounding fractions or guessing lost precision.
+/// Existing JSON integers and native descriptor streams are left untouched.
+#[allow(clippy::cast_possible_truncation)]
+fn normalize_js_stream_numbers(value: &mut Value) {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            if let Some(number) = number.as_f64()
+                && number.fract() == 0.0
+                && (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&number)
+            {
+                // The integral and safe-range checks make this cast exact.
+                *value = Value::Number((number as i64).into());
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_js_stream_numbers(value);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                normalize_js_stream_numbers(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionRuntimeEngineSelection {
     NativeRust,
@@ -957,5 +988,187 @@ impl ExtensionRuntimeEngineSelection {
     pub fn from_env() -> Self {
         let value = std::env::var(Self::ENV_VAR).unwrap_or_default();
         Self::from_env_value(&value)
+    }
+}
+
+#[cfg(test)]
+mod stream_number_tests {
+    use super::normalize_js_stream_numbers;
+    use crate::model::{AssistantMessageEvent, StopReason};
+    use serde_json::{Value, json};
+
+    fn js_message() -> Value {
+        json!({
+            "role": "assistant",
+            "content": [],
+            "api": "router-local-api",
+            "provider": "repro",
+            "model": "m1",
+            "usage": {
+                "input": 2_147_483_648.0,
+                "output": 1.0,
+                "cacheRead": 0.0,
+                "cacheWrite": 0.0,
+                "totalTokens": 2_147_483_649.0,
+                "cost": {
+                    "input": 0.125,
+                    "output": 0.001,
+                    "cacheRead": 0.0,
+                    "cacheWrite": 0.0,
+                    "total": 0.126
+                }
+            },
+            "stopReason": "error",
+            "errorMessage": "intentional repro error",
+            "timestamp": 1_789_918_884_239.0
+        })
+    }
+
+    #[test]
+    fn js_safe_integers_survive_i32_tag_boundary() {
+        for (input, expected) in [
+            (0.0, 0_i64),
+            (-0.0, 0),
+            (2_147_483_647.0, 2_147_483_647),
+            (2_147_483_648.0, 2_147_483_648),
+            (-2_147_483_649.0, -2_147_483_649),
+            (1_789_918_884_239.0, 1_789_918_884_239),
+            (9_007_199_254_740_991.0, 9_007_199_254_740_991),
+            (-9_007_199_254_740_991.0, -9_007_199_254_740_991),
+        ] {
+            let mut value = json!(input);
+            assert!(value.is_f64());
+            normalize_js_stream_numbers(&mut value);
+            assert_eq!(value.as_i64(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn js_normalization_preserves_fractions_unsafe_numbers_and_exact_json_integers() {
+        let original = json!([
+            0.125,
+            -1.25,
+            9_007_199_254_740_992.0,
+            -9_007_199_254_740_992.0,
+            9_223_372_036_854_775_808.0,
+            1.0e100,
+            i64::MIN,
+            u64::MAX,
+            "2147483648",
+            true,
+            null
+        ]);
+        let mut value = original.clone();
+        normalize_js_stream_numbers(&mut value);
+        assert_eq!(value, original);
+        assert!(value[2].is_f64());
+        assert!(value[4].is_f64());
+        assert_eq!(value[6].as_i64(), Some(i64::MIN));
+        assert_eq!(value[7].as_u64(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn js_normalization_is_recursive_and_idempotent() {
+        let mut value = json!({
+            "nested": [{"timestamp": 1_789_918_884_239.0, "cost": 0.125}],
+            "empty": [],
+            "contentIndex": 0.0
+        });
+        normalize_js_stream_numbers(&mut value);
+        assert_eq!(
+            value["nested"][0]["timestamp"].as_i64(),
+            Some(1_789_918_884_239)
+        );
+        assert_eq!(value["nested"][0]["cost"], json!(0.125));
+        assert_eq!(value["contentIndex"].as_u64(), Some(0));
+        let normalized = value.clone();
+        normalize_js_stream_numbers(&mut value);
+        assert_eq!(value, normalized);
+    }
+
+    #[test]
+    fn stream_simple_error_retains_original_error_with_wall_clock_timestamp() {
+        let mut value = json!({"type": "error", "reason": "error", "error": js_message()});
+        assert!(serde_json::from_value::<AssistantMessageEvent>(value.clone()).is_err());
+        normalize_js_stream_numbers(&mut value);
+        let event: AssistantMessageEvent = serde_json::from_value(value).expect("valid JS event");
+        let AssistantMessageEvent::Error { reason, error } = event else {
+            panic!("expected the provider's error event");
+        };
+        assert_eq!(reason, StopReason::Error);
+        assert_eq!(error.timestamp, 1_789_918_884_239);
+        assert_eq!(
+            error.error_message.as_deref(),
+            Some("intentional repro error")
+        );
+        assert_eq!(error.usage.input, 2_147_483_648);
+        assert_eq!(error.usage.total_tokens, 2_147_483_649);
+        assert_eq!(
+            serde_json::to_value(&error.usage.cost).unwrap()["input"],
+            json!(0.125)
+        );
+    }
+
+    #[test]
+    fn stream_simple_start_delta_and_done_accept_js_integer_fields() {
+        let mut message = js_message();
+        message["stopReason"] = json!("stop");
+        message["errorMessage"] = Value::Null;
+        message["content"] = json!([{"type": "text", "text": "hello"}]);
+        for (mut value, message_key) in [
+            (
+                json!({"type": "start", "partial": message.clone()}),
+                "partial",
+            ),
+            (
+                json!({
+                    "type": "text_delta", "contentIndex": 0.0,
+                    "delta": "hello", "partial": message.clone()
+                }),
+                "partial",
+            ),
+            (
+                json!({"type": "done", "reason": "stop", "message": message}),
+                "message",
+            ),
+        ] {
+            normalize_js_stream_numbers(&mut value);
+            let event: AssistantMessageEvent = serde_json::from_value(value).expect("valid event");
+            let encoded = serde_json::to_value(event).unwrap();
+            assert_eq!(
+                encoded[message_key]["timestamp"].as_i64(),
+                Some(1_789_918_884_239)
+            );
+            assert_eq!(
+                encoded[message_key]["usage"]["input"].as_u64(),
+                Some(2_147_483_648)
+            );
+            assert_eq!(encoded[message_key]["usage"]["cost"]["input"], json!(0.125));
+            if encoded["type"] == "text_delta" {
+                assert_eq!(encoded["contentIndex"].as_u64(), Some(0));
+                assert_eq!(encoded["delta"], "hello");
+            }
+        }
+    }
+
+    #[test]
+    fn stream_simple_invalid_integer_fields_are_not_rounded_or_saturated() {
+        for (pointer, invalid) in [
+            ("/timestamp", json!(1.5)),
+            ("/timestamp", json!(9_007_199_254_740_992.0)),
+            ("/timestamp", json!(9_223_372_036_854_775_808.0)),
+            ("/timestamp", Value::Null),
+            ("/usage/input", json!(-1.0)),
+            ("/usage/output", json!(0.5)),
+        ] {
+            let mut message = js_message();
+            *message.pointer_mut(pointer).unwrap() = invalid;
+            let mut value = json!({"type": "error", "reason": "error", "error": message});
+            normalize_js_stream_numbers(&mut value);
+            assert!(
+                serde_json::from_value::<AssistantMessageEvent>(value).is_err(),
+                "{pointer}"
+            );
+        }
     }
 }

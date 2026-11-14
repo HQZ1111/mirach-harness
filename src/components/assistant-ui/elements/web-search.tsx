@@ -42,7 +42,7 @@ export function WebSearch({
           "text-foreground/70 inline-flex w-fit items-center gap-1.5 rounded-full px-3.5 py-2 text-xs",
         )}
       >
-        <SearchIcon className="text-foreground/40 size-3" />
+        <SearchIcon className="text-foreground/40 size-[var(--size-icon-sm)]" />
         {query}
       </span>
       <div className="text-foreground/45 text-xs">

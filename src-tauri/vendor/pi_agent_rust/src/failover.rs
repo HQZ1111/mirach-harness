@@ -25,25 +25,158 @@ pub enum FailoverClass {
     Transient,
 }
 
-/// Classify an error text for failover. `None` = never fail over (auth and
-/// other loud errors). Ordering matters: auth patterns are checked FIRST so
-/// a "401 ... quota" message never fails over.
-pub fn classify_failover(error_text: &str) -> Option<FailoverClass> {
+/// Recognize response status evidence, never a numeric substring in an id.
+/// A leading status belongs to the response even when the body quotes another
+/// HTTP code. The diagnostic parser handles the normal HTTP/status wrappers.
+fn recovery_http_status(lower: &str) -> Option<u16> {
+    let mut headline = lower.trim();
+    if let Some(rest) = headline.strip_prefix("provider error: ") {
+        headline = rest.split_once(": ").map_or(rest, |(_, message)| message);
+    }
+    if let Some(rest) = headline
+        .strip_prefix("api error:")
+        .or_else(|| headline.strip_prefix("error:"))
+    {
+        headline = rest.trim_start();
+    }
+    if let Some(status) = leading_http_status(headline) {
+        return Some(status);
+    }
+    if let Some(status) =
+        crate::error::ProviderErrorSummary::from_error_text(None, lower).http_status
+    {
+        return Some(status);
+    }
+    // Providers also use `Name API error (503): ...` and JSON status fields.
+    if let Some((_, rest)) = headline.split_once("api error (")
+        && let Some(status) = leading_http_status(rest)
+    {
+        return Some(status);
+    }
+    for key in ["\"status\"", "\"status_code\"", "\"statuscode\""] {
+        for (index, _) in lower.match_indices(key) {
+            let rest = lower[index + key.len()..].trim_start();
+            if let Some(value) = rest.strip_prefix(':') {
+                let value = value.trim_start();
+                let value = value.strip_prefix('"').unwrap_or(value);
+                if let Some(status) = leading_http_status(value) {
+                    return Some(status);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn leading_http_status(text: &str) -> Option<u16> {
+    let digits = text.get(..3)?;
+    if !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || text[3..].starts_with(|ch: char| ch.is_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    digits
+        .parse::<u16>()
+        .ok()
+        .filter(|status| (100..=599).contains(status))
+}
+
+/// Some providers report exhausted credits as a 400/402 instead of a 429.
+/// These specific capacity errors may change providers, but a generic mention
+/// of billing/quota in an invalid request must not override its response status.
+fn is_quota_exhaustion(lower: &str) -> bool {
+    [
+        "insufficient_quota",
+        "quota exceeded",
+        "quota_exceeded",
+        "quota has been exceeded",
+        "billing hard limit",
+        "billing_not_active",
+        "not enough credits",
+        "credit balance is too low",
+        "spending limit",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+}
+
+fn response_refuses_retry(lower: &str) -> bool {
+    recovery_http_status(lower)
+        .is_some_and(|status| (400..=499).contains(&status) && !matches!(status, 408 | 429))
+}
+
+/// Text-only recovery after the caller has ruled out authentication and
+/// durability failures. Keep the old prose matcher, but do not feed it numeric
+/// request ids, durations or token counts as if they were HTTP status codes.
+fn provider_text_is_retryable(
+    error_text: &str,
+    usage_input_tokens: Option<u64>,
+    context_window: Option<u32>,
+) -> bool {
+    if crate::error::is_context_overflow(error_text, usage_input_tokens, context_window) {
+        return false;
+    }
+    let lower = error_text.to_ascii_lowercase();
+    if let Some(status) = recovery_http_status(&lower)
+        && (400..=599).contains(&status)
+    {
+        return matches!(status, 408 | 429 | 500..=599);
+    }
+    let prose: String = lower
+        .chars()
+        .map(|ch| if ch.is_ascii_digit() { '#' } else { ch })
+        .collect();
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || crate::error::is_retryable_error(&prose, usage_input_tokens, context_window)
+}
+
+/// Refusal shared by same-provider retry and failover. The input is lowercase.
+/// Authentication wins even when the provider also mentions a transient status.
+fn is_auth_failure(lower: &str) -> bool {
     const AUTH_PATTERNS: &[&str] = &[
-        "401",
-        "403",
         "unauthorized",
+        "unauthenticated",
         "forbidden",
         "invalid api key",
         "invalid_api_key",
         "incorrect api key",
         "authentication failed",
+        "authentication error",
+        "authentication_error",
         "permission denied",
+        "permission_denied",
         "expired token",
+        "invalid token",
+        "invalid_token",
+        "invalid credentials",
+        "invalid_credentials",
         "missing api key",
     ];
+    if AUTH_PATTERNS.iter().any(|pattern| lower.contains(pattern)) {
+        return true;
+    }
+
+    // The response status outranks unrelated numbers inside its body. Use the
+    // same evidence for authentication and capacity classification, including
+    // bare leading statuses and JSON wire spellings. Credential wording above
+    // still wins over an outer transient status.
+    if let Some(status) = recovery_http_status(lower) {
+        return matches!(status, 401 | 403);
+    }
+
+    // Some providers emit a bare status instead. Match a complete token, never
+    // the middle of a request id, a token count, or a duration such as 1403ms.
+    lower
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .any(|token| matches!(token, "401" | "403"))
+}
+
+/// Classify an error text for failover. `None` = never fail over (auth and
+/// other loud errors). Terminal markers and auth are checked before transient
+/// patterns so a "401 ... quota" message never fails over.
+pub fn classify_failover(error_text: &str) -> Option<FailoverClass> {
     const QUOTA_PATTERNS: &[&str] = &[
-        "429",
         "rate limit",
         "rate_limit",
         "too many requests",
@@ -53,10 +186,6 @@ pub fn classify_failover(error_text: &str) -> Option<FailoverClass> {
         "spending limit",
     ];
     const OVERLOAD_PATTERNS: &[&str] = &[
-        "529",
-        "503",
-        "502",
-        "500",
         "overloaded",
         "service unavailable",
         "service_unavailable",
@@ -66,11 +195,32 @@ pub fn classify_failover(error_text: &str) -> Option<FailoverClass> {
         "internal error",
     ];
 
+    // Durability failures may follow completed side effects. Context overflow
+    // needs compaction, not a replay against another provider.
+    if marks_session_persistence(error_text)
+        || crate::error::is_context_overflow(error_text, None, None)
+    {
+        return None;
+    }
     let text = error_text.to_ascii_lowercase();
 
     // Auth: loud, user-actionable, never a failover trigger.
-    if AUTH_PATTERNS.iter().any(|p| text.contains(p)) {
+    if is_auth_failure(&text) {
         return None;
+    }
+    if is_quota_exhaustion(&text) {
+        return Some(FailoverClass::Quota);
+    }
+    if let Some(status) = recovery_http_status(&text) {
+        match status {
+            408 | 504 => return Some(FailoverClass::Transient),
+            429 => return Some(FailoverClass::Quota),
+            500..=599 => return Some(FailoverClass::Overload),
+            // An invalid request cannot be repaired by another provider call,
+            // even when its body quotes a transient status or retry wording.
+            400..=499 => return None,
+            _ => {}
+        }
     }
 
     if QUOTA_PATTERNS.iter().any(|p| text.contains(p)) {
@@ -81,7 +231,7 @@ pub fn classify_failover(error_text: &str) -> Option<FailoverClass> {
         return Some(FailoverClass::Overload);
     }
 
-    if crate::error::is_retryable_error(&text.to_ascii_lowercase(), None, None) {
+    if provider_text_is_retryable(&text, None, None) {
         return Some(FailoverClass::Transient);
     }
     None
@@ -94,8 +244,12 @@ pub struct FailoverChain {
     pub entries: Vec<String>,
 }
 
-/// Resolve the chain for a role name or an exact `provider/model` spec from
-/// `retry.fallbackChains`. Role keys take precedence over exact model specs.
+/// Resolve the chain for a role name or an exact `provider/model` spec.
+///
+/// Looks up fallback chains from `retry.fallbackChains`. Role keys take precedence
+/// over exact model specs. Provider aliases and surrounding spec whitespace follow
+/// model resolution. An exact key wins over equivalent spellings; otherwise the
+/// lexicographically first matching key wins, independent of `HashMap` iteration order.
 pub fn chain_for<S: std::hash::BuildHasher>(
     chains: &HashMap<String, Vec<String>, S>,
     role: &str,
@@ -110,14 +264,38 @@ pub fn chain_for<S: std::hash::BuildHasher>(
         });
     }
     let full = format!("{provider}/{model_id}");
-    for (key, entries) in chains {
-        if key.eq_ignore_ascii_case(&full) && !entries.is_empty() {
-            return Some(FailoverChain {
-                entries: entries.clone(),
-            });
-        }
+    if let Some(entries) = chains.get(&full)
+        && !entries.is_empty()
+    {
+        return Some(FailoverChain {
+            entries: entries.clone(),
+        });
     }
-    None
+    chains
+        .iter()
+        .filter(|(key, entries)| !entries.is_empty() && model_spec_matches(key, provider, model_id))
+        .min_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, entries)| FailoverChain {
+            entries: entries.clone(),
+        })
+}
+
+/// Use the same identity relation as `resolve_chain_spec`, including provider
+/// aliases and nested model ids. Raw string equality is not model identity.
+fn model_spec_matches(spec: &str, provider: &str, model_id: &str) -> bool {
+    crate::provider_metadata::split_provider_model_spec(spec).is_some_and(
+        |(candidate_provider, candidate_model)| {
+            crate::provider_metadata::provider_ids_match(provider, candidate_provider)
+                && model_id.eq_ignore_ascii_case(candidate_model)
+        },
+    )
+}
+
+fn model_specs_match(left: &str, right: &str) -> bool {
+    crate::provider_metadata::split_provider_model_spec(right).map_or_else(
+        || left.eq_ignore_ascii_case(right),
+        |(provider, model_id)| model_spec_matches(left, provider, model_id),
+    )
 }
 
 /// Cooldown FSM for the primary after a failover.
@@ -129,6 +307,10 @@ pub fn chain_for<S: std::hash::BuildHasher>(
 pub struct CooldownTracker {
     failed_at: Option<Instant>,
     cooldown: Duration,
+    /// A restored deadline may be farther away than the configured interval
+    /// after a wall-clock adjustment. Keep that interval without changing the
+    /// duration a subsequent, newly observed failure will use.
+    restored_remaining: Option<Duration>,
 }
 
 impl CooldownTracker {
@@ -137,24 +319,59 @@ impl CooldownTracker {
         Self {
             failed_at: None,
             cooldown: Duration::from_secs(cooldown_secs),
+            restored_remaining: None,
         }
     }
 
     /// Record that the primary failed at `now`.
     pub const fn record_primary_failure(&mut self, now: Instant) {
         self.failed_at = Some(now);
+        self.restored_remaining = None;
     }
 
     /// Whether the primary may be used again at `now`.
     #[must_use]
     pub fn should_use_primary(&self, now: Instant) -> bool {
-        self.failed_at
-            .is_none_or(|failed| now.duration_since(failed) >= self.cooldown)
+        self.failed_at.is_none_or(|failed| {
+            now.checked_duration_since(failed)
+                .is_some_and(|elapsed| elapsed >= self.restored_remaining.unwrap_or(self.cooldown))
+        })
     }
 
     /// Clear the tracker (primary succeeded).
     pub const fn reset(&mut self) {
         self.failed_at = None;
+        self.restored_remaining = None;
+    }
+
+    /// Create a cooldown tracker restored from a restart-safe deadline (bd-gm481.2).
+    /// If `now < deadline`, the exact remaining cooldown is tracked against a
+    /// monotonic clock. If `now >= deadline`, the cooldown has elapsed.
+    #[must_use]
+    pub fn from_deadline(
+        cooldown_secs: u64,
+        deadline: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self::from_deadline_at(cooldown_secs, deadline, now, Instant::now())
+    }
+
+    fn from_deadline_at(
+        cooldown_secs: u64,
+        deadline: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+        monotonic_now: Instant,
+    ) -> Self {
+        // Do not round to milliseconds or synthesize a historical Instant:
+        // rounding releases sub-millisecond deadlines early, clamping to the
+        // configured duration loses clock-rollback time, and checked_sub can
+        // fail for large durations even when the deadline has already passed.
+        let remaining = (deadline - now).to_std().unwrap_or(Duration::ZERO);
+        Self {
+            failed_at: Some(monotonic_now),
+            cooldown: Duration::from_secs(cooldown_secs),
+            restored_remaining: Some(remaining),
+        }
     }
 
     /// Deterministic test view of the failure timestamp.
@@ -335,17 +552,52 @@ pub struct FailoverPrimary {
 /// the interactive stacks, where a configured chain is currently inert — adopt
 /// failover without becoming a third copy (bd-u2qv4).
 ///
-/// Per-process by design, matching both existing surfaces: a reopened session
-/// starts empty and stays on whatever the Session header says. Recovering the
-/// primary across a restart would need it durably recorded, which neither
-/// surface does today.
+/// Durable restart-safe failover provenance is recorded on Session `ModelChange`
+/// entries and restored upon session open (bd-gm481.2).
 #[derive(Debug, Default)]
 pub struct FailoverState {
     cooldown: Option<CooldownTracker>,
     primary: Option<FailoverPrimary>,
     active: Option<(String, String)>,
     chain_position: usize,
+    lifecycle_id: Option<String>,
+    source: Option<FailoverSource>,
 }
+
+/// Process-local identity of the branch record that supplied a cooldown.
+/// Full provenance matters because sibling branches can share a lifecycle and
+/// cursor while recording different deadlines. Entry identity also separates
+/// older records without lifecycle IDs or usable deadlines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FailoverSource {
+    session_id: String,
+    entry_id: Option<String>,
+    entry_parent_id: Option<String>,
+    entry_timestamp: String,
+    provenance: crate::session::ModelChangeFailover,
+}
+
+impl FailoverSource {
+    pub(crate) fn from_session(session: &crate::session::Session) -> Option<Self> {
+        let change = session.active_failover_model_change_for_current_path()?;
+        Some(Self {
+            session_id: session.header.id.clone(),
+            entry_id: change.base.id.clone(),
+            entry_parent_id: change.base.parent_id.clone(),
+            entry_timestamp: change.base.timestamp.clone(),
+            provenance: change.failover.clone()?,
+        })
+    }
+}
+
+/// Constituent components of a `FailoverState`.
+pub type FailoverParts = (
+    Option<CooldownTracker>,
+    Option<FailoverPrimary>,
+    Option<(String, String)>,
+    usize,
+    Option<String>,
+);
 
 impl FailoverState {
     /// Build from configuration. The cooldown tracker is absent when no
@@ -362,6 +614,22 @@ impl FailoverState {
             primary: None,
             active: None,
             chain_position: 0,
+            lifecycle_id: None,
+            source: None,
+        }
+    }
+
+    /// Build with no cooldown tracker, for a session that has no chain
+    /// configured: there is nothing to fail over to and nothing to restore.
+    #[must_use]
+    pub const fn new_empty() -> Self {
+        Self {
+            cooldown: None,
+            primary: None,
+            active: None,
+            chain_position: 0,
+            lifecycle_id: None,
+            source: None,
         }
     }
 
@@ -372,6 +640,98 @@ impl FailoverState {
         Self {
             cooldown: Some(CooldownTracker::new(cooldown_secs)),
             ..Self::default()
+        }
+    }
+
+    /// Reconstruct cross-turn failover bookkeeping from a persisted session
+    /// record (bd-gm481.2). If the session's active branch path ends on an
+    /// unrestored failover swap, its primary, active fallback, chain position,
+    /// and restart-safe cooldown deadline are restored.
+    #[must_use]
+    pub fn reconstruct_from_session(
+        session: &crate::session::Session,
+        configured_cooldown_secs: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let mut state = Self::with_cooldown_secs(configured_cooldown_secs);
+        state.reconcile_from_session(session, configured_cooldown_secs, now);
+        state
+    }
+
+    /// Keep a running monotonic timer only while its exact branch record is
+    /// unchanged. A manual selection clears recovery state; another branch's
+    /// failover record supplies its own cursor and restart-safe cooldown.
+    pub(crate) fn reconcile_from_session(
+        &mut self,
+        session: &crate::session::Session,
+        configured_cooldown_secs: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Some(source) = FailoverSource::from_session(session) else {
+            self.clear();
+            return;
+        };
+        if self.source.as_ref() == Some(&source)
+            && self.chain_position == source.provenance.chain_position.unwrap_or(0)
+        {
+            return;
+        }
+        *self =
+            Self::reconstruct_from_provenance(&source.provenance, configured_cooldown_secs, now);
+        self.source = Some(source);
+    }
+
+    /// Reconstruct cross-turn failover bookkeeping from explicit provenance
+    /// (bd-gm481.2).
+    #[must_use]
+    pub fn reconstruct_from_provenance(
+        provenance: &crate::session::ModelChangeFailover,
+        configured_cooldown_secs: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let primary = FailoverPrimary {
+            provider: provenance.primary_provider.clone(),
+            model_id: provenance.primary_model_id.clone(),
+            requested_thinking_level: provenance
+                .primary_thinking_level
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default(),
+        };
+        let active = (
+            provenance.fallback_provider.clone(),
+            provenance.fallback_model_id.clone(),
+        );
+        let chain_position = provenance.chain_position.unwrap_or(0);
+        let cooldown_secs = provenance.cooldown_secs.unwrap_or(configured_cooldown_secs);
+        let cooldown = provenance
+            .cooldown_deadline
+            .as_deref()
+            .and_then(|dl| chrono::DateTime::parse_from_rfc3339(dl).ok())
+            .map_or_else(
+                || {
+                    // An active failover without a usable deadline is not
+                    // evidence that the failed primary has recovered. Older
+                    // records and malformed timestamps restart the interval.
+                    let mut tracker = CooldownTracker::new(cooldown_secs);
+                    tracker.record_primary_failure(Instant::now());
+                    tracker
+                },
+                |deadline| {
+                    CooldownTracker::from_deadline(
+                        cooldown_secs,
+                        deadline.with_timezone(&chrono::Utc),
+                        now,
+                    )
+                },
+            );
+        Self {
+            cooldown: Some(cooldown),
+            primary: Some(primary),
+            active: Some(active),
+            chain_position,
+            lifecycle_id: provenance.lifecycle_id.clone(),
+            source: None,
         }
     }
 
@@ -399,6 +759,36 @@ impl FailoverState {
         self.chain_position = position;
     }
 
+    /// Active failover lifecycle ID, if any.
+    #[must_use]
+    pub fn lifecycle_id(&self) -> Option<&str> {
+        self.lifecycle_id.as_deref()
+    }
+
+    /// Set or update the active failover lifecycle ID.
+    pub fn set_lifecycle_id(&mut self, id: Option<String>) {
+        self.lifecycle_id = id;
+        self.source = None;
+    }
+
+    /// Cooldown tracker, if configured.
+    #[must_use]
+    pub const fn cooldown(&self) -> Option<&CooldownTracker> {
+        self.cooldown.as_ref()
+    }
+
+    /// Deconstruct into constituent state components.
+    #[must_use]
+    pub fn into_parts(self) -> FailoverParts {
+        (
+            self.cooldown,
+            self.primary,
+            self.active,
+            self.chain_position,
+            self.lifecycle_id,
+        )
+    }
+
     /// The identity a fresh swap should record as its primary: the one already
     /// recorded when a chain is in flight, else the live identity.
     ///
@@ -417,6 +807,7 @@ impl FailoverState {
         active: (String, String),
         now: std::time::Instant,
     ) {
+        self.source = None;
         if self.primary.is_none() {
             self.primary = Some(primary);
         }
@@ -439,9 +830,11 @@ impl FailoverState {
 
     /// The primary is back; the chain starts over from the top next time.
     pub fn clear(&mut self) {
+        self.source = None;
         self.primary = None;
         self.active = None;
         self.chain_position = 0;
+        self.lifecycle_id = None;
         if let Some(tracker) = self.cooldown.as_mut() {
             tracker.reset();
         }
@@ -498,15 +891,10 @@ impl<'a> FailoverWalk<'a> {
             let index = self.position;
             let spec = self.entries[index].as_str();
             self.position += 1;
-            let is_current = crate::provider_metadata::split_provider_model_spec(spec).is_some_and(
-                |(provider, model_id)| {
-                    crate::provider_metadata::provider_ids_match(self.current_provider, provider)
-                        && self.current_model.eq_ignore_ascii_case(model_id)
-                },
-            );
+            let is_current = model_spec_matches(spec, self.current_provider, self.current_model);
             let is_duplicate = self.entries[..index]
                 .iter()
-                .any(|earlier| earlier.eq_ignore_ascii_case(spec));
+                .any(|earlier| model_specs_match(earlier, spec));
             if is_current || is_duplicate {
                 continue;
             }
@@ -576,7 +964,7 @@ pub fn retry_delay_ms(base_delay_ms: u32, max_delay_ms: u32, attempt: u32) -> u3
 /// session-persistence failure?
 ///
 /// Such a failure means provider or tool side effects may already have
-/// happened while the durable record is missing or stale. Re-entering the
+/// happened while the durable session record is missing or stale. Re-entering the
 /// provider — retry, credential rotation, or model failover — could repeat
 /// those effects, so callers must treat this as final regardless of what the
 /// wrapped prose looks like.
@@ -607,31 +995,49 @@ pub fn error_result_is_retryable(
         return false;
     }
     let error_text = message.error_message.as_deref().unwrap_or("Request error");
-    // Session-persistence failures are never retryable, even when the wrapped
-    // message contains transient-looking prose ("connection reset", "500"):
-    // flattening loses the typed boundary, so the stable prefix is checked
-    // before any text classification.
-    if marks_session_persistence(error_text) {
+    // Terminal markers and authentication outrank transient-looking prose.
+    // In particular, a mixed 401/429 response must not spend the retry budget.
+    if marks_session_persistence(error_text) || is_auth_failure(&error_text.to_ascii_lowercase()) {
         return false;
     }
-    crate::error::is_retryable_error(error_text, Some(message.usage.input), context_window)
+    provider_text_is_retryable(error_text, Some(message.usage.input), context_window)
+}
+
+/// Only provider/transport failures can justify another provider call.
+///
+/// A local tool, configuration, extension or session failure cannot be repaired by
+/// re-entering the provider, even when its diagnostic quotes a transient error.
+const fn is_provider_call_error(error: &crate::error::Error) -> bool {
+    matches!(
+        error,
+        crate::error::Error::Api(_)
+            | crate::error::Error::Provider { .. }
+            | crate::error::Error::Io(_)
+    )
 }
 
 /// Whether a failed provider call reported through [`crate::error::Error`]
 /// should be retried against the same provider.
 ///
-/// Classifies from the TYPED error first — [`crate::error::Error::is_transient`]
-/// walks the source chain for a transient `io::ErrorKind` (connection
-/// reset/abort/EOF/broken pipe/timeout) without depending on flattened message
-/// text — then falls back to text matching for prose-only errors
-/// (pi_agent_rust#118). No usage or context window is available on this path
-/// because no response was received.
+/// Local errors and terminal markers are refused before classification.
+/// For provider/transport errors, [`crate::error::Error::is_transient`] walks
+/// the typed source chain without depending on flattened message text, then
+/// prose-only failures use text matching (pi_agent_rust#118).
 #[must_use]
 pub fn call_error_is_retryable(error: &crate::error::Error) -> bool {
-    if error.is_session_persistence() {
+    if !is_provider_call_error(error) {
         return false;
     }
-    error.is_transient() || crate::error::is_retryable_error(&error.to_string(), None, None)
+    let error_text = error.to_string();
+    let lower = error_text.to_ascii_lowercase();
+    if marks_session_persistence(&error_text)
+        || is_auth_failure(&lower)
+        || crate::error::is_context_overflow(&error_text, None, None)
+        || response_refuses_retry(&lower)
+    {
+        return false;
+    }
+    error.is_transient() || provider_text_is_retryable(&error_text, None, None)
 }
 
 /// The outcome of one provider attempt, borrowed for classification.
@@ -759,13 +1165,16 @@ pub fn decide(
         ),
     };
     let budget_left = progress.retry_count < policy.max_retries && progress.stream_can_retry;
-    let may_fail_over = progress.failovers_this_turn < policy.max_failovers_per_turn;
+    // A fallback also re-enters the provider. A surface that cannot retract
+    // visible output must not bypass its no-retry boundary by changing models.
+    let may_fail_over =
+        progress.stream_can_retry && progress.failovers_this_turn < policy.max_failovers_per_turn;
 
     // Each outcome shape decides only what is specific to it — whether the turn
     // is terminal, and whether its failure is retryable. The budget arithmetic
     // that follows is the same for both, and keeping it in one place is what
     // stops the two from drifting again.
-    let same_provider_is_worth_another_try = match outcome {
+    let (same_provider_is_worth_another_try, failure_can_fail_over) = match outcome {
         TurnOutcome::Completed(message) => {
             match message.stop_reason {
                 crate::model::StopReason::Aborted => {
@@ -778,23 +1187,194 @@ pub fn decide(
             if marks_session_persistence(error_text) {
                 return TurnDecision::Terminal(TerminalReason::SessionPersistence);
             }
-            error_result_is_retryable(message, context_window)
+            if is_auth_failure(&error_text.to_ascii_lowercase()) {
+                return TurnDecision::Finish { success: false };
+            }
+            // Keep token-count evidence here, before the chain walk reduces
+            // an error to prose. Otherwise a silent overflow becomes a 503
+            // failover when classify_failover can no longer see the usage.
+            if crate::error::is_context_overflow(
+                error_text,
+                Some(message.usage.input),
+                context_window,
+            ) {
+                return TurnDecision::Finish { success: false };
+            }
+            let retryable = error_result_is_retryable(message, context_window);
+            (
+                retryable,
+                retryable || classify_failover(error_text).is_some(),
+            )
         }
         TurnOutcome::Failed(error) => {
-            if error.is_session_persistence() {
+            if matches!(error, crate::error::Error::Aborted) {
+                return TurnDecision::Terminal(TerminalReason::Aborted);
+            }
+            // A persistence marker remains terminal after a boundary flattens
+            // and rewraps it as Api, Provider, Io, or another Session error.
+            let error_text = error.to_string();
+            if marks_session_persistence(&error_text) {
                 return TurnDecision::Terminal(TerminalReason::SessionPersistence);
             }
-            call_error_is_retryable(error)
+            if !is_provider_call_error(error)
+                || is_auth_failure(&error_text.to_ascii_lowercase())
+                || crate::error::is_context_overflow(&error_text, None, context_window)
+            {
+                return TurnDecision::Finish { success: false };
+            }
+            let retryable = call_error_is_retryable(error);
+            (
+                retryable,
+                retryable || classify_failover(&error_text).is_some(),
+            )
         }
     };
 
     if budget_left && same_provider_is_worth_another_try {
         return retry();
     }
-    if may_fail_over {
+    // An unclassified failure is not evidence that another provider can fix
+    // the request. Do not open a recovery lifecycle just because budget remains.
+    if may_fail_over && failure_can_fail_over {
         return TurnDecision::FailOver;
     }
     TurnDecision::Finish { success: false }
+}
+
+#[cfg(test)]
+mod recovery_boundary_tests {
+    use super::*;
+    use crate::model::{AssistantMessage, StopReason, Usage};
+
+    fn failure() -> AssistantMessage {
+        AssistantMessage {
+            content: Vec::new(),
+            api: "test-api".into(),
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Error,
+            stop_details: None,
+            error_message: Some("503 service unavailable".into()),
+            timestamp: 0,
+        }
+    }
+
+    fn policy() -> RetryPolicy {
+        RetryPolicy {
+            max_retries: 3,
+            max_failovers_per_turn: 2,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        }
+    }
+
+    fn progress(stream_can_retry: bool) -> TurnProgress {
+        TurnProgress {
+            retry_count: 0,
+            failovers_this_turn: 0,
+            stream_can_retry,
+        }
+    }
+
+    #[test]
+    fn visible_output_boundary_blocks_same_provider_and_cross_provider_reentry() {
+        let message = failure();
+        let error = crate::error::Error::api("503 service unavailable");
+        for retries in [0, 3] {
+            let policy = RetryPolicy {
+                max_retries: retries,
+                ..policy()
+            };
+            for outcome in [
+                TurnOutcome::Completed(&message),
+                TurnOutcome::Failed(&error),
+            ] {
+                assert_eq!(
+                    decide(outcome, &progress(false), &policy, Some(8_192)),
+                    TurnDecision::Finish { success: false }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn known_token_overflow_cannot_become_a_prose_only_failover() {
+        let mut message = failure();
+        message.usage.input = 8_193;
+        for retries in [0, 3] {
+            let policy = RetryPolicy {
+                max_retries: retries,
+                ..policy()
+            };
+            assert_eq!(
+                decide(
+                    TurnOutcome::Completed(&message),
+                    &progress(true),
+                    &policy,
+                    Some(8_192)
+                ),
+                TurnDecision::Finish { success: false }
+            );
+        }
+        // Missing evidence is not fabricated: unknown windows retain the
+        // existing retry behavior for a genuinely transient-looking error.
+        assert!(matches!(
+            decide(
+                TurnOutcome::Completed(&message),
+                &progress(true),
+                &policy(),
+                None
+            ),
+            TurnDecision::Retry { .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_context_overflow_does_not_walk_a_fallback_chain() {
+        let error = crate::error::Error::api("maximum context length exceeded");
+        assert_eq!(
+            decide(
+                TurnOutcome::Failed(&error),
+                &progress(true),
+                &policy(),
+                None
+            ),
+            TurnDecision::Finish { success: false }
+        );
+    }
+
+    #[test]
+    fn recovery_boundaries_preserve_success_and_typed_terminal_reasons() {
+        let mut message = failure();
+        message.stop_reason = StopReason::Stop;
+        message.error_message = None;
+        assert_eq!(
+            decide(
+                TurnOutcome::Completed(&message),
+                &progress(false),
+                &policy(),
+                None
+            ),
+            TurnDecision::Finish { success: true }
+        );
+        let aborted = crate::error::Error::Aborted;
+        let persistence = crate::error::Error::session_persistence("503 while saving");
+        for (error, reason) in [
+            (&aborted, TerminalReason::Aborted),
+            (&persistence, TerminalReason::SessionPersistence),
+        ] {
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(error),
+                    &progress(false),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Terminal(reason)
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -860,6 +1440,87 @@ mod tests {
         // The "default" role key matches any model by design; an UNCONFIGURED
         // role + unconfigured exact model yields no chain.
         assert!(chain_for(&chains, "task", "openai", "gpt-5.5").is_none());
+    }
+
+    #[test]
+    fn chain_lookup_resolves_provider_aliases_and_spec_whitespace() {
+        let chains = HashMap::from([(
+            " gemini / GEMINI-Z ".to_string(),
+            vec!["openai/gpt-y".to_string()],
+        )]);
+        for provider in ["google", "gemini", "GOOGLE"] {
+            let resolved = chain_for(&chains, "task", provider, "gemini-z")
+                .expect("configured aliases must resolve like model selection");
+            assert_eq!(resolved.entries, vec!["openai/gpt-y".to_string()]);
+        }
+    }
+
+    #[test]
+    fn chain_lookup_keeps_role_then_exact_key_precedence() {
+        let chains = HashMap::from([
+            ("task".to_string(), vec!["role/winner".to_string()]),
+            (
+                "google/gemini-z".to_string(),
+                vec!["exact/winner".to_string()],
+            ),
+            (
+                "GOOGLE/GEMINI-Z".to_string(),
+                vec!["case/alternative".to_string()],
+            ),
+            (
+                "gemini/gemini-z".to_string(),
+                vec!["alias/alternative".to_string()],
+            ),
+        ]);
+        assert_eq!(
+            chain_for(&chains, "task", "google", "gemini-z")
+                .unwrap()
+                .entries,
+            vec!["role/winner".to_string()]
+        );
+        assert_eq!(
+            chain_for(&chains, "unconfigured", "google", "gemini-z")
+                .unwrap()
+                .entries,
+            vec!["exact/winner".to_string()]
+        );
+    }
+
+    #[test]
+    fn equivalent_chain_keys_have_a_stable_tie_break() {
+        for keys in [
+            ["gemini/gemini-z", "GEMINI/GEMINI-Z"],
+            ["GEMINI/GEMINI-Z", "gemini/gemini-z"],
+        ] {
+            let chains: HashMap<_, _> = keys
+                .into_iter()
+                .map(|key| (key.to_string(), vec![key.to_string()]))
+                .collect();
+            assert_eq!(
+                chain_for(&chains, "task", "google", "gemini-z")
+                    .unwrap()
+                    .entries,
+                vec!["GEMINI/GEMINI-Z".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn empty_role_and_exact_chains_do_not_hide_a_nonempty_alias_chain() {
+        let chains = HashMap::from([
+            ("task".to_string(), Vec::new()),
+            ("google/gemini-z".to_string(), Vec::new()),
+            (
+                "gemini/gemini-z".to_string(),
+                vec!["openai/gpt-y".to_string()],
+            ),
+        ]);
+        assert_eq!(
+            chain_for(&chains, "task", "google", "gemini-z")
+                .unwrap()
+                .entries,
+            vec!["openai/gpt-y".to_string()]
+        );
     }
 
     #[test]
@@ -1045,6 +1706,162 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failover_state_reconstructs_from_session_with_cooldown_active() {
+        use crate::session::{ModelChangeFailover, Session};
+        let mut session = Session::in_memory();
+        let now = chrono::Utc::now();
+        // Cooldown deadline is 40 seconds in the future
+        let deadline = (now + chrono::Duration::seconds(40))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let provenance = ModelChangeFailover {
+            primary_provider: "anthropic".to_string(),
+            primary_model_id: "claude-3-7-sonnet".to_string(),
+            primary_thinking_level: Some("high".to_string()),
+            fallback_provider: "openai".to_string(),
+            fallback_model_id: "gpt-4o".to_string(),
+            chain_position: Some(2),
+            cooldown_deadline: Some(deadline),
+            cooldown_secs: Some(60),
+            lifecycle_id: Some("lifecycle-active-123".to_string()),
+        };
+
+        session.append_model_change_with_role_and_failover(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            Some("failover".to_string()),
+            Some(provenance),
+        );
+
+        let state = FailoverState::reconstruct_from_session(&session, 60, now);
+        assert_eq!(
+            state.primary(),
+            Some(&primary("anthropic", "claude-3-7-sonnet"))
+        );
+        assert_eq!(
+            state.active(),
+            Some(&("openai".to_string(), "gpt-4o".to_string()))
+        );
+        assert_eq!(state.chain_position(), 2);
+        assert_eq!(state.lifecycle_id(), Some("lifecycle-active-123"));
+
+        // Cooldown has 40s left: right now it should NOT restore
+        let inst_now = Instant::now();
+        assert!(!state.should_restore_primary(inst_now));
+        // After 41s, it SHOULD restore
+        assert!(state.should_restore_primary(inst_now + Duration::from_secs(41)));
+    }
+
+    #[test]
+    fn failover_state_reconstructs_from_session_with_cooldown_elapsed() {
+        use crate::session::{ModelChangeFailover, Session};
+        let mut session = Session::in_memory();
+        let now = chrono::Utc::now();
+        // Cooldown deadline is in the past (10 seconds ago)
+        let deadline = (now - chrono::Duration::seconds(10))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let provenance = ModelChangeFailover {
+            primary_provider: "anthropic".to_string(),
+            primary_model_id: "claude-3-7-sonnet".to_string(),
+            primary_thinking_level: Some("high".to_string()),
+            fallback_provider: "openai".to_string(),
+            fallback_model_id: "gpt-4o".to_string(),
+            chain_position: Some(1),
+            cooldown_deadline: Some(deadline),
+            cooldown_secs: Some(300),
+            lifecycle_id: Some("lifecycle-elapsed-456".to_string()),
+        };
+
+        session.append_model_change_with_role_and_failover(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            Some("failover".to_string()),
+            Some(provenance),
+        );
+
+        let state = FailoverState::reconstruct_from_session(&session, 300, now);
+        assert_eq!(
+            state.primary(),
+            Some(&primary("anthropic", "claude-3-7-sonnet"))
+        );
+        assert_eq!(
+            state.active(),
+            Some(&("openai".to_string(), "gpt-4o".to_string()))
+        );
+        assert_eq!(state.lifecycle_id(), Some("lifecycle-elapsed-456"));
+        // Cooldown already elapsed: should restore immediately!
+        assert!(state.should_restore_primary(Instant::now()));
+    }
+
+    #[test]
+    fn failover_state_reconstruct_returns_clean_state_when_restored_or_explicitly_changed() {
+        use crate::session::{ModelChangeFailover, Session};
+        let mut session = Session::in_memory();
+        let now = chrono::Utc::now();
+
+        // 1. Unrestored failover
+        let provenance = ModelChangeFailover {
+            primary_provider: "anthropic".to_string(),
+            primary_model_id: "claude-3-7-sonnet".to_string(),
+            primary_thinking_level: None,
+            fallback_provider: "openai".to_string(),
+            fallback_model_id: "gpt-4o".to_string(),
+            chain_position: Some(1),
+            cooldown_deadline: None,
+            cooldown_secs: Some(0),
+            lifecycle_id: None,
+        };
+        session.append_model_change_with_role_and_failover(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            Some("failover".to_string()),
+            Some(provenance),
+        );
+
+        // 2. Primary restored
+        session.append_model_change_with_role(
+            "anthropic".to_string(),
+            "claude-3-7-sonnet".to_string(),
+            Some("primary_restore".to_string()),
+        );
+
+        let state = FailoverState::reconstruct_from_session(&session, 300, now);
+        assert_eq!(
+            state.primary(),
+            None,
+            "restored session must not reconstruct failover primary"
+        );
+        assert_eq!(state.active(), None);
+
+        // 3. Re-failover then explicit user model change
+        session.append_model_change_with_role_and_failover(
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            Some("failover".to_string()),
+            Some(ModelChangeFailover {
+                primary_provider: "anthropic".to_string(),
+                primary_model_id: "claude-3-7-sonnet".to_string(),
+                primary_thinking_level: None,
+                fallback_provider: "openai".to_string(),
+                fallback_model_id: "gpt-4o".to_string(),
+                chain_position: Some(1),
+                cooldown_deadline: None,
+                cooldown_secs: Some(0),
+                lifecycle_id: None,
+            }),
+        );
+        // Explicit change (role None)
+        session.append_model_change("cohere".to_string(), "command-r".to_string());
+
+        let state2 = FailoverState::reconstruct_from_session(&session, 300, now);
+        assert_eq!(
+            state2.primary(),
+            None,
+            "explicit model change must supersede failover primary"
+        );
+        assert_eq!(state2.active(), None);
+    }
+
     // -- shared chain walk (bd-u2qv4) --------------------------------------
 
     fn chain(specs: &[&str]) -> FailoverChain {
@@ -1066,6 +1883,53 @@ mod tests {
         assert_eq!(walk.next_spec(), Some((3, "google/gemini-z")));
         assert_eq!(walk.next_spec(), None);
         assert_eq!(walk.position(), 4);
+    }
+
+    #[test]
+    fn the_walk_skips_alias_duplicates_after_intervening_models() {
+        let chain = chain(&[
+            "google/gemini-z",
+            "openai/gpt-y",
+            " GEMINI / GEMINI-Z ",
+            "google/gemini-next",
+        ]);
+        let mut walk = FailoverWalk::new(&chain, 0, "anthropic", "claude-x");
+        assert_eq!(walk.next_spec(), Some((0, "google/gemini-z")));
+        assert_eq!(walk.next_spec(), Some((1, "openai/gpt-y")));
+        assert_eq!(walk.next_spec(), Some((3, "google/gemini-next")));
+        assert_eq!(walk.next_spec(), None);
+        assert_eq!(walk.position(), 4);
+    }
+
+    #[test]
+    fn a_resumed_walk_does_not_revisit_an_earlier_provider_alias() {
+        let chain = chain(&[
+            "gemini/gemini-z",
+            "openai/gpt-y",
+            "google/gemini-z",
+            "anthropic/claude-x",
+        ]);
+        let mut walk = FailoverWalk::new(&chain, 2, "openai", "gpt-y");
+        assert_eq!(walk.next_spec(), Some((3, "anthropic/claude-x")));
+        assert_eq!(walk.position(), 4);
+        assert_eq!(walk.next_spec(), None);
+    }
+
+    #[test]
+    fn identity_matching_keeps_distinct_provider_routes_and_nested_models() {
+        let chain = chain(&[
+            "google/gemini-z",
+            "google-gemini-cli/gemini-z",
+            "openrouter/anthropic/claude-x",
+            "anthropic/claude-x",
+            " OPENROUTER / anthropic/CLAUDE-X ",
+        ]);
+        let mut walk = FailoverWalk::new(&chain, 0, "openai", "gpt-y");
+        for (index, spec) in chain.entries[..4].iter().enumerate() {
+            assert_eq!(walk.next_spec(), Some((index, spec.as_str())));
+        }
+        assert_eq!(walk.next_spec(), None);
+        assert_eq!(walk.position(), 5);
     }
 
     #[test]
@@ -1202,7 +2066,7 @@ mod tests {
         // model's context window here and print mode passes None. It only
         // changes the verdict for a SILENT overflow, where the prose reads
         // transient and input tokens > window is the only evidence — see
-        // a_silent_context_overflow_stops_retrying_only_once_the_window_is_known.
+        // a_silent_context_overflow_stops_all_reentry_once_the_window_is_known.
         let overflow = errored_message(Some("prompt is too long: 250000 tokens > 200000"), 250_000);
         assert!(!error_result_is_retryable(&overflow, Some(200_000)));
     }
@@ -1314,16 +2178,16 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_that_has_already_shown_output_does_not_retry_but_may_fail_over() {
-        // Print mode refuses a retry once visible bytes have reached the
-        // terminal; the chain is still admissible because a swap resumes the
-        // turn rather than replaying it.
+    fn a_surface_that_has_already_shown_output_cannot_reenter_another_provider() {
+        // A model swap resumes the incomplete request too. It cannot retract
+        // bytes already emitted by a text-only surface, so it must respect
+        // the same re-entry boundary as a same-provider retry.
         let message = errored_message(Some("503 service unavailable"), 0);
         let mut stalled = progress(0, 0);
         stalled.stream_can_retry = false;
         assert_eq!(
             decide(TurnOutcome::Completed(&message), &stalled, &policy(), None),
-            TurnDecision::FailOver
+            TurnDecision::Finish { success: false }
         );
     }
 
@@ -1357,10 +2221,8 @@ mod tests {
 
     #[test]
     fn a_loud_auth_error_finishes_rather_than_failing_over_into_another_one() {
-        // classify_failover refuses auth, and the chain walk would only find
-        // another provider to reject the same credentials. The decision still
-        // offers FailOver; the caller's walk is what declines. Pinned so a
-        // future change to that division is deliberate.
+        // Refusal belongs to the shared decision, not only the caller's walk:
+        // no surface may retry or open a failover lifecycle for bad credentials.
         let error = crate::error::Error::Api("401 unauthorized: invalid api key".to_string());
         assert_eq!(
             decide(
@@ -1369,22 +2231,274 @@ mod tests {
                 &policy(),
                 None
             ),
-            TurnDecision::FailOver
+            TurnDecision::Finish { success: false }
         );
+        assert_eq!(classify_failover(&error.to_string()), None);
+    }
+
+    #[test]
+    fn a_failed_abort_is_terminal_with_any_remaining_budget() {
+        let error = crate::error::Error::Aborted;
+        assert!(!call_error_is_retryable(&error));
+        for state in [progress(0, 0), progress(2, 0), progress(2, 1)] {
+            assert_eq!(
+                decide(TurnOutcome::Failed(&error), &state, &policy(), None),
+                TurnDecision::Terminal(TerminalReason::Aborted)
+            );
+        }
+    }
+
+    #[test]
+    fn local_errors_cannot_reenter_the_provider_due_to_their_prose() {
+        use crate::error::Error;
+
+        let errors = [
+            Error::auth("429 quota exceeded"),
+            Error::config("503 service unavailable"),
+            Error::validation("connection reset by peer"),
+            Error::tool("bash", "500 internal server error"),
+            Error::extension("fetch failed"),
+            Error::session("500 session write failed"),
+            Error::SessionNotFound {
+                path: "/sessions/500.jsonl".to_string(),
+            },
+            Error::Json(Box::new(serde_json::from_str::<bool>("503").unwrap_err())),
+            Error::Sqlite(Box::new(fsqlite::FrankenError::Busy)),
+        ];
+        for error in &errors {
+            assert!(!call_error_is_retryable(error), "{error}");
+            for state in [progress(0, 0), progress(2, 0)] {
+                assert_eq!(
+                    decide(TurnOutcome::Failed(error), &state, &policy(), None),
+                    TurnDecision::Finish { success: false },
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn auth_statuses_do_not_match_inside_request_ids_or_durations() {
+        for detail in [
+            "request=req401abcdef",
+            "request=4037",
+            "elapsed=1403ms",
+            "trace=x_401_y",
+        ] {
+            let text = format!("503 service unavailable: {detail}");
+            assert_eq!(classify_failover(&text), Some(FailoverClass::Overload));
+            let message = errored_message(Some(&text), 0);
+            let error = crate::error::Error::api(text);
+            assert!(error_result_is_retryable(&message, None));
+            assert!(call_error_is_retryable(&error));
+            for outcome in [
+                TurnOutcome::Completed(&message),
+                TurnOutcome::Failed(&error),
+            ] {
+                assert_eq!(
+                    decide(outcome, &progress(0, 0), &policy(), None),
+                    TurnDecision::Retry {
+                        attempt: 1,
+                        delay_ms: 500
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_response_status_outweighs_unlabelled_diagnostic_numbers() {
+        for text in [
+            "HTTP 503: service unavailable; request_id=401",
+            "API error (status code: 503): upstream overloaded; attempt=403",
+        ] {
+            assert_eq!(classify_failover(text), Some(FailoverClass::Overload));
+            let error = crate::error::Error::api(text);
+            let message = errored_message(Some(text), 0);
+            assert!(call_error_is_retryable(&error));
+            assert!(error_result_is_retryable(&message, None));
+        }
+        // Explicit credential wording still wins over an outer 503 wrapper.
         assert_eq!(
-            classify_failover("401 unauthorized: invalid api key"),
-            None,
-            "the walk is what refuses an auth failure"
+            classify_failover("HTTP 503: invalid_api_key; retry delay"),
+            None
         );
     }
 
     #[test]
-    fn a_silent_context_overflow_stops_retrying_only_once_the_window_is_known() {
+    fn authentication_status_codes_support_provider_wire_spellings() {
+        for status in [
+            "401",
+            "403",
+            "HTTP401",
+            "http: 403",
+            "status code = 401",
+            "{\"status\":403}",
+        ] {
+            let text = format!("{status}: 429 retry delay");
+            assert_eq!(classify_failover(&text), None, "{text}");
+            let error = crate::error::Error::api(text.clone());
+            let message = errored_message(Some(&text), 0);
+            assert!(!call_error_is_retryable(&error), "{text}");
+            assert!(!error_result_is_retryable(&message, None), "{text}");
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(0, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Finish { success: false },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_refusal_wins_over_transient_words_on_both_outcome_shapes() {
+        for text in [
+            "401 unauthorized: 429 rate limit exceeded",
+            "403 forbidden: service unavailable",
+            "authentication_error: 503 overloaded",
+            "invalid_api_key: connection reset by peer",
+            "expired token: 500 server error",
+            "invalid_token: upstream connect error",
+            "permission_denied: 429 quota exceeded",
+        ] {
+            // Without the refusal guard, each message would spend the budget.
+            assert!(crate::error::is_retryable_error(text, None, None), "{text}");
+            assert_eq!(classify_failover(text), None, "{text}");
+            let message = errored_message(Some(text), 0);
+            assert!(!error_result_is_retryable(&message, None), "{text}");
+            let error = crate::error::Error::api(text);
+            assert!(!call_error_is_retryable(&error), "{text}");
+            for outcome in [
+                TurnOutcome::Completed(&message),
+                TurnOutcome::Failed(&error),
+            ] {
+                assert_eq!(
+                    decide(outcome, &progress(0, 0), &policy(), None),
+                    TurnDecision::Finish { success: false },
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repackaged_persistence_markers_remain_terminal_everywhere() {
+        use crate::error::Error;
+
+        for detail in [
+            "503 connection reset by peer",
+            "401 unauthorized: 429 quota",
+        ] {
+            let flattened = Error::session_persistence(detail).to_string();
+            let errors = [
+                Error::api(flattened.clone()),
+                Error::provider("test", flattened.clone()),
+                Error::session(format!("while committing turn: {flattened}")),
+                Error::Io(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    flattened.clone(),
+                ))),
+            ];
+            assert_eq!(classify_failover(&flattened), None);
+            for error in &errors {
+                // None retains the original typed Session(prefix...) shape.
+                assert!(!error.is_session_persistence());
+                assert!(!call_error_is_retryable(error), "{error}");
+                assert_eq!(classify_failover(&error.to_string()), None);
+                assert_eq!(
+                    decide(TurnOutcome::Failed(error), &progress(0, 0), &policy(), None),
+                    TurnDecision::Terminal(TerminalReason::SessionPersistence),
+                    "{error}"
+                );
+            }
+            let message = errored_message(Some(&flattened), 0);
+            assert!(!error_result_is_retryable(&message, None));
+            assert_eq!(
+                decide(
+                    TurnOutcome::Completed(&message),
+                    &progress(0, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Terminal(TerminalReason::SessionPersistence)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_context_overflow_is_not_failover_even_with_transient_statuses() {
+        for text in [
+            "503 service unavailable: prompt is too long",
+            "429 rate limit: context_length_exceeded",
+            "500 server error: too many tokens",
+        ] {
+            assert_eq!(classify_failover(text), None, "{text}");
+            assert!(!error_result_is_retryable(
+                &errored_message(Some(text), 0),
+                None
+            ));
+        }
+    }
+
+    #[test]
+    fn typed_transport_drops_still_retry_and_respect_both_budgets() {
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::NotConnected,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            // Deliberately no transient substring: the typed kind must decide.
+            let error = crate::error::Error::Io(Box::new(std::io::Error::new(kind, "wire")));
+            assert!(call_error_is_retryable(&error), "{kind:?}");
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(0, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Retry {
+                    attempt: 1,
+                    delay_ms: 500
+                },
+                "{kind:?}"
+            );
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(2, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::FailOver,
+                "{kind:?}"
+            );
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(2, 1),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Finish { success: false },
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_silent_context_overflow_stops_all_reentry_once_the_window_is_known() {
         // A SILENT overflow: the provider's prose reads transient, and only
         // input tokens > context window reveals that the request can never fit.
-        // This is the case the context window actually decides, and it is where
-        // print mode and RPC diverge — RPC refuses the retry, print spends its
-        // whole budget re-sending a prompt that cannot fit, billed each time.
+        // Once known, the overflow must block both retries and chain swaps;
+        // prose-only failover classification cannot recover that evidence.
         let silent = errored_message(Some("500 internal server error"), 250_000);
         let p = policy();
         assert_eq!(
@@ -1394,8 +2508,8 @@ mod tests {
                 &p,
                 Some(200_000)
             ),
-            TurnDecision::FailOver,
-            "a silent overflow must not burn the retry budget"
+            TurnDecision::Finish { success: false },
+            "a silent overflow must not burn retry or failover budgets"
         );
         assert!(
             matches!(
@@ -1421,7 +2535,7 @@ mod tests {
                     &p,
                     window
                 ),
-                TurnDecision::FailOver,
+                TurnDecision::Finish { success: false },
                 "window={window:?}"
             );
         }
@@ -1437,5 +2551,351 @@ mod tests {
 
         let loud = crate::error::Error::Api("401 unauthorized: invalid api key".to_string());
         assert!(!call_error_is_retryable(&loud));
+    }
+
+    #[test]
+    fn restored_cooldown_preserves_exact_deadlines_without_clamping() {
+        let wall = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let anchor = Instant::now();
+        for configured_secs in [0, 60, u64::MAX] {
+            for remaining in [
+                Duration::from_nanos(1),
+                Duration::from_micros(500),
+                Duration::from_secs(40),
+                Duration::from_secs(120),
+            ] {
+                let deadline = wall + chrono::Duration::from_std(remaining).unwrap();
+                let tracker =
+                    CooldownTracker::from_deadline_at(configured_secs, deadline, wall, anchor);
+                assert!(!tracker.should_use_primary(anchor));
+                let just_before = (anchor + remaining)
+                    .checked_sub(Duration::from_nanos(1))
+                    .expect("deadline is after the anchor");
+                assert!(!tracker.should_use_primary(just_before));
+                assert!(tracker.should_use_primary(anchor + remaining));
+            }
+        }
+    }
+
+    #[test]
+    fn elapsed_restored_deadlines_do_not_depend_on_instant_subtraction() {
+        let wall = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let anchor = Instant::now();
+        for configured_secs in [0, 60, u64::MAX] {
+            for deadline in [wall, wall - chrono::Duration::nanoseconds(1)] {
+                let tracker =
+                    CooldownTracker::from_deadline_at(configured_secs, deadline, wall, anchor);
+                assert!(tracker.should_use_primary(anchor));
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_failure_uses_the_configured_not_the_restored_interval() {
+        let wall = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let anchor = Instant::now();
+        for reset_first in [false, true] {
+            let mut tracker = CooldownTracker::from_deadline_at(
+                60,
+                wall + chrono::Duration::seconds(120),
+                wall,
+                anchor,
+            );
+            if reset_first {
+                tracker.reset();
+                assert!(tracker.should_use_primary(anchor));
+            }
+            tracker.record_primary_failure(anchor);
+            assert!(!tracker.should_use_primary(anchor + Duration::from_secs(59)));
+            assert!(tracker.should_use_primary(anchor + Duration::from_secs(60)));
+        }
+    }
+
+    #[test]
+    fn a_clock_sample_before_the_failure_cannot_expire_a_zero_cooldown() {
+        let anchor = Instant::now();
+        let mut tracker = CooldownTracker::new(0);
+        tracker.record_primary_failure(anchor + Duration::from_secs(1));
+        assert!(!tracker.should_use_primary(anchor));
+        assert!(tracker.should_use_primary(anchor + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn missing_or_invalid_persisted_deadlines_restart_the_effective_cooldown() {
+        use crate::session::{ModelChangeFailover, Session};
+
+        let wall = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        for deadline in [None, Some(""), Some("not-a-timestamp")] {
+            for persisted_secs in [None, Some(45), Some(0)] {
+                let mut session = Session::in_memory();
+                session.append_model_change_with_role_and_failover(
+                    "openai".to_string(),
+                    "gpt-y".to_string(),
+                    Some("failover".to_string()),
+                    Some(ModelChangeFailover {
+                        primary_provider: "anthropic".to_string(),
+                        primary_model_id: "claude-x".to_string(),
+                        primary_thinking_level: Some("high".to_string()),
+                        fallback_provider: "openai".to_string(),
+                        fallback_model_id: "gpt-y".to_string(),
+                        chain_position: Some(2),
+                        cooldown_deadline: deadline.map(str::to_string),
+                        cooldown_secs: persisted_secs,
+                        lifecycle_id: Some("restart-lifecycle".to_string()),
+                    }),
+                );
+                let state = FailoverState::reconstruct_from_session(&session, 75, wall);
+                let anchor = state.cooldown().unwrap().failed_at().unwrap();
+                let interval = Duration::from_secs(persisted_secs.unwrap_or(75));
+                assert_eq!(state.primary(), Some(&primary("anthropic", "claude-x")));
+                assert_eq!(state.chain_position(), 2);
+                assert_eq!(state.lifecycle_id(), Some("restart-lifecycle"));
+                if !interval.is_zero() {
+                    assert!(!state.should_restore_primary(anchor));
+                    let just_before = (anchor + interval)
+                        .checked_sub(Duration::from_nanos(1))
+                        .expect("interval is non-zero");
+                    assert!(!state.should_restore_primary(just_before));
+                }
+                assert!(state.should_restore_primary(anchor + interval));
+            }
+        }
+    }
+
+    #[test]
+    fn permanent_client_responses_block_both_recovery_paths() {
+        for status in [400, 404, 405, 410, 413, 415, 422] {
+            for prefix in [
+                format!("HTTP {status}"),
+                format!("status code = {status}"),
+                format!("{status}"),
+                format!("{{\"status\":{status}}}"),
+            ] {
+                let text = format!("{prefix}: invalid request; retry delay; request=req503429abc");
+                let message = errored_message(Some(&text), 0);
+                let error = crate::error::Error::api(text.clone());
+                assert_eq!(classify_failover(&text), None, "{text}");
+                assert!(!error_result_is_retryable(&message, None), "{text}");
+                assert!(!call_error_is_retryable(&error), "{text}");
+                for state in [progress(0, 0), progress(2, 0), progress(2, 1)] {
+                    for outcome in [
+                        TurnOutcome::Completed(&message),
+                        TurnOutcome::Failed(&error),
+                    ] {
+                        assert_eq!(
+                            decide(outcome, &state, &policy(), None),
+                            TurnDecision::Finish { success: false },
+                            "{text}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_numbers_do_not_invent_retry_or_failover_evidence() {
+        for text in [
+            "invalid schema: request=req429abcdef",
+            "invalid response: request_id=503",
+            "bad payload: elapsed=5000ms; tokens=1504",
+            "unexpected reply: trace=req_529_z",
+            "5000 bytes in an invalid response",
+            "503abc is an unknown model",
+        ] {
+            let message = errored_message(Some(text), 0);
+            let error = crate::error::Error::api(text);
+            assert_eq!(classify_failover(text), None, "{text}");
+            assert!(!error_result_is_retryable(&message, None), "{text}");
+            assert!(!call_error_is_retryable(&error), "{text}");
+            for outcome in [
+                TurnOutcome::Completed(&message),
+                TurnOutcome::Failed(&error),
+            ] {
+                assert_eq!(
+                    decide(outcome, &progress(0, 0), &policy(), None),
+                    TurnDecision::Finish { success: false },
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn response_status_not_body_numbers_selects_the_capacity_class() {
+        for (text, expected) in [
+            ("HTTP 503: request_id=429", FailoverClass::Overload),
+            ("HTTP 500: attempt=429", FailoverClass::Overload),
+            ("HTTP 504: quota_counter=429", FailoverClass::Transient),
+            ("HTTP 429: request_id=503", FailoverClass::Quota),
+        ] {
+            assert_eq!(classify_failover(text), Some(expected), "{text}");
+            let message = errored_message(Some(text), 0);
+            let error = crate::error::Error::api(text);
+            assert!(error_result_is_retryable(&message, None), "{text}");
+            assert!(call_error_is_retryable(&error), "{text}");
+        }
+    }
+
+    #[test]
+    fn terse_transient_statuses_retry_then_fail_over_within_budgets() {
+        for status in [408, 429, 500, 502, 503, 504, 507, 529, 599] {
+            for text in [
+                format!("HTTP {status}"),
+                format!("status code: {status}"),
+                format!("{status}"),
+                format!("Vendor API error ({status}): opaque"),
+                format!("{{\"status\":{status}}}"),
+                format!("{{\"statusCode\":\"{status}\"}}"),
+            ] {
+                let message = errored_message(Some(&text), 0);
+                let error = crate::error::Error::provider("test", text.clone());
+                assert!(classify_failover(&text).is_some(), "{text}");
+                assert!(error_result_is_retryable(&message, None), "{text}");
+                assert!(call_error_is_retryable(&error), "{text}");
+                for outcome in [
+                    TurnOutcome::Completed(&message),
+                    TurnOutcome::Failed(&error),
+                ] {
+                    assert_eq!(
+                        decide(outcome, &progress(0, 0), &policy(), None),
+                        TurnDecision::Retry {
+                            attempt: 1,
+                            delay_ms: 500,
+                        },
+                        "{text}"
+                    );
+                    assert_eq!(
+                        decide(outcome, &progress(2, 0), &policy(), None),
+                        TurnDecision::FailOver,
+                        "{text}"
+                    );
+                    assert_eq!(
+                        decide(outcome, &progress(2, 1), &policy(), None),
+                        TurnDecision::Finish { success: false },
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exhausted_credits_can_switch_providers_without_retrying_the_same_key() {
+        for text in [
+            "HTTP 400: credit balance is too low",
+            "HTTP 402: not enough credits",
+            "HTTP 400: insufficient_quota",
+            "HTTP 402: billing_not_active",
+        ] {
+            assert_eq!(classify_failover(text), Some(FailoverClass::Quota));
+            let message = errored_message(Some(text), 0);
+            let error = crate::error::Error::api(text);
+            assert!(!error_result_is_retryable(&message, None), "{text}");
+            assert!(!call_error_is_retryable(&error), "{text}");
+            for outcome in [
+                TurnOutcome::Completed(&message),
+                TurnOutcome::Failed(&error),
+            ] {
+                assert_eq!(
+                    decide(outcome, &progress(0, 0), &policy(), None),
+                    TurnDecision::FailOver,
+                    "{text}"
+                );
+            }
+        }
+        assert_eq!(classify_failover("HTTP 401: insufficient_quota"), None);
+        assert_eq!(classify_failover("HTTP 400: invalid billing field"), None);
+    }
+
+    #[test]
+    fn a_leading_permanent_status_cannot_be_overridden_by_a_quoted_status() {
+        for text in [
+            "400 invalid request; body mentions HTTP 503",
+            "401 rejected; body mentions HTTP 503",
+            "403 rejected; body mentions HTTP 429",
+        ] {
+            let message = errored_message(Some(text), 0);
+            let error = crate::error::Error::provider("test", text);
+            assert_eq!(classify_failover(text), None, "{text}");
+            assert!(!error_result_is_retryable(&message, None), "{text}");
+            assert!(!call_error_is_retryable(&error), "{text}");
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(0, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Finish { success: false },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_provider_errors_do_not_open_a_failover_lifecycle() {
+        for text in ["invalid schema", "unrecognized response", ""] {
+            let message = errored_message(Some(text), 0);
+            let error = crate::error::Error::api(text);
+            for outcome in [
+                TurnOutcome::Completed(&message),
+                TurnOutcome::Failed(&error),
+            ] {
+                for state in [progress(0, 0), progress(2, 0)] {
+                    assert_eq!(
+                        decide(outcome, &state, &policy(), None),
+                        TurnDecision::Finish { success: false },
+                        "{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_transport_causes_do_not_override_explicit_recovery_refusals() {
+        for text in [
+            "HTTP 400: invalid request; request_id=503",
+            "HTTP 403: retry delay",
+            "HTTP 503: prompt is too long",
+        ] {
+            let error = crate::error::Error::Io(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                text,
+            )));
+            assert!(error.is_transient());
+            assert!(!call_error_is_retryable(&error), "{text}");
+            assert_eq!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(0, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Finish { success: false },
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn prose_timeouts_are_recoverable_without_an_http_status() {
+        for text in ["request timed out", "upstream timeout"] {
+            let message = errored_message(Some(text), 0);
+            let error = crate::error::Error::api(text);
+            assert_eq!(classify_failover(text), Some(FailoverClass::Transient));
+            assert!(error_result_is_retryable(&message, None));
+            assert!(call_error_is_retryable(&error));
+            assert!(matches!(
+                decide(
+                    TurnOutcome::Failed(&error),
+                    &progress(0, 0),
+                    &policy(),
+                    None
+                ),
+                TurnDecision::Retry { .. }
+            ));
+        }
     }
 }

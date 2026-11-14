@@ -1,254 +1,126 @@
-# MIRACH 布局方案 v7.3（2026-10-06 · 语义归属 + 根面板 + 独立双位置切换 + hermes 条显隐/会话拖放对齐）
+# MIRACH 布局语义（当前态）
 
-> 本文档是布局的**唯一规范**：实现与文档冲突时，以文档为准改代码。
-> v7.0 回答两个结构问题：①页签的身份与约束跟随**语义**（面板页签拖到
-> 主栏分栏，仍是面板栏的子栏），不再继承所在栏；②**根面板**（打开页
-> 宿主）定义"面板栏在哪"，面板栏缺席（隐藏）时交换/位置 = 纯逻辑旗标，
-> 打开时按旗标位重建。演变记录见 §12，废弃清单见 §10。
-
----
+> 载体 = dockview-react 8.5.1。本文只写**与载体无关的语义**与当前取值；
+> 实现细节（收放约束盒、fromJSON 护栏、FLIP 等）在
+> `src/components/layout/dockview-column-ops.ts` 的注释里，
+> 架构分层见 `docs/architecture.md` §5。
 
 ## 1. 三栏与语义归属
 
 ```
-┌──────────────────────────────────────────────┐
-│  顶带（85px · 页签条/logo/双行块三栏信息位）       │
-├────────┬──────────────────────┬──────────────┤
-│        │                      │  根面板(打开页) │
-│ 左侧栏  │  对话栏               │  +子栏分栏     │
-│ 会话/机器人 │ 主对话+多对话标签      ├──────────────┤
-│        │                      │  终端（可关）   │
-└────────┴──────────────────────┴──────────────┘
+┌──────────┬────────────────────────┬──────────────┐
+│ 左栏     │ 主栏（对话）            │ 面板栏        │
+│ 无标签   │ 无标签                  │ 唯一多标签列  │
+│ 会话列表 │ 工作区名头 + 消息/composer│ 文件树/终端/预览│
+└──────────┴────────────────────────┴──────────────┘
 ```
 
-- **页签语义 region** = 窗格类型表（pane-registry `PANE_TYPES.region`）：
-  - workspace / session（真会话）→ **chat**
-  - files / review / terminal / preview / external（打开文件·网页·子智能体）
-    → **panels**
-  - leftrail → **left**
-- **tabset 语义戳 = 第一个有语义页签的 region**（锚页签）。页签进出
-  （add/move/delete）→ 戳即重算（diff 门控，`syncSemanticStamps`）。
-  混合栈 [workspace, files] 戳 = chat（锚 = workspace）；锚移走 →
-  戳重算为 files → panels。
-- **约束继承语义，不继承位置**（v7.0 核心变更）：tabset 的 min/max 按
-  **语义戳**下发（§5 表）。面板页签拖到对话栏旁分栏 → 新分栏戳 = panels
-  （min 240 无上限）——它是**面板栏的子栏**，不吃对话栏的 395；反之
-  会话页签分栏到任何位置都吃 chat 的 395。"在哪栏分继承哪栏的宽度限制"
-  废除（§10）。
-- **投放准入不变**（§4）：语义改变的是分栏的身份与约束，不是可去哪。
+- 语义戳 = dockview panel 的 `params: { region: 'left' | 'chat' | 'panels' }`，
+  随序列化自动带。
+- 左栏与主栏**没有页签**（组 `hideHeader: true`）——面板页签不能拖入。
+- 左栏与主栏**只能分栏**（并排/上下拆分），拆出的格通过侧栏指派会话。
+- 面板栏是唯一有多标签的列：文件树/终端/预览以页签共存。
 
-## 2. 根面板（回答"多标签下哪个是面板栏"；**v7.3.1 唯一性定稿**）
+## 2. 根面板唯一
 
-- **根面板 = 打开页（open 签）所在的 tabset，且唯一**——它定义"面板栏
-  在哪"，**动词（隐藏/打开/位置切换）只作用于根面板那一根列**。
-  其余 tabset（拖到主栏的分栏、面板栏拆出的子栏）= **子栏**（语义戳
-  panels）——**独立分栏**：不随根面板的动词跟移/隐藏；自己拖空自己关
-  （flexlayout tidy）。子栏存在期间它就是用户手放的窗格，面板栏身份
-  不稀释。
-- 根面板不可关不可拖（open 签 `enableClose:false` + `enableDrag:false`）。
-- **关空收列（ZCode 原义，实锤于 workspaceSidePane.ts）**：**根面板列**
-  的最后一个实签被关闭/拖走 → **根面板列关闭**（ZCode：`closeSidePaneTab`
-  末签关闭返回 null → `syncSidePaneCollapsedWithTabs` →
-  `setIsSidePaneCollapsed(true)`）。打开页**随列消失**，不独立存在——
-  这就是它"怎么消失的"。子栏被拖空 → 该子栏立即关闭（空 tabset 一律
-  清除，空白面板 = bug）。
-- **面板栏缺席两条路径**：①显式"隐藏面板栏"（根面板列快照移除，重开
-  还原内容）；②关空收列（无快照）。两条路径下 `colOrder` 都仍记录"根
-  面板属于哪"——**colOrder 就是根面板的逻辑位置**（恒 3 项，含隐藏列），
-  `panelsHidden` 旗标 = 缺席标记（两种缺席共用）。
-- 打开面板栏打开的是**根面板列**：有快照 → 原内容还原；无快照（关空后）
-  → **新打开页**（ZCode：toggle 重开、state null → openTabLauncher）。
-  子栏不受影响（缺席态的位置切换 = 纯记录，子栏不跳位）。
-- 对话栏/左栏同构：对话栏根 = 主会话 workspace（不可关），左栏根 =
-  leftrail（不可关不可拖）——三栏各有根。
+**打开页（`open` panel）所在组 = 面板栏的身份锚**。
 
-## 3. 菜单语义（v7.2 独立双位置切换；投影不变量）
+- 面板列有实签 → `open` 锚撤下（锚与实签不并存）。
+- 末签关闭 → 锚回来（组仍在，或按 colOrder 语义位重建）。
+- `open` 不可拖出（`onWillDragPanel` 整钮拦截）——拖走 = 不经旗标地拆列。
 
-**v7.2（用户定稿"没有交换位置了"）**：布局段两行位置动词 = **独立双切换**
-——「左侧栏移到最右/最左」与「面板栏移到左侧/右侧」（**两态**，按面板栏
-当前在 chat 哪一侧翻转；v7.2.1：废除三态的"左栏旁"文案）。
+## 3. 尺寸约束（按语义戳）
 
-**优先级（v7.3.2 用户定稿）**：两根栏同一套「移到左/右」逻辑，**左栏优先**——同侧时左栏贴边缘排第一，面板栏让到它后面（第二位）；异侧时面板栏占对面边缘。
+| 语义 | min | max | 默认宽 |
+|------|------|------|------|
+| left | **270** | **400** | **300** |
+| chat | 395 | — | 吸收者（吃剩余宽度） |
+| panels | **270** | **400** | **300** |
 
-**状态域**：colOrder 合法值 = **4 种排列**，`left 恒占一端`：
-`[L,C,P] [L,P,C] [P,C,L] [C,P,L]`（`[P,L,C]/[C,L,P]` 非法——左栏永远
-不进中间）。面板栏的两个位置 = **内位（紧挨左栏）↔ 外位（远端）**，
-**永不跨到左栏占的那一端（让位）**；chat 自由填补剩余跨度（面板栏内位
-时 chat 自然靠边——"对话栏不用一直在中间"）。
+- **栏宽是定值，不随窗口缩放**（`rail-metrics.ts`，2026-10-22 用户定稿）。
+  默认 300、许可 270–400；窗口变宽变窄，两轨都保持 300，主栏吃剩余。
+- **窗口缩放后要重新钉宽**：dockview 的序列化按**比例**记列宽，1400 宽窗口
+  恢复 1760 存档会把 300 摊成 240 左右。所以 `repinRailWidths()` 在 resize
+  稳定后把两轨钉回目标宽（绝对 px），目标宽由用户拖 sash 更新。
+- **主栏撞 min 时不记目标宽**：窗口窄到主栏触 `CHAT_MIN_WIDTH` 时 dockview
+  会强行压窄某一轨（1000 宽下左栏 300→293），那是几何让位不是用户意图；
+  记成新目标会导致窗口恢复后栏宽永久停在 293。
+- 约束走**面板级** `minimumWidth`/`maximumWidth`（组约束回落到活动 panel 的
+  同名值），随 panels 记录 round-trip。
+- **收起态**（隐藏左栏/面板栏）= 宽度 0 + 组约束盒 `{min:0, max:0}`——只放开
+  min 不够，max 留着会让分栏把它重摊出宽度（见 `column-constraints.ts`）。
+- 上下最多 2 行不可再竖分（投放层拒）；左右不限。
+- 配重吸收者 = **chat 语义列**；panels 按记忆宽托底。
 
-| 动作 | 在场 | 缺席（已隐藏） |
-|------|------|------|
-| 左侧栏位置切换 | colOrder 里 `left` 条目移到另一端（其余条目相对序不动）+ 在场列对齐投影（`alignVisibleToOrder`） | **纯记录**：只移条目（可见投影不变，物理不动——面板栏不因隐藏的左栏切边而跳端） |
-| 面板栏位置切换 | colOrder 里 `panels` 与 `chat` 条目换位（= 跨过 chat，不跨 left）+ 在场列对齐 | **纯记录**：条目换位（投影不变） |
-| 隐藏/打开左栏/面板栏 | 快照 + 移除 | 按 colOrder 语义位插回（`colOrderInsertIndex`） |
-
-两个切换都是**纯对合**（任意状态点两次回原位）。`[L,C,P]` 点左栏切换 →
-`[C,P,L]`（左栏到面板栏右边，chat 滑到左端）；`[L,C,P]` 点面板栏切换 →
-`[L,P,C]`（面板栏要左侧）。**让位的结算语义（v7.2.1）**：面板栏按钮请求
-的是一个**侧别**（左/右）——目标侧空闲（左栏不在那）→ 面板栏占那侧的
-边缘；目标侧被左栏占 → 面板栏自动让位，落到该侧紧挨左栏、**不占边缘**
-（即内位）。左栏隐藏时面板栏可以占任意端（列自由），左栏重开即回到自
-己记住的端、面板栏顺势让开。
-
-**投影不变量（v7.1，全量矩阵实锤）**：物理列序 ≡ colOrder 去隐藏投影。
-任何栏动词之后必须维持——失联后任何"按语义位插回"都无法自愈。colOrder
-**恒 3 项**（含隐藏列）：show 插回后**原样保留**，禁止从物理树重算（重算
-把隐藏列挤掉——2 项 colOrder 丢位置记忆，重载校验 `length===3` 失败整表
-回退默认）。
-
-**用户推演成立**：面板栏在最右 → 隐藏 → 点"面板栏移到左侧"（只记
-旗标，树不动）→ 点"打开面板栏" → 面板栏按记录位打开（左栏占左端时
-落到左端让位内位）。左栏切边同理（隐藏时切 = 重开时出现在另一端）。
-
-缺席态的行文案由 colflags 驱动（打开 X / X 移到 Y），与树无关。
-
----
-
-## 4. 页签归属与拖拽（v6.0 不变）
+## 4. 页签归属与拖拽
 
 | 页签 | 能去哪 |
 |------|------|
-| 左侧栏 | **无页签**——Mirach 文字切换视图，拖入拖出均不存在 |
-| 对话栏页签（workspace/session-N） | **只能在对话栏内**：条内重排、拖出分栏（左右不限/上下第 2 行）；拖入左栏/面板栏被拒 |
-| 面板栏页签（files/review/terminal/preview/external） | **对话栏 + 面板栏**均可（无限制） |
-| 打开页（open） | **不可拖出**（enableDrag:false——根面板钉死） |
-| 会话行（左栏列表） | 拖到对话栏**页签条**（条带矩形覆盖页签按钮——拖到主对话页签上 =
-  拖到条上）= 在悬停页签的**槽位前堆叠**会话页签（hermes slotBefore 槽位
-  精度）；**条隐藏 = 无法拖入**；其余拒绝 |
+| 左栏 | **无页签**——文字切换视图，拖入拖出均不存在 |
+| 对话栏页签（workspace / session-N） | **只能在对话栏内**：条内重排、拖出分栏；拖入左栏被拒 |
+| 面板栏页签（files/review/terminal/preview） | **对话栏 + 面板栏**均可，且可拖出分栏 |
+| 打开页（open） | **不可拖出**（根面板钉死） |
 
-- 拖拽引擎单目标解析（先条带插入符后 zone 径向）；**edge 分栏的新 tabset
-  盖被拖页签的语义戳**（v7.0：不再预戳目标列 region）。
-- 上下两行上限在投放判定强制。
+### 4.1 拖放准入（2026-10-22 定稿）
 
-## 5. 尺寸约束（按语义戳）
+- **左栏不是拖拽目标**：不接收标签、也不在它周围分栏（判据 = 组内有
+  `region: 'left'` 的面板）。`onUnhandledDragOver` 不 accept、`onWillShowOverlay`
+  与 `onWillDrop` 双缝 `preventDefault`。
+- **只有面板栏的标签能拖出分栏**；对话栏的会话标签走 dockview 原生分栏。
+- **单标签组拖出必须自己接管**：dockview 的 `_doMoveGroupOrPanel` 在
+  `sourceGroup.size < 2` 时走「整组移动」分支（同层 `moveView` 换位，不拆
+  新组）——面板栏常态只有一个标签，于是"拖出来"永远只是换位。接管实现见
+  `open-page-actions.ts::splitPanelOut`（补占位 → `moveTo` → 撤占位）。
+- 判定语义有单测守着：`drop-admission.test.ts`。
+| 会话行（左栏列表） | 拖到对话栏内容区 → 按落点开该会话分栏（center=堆叠、四边=分栏）；其余拒绝 |
 
-| 语义 | min | max | 默认宽 | 备注 |
-|------|------|------|------|------|
-| left | 240 | **420** | 350 | 仅左栏列（leftrail 不可搬，天然无歧义） |
-| chat | 395 | — | 吸收者 | 可多个 chat 语义列，按权重分吃剩余 |
-| panels | 240 | — | 350 | 记忆宽 rootPxMem.panels 托底 |
+**hideHeader 组不收 center 堆叠**：无条组收下第二个标签后不可见也不可切
+（隐形标签死结）——`onWillShowOverlay` + `onWillDrop` 双缝拦。
 
-- 分栏：上下最多 2 行不可再竖分（投放层拒）；左右不限。
-- 根行子项可 >3（对话/面板的分栏都是根行直接子项）；配重吸收者 =
-  **chat 语义列**，panels 语义列按记忆宽托底（rebalance）。
-- 每行最小高度 = 标题条；终端行默认 20vh。
+## 5. 打开页（ZCode openTabLauncher 对照）
 
-## 6. 页签条显隐（v7.3：ladder 全量对齐 hermes + 条隐藏拒拖入）
+**ZCode 原始生命周期**：面板内容 = `sidePaneState`（tabs）| `null`；末签关闭 →
+`null` 并收起面板；打开页渲染条件 = 面板开着但一个实签都没有的窗口期；
+任一实签开出 → launcher 被页签 UI 替换。
 
-hermes strip-visibility ladder（strip-visibility.ts 逐条）：**搁浅优先**
-（孤可关签的 ✕ 只在条上，压过手动 never）；手动 `stripMode`（always/
-never，应用菜单「隐藏/显示标签」行，按落点栏）次之；缺省自动（单签隐藏、
-≥2 签显示）；**孤主会话页签 + 另一根对话分栏在场 → 条在位**
-（hermes siblingMainZone——lone-chat-sibling-zone：双对话分栏各需条上
-把手，"拖第二个会话出去后主对话条消失"回归）。左栏恒无条。下发在
-constraints-sync（`stripVisibleOf`，sibling 由 `siblingMainZoneOf` 现算）。
+**harness 映射**（打开页 = `open` 签）：
 
-**条隐藏 = 无法拖入**（用户定稿，hermes 同果）：页签条隐藏的分栏不是
-拖拽目标——快照期过滤（`hiddenStripZoneIds`），中心/边缘/条带全不亮。
-会话行拖入同理（hermes snapshotStrips 来自 DOM：条不渲染即无堆叠目标）。
-恢复路径 = 应用菜单「显示标签」（hermes：restoring never depends on the
-strip）。
+- **出现**：①用户显式「打开面板栏」（无快照即新打开页）；②boot 出厂
+  （面板开着且无实签）。
+- **消失**：①第一个实签开出（点文件树/终端/预览）；②最后一个实签关闭/拖走
+  → 锚回来。
+- 三个按钮（文件树/终端/预览）开出实签；文件树点文件 → 预览页签；
+  终端重开回底部行。
 
-## 7. 混合栈的语义边界
+## 6. 会话分栏（独立完整聊天运行时）
 
-- tabset 内页签语义混合（workspace+files 同栈）：戳 = 锚页签（第一个
-  有语义页签）。锚关闭/移走 → 戳重算 → 约束瞬时切到新语义（min 跳变
-  可接受，语义真相优先）。
-- 中心投放（center）不预戳：戳由 sync 按锚页签重算；edge 分栏预戳 =
-  被拖页签语义（§4）。
+会话分栏 = **独立完整聊天**（`session-runtime.ts` `useThreadChatRuntime`）：
+自己的轮次机 + per-thread SSE 流（`GET ?thread=<sessionId>`，引擎
+`ThreadBuffers` 按线程分桶）+ 自己的 composer（`thread.aui` 的 `scoped`：
+跳过主会话管理 chrome，消息/composer/思考指示/建议照常）+ 发送 POST 带
+`sessionPath`（引擎 flush 当前会话切到分栏会话再跑，事件落本线程 buffer）。
+水合 = `pi_get_session_messages(path)`。
 
-## 8. 打开页（ZCode openTabLauncher 逐条对照；源码实锤 =
-G:\ZCode-main/packages/ui/src/app-shell/AnimatedSidePanePanel.tsx
-929-940/1310 行 + lib/workspaceSidePane.ts closeSidePaneTab/
-syncSidePaneCollapsedWithTabs）
+**多柄并发**：引擎 `side_engines` 表——分栏线程键 → 独立 SideEngine（自己的
+柄/锁/abort 槽），分栏 prompt 只锁自己柄，与主柄/其他分栏并行；
+`pi_interrupt` 按 `thread` 定向 abort。
 
-**ZCode 原始生命周期**：
-- 面板内容 = `sidePaneState`（tabs 列表）|`null`；**末签关闭 → null**，
-  随即 `setIsSidePaneCollapsed(true)` 面板收起（**页面关闭**）。
-- 打开页（openTabLauncher）渲染条件 = 面板还开着但 `sidePaneState ===
-  null`（1310 行 `hasRenderedSidePane ? openTabLauncher : null`）——即
-  **面板被显式打开、但一个实签都没有**的窗口期。
-- 任一实签开出（`activateSidePaneTab(null, tab)` 从 null 重建状态）→
-  launcher 被页签 UI 替换。
-- 面板整个消失 = 只有点显式切换钮；launcher 永不与实签并存。
+**已知边界**：单 handle 时两个分栏不能同时流式（后发等先发收尾）；分栏内本
+会话 run 进行中再发 = fail loud（排队面板是主会话功能）。
 
-**harness 映射**（打开页 = open 签，ZCode launcher 的对应物）：
-- **出现时机**：①用户显式"打开面板栏"（缺席重建/关空后重开——无快照
-  即新打开页）；②boot 出厂（出厂 = 面板开着且无实签）。
-- **消失时机**：①第一个实签开出（点文件树/终端/预览按钮，syncOpenAnchor
-  撤下）；②**最后一个实签被关闭/拖走 → 随整列关闭**（关空收列，open
-  签被翻 enableClose 后随 deleteTabset 删除——不回驻、不复活）。
-- 三个按钮（文件树/终端/预览）开出实签；文件树点文件 → 预览页签
-  （preview-opener 链）；终端重开回底部行。
-- 关空收列后 colOrder 仍记位 → 菜单"打开面板栏"在新位置重开新打开页。
+## 7. 位置切换与收放
 
-## 9. 会话多标签（v6.0 §5/§6/§8 不变）
+- **colOrder 恒 3 项**（含隐藏列），存 `colflags.v1`。
+- **左栏占端位**：`left` 在 colOrder 首位 = 最左，否则最右。
+- **面板栏在内/外位之间切换**（永不跨到左栏的端，同侧让位）。
+- **收放 = 宽度归 0**（全隐藏语义，不做 icon rail）；组常驻，从不摘除
+  ——摘除会在展开时重挂整棵 React 树（实测 391ms long task）。
+- 隐藏态的行文案由 colflags 驱动（打开 X / X 移到 Y），与树无关。
 
-主会话恒在；会话行拖条带开签（threadId 绑定，同会话置前）；页签激活
-→ onModelChange SELECT_TAB → bridge → runtime 切线程；点击行 = 切主
-会话。
+## 8. 布局存档
 
----
-
-## 10. 已废弃（勿回退）
-
-**v5.0/v6.0 清单**（竖轨/预设/编辑器/镜像/抽屉/最大化/整侧收起/border
-折叠/页签多选/列推导/回家语义/黑 chip/FancyZones 多区合并/
-SingleTabStretch/ZoneMenu 体系/显示标签眼钮/标题栏齿轮）之外，v7.0
-追加：
-
-- **位置继承**（"在哪栏分继承哪栏的宽度限制"）——tabset 约束改由语义
-  戳驱动；
-- **"面板栏 = 某个固定可见列"的观念**——面板栏身份 = colOrder 逻辑
-  记录 + 根面板（打开页宿主）；子栏可关可搬，根面板定义身份。
-
-## 11. 边界与待跟进
-
-- ~~并排两个对话分栏各显各的会话~~ **v7.4 完整版（用户定稿：禁止简化
-  版）**：会话分栏 = **独立完整聊天运行时**（`session-runtime.ts`
-  useThreadChatRuntime）——自己的轮次机 + per-thread SSE 流
-  （`GET ?thread=<sessionId>`，引擎 ThreadBuffers 本就按线程分桶）+
-  自己的 composer（thread.aui `scoped`：跳过主会话管理 chrome，消息/
-  composer/思考指示/建议照常）+ 发送 POST 带 sessionPath（引擎 flush
-  当前会话切到分栏会话再跑，事件落本线程 buffer）；工作区 postRun 同样
-  带 path（跨分栏发送后切回）。水合 = pi_get_session_messages(path)。
-  threadId === 活动会话 → live 复用工作区（buffer 单消费约束）。**多柄并发（v7.5）**：引擎 side_engines 表——分栏线程键 → 独立 SideEngine（自己的柄/锁/abort 槽），分栏 prompt 只锁自己柄，与主柄/其他分栏并行；side_open 幂等换绑、工作区 open 驱逐同路径子柄、side_prompt 收尾显式 flush；pi_interrupt 按 thread 定向 abort。
-  **已知边界**：引擎单 handle——两个分栏不能同时流式（后发等先发收尾，
-  prompt 持锁跨整个 run）；分栏内本会话 run 进行中再发 = fail loud
-  （排队面板是主会话功能）。
-- 检查面板仍为占位；打开文件/网页/子智能体（external）走 OS 拖入占位，
-  语义已归 panels。
-- 页签溢出：原生溢出按钮 + 总览菜单。
-
-## 12. 实现载体与演变记录
-
-**载体**：
-- flexlayout-react 0.11；根行子项 = 各列/分栏（可 >3）。
-- `tabset.config = { region: 语义戳, stripMode? }`；`tab.config =
-  { threadId? }`。
-- colflags.v1 = `{ colOrder(恒3项), leftHidden, panelsHidden }`——根
-  面板逻辑位置的唯一记录；colstash.v1 = 隐藏列快照。
-- stamp 重算 = `syncSemanticStamps`（结构动作同步跑 + sync 兜底）；
-  dropSplit 预戳 = 被拖页签语义。
-- 布局持久化 `mirach.harness.layout.v8`。
-
-**演变记录**：
-- v1–v5：见 git 历史（hermes 逐字移植 → flexlayout 三栏 → 竖轨/预设
-  全量轮 → v5.0 三栏固定 → v6.0 收口重建 + 会话多标签 + 打开页空态 +
-  应用菜单唯一化）。
-- **v7.0（2026-10-05）**：语义归属 + 根面板。①tabset 约束由**语义戳**
-  驱动（锚页签的窗格类型），废除位置继承——面板页签在主栏分栏仍是
-  面板栏子栏；②确立**根面板**概念（打开页宿主定义面板栏身份，子栏
-  可关可搬，拖空只关子栏）；③面板栏缺席（隐藏）时**交换/位置 = 纯
-  逻辑旗标**，打开面板栏按旗标位重建——用户推演"最右→隐藏→移到左
-  栏旁→打开即在左栏旁"成立；④edge 分栏预戳改被拖页签语义。
-- **v7.1（2026-10-06）**：四动词全量矩阵修复（24 状态 × 4 动词 × 双击 +
-  重载持久 + 随机游走，CDP E2E）。①**投影不变量**入规范（§3）：物理列序
-  ≡ colOrder 去隐藏投影，缺席交换只改旗标会失联且无法自愈 → 交换统一为
-  旗标互换 + `alignVisibleToOrder`（旧"两次 moveNode 锚 chat"在
-  [L,P,C] 类序不回位，废）；②colOrder **恒 3 项**——show-left 从物理树
-  重算把隐藏列挤掉（2 项 colOrder 丢位置记忆 + 重载校验失败回退默认），
-  插回后原样保留；③`withdrawOpenOnPanelTabArrival` 加 **TabNode 门**：
-  栏级 moveNode（互换/移位/列序对齐）的 fromNode 是列节点本体，误判成
-  "实签抵达面板栏"会删 open，嵌套 DELETE_TAB(open) 再进 onModelChange
-  时关空收列见列已空 → **整列被带走的毁列链**（hide→show→swap 实锤）。
+- 键 `mirach.harness.layout.v10`（dockview 序列化）+ `colflags.v1`（栏旗标）。
+  v10 是栏宽改比例口径后换的新键（旧 v9 档存的是 350 基准的列比例）。
+- **存档按比例记宽**：窗口 resize 后存的是比例，恢复按新容器宽摊开。
+  要出厂形态就删 v10 再 reload，或右键「默认布局」。
+- 坏档防御：根行有 `views: []` 的空 leaf 判废，回出厂布局（错误可见）。

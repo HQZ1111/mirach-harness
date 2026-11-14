@@ -1,0 +1,173 @@
+/* ── hermes 桌面端设计令牌（镜像树专用）──────────────────────────────
+ *
+ * 为什么需要这个文件：`src/hermes-mirror/` 是 hermes 桌面端组件树的**逐字
+ * 镜像**（见 docs/HANDOFF-hermes-port.md）。那些组件的 tailwind 类写的是上游
+ * 的设计令牌 `--ui-*` / `--dt-*` / `--theme-*`（实测镜像引用 73 个）。
+ * tokens.css 只为其中 17 个建了别名（早期手写近似版用到的那些），其余 56 个
+ * 在宿主里**未定义** —— `var(--ui-bg-editor)` 会解析成空值，背景/描边/语义色
+ * 全部塌掉。视觉上就是"和 hermes 不一样"。
+ *
+ * 取值来源（**照抄上游，不自造**）：`apps/desktop/src/styles.css` 的 `:root`
+ * 段（上游 2026-10 版本，light 主题）。上游那一段是自洽的：`--theme-*` 是
+ * 字面色种子，`--ui-*` 由种子 color-mix 派生，`--dt-*` 再指向 `--ui-*`。
+ * 所以这里按同一顺序照抄，只在一处偏离：
+ *
+ *   `--theme-primary` / `--theme-midground` / `--ui-blue` 指到宿主的
+ *   `--brand`（#006fff，用户 2026 定稿）。上游是同族但不同的蓝
+ *   (#0053fd)。品牌色是用户的明确决定，只有这三个令牌跟随宿主，其余全部
+ *   用上游原值 —— 改这一个变量就能看出"是不是只差品牌色"。
+ *
+ * 与 tokens.css 的关系：那个文件已有的 17 个 `--ui-*` 别名（指向宿主灰阶
+ * 刻度）**保持不变**——它们是刻意的宿主化，且视觉已验收。本文件只补缺口，
+ * 定义顺序在其后，靠 `:root` 同权重后者胜出，所以这里**不重复定义**那 17 个
+ * 名字（重复会静默覆盖已验收的宿主取值）。
+ *
+ * 注意：CSS 注释里禁止半角星号紧跟斜杠连写（会提前闭合注释，踩过）。
+ */
+
+:root {
+  /* ── 主题色种子（上游 :root 字面值）────────────────────────────── */
+  --theme-foreground: #17171a;
+  --theme-primary: var(--brand);                 /* 偏离：宿主品牌色 */
+  --theme-secondary: color-mix(in srgb, var(--theme-primary) 7%, #ffffff);
+  --theme-accent-soft: color-mix(in srgb, var(--theme-primary) 10%, #ffffff);
+  --theme-midground: var(--brand);               /* 偏离：宿主品牌色 */
+  --theme-warm: #cf806d;
+  --theme-background-seed: #f8faff;
+  --theme-sidebar-seed: #f3f7ff;
+  --theme-card-seed: #ffffff;
+  --theme-elevated-seed: #ffffff;
+  --theme-bubble-seed: color-mix(in srgb, var(--theme-primary) 6%, #ffffff);
+  --theme-neutral-chrome: #f3f3f3;
+  /* 中性卡/侧栏底：上游由 color-mix 从 neutral-chrome 推出，取值见其 :root
+     的 --theme-neutral-card / --theme-neutral-sidebar（同 #f3f3f3 系）。 */
+  --theme-neutral-card: #f3f3f3;
+  --theme-neutral-sidebar: #f3f3f3;
+  /* 种子混入中性底的比例（上游 light 值） */
+  --theme-mix-chrome: 92%;
+  --theme-mix-sidebar: 100%;
+  --theme-mix-card: 22%;
+  --theme-mix-elevated: 28%;
+  --theme-mix-bubble: 0%;
+  /* fill/stroke 阶梯的强调色混入比例（上游 light 值）——--ui-bg-* /
+     --ui-stroke-* 的派生输入。 */
+  --theme-fill-primary-accent-mix: 16%;
+  --theme-fill-secondary-accent-mix: 11%;
+  --theme-fill-tertiary-accent-mix: 8%;
+  --theme-fill-quaternary-accent-mix: 5%;
+  --theme-fill-quinary-accent-mix: 3%;
+  --theme-stroke-primary-accent-mix: 24%;
+  --theme-stroke-secondary-accent-mix: 16%;
+  --theme-stroke-tertiary-accent-mix: 10%;
+  --theme-stroke-quaternary-accent-mix: 6%;
+  --theme-row-hover-accent-mix: 4%;
+  --theme-row-active-accent-mix: 8%;
+  --theme-control-hover-accent-mix: 6%;
+  --theme-control-active-accent-mix: 8%;
+
+  /* ── 上游语义色板（字面值）────────────────────────────────────── */
+  --ui-base: var(--theme-foreground);
+  --ui-accent: var(--theme-midground);
+  --ui-accent-secondary: var(--theme-primary);
+  --ui-warm: var(--theme-warm);
+  --ui-orange: #db704b;
+  --ui-yellow: #c08532;
+  --ui-cyan: #4c7f8c;
+  --ui-blue: var(--brand);                       /* 偏离：宿主品牌色 */
+  --ui-purple: #9e94d5;
+
+  /* 代码/选区/终端面（上游字面值） */
+  --ui-inline-code-background: color-mix(in srgb, #141414 5%, transparent);
+  --ui-inline-code-foreground: color-mix(in srgb, #141414 88%, transparent);
+  --ui-selection-background: color-mix(in srgb, #ffd24a 55%, transparent);
+  --ui-terminal-surface-background: var(--ui-chat-surface-background);
+
+  /* 标题栏控件（上游字面值；镜像的 button.tsx 用 h-(--titlebar-control-height)
+     这类任意值语法读它们，缺了就是 0 高 0 宽） */
+  --titlebar-control-size: 24px;
+  --titlebar-control-height: 24px;
+  --titlebar-icon-size: 13.9px;
+
+  /* ── 表面阶梯（上游 color-mix 派生）──────────────────────────── */
+  --ui-bg-chrome: color-mix(
+    in srgb,
+    var(--theme-background-seed) var(--theme-mix-chrome),
+    var(--theme-neutral-chrome)
+  );
+  --ui-bg-sidebar: color-mix(
+    in srgb,
+    var(--theme-sidebar-seed) var(--theme-mix-sidebar),
+    var(--theme-neutral-sidebar)
+  );
+  --ui-bg-editor: color-mix(in srgb, var(--theme-card-seed) var(--theme-mix-card), var(--theme-neutral-card));
+  --ui-bg-elevated: color-mix(
+    in srgb,
+    var(--theme-elevated-seed) var(--theme-mix-elevated),
+    var(--theme-neutral-card)
+  );
+  --ui-bg-card: color-mix(in srgb, var(--ui-accent) 4%, color-mix(in srgb, var(--ui-base) 4%, transparent));
+  --ui-bg-input: #fcfcfc;
+  --ui-surface-background: var(--ui-bg-editor);
+  /* 半透明档：打开但未聚焦的行（上游 row-open 是 active 的 28%） */
+  --ui-row-open-background: color-mix(in srgb, var(--ui-row-active-background) 28%, transparent);
+  --ui-control-hover-background: color-mix(
+    in srgb,
+    var(--ui-accent) var(--theme-control-hover-accent-mix),
+    color-mix(in srgb, var(--ui-base) 4%, transparent)
+  );
+
+  /* ── 描边（tokens.css 只给了 secondary/tertiary；primary 与
+     quaternary 由上游派生式补齐，--dt-input/--dt-ring 依赖 primary）── */
+  --ui-stroke-primary: color-mix(
+    in srgb,
+    var(--ui-accent) var(--theme-stroke-primary-accent-mix),
+    color-mix(in srgb, var(--ui-base) 10%, transparent)
+  );
+  --ui-stroke-quaternary: color-mix(
+    in srgb,
+    var(--ui-accent) var(--theme-stroke-quaternary-accent-mix),
+    color-mix(in srgb, var(--ui-base) 3%, transparent)
+  );
+
+  /* ── --dt-*：上游 shadcn 桥接层，全部指向上面的 --ui-* / --theme-* ── */
+  --dt-background: var(--ui-bg-chrome);
+  --dt-foreground: var(--ui-text-primary);
+  --dt-card: var(--ui-bg-editor);
+  --dt-muted: var(--ui-bg-tertiary);
+  --dt-primary: var(--theme-primary);
+  --dt-primary-foreground: #fcfcfc;
+  --dt-primary-solid: var(--theme-primary);
+  --dt-primary-solid-foreground: #fcfcfc;
+  --dt-secondary: var(--theme-secondary);
+  --dt-secondary-foreground: var(--ui-text-secondary);
+  --dt-accent: var(--theme-accent-soft);
+  --dt-accent-foreground: var(--ui-text-primary);
+  --dt-border: var(--ui-stroke-secondary);
+  --dt-input: var(--ui-stroke-primary);
+  --dt-ring: var(--ui-stroke-primary);
+  --dt-midground: var(--theme-midground);
+  --dt-composer-ring: var(--ui-base);
+  /* 输入框 chrome 的三个旋钮（上游 light 值）：边框/底色透明度与内阴影。
+     镜像的 `.desktop-input-chrome` 规则靠它们工作（见 hermes-ui.css）。 */
+  --dt-input-border: 7%;
+  --dt-input-bg: 0%;
+  --dt-input-inset: inset 0 1px 1px color-mix(in srgb, #000 10%, transparent);
+  /* 滚动条拇指色：上游从 midground 去掉色度（oklch 相对色），保持明度。
+     WebView2 = Chromium，支持 oklch(from …)，照抄即可。 */
+  --dt-scrollbar-thumb: oklch(from var(--dt-midground) l 0 h);
+  --dt-destructive: #cf2d56;
+  --dt-destructive-foreground: #ffffff;
+  --dt-sidebar-border: var(--ui-stroke-secondary);
+  /* 用户气泡：上游按 --user-bubble-keep 保留度混到透明（缺省 100% = 实色） */
+  --dt-user-bubble: color-mix(in srgb, var(--ui-chat-bubble-background) var(--user-bubble-keep, 100%), transparent);
+  --dt-user-bubble-border: var(--ui-stroke-tertiary);
+
+  /* ── 排版与字族：上游 --dt-font-sans/mono 是字体栈；宿主用全局
+     --font-family（HarmonyOS Sans SC，用户定稿）与等宽栈。base-size /
+     line-height / letter-spacing 照抄上游（16px / 1.5 / 0）。 */
+  --dt-font-sans: var(--font-family);
+  --dt-font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Mono', 'Consolas', 'Courier New', monospace;
+  --dt-base-size: 1rem;
+  --dt-line-height: 1.5;
+  --dt-letter-spacing: 0;
+}

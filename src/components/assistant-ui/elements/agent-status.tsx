@@ -36,9 +36,9 @@ export function AgentStatus({
       {...props}
     >
       {state === "done" ? (
-        <CheckIcon aria-hidden className="size-3 shrink-0 text-emerald-500" />
+        <CheckIcon aria-hidden className="size-[var(--size-icon-sm)] shrink-0 text-emerald-500" />
       ) : state === "failed" ? (
-        <XIcon aria-hidden className="text-destructive size-3 shrink-0" />
+        <XIcon aria-hidden className="text-destructive size-[var(--size-icon-sm)] shrink-0" />
       ) : (
         <span
           aria-hidden
@@ -70,9 +70,9 @@ export function AgentStatus({
         {trailing !== undefined ? (
           trailing
         ) : state === "done" || state === "failed" ? (
-          <RotateCcwIcon className="size-3" />
+          <RotateCcwIcon className="size-[var(--size-icon-sm)]" />
         ) : (
-          <PauseIcon className="size-3" />
+          <PauseIcon className="size-[var(--size-icon-sm)]" />
         )}
       </span>
     </span>

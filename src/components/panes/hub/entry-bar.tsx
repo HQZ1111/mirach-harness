@@ -13,11 +13,12 @@
  * - 新建会话 → callbacks.newThread（assistant-ui 原生
  *   aui.threads.switchToNewThread，threadListAdapter.onSwitchToNewThread
  *   = pi_discard_session 语义——接线在 sessions-pane.tsx）；
- * - 技能与工具 → pi_list_resources 只读管理面板（pi 资源面，
- *   pi-resources-dialog.tsx——skills/prompts/extensions/packages 列举）；
- * - 消息平台 / 产物 / 定时任务 → pi 无对等物（pi 侧定时=后台 bash jobs
- *   工具非 cron 服务、无消息平台/制品实体）——hermes 视觉放行，点击弹
- *   诚实提示条（本组件内渲染、可关闭），不装假跳转。
+ * - 技能与工具 → 主区视图切到 CapabilitiesPane（hermes SkillsPage 的移植，
+ *   数据面 pi_capabilities）；
+ * - 定时任务 → 主区视图切到 CronPane（2026-10-29 接通：后端 pi_cron.rs +
+ *   前端 hermes-mirror/app/cron 上游逐字复制）；
+ * - 消息平台 / 产物 → pi 无对等物（无消息平台桥、无独立制品实体）——
+ *   hermes 视觉放行，点击弹诚实提示条（本组件内渲染、可关闭），不装假跳转。
  *
  * 快捷键标注：harness 无 keybinds store（接 pi 前定取舍）——静态
  * Ctrl+N（hermes actions.ts:84 session.new defaults ['mod+n']），注释注明。
@@ -36,7 +37,29 @@ import {
 
 import { SharedLayoutBg } from '@/components/motion/shared-layout-bg'
 
-import { openResourcesDialog } from './pi-resources-dialog'
+import { mainViewStore } from '@/components/panes/main-view-store'
+
+/**
+ * 主区视图开关的入口动作（2026-10-26）。
+ *
+ * hermes 的 `/skills` 是顶级路由（`App.tsx:166`）——点「Skills」**替换对话
+ * 区**，不是新开面板。宿主的对话区 = dockview `workspace` 面板，所以这里
+ * 只切 `main-view-store` 的视图（MainWorkspacePane 消费）；聊天保持挂载
+ * （`display:none`），流式 run 不中断。
+ */
+function openCapabilitiesPane(): void {
+  mainViewStore.getState().setView('capabilities')
+}
+
+/**
+ * 定时任务页（2026-10-29）。
+ *
+ * 与 `openCapabilitiesPane` 同语义：hermes 的 `/cron` 也是顶级路由
+ * （`apps/desktop/src/app/routes.ts:73`），点入口**替换对话区**。
+ */
+function openCronPane(): void {
+  mainViewStore.getState().setView('cron')
+}
 
 /** 入口的动作回调（newThread 由 runtime 通道注入——sessions-pane.tsx）。 */
 export interface EntryBarCallbacks {
@@ -64,19 +87,26 @@ const ITEMS: EntryItem[] = [
     kbd: ['Ctrl', 'N'],
     available: true,
     // hermes new-session 行（:1554-1556 $newChatProfile.set(null) + 导航）；
-    // harness = assistant-ui switchToNewThread（pi_discard_session 语义）
+    // harness = assistant-ui switchToNewThread（pi_discard_session 语义）。
+    // 同时把主区切回聊天（若正停在技能页——hermes 的导航语义：点聊天动作
+    // = 回 /chat 路由）。
     icon: PlusIcon,
-    act: (cb) => cb.newThread(),
+    act: (cb) => {
+      mainViewStore.getState().showChat()
+      cb.newThread()
+    },
   },
   {
     id: 'capabilities',
     label: '技能与工具',
     available: true,
-    // pi 对等：skills/prompts 目录 + extensions/packages 配置（只读管理）
-    // ——pi_list_resources（pi_resources.rs；loader = pi 原生
-    // resources.rs:950 load_skills / :1414 load_prompt_templates）
+    // 2026-10-26 用户："左侧栏的技能与工具完全复制 hermes 的" +
+    // "独立页面（同 hermes）"——从浮层改为面板栏的独立标签页
+    // （CapabilitiesPane，hermes SkillsPage 的移植）。
+    // 数据面 = pi_capabilities（pi_capabilities.rs）：技能 CRUD + 开关 +
+    // 工具集启停，落 ~/.pi/agent/{skills,harness-capabilities.json}。
     icon: WrenchIcon,
-    act: () => openResourcesDialog(),
+    act: () => openCapabilitiesPane(),
   },
   {
     id: 'messaging',
@@ -99,17 +129,19 @@ const ITEMS: EntryItem[] = [
   {
     id: 'cron',
     label: '定时任务',
-    // hermes = cron jobs 面（CRON_ROUTE）；pi 无 cron（vendor 源码无 cron
-    // 模块，定时= jobs 后台任务非调度器）——诚实提示
-    available: false,
+    // 2026-10-29：**已接通**（此前是"pi 无 cron"的诚实提示）。
+    // 后端 = src-tauri/src/pi_cron.rs（存储/调度/执行/IPC，模块头有对
+    // hermes cron/ 的语义对照）；前端 = hermes-mirror/app/cron/（上游逐字
+    // 复制）+ hermes-shim/api/cron.ts（数据面换成 pi_cron_* IPC）。
+    // 与「技能与工具」同形态：替换对话区（上游 `/cron` 是顶级路由）。
+    available: true,
     icon: ClockIcon,
-    act: () => {},
+    act: () => openCronPane(),
   },
 ]
 
 /** 左栏入口条（hermes SIDEBAR_NAV 行渲染的 harness 版）。 */
-export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {
-  // 诚实提示条（pi 无对等物的入口点击后显示；点 ✕ 或点其它可用入口即消）
+export function EntryBar({ callbacks }: { callbacks: EntryBarCallbacks }) {  // 诚实提示条（pi 无对等物的入口点击后显示；点 ✕ 或点其它可用入口即消）
   const [notice, setNotice] = useState<string | null>(null)
 
   return (

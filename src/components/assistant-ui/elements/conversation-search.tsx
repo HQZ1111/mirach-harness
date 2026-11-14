@@ -51,7 +51,7 @@ export function ConversationSearch({
             "flex items-center gap-2 rounded-full py-1.5 pr-1.5 pl-3",
           )}
         >
-          <SearchIcon className="text-foreground/30 size-3.5 shrink-0" />
+          <SearchIcon className="text-foreground/30 size-[var(--size-icon-md)] shrink-0" />
           <input
             value={query}
             onChange={(event) => onQueryChange?.(event.target.value)}
@@ -72,7 +72,7 @@ export function ConversationSearch({
                 onClick={() => onStep(-1)}
                 className={cn(ghostButton, "size-6 shrink-0")}
               >
-                <ChevronUpIcon className="size-3.5" />
+                <ChevronUpIcon className="size-[var(--size-icon-md)]" />
               </button>
               <button
                 type="button"
@@ -80,7 +80,7 @@ export function ConversationSearch({
                 onClick={() => onStep(1)}
                 className={cn(ghostButton, "size-6 shrink-0")}
               >
-                <ChevronDownIcon className="size-3.5" />
+                <ChevronDownIcon className="size-[var(--size-icon-md)]" />
               </button>
             </>
           )}

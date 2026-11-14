@@ -81,6 +81,10 @@ export function resolveContentWidth(columnWidth: number, preference: number | nu
  * variable so the glow indicator rides it. */
 export function WidthHandle(props: {
   side: 'left' | 'right'
+  /** 保留位：面板让位已由 panes.css 按 `--dsh-column-width` /
+   *  `--dsh-panel-offset` 统一计算（与内容列同源），调用方不再传类——
+   *  第二写入者会让手柄与内容列漂移。 */
+  shiftClass?: string
   onStart: () => number
   onDrag: (width: number) => void
   onCommit: (width: number) => void
@@ -152,7 +156,11 @@ export function WidthHandle(props: {
 
   return (
     <div
-      className="aui-width-handle"
+      className={
+        'aui-width-handle' +
+        // 面板让位（与内容列同款类：恒位移或 ≥1280 容器宽位移）——手柄跟列走
+        (props.shiftClass ? ' ' + props.shiftClass : '')
+      }
       data-side={props.side}
       data-width-handle={props.side}
       data-dragging={dragging || undefined}

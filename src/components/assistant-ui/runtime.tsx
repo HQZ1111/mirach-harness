@@ -40,11 +40,17 @@ import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
+import { timelineMarkerBridge } from './timeline-marker-store'
 import { dispatchToolDetails } from './tool-sidecar'
 import { askBridge } from './ask-bridge'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import { sessionCatalog, sessionDisplayName, hydrateSessionMeta } from '@/components/panes/session-manage/session-catalog'
+import {
+  activeSessionCwd,
+  reviewStore,
+  scheduleReviewRefresh,
+} from '@/components/panes/review-store'
 import { setSessionThreadSwitcher } from '@/components/panes/session-manage/session-tab-bridge'
 
 import {
@@ -180,6 +186,27 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // adapter 的 state 通道，不再加桥（真相仍在轮次机 context）
   const compaction = useSelector(actorRef, (s) => s.context.compaction)
   const interrupted = useSelector(actorRef, (s) => s.context.interrupted)
+
+  // ── 审查面板的自动刷新触发（hermes store/review.ts 的模块级订阅对偶）──
+  //
+  // 上游挂在 `$busy`（活动会话的忙标志）与 `$workspaceChangeTick` 上：
+  //  - busy **上升沿** → 记本轮基线（`git rev-parse HEAD`），供 lastTurn scope；
+  //  - busy **下降沿**（一轮结束）→ 防抖刷新变更列表 + 过期就重查 gh/PR。
+  // 宿主没有 `$workspaceChangeTick` 事件源（pi 的工具事件在轮次机里），
+  // 用"轮次起止"这一条边覆盖同一个需求（工具改动都在轮内发生）；文件外部
+  // 改动由面板的刷新钮与窗口 focus 兜底。
+  //
+  // 边沿变量复用下方收尾段的 `reviewWasRunningRef`（同一 render 作用域）。
+  useEffect(() => {
+    if (isRunning === reviewWasRunningRef.current) return
+    reviewWasRunningRef.current = isRunning
+    if (isRunning) {
+      const cwd = activeSessionCwd()
+      if (cwd) void reviewStore.getState().captureTurnBase(cwd)
+      return
+    }
+    scheduleReviewRefresh()
+  }, [isRunning])
 
   const [endpoint, setEndpoint] = useState<{ port: number; token: string } | null>(null)
   const endpointRef = useRef(endpoint)
@@ -338,6 +365,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             // 滚动位置恢复请求（挂载水合成功路径）：视口（thread.aui 侧）
             // 消费后按持久化位置恢复阅读位
             threadScrollBridge.getState().requestRestore(st.sessionId)
+            // 时间线标记（模型切换/压缩分隔线）：与消息同源、同索引，水合
+            // 后必须一起重拉——否则刷新页面后分隔线整批消失。
+            void timelineMarkerBridge.getState().refresh(st.sessionId)
           }
         } catch (e) {
           // 区分"正常无会话"（pi_get_state 报 no active session——首启预期
@@ -492,11 +522,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   /** 会话更换（切换 / New Chat / fork / 回父会话 / 删除当前 / 回退）成功后
    * 清会话域桥投影：排队消息属于原会话轨迹（clear）、检查点投影与
    * currentId 同属会话（resetProjection）、成本显示切到新会话（lastRun
-   * 清；累计按 sessionId 键隔离保留）。 */
+   * 清；累计按 sessionId 键隔离保留）。时间线标记（模型切换/压缩分隔线）
+   * 同属会话域——重拉该会话的条目投影。 */
   const resetSessionScopedBridges = useCallback((sessionId: string | null) => {
     sessionQueue.getState().clear()
     checkpointBridge.getState().resetProjection()
     costBridge.getState().resetSession(sessionId)
+    void timelineMarkerBridge.getState().refresh(sessionId)
   }, [])
 
   /** fork 执行（「从此分支探索」）：守卫 → fork 点 index 映射 →
@@ -805,6 +837,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   //    消息创建的会话 currentThreadId 可能仍为 null），把本 run 的
   //    costUsd 累进该会话的进程内账本（历史会话不回算）。
   const wasRunningRef = useRef(false)
+  /** 审查刷新用的轮次边沿（与上面的收尾边沿分开：两者消费时机不同，
+   *  共用一个变量会互相覆盖，见审查段注释）。 */
+  const reviewWasRunningRef = useRef(false)
   const usageRef = useRef<TurnUsage | null>(null)
   usageRef.current = usage
 
@@ -859,6 +894,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     if (!wasRunningRef.current) return
     wasRunningRef.current = false
     branchBridge.getState().requestRefresh()
+    // 时间线标记重拉：模型切换 / 自动压缩都发生在 run 之间，run 收尾是
+    // 唯一能看见它们落盘的时机（会话条目在 run 结束时 flush）。
+    void timelineMarkerBridge.getState().refresh(currentThreadIdRef.current)
     drainQueue()
     recordRunCost()
   }, [isRunning, drainQueue, recordRunCost])

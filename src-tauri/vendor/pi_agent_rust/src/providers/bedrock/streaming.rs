@@ -208,6 +208,9 @@ impl Decoder {
 struct OpenBlock {
     index: usize,
     tool_input: String,
+    // Absence of input permits a zero-argument call; an explicitly supplied
+    // empty stream is malformed JSON, not permission to invent arguments.
+    tool_input_seen: bool,
     redacted: Vec<u8>,
 }
 
@@ -216,6 +219,9 @@ struct MessageState {
     pending: VecDeque<StreamEvent>,
     open: BTreeMap<u64, OpenBlock>,
     seen: BTreeSet<u64>,
+    // Tool IDs correlate subsequent results and cannot be reused even after
+    // their content block closes. Wire block indices are a separate namespace.
+    tool_ids: BTreeSet<String>,
     started: bool,
     stopped: bool,
     metadata_seen: bool,
@@ -235,6 +241,7 @@ impl MessageState {
             pending: VecDeque::new(),
             open: BTreeMap::new(),
             seen: BTreeSet::new(),
+            tool_ids: BTreeSet::new(),
             started: false,
             stopped: false,
             metadata_seen: false,
@@ -263,6 +270,7 @@ impl MessageState {
             OpenBlock {
                 index,
                 tool_input: String::new(),
+                tool_input_seen: false,
                 redacted: Vec::new(),
             },
         );
@@ -276,30 +284,108 @@ impl MessageState {
         let id = block_id(value)?;
         let start = value
             .get("start")
-            .ok_or_else(|| invalid("missing block start"))?;
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("missing or invalid block start"))?;
+        if start.len() != 1 {
+            return Err(invalid("ambiguous content block start"));
+        }
         let tool = start
             .get("toolUse")
             .ok_or_else(|| invalid("unsupported content block start"))?;
-        let tool_id = string(tool, "toolUseId")?.to_string();
-        let name = string(tool, "name")?.to_string();
-        if tool_id.is_empty() || name.is_empty() {
-            return Err(invalid("tool block has an empty identity"));
+        // A server_tool_use is performed remotely. Mapping it to ToolCall
+        // would authorize a second, local execution with a different trust
+        // boundary. Fail closed until the model has a remote-tool vocabulary.
+        if tool.get("type").is_some() {
+            return Err(invalid(
+                "server-managed or unknown tool type is not a local tool request",
+            ));
+        }
+        let tool_id = string(tool, "toolUseId")?;
+        let name = string(tool, "name")?;
+        if !valid_tool_identity(tool_id, true) || !valid_tool_identity(name, false) {
+            return Err(invalid("invalid tool-call identity"));
+        }
+        if self.tool_ids.contains(tool_id) {
+            return Err(invalid("duplicate tool-call id"));
         }
         self.reserve_content(tool_id.len().saturating_add(name.len()))?;
         let index = self.add_block(
             id,
             ContentBlock::ToolCall(ToolCall {
-                id: tool_id.clone(),
-                name: name.clone(),
+                id: tool_id.to_string(),
+                name: name.to_string(),
                 arguments: Value::Null,
                 thought_signature: None,
             }),
         )?;
+        self.tool_ids.insert(tool_id.to_string());
         self.pending.push_back(StreamEvent::ToolCallStart {
             content_index: index,
-            id: tool_id,
-            name,
+            id: tool_id.to_string(),
+            name: name.to_string(),
         });
+        Ok(())
+    }
+
+    /// A complete block is evidence of content, not permission to execute it.
+    /// The shared agent admits tools on Stop/Length too, so a Bedrock response
+    /// containing local calls must explicitly finish with tool_use. Refusals
+    /// stay on its fail-closed Error path; they are never retried as success.
+    fn stop_message(&mut self, value: &Value) -> Result<()> {
+        if !self.open.is_empty() {
+            return Err(invalid(
+                "messageStop arrived with unfinished content blocks",
+            ));
+        }
+        let wire_reason = string(value, "stopReason")?;
+        if wire_reason == "tool_use" && self.tool_ids.is_empty() {
+            return Err(invalid("tool_use stop reason has no local tool calls"));
+        }
+        let (reason, failure) = match wire_reason {
+            "end_turn" | "stop_sequence" => (StopReason::Stop, None),
+            "tool_use" => (StopReason::ToolUse, None),
+            "max_tokens" | "model_context_window_exceeded" => (StopReason::Length, None),
+            "guardrail_intervened" => (
+                StopReason::Error,
+                Some("Bedrock guardrail_intervened: response blocked; local tool calls withheld"),
+            ),
+            "content_filtered" => (
+                StopReason::Error,
+                Some("Bedrock content_filtered: response refused; local tool calls withheld"),
+            ),
+            "malformed_tool_use" => (
+                StopReason::Error,
+                Some("Bedrock malformed_tool_use: invalid tool request; local tool calls withheld"),
+            ),
+            "malformed_model_output" => (
+                StopReason::Error,
+                Some(
+                    "Bedrock malformed_model_output: invalid model response; local tool calls withheld",
+                ),
+            ),
+            // Unknown provider strings can contain credentials or terminal
+            // controls. Keep a fixed diagnostic rather than echoing the wire.
+            _ => (
+                StopReason::Error,
+                Some("Bedrock returned an unsupported stop reason; local tool calls withheld"),
+            ),
+        };
+        let failure = failure.or_else(|| {
+            if self.tool_ids.is_empty() || reason == StopReason::ToolUse {
+                None
+            } else if reason == StopReason::Length {
+                Some("Bedrock response was truncated before tool_use authorization; local tool calls withheld")
+            } else {
+                Some("Bedrock ended without tool_use authorization; local tool calls withheld")
+            }
+        });
+        self.message.stop_reason = if failure.is_some() {
+            StopReason::Error
+        } else {
+            reason
+        };
+        self.message.error_message = failure.map(str::to_string);
+        self.stopped = true;
         Ok(())
     }
 
@@ -357,27 +443,7 @@ impl MessageState {
             "contentBlockStart" => self.start_block(value)?,
             "contentBlockDelta" => self.delta(value)?,
             "contentBlockStop" => self.end_block(block_id(value)?)?,
-            "messageStop" => {
-                if !self.open.is_empty() {
-                    return Err(invalid(
-                        "messageStop arrived with unfinished content blocks",
-                    ));
-                }
-                let reason = string(value, "stopReason")?;
-                self.message.stop_reason = match reason {
-                    "end_turn" | "stop_sequence" => StopReason::Stop,
-                    "tool_use" => StopReason::ToolUse,
-                    "max_tokens" | "model_context_window_exceeded" => StopReason::Length,
-                    // Unknown terminal outcomes must not authorize tool execution
-                    // or be committed as an ordinary successful answer.
-                    _ => StopReason::Error,
-                };
-                if self.message.stop_reason == StopReason::Error {
-                    self.message.error_message =
-                        Some("Bedrock returned a non-success stop reason".to_string());
-                }
-                self.stopped = true;
-            }
+            "messageStop" => self.stop_message(value)?,
             _ => return Err(invalid("unsupported ConverseStream event type")),
         }
         Ok(())
@@ -424,6 +490,7 @@ impl MessageState {
             if !matches!(self.message.content[block.index], ContentBlock::ToolCall(_)) {
                 return Err(invalid("tool delta changed the content block type"));
             }
+            block.tool_input_seen = true;
             block.tool_input.push_str(input);
             self.pending.push_back(StreamEvent::ToolCallDelta {
                 content_index: block.index,
@@ -535,12 +602,16 @@ impl MessageState {
                 redacted.data = base64::engine::general_purpose::STANDARD.encode(block.redacted);
             }
             ContentBlock::ToolCall(tool) => {
-                tool.arguments = if block.tool_input.is_empty() {
-                    serde_json::json!({})
-                } else {
-                    serde_json::from_str(&block.tool_input)
+                let arguments = if block.tool_input_seen {
+                    serde_json::from_str::<Value>(&block.tool_input)
                         .map_err(|_| invalid("malformed tool input JSON"))?
+                } else {
+                    serde_json::json!({})
                 };
+                if !arguments.is_object() {
+                    return Err(invalid("tool input must be a complete JSON object"));
+                }
+                tool.arguments = arguments;
                 self.pending.push_back(StreamEvent::ToolCallEnd {
                     content_index,
                     tool_call: tool.clone(),
@@ -556,11 +627,31 @@ impl MessageState {
             return Err(invalid("unexpected EOF before a complete messageStop"));
         }
         let message = std::mem::take(&mut self.message);
-        Ok(StreamEvent::Done {
-            reason: message.stop_reason,
-            message,
-        })
+        if message.stop_reason == StopReason::Error {
+            Ok(StreamEvent::Error {
+                reason: StopReason::Error,
+                error: message,
+            })
+        } else {
+            Ok(StreamEvent::Done {
+                reason: message.stop_reason,
+                message,
+            })
+        }
     }
+}
+
+// Bedrock's service identity grammar, checked before allocation or publication:
+// ToolUseBlockStart.name is [a-zA-Z0-9_-]+ and toolUseId additionally allows
+// '.', ':'; both are at most 64 bytes. IDs are preserved, never normalized.
+fn valid_tool_identity(value: &str, is_id: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'-')
+                || (is_id && matches!(byte, b'.' | b':'))
+        })
 }
 
 fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
@@ -1161,5 +1252,547 @@ mod tests {
         assert!(output.next().now_or_never().is_none());
         drop(output);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    fn tool_start(index: u64, id: &str, name: &str) -> Vec<u8> {
+        event(
+            "contentBlockStart",
+            &json!({"contentBlockIndex": index, "start": {
+                "toolUse": {"toolUseId": id, "name": name}
+            }}),
+        )
+    }
+
+    fn tool_input(index: u64, input: &str) -> Vec<u8> {
+        event(
+            "contentBlockDelta",
+            &json!({"contentBlockIndex": index, "delta": {"toolUse": {"input": input}}}),
+        )
+    }
+
+    fn tool_stop() -> Vec<u8> {
+        event("messageStop", &json!({"stopReason": "tool_use"}))
+    }
+
+    fn assert_one_terminal_error(result: &[Result<StreamEvent>]) {
+        assert!(result.last().is_some_and(Result::is_err), "{result:?}");
+        assert_eq!(result.iter().filter(|item| item.is_err()).count(), 1);
+        assert!(
+            !result
+                .iter()
+                .any(|item| matches!(item, Ok(StreamEvent::Done { .. }))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_ids_are_rejected_even_with_distinct_or_closed_wire_indices() {
+        for close_first in [false, true] {
+            let mut frames = vec![start(), tool_start(7, "call-a", "read")];
+            if close_first {
+                frames.push(block_stop(7));
+            }
+            frames.extend([
+                tool_start(u64::MAX, "call-a", "write"),
+                block_stop(u64::MAX),
+                tool_stop(),
+            ]);
+            let result = collect(frames);
+            assert_one_terminal_error(&result);
+            assert_eq!(
+                result
+                    .iter()
+                    .filter(|item| matches!(item, Ok(StreamEvent::ToolCallStart { .. })))
+                    .count(),
+                1
+            );
+            assert!(
+                result
+                    .last()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("duplicate tool-call id")
+            );
+        }
+    }
+
+    #[test]
+    fn tool_identity_grammar_is_checked_before_publishing_the_call() {
+        for invalid_identity in ["", " ", " leading", "a/b", "a\nb", "é", &"x".repeat(65)] {
+            for invalid_id in [false, true] {
+                let (id, name) = if invalid_id {
+                    (invalid_identity, "read")
+                } else {
+                    ("call-a", invalid_identity)
+                };
+                let result = collect(vec![
+                    start(),
+                    tool_start(0, id, name),
+                    block_stop(0),
+                    tool_stop(),
+                ]);
+                assert_one_terminal_error(&result);
+                assert!(!result.iter().any(|item| matches!(
+                    item,
+                    Ok(StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallEnd { .. })
+                )));
+            }
+        }
+        assert!(valid_tool_identity("provider:call.1_a-b", true));
+        assert!(!valid_tool_identity("read.file", false));
+        assert!(!valid_tool_identity("read:file", false));
+        assert!(valid_tool_identity(&"x".repeat(64), true));
+        assert!(valid_tool_identity(&"x".repeat(64), false));
+    }
+
+    #[test]
+    fn server_managed_and_unknown_tool_types_never_enter_local_execution() {
+        for kind in [
+            json!("server_tool_use"),
+            json!("future_type"),
+            Value::Null,
+            json!(false),
+        ] {
+            let result = collect(vec![
+                start(),
+                event(
+                    "contentBlockStart",
+                    &json!({"contentBlockIndex": 0, "start": {
+                        "toolUse": {"toolUseId": "call-a", "name": "bash", "type": kind}
+                    }}),
+                ),
+                tool_input(0, "{\"command\":\"must-not-run\"}"),
+                block_stop(0),
+                tool_stop(),
+            ]);
+            assert_one_terminal_error(&result);
+            assert!(!result.iter().any(|item| matches!(
+                item,
+                Ok(StreamEvent::ToolCallStart { .. } | StreamEvent::ToolCallEnd { .. })
+            )));
+            assert!(
+                result
+                    .last()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("not a local tool request")
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_start_unions_cannot_hide_a_second_content_kind() {
+        for extra in ["toolResult", "text", "futureBlock"] {
+            let mut payload = json!({"contentBlockIndex": 0, "start": {
+                "toolUse": {"toolUseId": "call-a", "name": "read"}
+            }});
+            payload["start"]
+                .as_object_mut()
+                .unwrap()
+                .insert(extra.to_string(), json!({}));
+            let result = collect(vec![
+                start(),
+                event("contentBlockStart", &payload),
+                tool_stop(),
+            ]);
+            assert_one_terminal_error(&result);
+            assert!(
+                !result
+                    .iter()
+                    .any(|item| matches!(item, Ok(StreamEvent::ToolCallStart { .. })))
+            );
+        }
+    }
+
+    #[test]
+    fn supplied_tool_arguments_must_finish_as_a_json_object() {
+        for input in ["", " ", "null", "[]", "42", "true", "\"text\"", "{", "{}{}"] {
+            let result = collect(vec![
+                start(),
+                tool_start(0, "call-a", "read"),
+                tool_input(0, input),
+                block_stop(0),
+                tool_stop(),
+            ]);
+            assert_one_terminal_error(&result);
+            assert!(
+                !result
+                    .iter()
+                    .any(|item| matches!(item, Ok(StreamEvent::ToolCallEnd { .. }))),
+                "{input}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_arguments_and_explicit_empty_objects_are_valid_zero_argument_calls() {
+        for fragments in [vec![], vec!["{}"], vec!["", "{", "}"]] {
+            let mut frames = vec![start(), tool_start(0, "call-a", "read")];
+            frames.extend(fragments.into_iter().map(|input| tool_input(0, input)));
+            frames.extend([block_stop(0), tool_stop()]);
+            let result = collect(frames);
+            assert!(result.iter().all(Result::is_ok), "{result:?}");
+            let Some(Ok(StreamEvent::Done { reason, message })) = result.last() else {
+                panic!("expected completed tool turn");
+            };
+            assert_eq!(*reason, StopReason::ToolUse);
+            let ContentBlock::ToolCall(call) = &message.content[0] else {
+                panic!("expected tool call");
+            };
+            assert_eq!(call.arguments, json!({}));
+        }
+    }
+
+    #[test]
+    fn parallel_calls_keep_dense_content_indices_and_independent_argument_buffers() {
+        let bytes = [
+            start(),
+            text(),
+            block_stop(0),
+            tool_start(u64::MAX, "provider:call.1", "read"),
+            tool_start(7, "provider:call.2", "read"),
+            tool_input(7, "{\"path\":"),
+            tool_input(u64::MAX, "{\"path\":\"first.txt\"}"),
+            block_stop(u64::MAX),
+            tool_input(7, "\"second.txt\"}"),
+            block_stop(7),
+            tool_stop(),
+        ]
+        .concat();
+        for chunks in [
+            vec![bytes.clone()],
+            bytes.chunks(3).map(<[u8]>::to_vec).collect(),
+        ] {
+            let result = collect(chunks);
+            assert!(result.iter().all(Result::is_ok), "{result:?}");
+            let completed: Vec<_> = result
+                .iter()
+                .filter_map(|item| match item {
+                    Ok(StreamEvent::ToolCallEnd {
+                        content_index,
+                        tool_call,
+                    }) => Some((*content_index, tool_call)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(completed.len(), 2);
+            assert_eq!(completed[0].0, 1);
+            assert_eq!(completed[0].1.id, "provider:call.1");
+            assert_eq!(completed[0].1.arguments, json!({"path": "first.txt"}));
+            assert_eq!(completed[1].0, 2);
+            assert_eq!(completed[1].1.id, "provider:call.2");
+            assert_eq!(completed[1].1.arguments, json!({"path": "second.txt"}));
+            let Some(Ok(StreamEvent::Done { message, .. })) = result.last() else {
+                panic!("expected Done");
+            };
+            for (index, call) in completed {
+                let ContentBlock::ToolCall(stored) = &message.content[index] else {
+                    panic!("expected stored call");
+                };
+                assert_eq!(stored.id, call.id);
+                assert_eq!(stored.arguments, call.arguments);
+            }
+        }
+    }
+
+    #[test]
+    fn tool_use_without_a_tool_is_not_a_completed_agent_step() {
+        for frames in [
+            vec![start(), tool_stop()],
+            vec![start(), text(), block_stop(0), tool_stop()],
+        ] {
+            let result = collect(frames);
+            assert_one_terminal_error(&result);
+            assert!(
+                result
+                    .last()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no local tool calls")
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_tool_start_retires_a_still_open_transport_before_the_error() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut output = from_bytes(
+            Box::pin(DropProbe {
+                frame: Some(
+                    [
+                        start(),
+                        tool_start(0, "call-a", "read"),
+                        tool_start(1, "call-a", "write"),
+                    ]
+                    .concat(),
+                ),
+                dropped: Arc::clone(&dropped),
+            }),
+            "m".into(),
+            "p".into(),
+            Vec::new(),
+        );
+        for _ in 0..2 {
+            assert!(output.next().now_or_never().unwrap().unwrap().is_ok());
+        }
+        assert!(output.next().now_or_never().unwrap().unwrap().is_err());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(output.next().now_or_never().unwrap().is_none());
+    }
+
+    fn usage_metadata() -> Vec<u8> {
+        event(
+            "metadata",
+            &json!({"usage": {
+                "inputTokens": 7,
+                "outputTokens": 3,
+                "cacheReadInputTokens": 20,
+                "cacheWriteInputTokens": 5,
+                "totalTokens": 35
+            }}),
+        )
+    }
+
+    fn terminal_failure(result: &[Result<StreamEvent>]) -> &AssistantMessage {
+        assert!(result.iter().all(Result::is_ok), "{result:?}");
+        assert!(
+            !result
+                .iter()
+                .any(|item| matches!(item, Ok(StreamEvent::Done { .. }))),
+            "{result:?}"
+        );
+        assert_eq!(
+            result
+                .iter()
+                .filter(|item| matches!(item, Ok(StreamEvent::Error { .. })))
+                .count(),
+            1,
+            "{result:?}"
+        );
+        let Some(Ok(StreamEvent::Error { reason, error })) = result.last() else {
+            panic!("expected one terminal Error: {result:?}");
+        };
+        assert_eq!(*reason, StopReason::Error);
+        assert_eq!(error.stop_reason, StopReason::Error);
+        error
+    }
+
+    #[test]
+    fn completed_local_calls_require_terminal_tool_use_authorization() {
+        for reason in [
+            "end_turn",
+            "stop_sequence",
+            "max_tokens",
+            "model_context_window_exceeded",
+            "guardrail_intervened",
+            "content_filtered",
+            "malformed_tool_use",
+            "malformed_model_output",
+            "future_outcome",
+        ] {
+            let result = collect(vec![
+                start(),
+                tool_start(7, "call-a", "write"),
+                tool_input(7, "{\"path\":\"retained.txt\"}"),
+                block_stop(7),
+                event("messageStop", &json!({"stopReason": reason})),
+                usage_metadata(),
+            ]);
+            // Even a validated ToolCallEnd cannot make the final outcome a
+            // success. The call remains available for diagnostics, not execution.
+            assert_eq!(
+                result
+                    .iter()
+                    .filter(|item| matches!(item, Ok(StreamEvent::ToolCallEnd { .. })))
+                    .count(),
+                1,
+                "{reason}: {result:?}"
+            );
+            let message = terminal_failure(&result);
+            assert!(
+                message
+                    .error_message
+                    .as_deref()
+                    .unwrap()
+                    .contains("local tool calls withheld")
+            );
+            assert_eq!(message.usage.total_tokens, 35);
+            let ContentBlock::ToolCall(call) = &message.content[0] else {
+                panic!("expected retained diagnostic call");
+            };
+            assert_eq!(call.id, "call-a");
+            assert_eq!(call.arguments, json!({"path": "retained.txt"}));
+        }
+    }
+
+    #[test]
+    fn text_only_stops_preserve_normal_and_truncation_outcomes() {
+        for (wire_reason, expected) in [
+            ("end_turn", StopReason::Stop),
+            ("stop_sequence", StopReason::Stop),
+            ("max_tokens", StopReason::Length),
+            ("model_context_window_exceeded", StopReason::Length),
+        ] {
+            let result = collect(vec![
+                start(),
+                text(),
+                block_stop(0),
+                event("messageStop", &json!({"stopReason": wire_reason})),
+                usage_metadata(),
+            ]);
+            assert!(result.iter().all(Result::is_ok), "{result:?}");
+            assert!(
+                !result
+                    .iter()
+                    .any(|item| matches!(item, Ok(StreamEvent::Error { .. })))
+            );
+            let Some(Ok(StreamEvent::Done { reason, message })) = result.last() else {
+                panic!("expected Done for {wire_reason}: {result:?}");
+            };
+            assert_eq!(*reason, expected);
+            assert_eq!(message.stop_reason, expected);
+            assert!(message.error_message.is_none());
+            assert_eq!(message.usage.total_tokens, 35);
+            let ContentBlock::Text(content) = &message.content[0] else {
+                panic!("expected retained text");
+            };
+            assert_eq!(content.text, "héllo");
+        }
+    }
+
+    #[test]
+    fn service_failure_outcomes_preserve_text_identity_and_usage() {
+        for wire_reason in [
+            "guardrail_intervened",
+            "content_filtered",
+            "malformed_tool_use",
+            "malformed_model_output",
+        ] {
+            let result = collect(vec![
+                start(),
+                text(),
+                block_stop(0),
+                event("messageStop", &json!({"stopReason": wire_reason})),
+                usage_metadata(),
+            ]);
+            let message = terminal_failure(&result);
+            assert!(
+                message
+                    .error_message
+                    .as_deref()
+                    .unwrap()
+                    .contains(wire_reason)
+            );
+            assert_eq!(message.provider, "provider-a");
+            assert_eq!(message.model, "model-a");
+            assert_eq!(message.api, "bedrock-converse-stream");
+            assert_eq!(message.usage.input, 7);
+            assert_eq!(message.usage.output, 3);
+            assert_eq!(message.usage.cache_read, 20);
+            assert_eq!(message.usage.cache_write, 5);
+            assert_eq!(message.usage.total_tokens, 35);
+            let ContentBlock::Text(content) = &message.content[0] else {
+                panic!("expected retained text");
+            };
+            assert_eq!(content.text, "héllo");
+        }
+    }
+
+    #[test]
+    fn unknown_stop_outcomes_do_not_echo_untrusted_wire_strings() {
+        for wire_reason in ["", "future_status secret-canary\u{1b}[31m\n", "TOOL_USE"] {
+            let result = collect(vec![
+                start(),
+                event("messageStop", &json!({"stopReason": wire_reason})),
+            ]);
+            let message = terminal_failure(&result);
+            assert_eq!(
+                message.error_message.as_deref(),
+                Some("Bedrock returned an unsupported stop reason; local tool calls withheld")
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_failures_wait_for_metadata_then_finish_exactly_once() {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        tx.unbounded_send(Ok([
+            start(),
+            text(),
+            block_stop(0),
+            event("messageStop", &json!({"stopReason": "content_filtered"})),
+        ]
+        .concat()))
+            .unwrap();
+        let mut output = from_bytes(Box::pin(rx), "m".into(), "p".into(), Vec::new());
+        for _ in 0..4 {
+            let item = output.next().now_or_never().unwrap().unwrap().unwrap();
+            assert!(!matches!(
+                item,
+                StreamEvent::Done { .. } | StreamEvent::Error { .. }
+            ));
+        }
+        assert!(output.next().now_or_never().is_none());
+        tx.unbounded_send(Ok(usage_metadata())).unwrap();
+        drop(tx);
+        let result = output.next().now_or_never().unwrap().unwrap().unwrap();
+        let StreamEvent::Error { reason, error } = result else {
+            panic!("expected terminal Error");
+        };
+        assert_eq!(reason, StopReason::Error);
+        assert_eq!(error.usage.total_tokens, 35);
+        assert_eq!(error.content.len(), 1);
+        assert!(output.next().now_or_never().unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_stop_does_not_hide_a_corrupt_or_exception_tail() {
+        let mut exception_headers = Vec::new();
+        header(":message-type", "exception", &mut exception_headers);
+        header(
+            ":exception-type",
+            "internalServerException",
+            &mut exception_headers,
+        );
+        let exception = raw_frame(&exception_headers, br#"{"message":"tail failed"}"#);
+        for tail in [vec![0], vec![0; 12], exception] {
+            let result = collect(vec![
+                start(),
+                text(),
+                block_stop(0),
+                event(
+                    "messageStop",
+                    &json!({"stopReason": "malformed_model_output"}),
+                ),
+                tail,
+            ]);
+            assert_one_terminal_error(&result);
+            assert!(
+                !result
+                    .iter()
+                    .any(|item| matches!(item, Ok(StreamEvent::Error { .. })))
+            );
+        }
+    }
+
+    #[test]
+    fn absent_or_non_string_stop_reasons_cannot_default_to_success() {
+        for payload in [
+            json!({}),
+            json!({"stopReason": null}),
+            json!({"stopReason": 1}),
+            json!({"stopReason": false}),
+            json!({"stopReason": []}),
+            json!({"stopReason": {}}),
+        ] {
+            let result = collect(vec![start(), event("messageStop", &payload)]);
+            assert_one_terminal_error(&result);
+        }
     }
 }

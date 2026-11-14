@@ -17,6 +17,22 @@
 import { Orientation } from 'dockview-core'
 import type { DockviewApi, DockviewGroupPanel, SerializedDockview } from 'dockview-react'
 
+import {
+  createConstraintKeeper,
+  NO_MAXIMUM,
+  type ColumnConstraints,
+  type ConstraintTarget,
+} from './column-constraints'
+import {
+  CHAT_MIN_WIDTH,
+  clampRailWidth,
+  leftRailDefaultWidth,
+  panelsRailDefaultWidth,
+  RAIL_DEFAULT_WIDTH,
+  RAIL_MAX_WIDTH,
+  RAIL_MIN_WIDTH,
+} from './rail-metrics'
+
 export type ColRegion = 'left' | 'chat' | 'panels'
 
 export interface ColumnFlags {
@@ -25,7 +41,7 @@ export interface ColumnFlags {
   panelsHidden: boolean
 }
 
-// ── 出厂布局（三栏）：[左栏 350 | 主栏 | 面板栏 350] ────────────────────────
+// ── 出厂布局（三栏）：[左栏 | 主栏 | 面板栏] ─────────────────────────────────
 // 左/主组 hideHeader（无标签条）；组约束走**面板级** minimumWidth/
 // maximumWidth（GroupviewPanelState 字段，随序列化 round-trip——组的生效
 // 约束回落到活动 panel 的同名值；leaf data 的 constraints/initialWidth 在
@@ -33,50 +49,63 @@ export interface ColumnFlags {
 // 按比例归一——精确 px 由 boot 后 setSize 钉回）。面板栏出厂单签 open
 // （打开页宿主，tabComponent openTab = 无 ✕ 头，根面板不可关）。
 // 2026-10-16 自 dockview-shell 迁入（「默认布局」复位动词的同源消费方）。
-export const RAIL_W = 350
-
-export const FACTORY_LAYOUT: SerializedDockview = {
-  grid: {
-    root: {
-      type: 'branch',
-      data: [
-        { type: 'leaf', data: { id: 'g-left', views: ['leftrail'], hideHeader: true }, size: RAIL_W },
-        { type: 'leaf', data: { id: 'g-chat', views: ['workspace'], hideHeader: true }, size: 1100 },
-        { type: 'leaf', data: { id: 'g-panels', views: ['open'] }, size: RAIL_W },
-      ],
+//
+// **栏宽是定值**（2026-10-22 用户定稿）：两轨默认宽 300、许可 270–400，
+// 不随窗口缩放（口径单源 rail-metrics.ts）。容器宽只用来算主栏吃多少。
+export const factoryLayout = (containerWidth: number, containerHeight: number): SerializedDockview => {
+  const width = Math.max(1, Math.round(containerWidth))
+  const left = leftRailDefaultWidth()
+  const panels = panelsRailDefaultWidth()
+  // 主栏吃剩余（两侧栏是定值，剩下的都归它；极窄窗口下不低于主栏 min）
+  const chat = Math.max(CHAT_MIN_WIDTH, width - left - panels)
+  return {
+    grid: {
+      root: {
+        type: 'branch',
+        data: [
+          { type: 'leaf', data: { id: 'g-left', views: ['leftrail'], hideHeader: true }, size: left },
+          { type: 'leaf', data: { id: 'g-chat', views: ['workspace'], hideHeader: true }, size: chat },
+          { type: 'leaf', data: { id: 'g-panels', views: ['open'] }, size: panels },
+        ],
+      },
+      height: Math.max(1, Math.round(containerHeight)),
+      width,
+      orientation: Orientation.HORIZONTAL,
     },
-    height: 1000,
-    width: 1800,
-    orientation: Orientation.HORIZONTAL,
-  },
-  panels: {
-    leftrail: {
-      id: 'leftrail',
-      contentComponent: 'leftrail',
-      title: '',
-      minimumWidth: 240,
-      maximumWidth: 420,
-      params: { region: 'left' },
+    panels: {
+      leftrail: {
+        id: 'leftrail',
+        contentComponent: 'leftrail',
+        title: '',
+        minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
+        params: { region: 'left' },
+      },
+      workspace: {
+        id: 'workspace',
+        contentComponent: 'workspace',
+        title: '',
+        minimumWidth: CHAT_MIN_WIDTH,
+        params: { region: 'chat' },
+      },
+      open: {
+        id: 'open',
+        contentComponent: 'open',
+        title: '打开',
+        tabComponent: 'openTab',
+        minimumWidth: RAIL_MIN_WIDTH,
+        params: { region: 'panels' },
+      },
     },
-    workspace: {
-      id: 'workspace',
-      contentComponent: 'workspace',
-      title: '',
-      minimumWidth: 395,
-      params: { region: 'chat' },
-    },
-    open: {
-      id: 'open',
-      contentComponent: 'open',
-      title: '打开',
-      tabComponent: 'openTab',
-      minimumWidth: 240,
-      params: { region: 'panels' },
-    },
-  },
+  }
 }
 
-export const LAYOUT_KEY = 'mirach.harness.layout.v9'
+/** 布局存档键。**v10**（2026-10-22）：栏宽口径从写死 350 改成用户定稿的
+ *  300 / min 270 / max 400（口径单源 rail-metrics.ts）。旧档里存的列宽是
+ *  350 基准下的产物，沿用会让新默认值看不见——换键即等于让所有人拿到新的
+ *  出厂几何（代价：旧的分栏形态不迁移）。
+ *  改键的规矩与之前一致：语义真变了才换，不为了"清一下存档"换。 */
+export const LAYOUT_KEY = 'mirach.harness.layout.v10'
 
 // ── 持久化（旗标 + 列快照——键与语义照 column-ops 原样） ─────────────────────
 
@@ -328,80 +357,94 @@ const viewOfGroup = (g: DockviewGroupPanel): HTMLElement | undefined => {
   return el instanceof HTMLElement ? el : undefined
 }
 
-/** 宽度载体所在的 split 容器（`.dv-view` → `.dv-view-container` →
- *  `.dv-split-view-container`）。 */
-const splitOfView = (view: HTMLElement): HTMLElement | undefined => {
-  const el = view.parentElement?.parentElement
-  return el instanceof HTMLElement ? el : undefined
-}
-
 /** 收放期间的内容淡出标记（`data-dv-morph`）——CSS 只认它做 opacity 过渡。
  *  宽度**不靠 CSS**（见 tweenFrames 头注释：CSS 与 dockview 模型不同步）。 */
 const markMorph = (g: DockviewGroupPanel, phase: 'show' | 'hide'): void => {
   g.element?.setAttribute('data-dv-morph', phase)
-  // split 容器上的 `data-dv-morph='col'`：给"跟随列移动的装饰层"（主对话
-  // 颜色层的贴边内缩、列头内边距）开过渡——它们的状态在补间开始时按目标
-  // 态翻转，没有过渡就是硬跳 20px（用户报"颜色层直接到边缘/再闪回来"）。
-  // 只在补间期间存在，boot 期自愈走 withoutColumnMorph 不会挂上。
-  const view = viewOfGroup(g)
-  const split = view ? splitOfView(view) : undefined
-  split?.setAttribute('data-dv-morph', 'col')
 }
 
 const clearMorph = (g: DockviewGroupPanel | undefined): void => {
   if (!g) return
   g.element?.removeAttribute('data-dv-morph')
-  const view = viewOfGroup(g)
-  const split = view ? splitOfView(view) : undefined
-  split?.removeAttribute('data-dv-morph')
 }
 
-/** 组快照约束（暂时解除 min-宽，0 宽才可达）。
- *  **必须存原值并在收放结束后还原**——早期版本按 region 硬编码回落
- *  240，把出厂 left maximumWidth=420 永久丢了（用户可以把左栏拖到任意宽）。
- *  `g.minimumWidth/maximumWidth` 是公开 getter（dockviewGroupPanel.d.ts）。 */
-interface SavedConstraints {
-  minimumWidth: number
-  maximumWidth: number
+/** ── 收放约束（状态机在 column-constraints.ts，此处只做 dockview 投影）──
+ *
+ * 两个实测 bug 的根因都在这里（详细机制见 column-constraints.ts 文件头）：
+ *  ① 收起只放开 min、max 留在 MAX → 0 宽列对 dockview 仍是 flexible item，
+ *    `Sizing.Distribute` 的 addPanel（分栏/开新签）会把它重新摊出宽度，
+ *    而内容层还挂着 `data-dv-collapsed` → 面板栏位置一张空白卡；
+ *  ② 收起收尾就把快照删了 → 展开拿不到原值，min/max 限制永久失效。
+ *
+ * 原值取**面板级**约束（panel.minimumWidth/maximumWidth，随 panels 存档
+ * round-trip），不取组当前值——后者可能已经是收放态（刷新后按旗标自愈时
+ * 列本来就是 0 宽），拿它当原值会把错误固化。
+ *
+ * **每个组必须复用同一个投影对象**（2026-10-22 实机实锤）：状态机的快照表
+ * 以 target 为键（WeakMap），每次调用现造新对象会让快照永远命中不了——
+ * 实测表现为展开后组约束停在补间盒 {0, MAX}（宽度限制确实失效），而修好
+ * 键身份后才回到面板级 {240, MAX}。 */
+interface ConstraintTargetView extends ConstraintTarget {
+  readonly group: DockviewGroupPanel
 }
 
-const savedConstraints = new WeakMap<DockviewGroupPanel, SavedConstraints>()
+const constraintKeeper = createConstraintKeeper()
+const constraintTargets = new WeakMap<DockviewGroupPanel, ConstraintTargetView>()
 
-const releaseMinWidth = (g: DockviewGroupPanel): void => {
-  if (savedConstraints.has(g)) return
-  const api = g.api as unknown as {
-    setConstraints?: (v: { minimumWidth?: number; maximumWidth?: number }) => void
+const constraintTargetOf = (g: DockviewGroupPanel): ConstraintTargetView => {
+  const existing = constraintTargets.get(g)
+  if (existing) return existing
+  const view: ConstraintTargetView = {
+    id: g.id,
+    group: g,
+    // 两个 getter 都**现读**（面板集合与活动面板会变：分栏/切签），
+    // 只有对象身份需要稳定。
+    get currentMaximumWidth() {
+      return g.maximumWidth
+    },
+    get panelConstraints() {
+      const panel = g.activePanel ?? g.panels[0]
+      if (!panel) {
+        console.error('[dv-column-ops] 组内没有面板——无法取原约束', g.id)
+        return { minimumWidth: 0, maximumWidth: NO_MAXIMUM }
+      }
+      return {
+        minimumWidth: panel.minimumWidth ?? 0,
+        maximumWidth: panel.maximumWidth ?? NO_MAXIMUM,
+      }
+    },
+    apply(next) {
+      const groupApi = g.api as unknown as {
+        setConstraints?: (v: ColumnConstraints) => void
+      }
+      if (typeof groupApi.setConstraints !== 'function') {
+        console.error('[dv-column-ops] group.api.setConstraints 不在场——收放约束无法下发', g.id)
+        return
+      }
+      groupApi.setConstraints(next)
+    },
   }
-  if (typeof api.setConstraints !== 'function') {
-    console.error('[dv-column-ops] group.api.setConstraints 不在场——收放将受 min 宽限制', g.id)
-    return
-  }
-  savedConstraints.set(g, { minimumWidth: g.minimumWidth, maximumWidth: g.maximumWidth })
-  api.setConstraints({ minimumWidth: 0, maximumWidth: Number.MAX_SAFE_INTEGER })
+  constraintTargets.set(g, view)
+  return view
 }
 
-/** 还原 min 约束。`minOverride` 用于"收起到 0 后仍保持可展开"——
- *  此时 min 必须留在 0，否则用户下次拖/补间又会被钳回出厂 240。 */
-const restoreMinWidth = (g: DockviewGroupPanel, minOverride?: number): void => {
-  const saved = savedConstraints.get(g)
-  if (!saved) return
-  savedConstraints.delete(g)
-  const api = g.api as unknown as {
-    setConstraints?: (v: { minimumWidth?: number; maximumWidth?: number }) => void
-  }
-  api.setConstraints?.({
-    minimumWidth: minOverride ?? saved.minimumWidth,
-    maximumWidth: saved.maximumWidth,
-  })
-}
+const openTweenConstraints = (g: DockviewGroupPanel): void =>
+  constraintKeeper.beginTween(constraintTargetOf(g))
+
+const collapseConstraints = (g: DockviewGroupPanel): void =>
+  constraintKeeper.settleCollapsed(constraintTargetOf(g))
+
+const restoreConstraints = (g: DockviewGroupPanel): void =>
+  constraintKeeper.settleExpanded(constraintTargetOf(g))
 
 /** 逐帧驱动一组宽度（**JS 补间替代 CSS transition**）。
  *
  *  **为什么不用 CSS transition**（2026-10-18 实锤）：CSS 只改 DOM 的 inline
  *  width，dockview 的**模型**仍认为该列是原宽。两者不一致时库会按模型重新
- *  分配，把释放的宽度全塞给最后一列（实测：左栏 350→0 的过程中 panels
- *  350→700，收起后才回 350）——用户看到的就是"面板栏闪烁变大"。逐帧调用
- *  `api.setSize` 则让**模型与 DOM 同步推进**，每次分配都落在我们指定的列上。
+ *  分配，把释放的宽度全塞给最后一列（实测：左栏收到 0 的过程中，面板栏被
+ *  摊到原宽的两倍，收起后才回原值）——用户看到的就是"面板栏闪烁变大"。
+ *  逐帧调用 `api.setSize` 则让**模型与 DOM 同步推进**，每次分配都落在我们
+ *  指定的列上。
  *
  *  调用方负责：① 先解除被收列的 min 约束（否则钳在 240，实测）；
  *  ② 给出每帧的目标宽度函数 `widthAt(eased)`。
@@ -423,19 +466,20 @@ const tweenFrames = (
     return
   }
   // **第 0 帧同步落地**（2026-10-18 实锤）：只排 rAF 的话，调用返回后到首个
-  // 动画帧之间还有一整帧（实测 ~380ms，CEF 下更久），期间 dockview 会把刚
-  // 插入的组按自己的分配显示出来——用户看到的就是"先跳到 min 宽再补间"。
+  // 动画帧之间还有一整帧（实测 ~380ms，旧运行时下更久），期间 dockview 会把
+  // 刚插入的组按自己的分配显示出来——用户看到的就是"先跳到 min 宽再补间"。
   // 先同步设一遍起点，浏览器随后才绘制。
   //
   // **同一 tick 里把宽表全部设完**（2026-10-18 实测）：`setSize` 只改一列，
-  // 差额由 dockview 推给邻居——单独设 left=0 会把 panels 从 350 顶到 1190。
+  // 差额由 dockview 推给邻居——单独设一列为 0 会把邻居顶到远超其原宽。
   // 因此首帧必须把**所有相关列**一起写（调用方已保证 widthAt 返回全表），
   // 且顺序无关（库按最终请求值结算）。
   apply(0)
-  // **用 setTimeout 而非 rAF 驱动**（2026-10-18 实测）：CEF 窗口模式下
-  // `requestAnimationFrame` 在一次布局结算后会停 400ms+（实测 rafMs=412，
-  // 期间 setTimeout(0) 只要 2ms）。若用 rAF，补间首帧就落在 412ms 后，那时
-  // dockview 已把宽度摊到终点——动画被整个吞掉。
+  // **用 setTimeout 而非 rAF 驱动补间**（2026-10-22 在 wry/WebView2 下复测）：
+  // 布局结算后 setTimeout(0) 实测 0ms，rAF 恒等下一帧（16ms @60fps）——
+  // setTimeout 首帧更早、补间更跟手。旧运行时（CEF）下 rAF 还会在一次布局
+  // 结算后停 400ms+（rafMs=412），那是切 setTimeout 的原始理由；该停摆在
+  // WebView2 上**不复现**，但 setTimeout 仍然更快，故维持不变。
   const t0 = performance.now()
   const step = () => {
     const p = Math.min(1, (performance.now() - t0) / durationMs)
@@ -599,10 +643,24 @@ const setColumnCollapsed = (
   const startWidth = Math.round(group.width)
   // 记住用户的原始宽度（展开时还原；0 宽时不能从 group.width 读）
   if (startWidth > 0) savedColumnWidth.set(group.id, startWidth)
-  const targetWidth = hidden ? 0 : (savedColumnWidth.get(group.id) ?? RAIL_W)
+  // 展开方向的回落值：用户拖过的宽优先，否则用**默认宽 300**（2026-10-22
+  // 用户定稿：栏宽是定值，不随容器缩放）。`savedColumnWidth` 只在收起时
+  // 记不到宽（0 宽读不出原值），所以这是"没记忆时"的兜底目标。
+  const region = regionOfGroup(group)
+  const defaultWidth = region === 'panels' ? panelsRailDefaultWidth() : leftRailDefaultWidth()
+  const targetWidth = hidden ? 0 : (savedColumnWidth.get(group.id) ?? defaultWidth)
 
-  // 已经到位：只补一致性与标记
+  // 已经到位：只补一致性与标记。**约束也必须在这一支收敛**（2026-10-22）：
+  // 刷新后按旗标自愈时列本来就是 0 宽（早退路径），若这里不把约束盒压成
+  // 0..0，收起态就缺了"不可被摊宽"的那个许可撤销——分栏照样会摊出空白卡。
+  // 展开方向同理：宽度已到目标但约束可能还停在收放态，必须还原。
   if (startWidth === targetWidth) {
+    if (hidden) collapseConstraints(group)
+    else restoreConstraints(group)
+    // 约束变更会触发 dockview 按存档比例 relayout（收起期间该列比例是 0），
+    // 把宽度钳到面板级 min——宽度已到目标也必须再钉一次，否则「打开」在
+    // 隐藏期比例为 0 的场景下会停在 min（实测 240 而非比例目标宽）。
+    group.api.setSize({ width: targetWidth })
     applyCollapsedMarker(group, hidden)
     onDone?.()
     return
@@ -614,24 +672,16 @@ const setColumnCollapsed = (
   const delta = targetWidth - startWidth // >0 展开、<0 收起
 
   morphBusy = true
-  // 收到 0 时必须放开 min 约束（出厂 min=240，否则钳住）
-  if (hidden) releaseMinWidth(group)
-  // **补间开始前就要处理两件"内容侧"的事**（2026-10-18 用户报"展开时容器
-  // 有动画、内容没有，等容器展开完瞬间出现"）：
-  //  ① 展开方向：摘掉 `data-dv-collapsed`——它里面的 `visibility: hidden`
-  //     会让整栏内容在整段补间里都不可见，等收尾才一次性恢复（"瞬间冒
-  //     出来"）。此刻组宽仍是 0（overflow 裁切），摘掉不会提前露出内容，
-  //     只是让内容跟着宽度一起入场（CSS 走 [data-dv-morph='show']）。
-  //  ② 两个方向都按**目标态**重算贴边标记：补间期间组宽还没到位，按实际
-  //     宽度算会得出旧结论，tint 的 20px 内缩就会在补间结束的一刻硬跳
-  //     （用户报"颜色层直接到边缘/再闪回来"）。用 override 按意图声明，
-  //     配合 panes.css 里 tint 的 left/right 过渡，内缩与列同步滑。
+  // 补间窗口的约束：min 放开到 0（出厂 min=240 会钳住），max 保留原值
+  // （补间要在 0..原宽 连续取值，任何上限都会让首帧被 clamp 跳变）。
+  openTweenConstraints(group)
+  // **展开方向：补间开始前就摘掉 `data-dv-collapsed`**（2026-10-18 用户报
+  // "展开时容器有动画、内容没有，等容器展开完瞬间出现"）——它里面的
+  // `visibility: hidden` 会让整栏内容在整段补间里都不可见，等收尾才一次性
+  // 恢复。此刻组宽仍是 0（overflow 裁切），摘掉不会提前露出内容，只是让
+  // 内容跟着宽度一起入场（CSS 走 [data-dv-morph='show']）。
   if (!hidden) setCollapsedAttr(group, false)
-  // 先挂补间标记（含 split 容器的 `[data-dv-morph='col']`）**再**翻贴边
-  // 状态——顺序反了的话，属性翻转与 transition 规则出现在同一次样式结算
-  // 里，起始值可能取到"新值"，20px 内缩就变成硬跳而不是滑（见 panes.css）。
   markMorph(group, hidden ? 'hide' : 'show')
-  refreshChatEdgeMarkers({ group, visible: !hidden })
 
   tweenFrames(
     MORPH_DUR_MS,
@@ -643,20 +693,30 @@ const setColumnCollapsed = (
       return out
     },
     () => {
-      // 收尾钉一次（取整残差 / 库内部微调）
-      group.api.setSize({ width: targetWidth })
-      if (chat) chat.api.setSize({ width: chatStart - delta })
+      // **顺序即语义**（2026-10-22 逐帧实机采样后定）：先还原/压紧约束，
+      // 再钉最终宽度。
+      // dockview 的 `setConstraints` 会走 `_onDidChange` → 父 branch 的
+      // relayout，而 relayout 按**存档比例**重算各列（收起期间 panels 的
+      // 比例是 0），于是宽度被钳到面板级 min（实测打开方向停在 240 而不是
+      // 记忆的目标宽）。把 setSize 放在约束之后，显式宽度才是最后一次写入。
       if (hidden) {
-        // 0 宽后仍要保住"下次能展开"：min 约束回到 0（否则再展开会被
-        // 钳回 240，但那时用户本来就是从 0 拉到 350，无需 min）
-        restoreMinWidth(group, 0)
+        // 收起态：约束盒归 0..0（不只是 min=0）——max 留着就等于给 dockview
+        // 留了一个"这列可以被摊宽"的许可，任何 Sizing.Distribute 的
+        // addPanel（分栏/开新签）都会把它重新摊出宽度（空白卡片，见
+        // collapseConstraints 注释）。快照**不在这里消费**，隐藏期一直
+        // 留着给展开方向还原。
+        collapseConstraints(group)
+        group.api.setSize({ width: targetWidth })
+        if (chat) chat.api.setSize({ width: chatStart - delta })
       } else {
-        restoreMinWidth(group)
+        // 展开收尾：还原收放前的 min/max（0..0 若留在身上，用户就再也
+        // 拖不宽了——「宽度限制失效」的另一半）。还原后再钉一次宽度。
+        restoreConstraints(group)
+        group.api.setSize({ width: targetWidth })
+        if (chat) chat.api.setSize({ width: chatStart - delta })
       }
-      // **先落 morphBusy 再打标记**：refreshChatEdgeMarkers 在补间期间会让位
-      // （见其注释），顺序反了这次最终收敛会变成空操作，贴边标记停留在补间
-      // 起点声明的目标态上——若期间用户拖过 sash，结果就是错的（2026-10-18
-      // 实测：split 列的 data-edge 校准丢失）。
+      // 收尾：标记落定（applyCollapsedMarker 只写 data-dv-collapsed——
+      // 贴边内缩那套随 MainTint 于 2026-10-21 整体退役）
       morphBusy = false
       applyCollapsedMarker(group, hidden)
       clearMorph(group)
@@ -673,60 +733,72 @@ const setCollapsedAttr = (g: DockviewGroupPanel, collapsed: boolean): void => {
 
 const applyCollapsedMarker = (g: DockviewGroupPanel, collapsed: boolean): void => {
   setCollapsedAttr(g, collapsed)
-  refreshChatEdgeMarkers()
-}
-
-/** 给 chat 组打"这一侧没有**可见**邻居"标记（CSS 用它决定颜色层是否内缩）。
- *
- *  **为什么需要 JS**（2026-10-18 实锤）：侧栏收起后组仍常驻（0 宽），DOM 序
- *  里它还是 firstChild——chat 不再是 first-child，`.main-tint--dockview` 的
- *  左内缩 20px 失效，颜色层直接贴到窗口边缘（用户报"隐藏之后主对话到边缘
- *  的间距没了"）。CSS 没有"跳过 0 宽兄弟后的第一个"这种选择器，而 :has()
- *  数不了"前面有几个可见列"——只能在收放后由 JS 算。
- *
- *  判据 = 物理序里 chat 前后各有没有**宽度 > 0** 的组。
- *
- *  **组常驻改造后这条从"收放兜底"变成"唯一判据"**：左栏组永远在 DOM 里，
- *  chat 永远不是 first-child，`.dv-view:first-child` 结构性规则已退役
- *  （见 panes.css）。所以本函数必须在 boot 与每次收放后都跑。
- *
- *  `override` 供展开补间期使用：此刻组宽仍是 0，但**意图**是可见——按实际
- *  宽度算会把"马上要出现的邻居"当成不存在，tint 会在补间中途多出一条
- *  20px 缝再消失（闪一下）。
- *
- *  **补间期间只认 override**：`onDidLayoutChange` 的防抖回调也会调本函数
- *  （用户拖 sash 把某列拖到 0 时得靠它），而它在补间中每帧都会排队——
- *  若用"实际宽度"覆盖补间开始时声明的目标态，tint 会在补间末段闪一下。
- *  故 morphBusy 且无 override 时直接返回，补间结束的 applyCollapsedMarker
- *  会做最终收敛。 */
-export const refreshChatEdgeMarkers = (override?: {
-  group: DockviewGroupPanel
-  visible: boolean
-}): void => {
-  if (morphBusy && !override) return
-  const a = api()
-  if (!a) return
-  const visual = visualOrderOf(a)
-  const groupById = new Map(a.groups.map((g) => [g.id, g] as const))
-  const isVisible = (id: string): boolean => {
-    if (override && override.group.id === id) return override.visible
-    return Math.round(groupById.get(id)?.width ?? 0) > 0
-  }
-  for (const chat of groupsOfRegion(a, 'chat')) {
-    const at = visual.indexOf(chat.id)
-    if (at < 0) continue
-    const visibleBefore = visual.slice(0, at).some(isVisible)
-    const visibleAfter = visual.slice(at + 1).some(isVisible)
-    if (visibleBefore) chat.element?.removeAttribute('data-edge-left')
-    else chat.element?.setAttribute('data-edge-left', '')
-    if (visibleAfter) chat.element?.removeAttribute('data-edge-right')
-    else chat.element?.setAttribute('data-edge-right', '')
-  }
 }
 
 /** 用户的列宽记忆（0 宽时读不到 group.width，只能自己存）。
  *  键 = 组 id（'g-left' / 'g-panels'），跨会话不持久——重启后回到快照值。 */
 const savedColumnWidth = new Map<string, number>()
+
+/** 两轨的**目标宽**（用户意图 / 出厂默认），跨窗口缩放保持不变。
+ *
+ *  为什么需要单独记（2026-10-22 实锤）：dockview 的序列化**按比例**记列宽。
+ *  窗口从 1760 缩到 1400 时，存档里 300/1748 的比例摊到新宽度只剩 270——
+ *  栏宽"自己变窄"了，与"默认 300 / min 270"的语义冲突。所以两轨的宽度
+ *  必须由我们按**绝对值**维护：窗口尺寸变化后重新钉回这个目标宽（被 clamp
+ *  到当前许可区间），主栏吃剩余。用户拖 sash 会更新目标宽（onDidLayoutChange
+ *  里同步，见 dockview-shell）。 */
+const railTargetWidth = new Map<string, number>()
+
+/** 记录/读取两轨目标宽（'left' / 'panels'）。 */
+export const setRailTargetWidth = (region: ColRegion, width: number): void => {
+  if (region === 'chat') return
+  railTargetWidth.set(region, clampRailWidth(width))
+}
+
+export const railTargetWidthOf = (region: ColRegion): number =>
+  railTargetWidth.get(region) ?? RAIL_DEFAULT_WIDTH
+
+/** 窗口尺寸变化后把两轨钉回目标宽（主栏吃剩余）。收起态（宽 0）跳过。
+ *
+ *  调用时机：dockview 容器尺寸变化（窗口 resize / 侧栏收放结束 / 拖出分栏）。
+ *  幂等：宽度已等于目标时不动，避免无谓的 relayout。
+ *
+ *  **自带重入护栏**（2026-10-22 实锤）：`setSize` 会同步触发
+ *  `onDidLayoutChange`，调用方若在该回调里再调本函数就会无限递归——
+ *  实测直接把主线程冻死（应用"卡死动不了"，只能强杀）。这里用模块级
+ *  标志挡住重入，任何调用方都不会踩坑。
+ *
+ *  **垂直分栏后 width 不是尺寸轴**：上下分栏会把根 gridview 转成 VERTICAL，
+ *  此时左栏组的 `setSize({width})` 不生效——它的 size 轴是高度。这里同时给
+ *  width/height（height 用当前值，等于不动），让 dockview 按自己的
+ *  orientation 挑轴。 */
+let repinInFlight = false
+
+export const repinRailWidths = (): void => {
+  if (repinInFlight) return
+  const a = api()
+  if (!a) return
+  const left = groupsOfRegion(a, 'left')[0]
+  const panels = groupsOfRegion(a, 'panels')[0]
+  // 收起中的列宽度为 0——它的目标宽在展开时用，这里不钉（钉了会把隐藏的
+  // 栏又撑出来）
+  const pin = (g: DockviewGroupPanel | undefined, region: ColRegion) => {
+    if (!g) return
+    const current = Math.round(g.width)
+    if (current <= 0) return
+    const target = clampRailWidth(railTargetWidthOf(region))
+    if (Math.abs(current - target) <= 1) return
+    // 带上 height（当前值）——垂直分栏下 width 不是尺寸轴，只给 width 是空操作
+    g.api.setSize({ width: target, height: Math.round(g.height) })
+  }
+  repinInFlight = true
+  try {
+    pin(left, 'left')
+    pin(panels, 'panels')
+  } finally {
+    repinInFlight = false
+  }
+}
 
 /** 隐藏/打开左侧栏（全隐藏语义：宽度归 0，不做 icon rail）。 */
 export const setLeftHidden = (hidden: boolean): void => {
@@ -743,26 +815,72 @@ export const setLeftHidden = (hidden: boolean): void => {
   setColumnCollapsed(lg, hidden)
 }
 
-/** 隐藏/打开面板栏（根面板列唯一；恢复位 = colOrder 语义位） */
+/** 隐藏/打开面板栏（根面板列唯一；恢复位 = colOrder 语义位）
+ *
+ *  **ZCode 语义对齐**（2026-11-01 用户："zcode打开页是没有标签的，只有
+ *  一个标签的时候是关闭是会关闭面板栏的"）：
+ *  - 隐藏时组可能已被 dockview 收走（末签关闭路径）——栏在视觉上已消失，
+ *    此时只记账（panelsHidden = true），不要求组在场；
+ *  - 打开时组不在场（末签关闭后被重新打开）→ 先重建打开页锚组
+ *    （ensurePanelsAnchor），再收约束盒展开。 */
 export const setPanelsHidden = (hidden: boolean): void => {
   const a = api()
   if (!a) return
   const flags = columnFlagsOf()
   if (hidden === flags.panelsHidden) return
-  const root = rootPanelsGroup(a)
+  let root = rootPanelsGroup(a)
   if (!root) {
-    console.error('[dv-column-ops] 面板栏不在场——切换放弃')
-    return
+    if (hidden) {
+      // 组已被 dockview 收走：栏已消失，只落旗标（boot normalize 不再误报）
+      setFlags({ ...flags, panelsHidden: true })
+      return
+    }
+    ensurePanelsAnchor(a)
+    root = rootPanelsGroup(a)
+    if (!root) {
+      console.error('[dv-column-ops] 面板栏锚重建失败——切换放弃')
+      return
+    }
   }
   setFlags({ ...flags, panelsHidden: hidden })
   setColumnCollapsed(root, hidden)
+  if (!hidden) {
+    // 重建/展开后把两轨钉回目标宽（rAF——不在布局回调栈里 setSize；重建
+    // 组的初始宽是 dockview 的比例摊分，不在 270–400 许可内）
+    requestAnimationFrame(() => repinRailWidths())
+  }
+}
+
+/** 重建面板栏锚（打开页宿主）。面板组被 dockview 收走后的「打开面板栏」
+ *  路径用；组与锚都在场时不做任何事。工厂布局的 open 面板形状与此同源
+ *  （factoryLayout.panels.open——**min+max 都带**：漏 max 会让重建组吃到
+ *  比例摊分宽 766，实测 2026-11-01）。 */
+export const ensurePanelsAnchor = (a: DockviewApi): void => {
+  if (a.getPanel('open')) return
+  if (rootPanelsGroup(a)) return
+  a.addPanel({
+    id: 'open',
+    component: 'open',
+    title: '面板',
+    tabComponent: 'openTab',
+    minimumWidth: RAIL_MIN_WIDTH,
+    maximumWidth: RAIL_MAX_WIDTH,
+    params: { region: 'panels' },
+    position: { referencePanel: 'workspace', direction: 'right' },
+  })
 }
 
 // ── boot 自愈（normalizeColumns 的 dockview 版） ─────────────────────────────
 
 /** 旗标与实际几何脱同步时按旗标收敛（**判据 = 宽度**，2026-10-18 改）：
  *  收放现在"只改宽度、从不摘组"，所以"组在不在"不再是隐藏判据——要看
- *  宽度是不是 0。列序对齐仍是每次都做。 */
+ *  宽度是不是 0。列序对齐仍是每次都做。
+ *
+ *  **约束盒也必须一起收敛**（2026-10-22）：dockview 的组级显式约束不随
+ *  存档 round-trip（组 state 只有 id/locked/hideHeader/headerPosition/
+ *  views），刷新后隐藏列回到"宽度 0 + 面板级 min 240/max MAX"——宽度对了
+ *  但许可还在，于是下一次分栏照样把它摊出宽度（空白卡片）。故无论走哪一
+ *  支，收起态都必须落成 0..0 的约束盒。 */
 export const normalizeColumns = (): void => {
   const a = api()
   if (!a) return
@@ -772,29 +890,31 @@ export const normalizeColumns = (): void => {
     console.info('[dv-column-ops] 布局快照机制已退役（收放改为纯宽度）——清理旧快照')
     safeSet(STASH_KEY, '')
   }
-  // 左栏：旗标说隐藏但仍有宽度 → 收到 0（boot 期无动画）
-  const lg = groupsOfRegion(a, 'left')[0]
-  if (lg) {
-    const collapsed = Math.round(lg.width) === 0
-    if (flags.leftHidden !== collapsed) {
-      withoutColumnMorph(() => setColumnCollapsed(lg, flags.leftHidden))
+  const converge = (g: DockviewGroupPanel, hidden: boolean): void => {
+    const collapsed = Math.round(g.width) === 0
+    if (collapsed !== hidden) {
+      withoutColumnMorph(() => setColumnCollapsed(g, hidden))
+      return
     }
-  } else if (!flags.leftHidden) {
+    // 宽度已是目标态：只收敛约束盒 + 标记（组常驻后 DOM 是新的，
+    // data-dv-collapsed 不会自己回来）
+    if (hidden) collapseConstraints(g)
+    else restoreConstraints(g)
+    applyCollapsedMarker(g, hidden)
+  }
+  // 左栏
+  const lg = groupsOfRegion(a, 'left')[0]
+  if (lg) converge(lg, flags.leftHidden)
+  else if (!flags.leftHidden) {
     console.error('[dv-column-ops] 左栏组不在树里——旗标未隐藏但无法恢复（布局存档异常）')
   }
   // 面板栏同理
   const root = rootPanelsGroup(a)
-  if (root) {
-    const collapsed = Math.round(root.width) === 0
-    if (flags.panelsHidden !== collapsed) {
-      withoutColumnMorph(() => setColumnCollapsed(root, flags.panelsHidden))
-    }
-  } else if (!flags.panelsHidden) {
+  if (root) converge(root, flags.panelsHidden)
+  else if (!flags.panelsHidden) {
     console.error('[dv-column-ops] 面板栏组不在树里——旗标未隐藏但无法恢复（布局存档异常）')
   }
   alignVisibleToOrder(a)
-  // 贴边标记每次收敛后都要重算（组常驻改造后它是唯一判据，见函数注释）
-  refreshChatEdgeMarkers()
   persistFlagsColOrder(a)
 }
 
@@ -828,39 +948,42 @@ export const persistFlagsColOrder = (a: DockviewApi): void => {
 
 // ── 复位（用户 2026-10-16：右键菜单「默认布局」）────────────────────────────
 
-/** 布局回出厂形态：fromJSON(FACTORY_LAYOUT)（内部先 clear——会话分栏/
- *  打开页全收，三栏 [左|主|面板] 重建，open 锚在场）+ 旗标复位（colOrder
- *  出厂序、栏显隐归 false；旧 colstash 判废——隐藏期快照对复位后的树已无
- *  意义）+ 双轨 350 两轮钉回（同 boot 出厂钉法：fromJSON 的 size 按比例
- *  归一，不是 px）+ 出厂布局存档（覆盖 v9 键，reload 后不回旧形态）。挂载
- *  页签的会话不丢：会话真相在 pi，重开走侧栏/列表。失败 = console.error
+/** 布局回出厂形态：fromJSON(factoryLayout(容器宽,高))（内部先 clear——会话
+ *  分栏/打开页全收，三栏 [左|主|面板] 重建，open 锚在场）+ 旗标复位
+ *  （colOrder 出厂序、栏显隐归 false；旧 colstash 判废——隐藏期快照对复位
+ *  后的树已无意义）+ 双轨钉回 300（同 boot 出厂钉法：fromJSON 的 size 按
+ *  比例归一，不是 px）+ 出厂布局存档（覆盖 v10 键，reload 后不回旧形态）。
+ *  挂载页签的会话不丢：会话真相在 pi，重开走侧栏/列表。失败 = console.error
  *  可见（规矩 12）。 */
 export const resetLayoutToFactory = (): void => {
   const a = api()
   if (!a) return
   try {
-    holdLayoutSurgery(() => a.fromJSON(FACTORY_LAYOUT))
+    const factory = factoryLayout(a.width, a.height)
+    holdLayoutSurgery(() => a.fromJSON(factory))
     // 旗标复位 + 快照清理（隐藏语义清零）
     setFlags({ colOrder: ['left', 'chat', 'panels'], leftHidden: false, panelsHidden: false })
     safeSet(STASH_KEY, '')
     // 复位后所有列都回到非 0 宽：清掉 0 宽标记与被记住的折叠宽
     for (const g of a.groups) applyCollapsedMarker(g, false)
     savedColumnWidth.clear()
-    // 双轨钉回 350（两轮互挤后收敛——boot 出厂同款；rAF 后树已稳）。
+    // 双轨钉回 300（两轮互挤后收敛——boot 出厂同款；rAF 后树已稳）。
     // 钉宽放复位护栏之外：rAF/150ms 回调跑时 depth 已归零，不受让位影响。
     const pin = () => {
       const lg = groupsOfRegion(a, 'left')[0]
       const pg = groupsOfRegion(a, 'panels')[0]
+      const left = leftRailDefaultWidth()
+      const panels = panelsRailDefaultWidth()
       for (let i = 0; i < 3; i++) {
-        pg?.api.setSize({ width: RAIL_W })
-        lg?.api.setSize({ width: RAIL_W })
+        pg?.api.setSize({ width: panels })
+        lg?.api.setSize({ width: left })
       }
     }
     requestAnimationFrame(pin)
     setTimeout(pin, 150)
     // 出厂存档（onDidLayoutChange 防抖 250ms 也会写——这里先写一次
     // 让持久化即时收敛，防 debounce 窗口内进程退出留下旧档）
-    safeSet(LAYOUT_KEY, JSON.stringify(FACTORY_LAYOUT))
+    safeSet(LAYOUT_KEY, JSON.stringify(factory))
     console.info('[dv-column-ops] 布局已复位为出厂形态')
   } catch (e) {
     console.error('[dv-column-ops] 布局复位失败', e)

@@ -10,7 +10,7 @@ use crate::agent_cx::AgentCx;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::extensions::{safe_canonicalize, strip_unc_prefix};
-use crate::model::{ContentBlock, ImageContent, TextContent};
+use crate::model::{ContentBlock, ImageContent, MediaContent, TextContent};
 use crate::platform::{
     EffectiveModeAccessContext, UNIX_ACCESS_READ, UNIX_ACCESS_SEARCH, UNIX_ACCESS_WRITE,
     ensure_effective_mode_access,
@@ -159,6 +159,49 @@ impl ToolEffects {
     }
 }
 
+/// Non-secret identity of the model currently serving the owning agent.
+///
+/// Keep provider and model separate: model identifiers can contain slashes,
+/// and child processes must not reinterpret them as a provider-qualified spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolModelSelection {
+    pub provider: String,
+    pub model: String,
+}
+
+/// Live model affinity shared by one registry and its delegating tools.
+///
+/// The host publishes changes only when it installs a provider. A delegation
+/// captures [`Self::current`] once so queued children and retries retain the
+/// model selected for that request. Credentials are never stored here.
+#[derive(Clone, Default)]
+pub struct ToolModelScope {
+    current: Arc<Mutex<Option<ToolModelSelection>>>,
+}
+
+impl ToolModelScope {
+    /// Capture the active model, or `None` for an unattached tool registry.
+    #[must_use]
+    pub fn current(&self) -> Option<ToolModelSelection> {
+        self.current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set(&self, provider: &str, model: &str) {
+        let selection =
+            (!provider.trim().is_empty() && !model.trim().is_empty()).then(|| ToolModelSelection {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            });
+        *self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = selection;
+    }
+}
+
 /// A tool that can be executed by the agent.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -186,6 +229,25 @@ pub trait Tool: Send + Sync {
         on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput>;
 
+    /// Execute with this invocation's live auxiliary-provider privacy policy.
+    /// Tools making a second model request use `protect` on complete source
+    /// fields before formatting or truncation. Ordinary tools retain their
+    /// normal execution path and do not capture session state in the registry.
+    ///
+    /// `protect` names its lifetimes with `for<'a, 'b>` because `#[async_trait]`
+    /// replaces elided lifetimes inside `Fn(..)` with method lifetimes, which
+    /// would make the callback accept only one caller-chosen borrow.
+    async fn execute_with_auxiliary_privacy(
+        &self,
+        tool_call_id: &str,
+        input: serde_json::Value,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        protect: &(dyn for<'a, 'b> Fn(&'a [&'b str]) -> Result<Vec<String>> + Send + Sync),
+    ) -> Result<ToolOutput> {
+        let _ = protect;
+        self.execute(tool_call_id, input, on_update).await
+    }
+
     /// Declare the coarse side effects used by the agent scheduler.
     ///
     /// Defaults to local write effects so undeclared tools are serialized fail-closed.
@@ -194,15 +256,35 @@ pub trait Tool: Send + Sync {
         ToolEffects::write()
     }
 
+    /// Declare the effects of this invocation for execution and approval gates.
+    ///
+    /// Input-aware tools may narrow their coarse declaration only for branches
+    /// that cannot perform the stronger effects. Malformed inputs must retain
+    /// a conservative declaration. Ordinary tools keep their existing effects.
+    #[must_use]
+    fn effects_for_input(&self, _input: &serde_json::Value) -> ToolEffects {
+        self.effects()
+    }
+
     /// Attach the owning registry's live background-job session scope.
     /// Non-job tools intentionally ignore it.
     fn bind_job_session_scope(&mut self, _scope: crate::jobs::JobSessionScope) {}
+
+    /// Attach the owning registry's live provider/model identity.
+    /// Tools that do not delegate model work intentionally ignore it.
+    fn bind_model_scope(&mut self, _scope: ToolModelScope) {}
 
     /// Where the tool comes from. Extension-registered tools answer
     /// [`ToolOrigin::Extension`] so `setActiveTools` can shelve and restore
     /// them without touching built-in or MCP tools.
     fn origin(&self) -> ToolOrigin {
         ToolOrigin::BuiltIn
+    }
+
+    /// Exact owner of a mounted MCP wrapper. Names alone cannot establish
+    /// ownership: an extension or caller may deliberately use the same name.
+    fn mcp_manager(&self) -> Option<&Arc<crate::mcp::McpManager>> {
+        None
     }
 }
 
@@ -2718,11 +2800,26 @@ fn expand_path(file_path: &str) -> String {
             .to_string_lossy()
             .to_string();
     }
-    if let Some(rest) = normalized.strip_prefix("~/") {
+    if let Some(rest) = home_relative_rest(&normalized, cfg!(windows)) {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
         return home.join(rest).to_string_lossy().to_string();
     }
     normalized
+}
+
+/// The remainder of `path` after a leading `~` home marker, or `None`.
+///
+/// `~/` is a home marker everywhere. `~\` is one only where backslash is a
+/// path separator (Windows, where models naturally write `~\Documents\x`);
+/// on Unix `~\x` is a legal relative file name and must stay literal.
+fn home_relative_rest(path: &str, backslash_separates: bool) -> Option<&str> {
+    path.strip_prefix("~/").or_else(|| {
+        if backslash_separates {
+            path.strip_prefix("~\\")
+        } else {
+            None
+        }
+    })
 }
 
 /// Resolve a path relative to `cwd`. Handles `~` expansion and absolute paths.
@@ -4217,7 +4314,8 @@ fn enforce_read_scope(path: &Path, cwd: &Path, workspace: &WorkspaceHandle) -> R
 #[derive(Debug, Clone, Default)]
 pub struct ProcessedFiles {
     pub text: String,
-    pub images: Vec<ImageContent>,
+    /// Image and media blocks in the order of their source file arguments.
+    pub attachments: Vec<ContentBlock>,
 }
 
 fn normalize_dot_segments(path: &Path) -> PathBuf {
@@ -4890,7 +4988,7 @@ fn append_file_notice_block(out: &mut String, path: &Path, notice: &str) {
     let _ = writeln!(out, "<file name=\"{path_str}\">\n{notice}\n</file>");
 }
 
-fn append_image_file_ref(out: &mut String, path: &Path, note: Option<&str>) {
+fn append_attachment_file_ref(out: &mut String, path: &Path, note: Option<&str>) {
     let path_str = escaped_file_tag_name(path);
     match note {
         Some(text) => {
@@ -4962,10 +5060,10 @@ fn maybe_append_image_argument(
 
     let base64_data =
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &resized.bytes);
-    out.images.push(ImageContent {
+    out.attachments.push(ContentBlock::Image(ImageContent {
         data: base64_data,
         mime_type: resized.mime_type.to_string(),
-    });
+    }));
 
     let note = if resized.resized {
         if let (Some(ow), Some(oh), Some(w), Some(h)) = (
@@ -4990,16 +5088,40 @@ fn maybe_append_image_argument(
     } else {
         None
     };
-    append_image_file_ref(&mut out.text, absolute_path, note.as_deref());
+    append_attachment_file_ref(&mut out.text, absolute_path, note.as_deref());
     Ok(true)
 }
 
-/// Process `@file` arguments into a single text prefix and image attachments.
+fn append_media_argument(
+    out: &mut ProcessedFiles,
+    absolute_path: &Path,
+    bytes: &[u8],
+    mime_type: &str,
+) {
+    let data = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+    let name = absolute_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(crate::model::sanitize_media_name);
+    out.attachments.push(ContentBlock::Media(MediaContent {
+        data,
+        mime_type: mime_type.to_string(),
+        name,
+    }));
+    let note = format!(
+        "[Media: {mime_type}, {}]",
+        crate::model::format_media_size(bytes.len() as u64)
+    );
+    append_attachment_file_ref(&mut out.text, absolute_path, Some(&note));
+}
+
+/// Process `@file` arguments into a single text prefix and ordered attachments.
 ///
-/// Matches the legacy TypeScript behavior:
 /// - Resolves paths (including `~` expansion + macOS screenshot variants)
 /// - Skips empty files
 /// - For images: attaches image blocks and appends `<file name="...">...</file>` references
+/// - For supported video/audio extensions: attaches the unchanged bytes as media,
+///   bounded by the default inline media byte cap
 /// - For text: embeds the file contents inside `<file>` tags
 pub fn process_file_arguments(
     file_args: &[String],
@@ -5007,10 +5129,6 @@ pub fn process_file_arguments(
     auto_resize_images: bool,
     workspace: &crate::workspace::WorkspaceHandle,
 ) -> Result<ProcessedFiles> {
-    // bd-cv653.3.12: the workspace handle is threaded through for
-    // multi-root confinement; file args are read-only today (reads confine
-    // through the tool layer), so the handle is accepted and unused here.
-    let _ = workspace;
     let mut out = ProcessedFiles::default();
 
     for file_arg in file_args {
@@ -5046,34 +5164,52 @@ pub fn process_file_arguments(
             continue;
         }
 
-        if meta.len() > READ_TOOL_MAX_BYTES {
+        let media_mime_type = absolute_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .and_then(crate::media_tools::media_mime_type_for_extension);
+        let max_bytes = if media_mime_type.is_some() {
+            crate::media_tools::DEFAULT_MEDIA_MAX_BYTES
+        } else {
+            READ_TOOL_MAX_BYTES
+        };
+        if meta.len() > max_bytes {
             append_file_notice_block(
                 &mut out.text,
                 &absolute_path,
                 &format!(
                     "[File is too large ({} bytes). Max allowed is {} bytes.]",
                     meta.len(),
-                    READ_TOOL_MAX_BYTES
+                    max_bytes
                 ),
             );
             continue;
         }
 
-        let allowed_roots = [cwd.to_path_buf(), Config::global_dir()];
-        let bytes =
-            read_file_capped_within_roots_sync(&absolute_path, &allowed_roots, READ_TOOL_MAX_BYTES)
-                .map_err(|e| {
-                    Error::tool(
-                        "read",
-                        format!("Could not read file {}: {e}", absolute_path.display()),
-                    )
-                })?;
+        // Snapshot immediately before the confined open so additions and
+        // revocations on shared workspace handles apply to the actual read.
+        let mut allowed_roots = workspace.snapshot_or(cwd).all();
+        allowed_roots.push(Config::global_dir());
+        let bytes = read_file_capped_within_roots_sync(&absolute_path, &allowed_roots, max_bytes)
+            .map_err(|e| {
+            Error::tool(
+                "read",
+                format!("Could not read file {}: {e}", absolute_path.display()),
+            )
+        })?;
+        if bytes.is_empty() {
+            continue;
+        }
 
         if maybe_append_image_argument(&mut out, &absolute_path, &bytes, auto_resize_images)? {
             continue;
         }
 
-        append_text_file_block(&mut out.text, &absolute_path, &bytes);
+        if let Some(mime_type) = media_mime_type {
+            append_media_argument(&mut out, &absolute_path, &bytes, mime_type);
+        } else {
+            append_text_file_block(&mut out.text, &absolute_path, &bytes);
+        }
     }
 
     Ok(out)
@@ -5356,6 +5492,8 @@ pub struct ToolRegistry {
     /// Shared by bash/jobs/hub and rebound by [`crate::agent::AgentSession`]
     /// to the live session handle.
     job_session_scope: crate::jobs::JobSessionScope,
+    /// Shared by delegating tools and updated on every host provider switch.
+    model_scope: ToolModelScope,
     /// Discoverable-tier tool names (bd-cv653.1.6): excluded from the provider
     /// schema until promoted via `xdev promote`. Everything not in this set
     /// is in the schema (essential tier).
@@ -5363,9 +5501,61 @@ pub struct ToolRegistry {
     /// Session undo recorder shared with write/edit/hashline_edit
     /// (bd-cv653.3.13); the interactive host reads it back for /undo //redo.
     mutation_recorder: Option<Arc<crate::undo::FileMutationRecorder>>,
+    /// Host-owned picker surface shared by permission-gated built-ins and the
+    /// optional model-facing ask tool. This exists even when `ask` is not in
+    /// the model schema: host authorization must not disappear merely because
+    /// the model cannot ask arbitrary questions.
+    host_ask: crate::ask::AskTool,
+    /// Invocation policy retained when extension/MCP mounts publish a snapshot.
+    /// Set only when the host explicitly disables its built-in tool set.
+    builtins_disabled: bool,
     /// Back-pointer to the [`SharedToolRegistry`] this snapshot belongs to,
     /// so a hostcall holding only a snapshot can publish an update.
     shared: Option<std::sync::Weak<SharedToolRegistryInner>>,
+}
+
+/// How the memory-bank tools are turned on, quoted in the `--tools` warning.
+const MEMORY_BANK_HOW: &str = "set memory.backend to \"local\" or \"cass\" in settings.json";
+
+/// The requested tool names pi does not provide at all.
+///
+/// A name pi DOES provide but does not select through `--tools` is not one of
+/// these; see [`unselectable_tool_names`]. Calling both a typo and a real tool
+/// "not a tool pi provides" was wrong about seven shipped tools.
+///
+/// Order and duplicates follow the request, so the warning reads back what the
+/// user typed.
+#[must_use]
+pub fn unknown_tool_names(requested: &[&str]) -> Vec<String> {
+    requested
+        .iter()
+        .filter(|name| {
+            !ToolRegistry::KNOWN_TOOL_NAMES.contains(*name)
+                && !ToolRegistry::TOOLS_NOT_SELECTED_BY_FLAG
+                    .iter()
+                    .any(|(name_, _)| name_ == *name)
+        })
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+/// The requested names that are real tools `--tools` has no say over, paired
+/// with what does decide them.
+///
+/// Listing one of these is harmless but has no effect, which is worth saying:
+/// the user asked for a tool by name and pi is about to decide its presence on
+/// other grounds entirely.
+#[must_use]
+pub fn unselectable_tool_names(requested: &[&str]) -> Vec<(String, &'static str)> {
+    requested
+        .iter()
+        .filter_map(|name| {
+            ToolRegistry::TOOLS_NOT_SELECTED_BY_FLAG
+                .iter()
+                .find(|(name_, _)| name_ == name)
+                .map(|(_, how)| ((*name).to_string(), *how))
+        })
+        .collect()
 }
 
 impl ToolRegistry {
@@ -5374,11 +5564,106 @@ impl ToolRegistry {
         Self::with_mutation_recorder(enabled, cwd, config, None, None)
     }
 
+    /// Construct an empty built-in set while retaining the host's picker policy.
+    /// Extensions and MCP tools may still be mounted afterward.
+    pub fn without_builtins(config: Option<&Config>) -> Self {
+        let mut registry = Self::from_tools(Vec::new());
+        registry.builtins_disabled = true;
+        registry.host_ask = crate::ask::AskTool::new(crate::ask::AskPolicy::from_config(
+            config.and_then(|config| config.ask_policy.as_deref()),
+        ));
+        registry
+    }
+
+    /// Whether this invocation explicitly disabled host-provided built-in tools.
+    /// Extension and MCP mounts do not change this policy.
+    #[must_use]
+    pub const fn builtins_disabled(&self) -> bool {
+        self.builtins_disabled
+    }
+
     /// The undo recorder attached at construction, if any.
     #[must_use]
     pub fn mutation_recorder(&self) -> Option<Arc<crate::undo::FileMutationRecorder>> {
         self.mutation_recorder.clone()
     }
+
+    /// Every name `--tools` will honour.
+    ///
+    /// The match in [`Self::with_mutation_recorder`] ends in `_ => {}`, so a
+    /// name it does not know is dropped without a word: `pi --tools
+    /// completely_made_up` starts an agent with no tools at all and says
+    /// nothing, and `--tools read,bsah,edit` quietly hands the model two tools
+    /// instead of three. This list is what [`unknown_tool_names`] measures a
+    /// request against.
+    ///
+    /// Keep it in step with that match. `tool_registry_builds_every_listed_name`
+    /// fails if a name here builds nothing, which is the direction that would
+    /// promise a tool pi cannot deliver. The reverse direction — a tool pi
+    /// registers that no list mentions — used to cost a spurious "not a tool pi
+    /// provides" warning; it is now covered by
+    /// [`Self::TOOLS_NOT_SELECTED_BY_FLAG`] and
+    /// `every_registerable_tool_is_named_in_one_of_the_two_lists`.
+    pub const KNOWN_TOOL_NAMES: &'static [&'static str] = &[
+        // Built here, one arm each.
+        "ast_edit",
+        "ast_grep",
+        "bash",
+        "browser",
+        "computer",
+        "current_time",
+        "debug",
+        "edit",
+        "eval",
+        "find",
+        "generate_image",
+        "github",
+        "grep",
+        "hashline_edit",
+        "hub",
+        "inspect_image",
+        "jobs",
+        "ls",
+        "lsp",
+        "read",
+        "read_media",
+        "security_scan",
+        "subagent",
+        "tts",
+        "web_search",
+        "write",
+        // Host-coupled: joined after construction by main.rs / sdk.rs.
+        "ask",
+        "todo",
+        "submit_plan",
+    ];
+
+    /// Tools pi provides that `--tools` does not select, and what decides them.
+    ///
+    /// These reach the registry outside the `--tools` match, so naming one on
+    /// the flag changes nothing. That is worth telling the user, and it is not
+    /// the same thing as a typo: before this list existed, `--tools xdev` was
+    /// answered with "xdev is not a tool pi provides", which is false about the
+    /// dispatcher the entire discoverable tier hangs off.
+    ///
+    /// The second field is the whole message a user needs to actually get the
+    /// tool, so keep it specific enough to act on.
+    pub const TOOLS_NOT_SELECTED_BY_FLAG: &'static [(&'static str, &'static str)] = &[
+        (
+            "xdev",
+            "the dispatcher appears whenever any discoverable-tier tool is enabled \
+             (ast_grep, ast_edit, lsp, debug, or the memory bank)",
+        ),
+        (
+            "manage_skill",
+            "always registered; it cannot touch user-authored skills, so it needs no opt-in",
+        ),
+        ("retain", MEMORY_BANK_HOW),
+        ("recall", MEMORY_BANK_HOW),
+        ("reflect", MEMORY_BANK_HOW),
+        ("memory_edit", MEMORY_BANK_HOW),
+        ("learn", MEMORY_BANK_HOW),
+    ];
 
     /// Like [`ToolRegistry::new`] but attaches a session undo recorder to the
     /// mutating file tools (bd-cv653.3.13). `workspace` installs the shared
@@ -5393,8 +5678,12 @@ impl ToolRegistry {
     ) -> Self {
         let legacy_workspace = WorkspaceHandle::default();
         let workspace = workspace.unwrap_or(&legacy_workspace);
+        let host_ask = crate::ask::AskTool::new(crate::ask::AskPolicy::from_config(
+            config.and_then(|config| config.ask_policy.as_deref()),
+        ));
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
         let job_session_scope = crate::jobs::JobSessionScope::default();
+        let model_scope = ToolModelScope::default();
         let shell_path = config.and_then(|c| c.shell_path.clone());
         let shell_command_prefix = config.and_then(|c| c.shell_command_prefix.clone());
         let image_auto_resize = config.is_none_or(Config::image_auto_resize);
@@ -5489,19 +5778,19 @@ impl ToolRegistry {
                     ));
                 }
                 "generate_image" => {
-                    let provider = config
-                        .and_then(|c| c.media.as_ref())
-                        .and_then(|m| m.image_gen_provider.clone());
+                    let media = config.and_then(|c| c.media.as_ref());
+                    let provider = media.and_then(|m| m.image_gen_provider.clone());
+                    let model = media.and_then(|m| m.image_gen_model.clone());
                     tools.push(Box::new(
-                        crate::media_tools::GenerateImageTool::with_provider(cwd, provider),
+                        crate::media_tools::GenerateImageTool::with_defaults(cwd, provider, model),
                     ));
                 }
                 "tts" => {
-                    let voice = config
-                        .and_then(|c| c.media.as_ref())
-                        .and_then(|m| m.tts_voice.clone());
-                    tools.push(Box::new(crate::media_tools::TtsTool::with_voice(
-                        cwd, voice,
+                    let media = config.and_then(|c| c.media.as_ref());
+                    let provider = media.and_then(|m| m.tts_provider.clone());
+                    let voice = media.and_then(|m| m.tts_voice.clone());
+                    tools.push(Box::new(crate::media_tools::TtsTool::with_defaults(
+                        cwd, provider, voice,
                     )));
                 }
                 "computer" => {
@@ -5511,7 +5800,14 @@ impl ToolRegistry {
                         .unwrap_or(true);
                     tools.push(Box::new(
                         crate::computer::ComputerTool::new(cwd)
-                            .with_require_approval(require_approval),
+                            .with_require_approval(require_approval)
+                            .with_approval_handler({
+                                let ask = host_ask.clone();
+                                std::sync::Arc::new(move |request| {
+                                    let ask = ask.clone();
+                                    Box::pin(async move { ask.prompt_installed(request).await })
+                                })
+                            }),
                     ));
                 }
                 "browser" => {
@@ -5534,26 +5830,36 @@ impl ToolRegistry {
                             .with_role_model_spec(role_model_spec),
                     ));
                 }
+                // Nothing to build: either a host-coupled tool the session host
+                // joins after construction (`ask`, `todo`, `submit_plan` — see
+                // main.rs and sdk.rs) or a name pi does not have. The two are
+                // told apart by [`ToolRegistry::KNOWN_TOOL_NAMES`], which is
+                // what warns about the second; they cannot be told apart here,
+                // because both do nothing.
                 _ => {}
             }
         }
 
         // Memory bank (bd-cv653.4.1): retain/recall/reflect/memory_edit join
-        // the active set only when `memory.backend: local`; off (default)
-        // keeps them absent from the model's tool list entirely.
-        if config.is_some_and(|cfg| cfg.memory_backend() == "local")
+        // the active set with local or cass; cass adds read-only history to
+        // recall while retaining the local bank. Off keeps these tools absent.
+        if config.is_some_and(|cfg| matches!(cfg.memory_backend(), "local" | "cass"))
             && let Ok(store) = crate::memory::MemoryStore::open(cwd)
         {
-            let store = std::sync::Arc::new(store);
+            let store = std::sync::Arc::new(
+                store.with_secrets_settings(config.and_then(|cfg| cfg.secrets.as_ref())),
+            );
             tools.push(Box::new(crate::memory::RetainTool::new(
                 std::sync::Arc::clone(&store),
             )));
-            tools.push(Box::new(crate::memory::RecallTool::new(
-                std::sync::Arc::clone(&store),
-            )));
-            tools.push(Box::new(crate::memory::ReflectTool::new(
-                std::sync::Arc::clone(&store),
-            )));
+            tools.push(Box::new(
+                crate::memory::RecallTool::new(std::sync::Arc::clone(&store))
+                    .with_cass_history(config.is_some_and(|cfg| cfg.memory_backend() == "cass")),
+            ));
+            tools.push(Box::new(
+                crate::memory::ReflectTool::new(std::sync::Arc::clone(&store))
+                    .with_secrets_settings(config.and_then(|cfg| cfg.secrets.as_ref())),
+            ));
             tools.push(Box::new(crate::memory::MemoryEditTool::new(
                 std::sync::Arc::clone(&store),
             )));
@@ -5585,15 +5891,17 @@ impl ToolRegistry {
                 && !tools.iter().any(|t| t.name() == "generate_image")
             {
                 tools.push(Box::new(
-                    crate::media_tools::GenerateImageTool::with_provider(
+                    crate::media_tools::GenerateImageTool::with_defaults(
                         cwd,
                         media_cfg.image_gen_provider.clone(),
+                        media_cfg.image_gen_model.clone(),
                     ),
                 ));
             }
             if media_cfg.enable_tts.unwrap_or(false) && !tools.iter().any(|t| t.name() == "tts") {
-                tools.push(Box::new(crate::media_tools::TtsTool::with_voice(
+                tools.push(Box::new(crate::media_tools::TtsTool::with_defaults(
                     cwd,
+                    media_cfg.tts_provider.clone(),
                     media_cfg.tts_voice.clone(),
                 )));
             }
@@ -5606,7 +5914,15 @@ impl ToolRegistry {
         {
             let require_approval = comp_cfg.require_approval.unwrap_or(true);
             tools.push(Box::new(
-                crate::computer::ComputerTool::new(cwd).with_require_approval(require_approval),
+                crate::computer::ComputerTool::new(cwd)
+                    .with_require_approval(require_approval)
+                    .with_approval_handler({
+                        let ask = host_ask.clone();
+                        std::sync::Arc::new(move |request| {
+                            let ask = ask.clone();
+                            Box::pin(async move { ask.prompt_installed(request).await })
+                        })
+                    }),
             ));
         }
 
@@ -5653,35 +5969,55 @@ impl ToolRegistry {
 
         for tool in &mut tools {
             tool.bind_job_session_scope(job_session_scope.clone());
+            tool.bind_model_scope(model_scope.clone());
         }
 
         Self {
             tools: tools.into_iter().map(Arc::from).collect(),
             inactive: Vec::new(),
             job_session_scope,
+            model_scope,
             discoverable: discoverable_names,
             mutation_recorder,
+            host_ask,
+            builtins_disabled: false,
             shared: None,
         }
+    }
+
+    /// Host-owned interactive picker shared with permission-gated built-ins.
+    ///
+    /// This is deliberately independent of whether the model-facing `ask`
+    /// tool is enabled. Installing a UI here gives the host somewhere to make
+    /// authorization decisions without granting the model a new tool.
+    #[must_use]
+    pub fn host_ask_tool(&self) -> crate::ask::AskTool {
+        self.host_ask.clone()
     }
 
     /// Construct a registry from a pre-built tool list.
     pub fn from_tools(mut tools: Vec<Box<dyn Tool>>) -> Self {
         let job_session_scope = crate::jobs::JobSessionScope::default();
+        let model_scope = ToolModelScope::default();
+        let host_ask = crate::ask::AskTool::new(crate::ask::AskPolicy::Error);
         for tool in &mut tools {
             tool.bind_job_session_scope(job_session_scope.clone());
+            tool.bind_model_scope(model_scope.clone());
         }
         Self {
             tools: tools.into_iter().map(Arc::from).collect(),
             inactive: Vec::new(),
             job_session_scope,
+            model_scope,
             discoverable: std::collections::HashSet::new(),
             mutation_recorder: None,
+            host_ask,
+            builtins_disabled: false,
             shared: None,
         }
     }
 
-    /// Shallow copy: the same tool handles, job scope, discoverability set,
+    /// Shallow copy: the same tool handles, job/model scopes, discoverability set,
     /// and undo recorder. [`SharedToolRegistry::update`] publishes a new
     /// snapshot from it without disturbing readers of the previous one.
     #[must_use]
@@ -5690,8 +6026,11 @@ impl ToolRegistry {
             tools: self.tools.clone(),
             inactive: self.inactive.clone(),
             job_session_scope: self.job_session_scope.clone(),
+            model_scope: self.model_scope.clone(),
             discoverable: self.discoverable.clone(),
             mutation_recorder: self.mutation_recorder.clone(),
+            host_ask: self.host_ask.clone(),
+            builtins_disabled: self.builtins_disabled,
             shared: self.shared.clone(),
         }
     }
@@ -5769,7 +6108,13 @@ impl ToolRegistry {
     /// Append a tool.
     pub fn push(&mut self, mut tool: Box<dyn Tool>) {
         tool.bind_job_session_scope(self.job_session_scope.clone());
-        self.tools.push(Arc::from(tool));
+        tool.bind_model_scope(self.model_scope.clone());
+        let name = tool.name();
+        if let Some(pos) = self.tools.iter().position(|t| t.name() == name) {
+            self.tools[pos] = Arc::from(tool);
+        } else {
+            self.tools.push(Arc::from(tool));
+        }
     }
 
     /// Extend the registry with additional tools.
@@ -5779,8 +6124,64 @@ impl ToolRegistry {
     {
         for mut tool in tools {
             tool.bind_job_session_scope(self.job_session_scope.clone());
-            self.tools.push(Arc::from(tool));
+            tool.bind_model_scope(self.model_scope.clone());
+            let name = tool.name();
+            if let Some(pos) = self.tools.iter().position(|t| t.name() == name) {
+                self.tools[pos] = Arc::from(tool);
+            } else {
+                self.tools.push(Arc::from(tool));
+            }
         }
+    }
+
+    /// Reconcile one manager's authoritative catalog without replacing any
+    /// unrelated tool, including a currently shelved extension registration.
+    /// Old snapshots retain their Arc handles for calls already in flight.
+    pub(crate) fn reconcile_mcp_tools(
+        &mut self,
+        manager: &Arc<crate::mcp::McpManager>,
+        mut replacements: Vec<Box<dyn Tool>>,
+    ) -> usize {
+        let owned = |tool: &dyn Tool| {
+            tool.mcp_manager()
+                .is_some_and(|owner| Arc::ptr_eq(owner, manager))
+        };
+        let mut changed = 0usize;
+        self.tools.retain_mut(|tool| {
+            if !owned(tool.as_ref()) {
+                return true;
+            }
+            let Some(index) = replacements
+                .iter()
+                .position(|next| next.name() == tool.name())
+            else {
+                changed += 1;
+                return false;
+            };
+            let mut next = replacements.remove(index);
+            if next.description() != tool.description() || next.parameters() != tool.parameters() {
+                next.bind_job_session_scope(self.job_session_scope.clone());
+                next.bind_model_scope(self.model_scope.clone());
+                *tool = Arc::from(next);
+                changed += 1;
+            }
+            true
+        });
+        for mut next in replacements {
+            if self
+                .tools
+                .iter()
+                .chain(&self.inactive)
+                .any(|tool| tool.name() == next.name())
+            {
+                continue;
+            }
+            next.bind_job_session_scope(self.job_session_scope.clone());
+            next.bind_model_scope(self.model_scope.clone());
+            self.tools.push(Arc::from(next));
+            changed += 1;
+        }
+        changed
     }
 
     /// The shared scope captured by the job completion fetcher.
@@ -5792,6 +6193,12 @@ impl ToolRegistry {
     /// Rebind every job-aware tool and fetcher to a live session resolver.
     pub fn bind_job_session_resolver(&self, resolver: crate::jobs::JobSessionIdResolver) {
         self.job_session_scope.bind(resolver);
+    }
+
+    /// The live host model shared by every snapshot and delegating tool.
+    #[must_use]
+    pub fn model_scope(&self) -> ToolModelScope {
+        self.model_scope.clone()
     }
 
     /// Get all tools.
@@ -5826,6 +6233,9 @@ pub struct SharedToolRegistry {
 /// rebuilt from a snapshot observes and bumps the same version.
 pub struct SharedToolRegistryInner {
     registry: std::sync::RwLock<Arc<ToolRegistry>>,
+    /// Retained independently of wrappers, including an empty or denied
+    /// catalog, so a later successful refresh can mount newly added tools.
+    mcp_managers: std::sync::Mutex<Vec<Arc<crate::mcp::McpManager>>>,
     /// Bumped on every published update; the agent folds it into its tool
     /// schema cache key so a swap made from a hostcall (for example
     /// `setActiveTools`) reaches the next provider request without any
@@ -5836,10 +6246,21 @@ pub struct SharedToolRegistryInner {
 impl SharedToolRegistry {
     #[must_use]
     pub fn new(mut registry: ToolRegistry) -> Self {
+        let mut mcp_managers = registry
+            .shared_handle()
+            .map_or_else(Vec::new, |shared| shared.mcp_managers());
+        for tool in registry.tools() {
+            if let Some(manager) = tool.mcp_manager()
+                && !mcp_managers.iter().any(|bound| Arc::ptr_eq(bound, manager))
+            {
+                mcp_managers.push(Arc::clone(manager));
+            }
+        }
         let inner = Arc::new_cyclic(|weak| {
             registry.shared = Some(weak.clone());
             SharedToolRegistryInner {
                 registry: std::sync::RwLock::new(Arc::new(registry)),
+                mcp_managers: std::sync::Mutex::new(mcp_managers),
                 version: std::sync::atomic::AtomicU64::new(0),
             }
         });
@@ -5866,6 +6287,50 @@ impl SharedToolRegistry {
     #[must_use]
     pub fn version(&self) -> u64 {
         self.inner.version.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn bind_mcp_manager(&self, manager: &Arc<crate::mcp::McpManager>) {
+        let mut managers = self
+            .inner
+            .mcp_managers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !managers.iter().any(|bound| Arc::ptr_eq(bound, manager)) {
+            managers.push(Arc::clone(manager));
+        }
+    }
+
+    pub(crate) fn mcp_managers(&self) -> Vec<Arc<crate::mcp::McpManager>> {
+        self.inner
+            .mcp_managers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    // The write guard spans the whole read-modify-write and the version bump:
+    // releasing it after the swap would let a reader pair the new snapshot
+    // with the old version.
+    #[allow(clippy::significant_drop_tightening)]
+    pub(crate) fn reconcile_mcp_tools(
+        &self,
+        manager: &Arc<crate::mcp::McpManager>,
+        replacements: Vec<Box<dyn Tool>>,
+    ) -> usize {
+        let mut guard = self
+            .inner
+            .registry
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut next = guard.clone_shallow();
+        let changed = next.reconcile_mcp_tools(manager, replacements);
+        if changed > 0 {
+            *guard = Arc::new(next);
+            self.inner
+                .version
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        changed
     }
 
     /// Publish a modified registry: shallow-copy the current snapshot, apply
@@ -6821,6 +7286,185 @@ async fn execute_bash_spawn(
     }
 }
 
+/// What the bash tool says on Windows when no bash can be found (GH #182).
+#[cfg(any(windows, test))]
+const NO_WINDOWS_BASH: &str = "No bash found to run the command. Install Git for Windows \
+(https://git-scm.com/download/win), put a bash.exe (Git Bash, MSYS2, Cygwin) on PATH, \
+or set \"shell_path\" in settings.json to a bash executable.";
+
+/// Logged once per process when no native bash exists and the bash tool,
+/// `!command` or a background job falls back to WSL's launcher (GH #182).
+#[cfg(any(windows, test))]
+const WSL_BASH_NOTICE: &str = "No native bash (Git for Windows, MSYS2, Cygwin) was found, so \
+shell commands run through WSL's bash.exe, inside the default WSL Linux distro: Windows drives \
+appear under /mnt/<drive>, Windows programs and PATH entries may not be available, and a UNC \
+working directory (\\\\server\\share) may not translate, so commands can start in a different \
+directory. To choose the shell, install Git for Windows or set \"shell_path\" in settings.json, \
+e.g. \"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe\".";
+
+/// Log [`WSL_BASH_NOTICE`] on the user-diagnostic channel (stderr, or the TUI
+/// log while the TUI owns the terminal; never tool output) the first time
+/// `shell` is WSL's launcher. `shown` makes it once per process. Returns
+/// whether the notice was emitted.
+#[cfg(any(windows, test))]
+fn notice_wsl_bash_once(shell: &Path, shown: &std::sync::atomic::AtomicBool) -> bool {
+    if !is_wsl_bash_launcher(shell) || shown.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return false;
+    }
+    tracing::warn!(
+        target: crate::config::USER_DIAGNOSTIC_TARGET,
+        shell = %shell.display(),
+        "{WSL_BASH_NOTICE}"
+    );
+    true
+}
+
+/// The shell the bash tool, `!command` and background jobs run when
+/// `shell_path` is not configured.
+///
+/// Unix: the first of `/bin/bash`, `/usr/bin/bash`, `/usr/local/bin/bash`,
+/// else `sh`. Windows has neither those paths nor an `sh` on `PATH`, so the
+/// old `sh` fallback failed every call with "program not found" (GH #182);
+/// see [`find_windows_bash`] for the Windows order.
+///
+/// On Windows, the first time a process falls back to WSL's `bash.exe` it
+/// logs [`WSL_BASH_NOTICE`] once on the user-diagnostic channel; use
+/// [`resolve_default_bash_shell`] to look the shell up without that notice.
+pub(crate) fn default_bash_shell() -> Result<String> {
+    let shell = resolve_default_bash_shell()?;
+    #[cfg(windows)]
+    {
+        static WSL_NOTICE_SHOWN: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        notice_wsl_bash_once(Path::new(&shell), &WSL_NOTICE_SHOWN);
+    }
+    Ok(shell)
+}
+
+/// [`default_bash_shell`] without the one-time WSL notice, for callers such
+/// as `pi doctor` that report the resolved shell themselves.
+// Only the Windows arm can fail.
+#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))]
+pub(crate) fn resolve_default_bash_shell() -> Result<String> {
+    #[cfg(windows)]
+    {
+        find_windows_bash(&WindowsShellEnv::from_process(), Path::is_file)
+            .map(|path| path.to_string_lossy().into_owned())
+            .ok_or_else(|| Error::tool("bash", NO_WINDOWS_BASH))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"]
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .unwrap_or("sh")
+            .to_string())
+    }
+}
+
+/// Where [`find_windows_bash`] looks, read from the environment.
+#[cfg(any(windows, test))]
+struct WindowsShellEnv {
+    /// `%ProgramFiles%`, `%ProgramW6432%`, `%ProgramFiles(x86)%`.
+    program_files: Vec<PathBuf>,
+    /// `%LOCALAPPDATA%` (per-user Git for Windows installs).
+    local_app_data: Option<PathBuf>,
+    /// `%SystemRoot%`, for the WSL launcher.
+    system_root: Option<PathBuf>,
+    path_dirs: Vec<PathBuf>,
+}
+
+#[cfg(any(windows, test))]
+impl WindowsShellEnv {
+    fn from_process() -> Self {
+        let var = |name: &str| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            program_files: ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
+                .into_iter()
+                .filter_map(var)
+                .collect(),
+            local_app_data: var("LOCALAPPDATA"),
+            system_root: var("SystemRoot"),
+            path_dirs: std::env::var_os("PATH")
+                .map(|path| absolute_path_dirs(&path))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// The absolute directories of a `PATH` value. An empty entry (a stray or
+/// trailing `;` is common on Windows) or a relative one such as `.` would
+/// otherwise make a `bash.exe` in the current directory, e.g. one committed
+/// to the repository being worked on, the shell every command runs through.
+#[cfg(any(windows, test))]
+fn absolute_path_dirs(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .collect()
+}
+
+/// Whether `path` is WSL's `bash.exe` launcher (`System32\bash.exe`, or the
+/// Store app alias under `WindowsApps`), which runs the command inside the
+/// default Linux distro rather than on Windows.
+pub(crate) fn is_wsl_bash_launcher(path: &Path) -> bool {
+    let in_system32 = path.parent().and_then(Path::file_name).is_some_and(|dir| {
+        dir.eq_ignore_ascii_case("system32") || dir.eq_ignore_ascii_case("sysnative")
+    });
+    in_system32
+        || path
+            .components()
+            .any(|part| part.as_os_str().eq_ignore_ascii_case("WindowsApps"))
+}
+
+/// Pick a bash on Windows (GH #182), in this order:
+///
+/// 1. Git for Windows in its standard install locations
+///    (`<ProgramFiles>\Git\bin\bash.exe`,
+///    `%LOCALAPPDATA%\Programs\Git\bin\bash.exe`).
+/// 2. `PATH`, in order: a `bash.exe` (Git Bash, MSYS2, Cygwin, Scoop shims),
+///    or the `bin\bash.exe` next to a Git install whose `cmd\git.exe` is on
+///    `PATH` (Git's default PATH option adds only `Git\cmd`).
+/// 3. WSL's `bash.exe` launcher, last: it works, but the command runs inside
+///    Linux, where Windows paths appear under `/mnt/<drive>`.
+#[cfg(any(windows, test))]
+fn find_windows_bash(env: &WindowsShellEnv, is_file: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let git_bash = |git_root: &Path| git_root.join("bin").join("bash.exe");
+    let installed = env
+        .program_files
+        .iter()
+        .map(|dir| git_bash(&dir.join("Git")))
+        .chain(
+            env.local_app_data
+                .iter()
+                .map(|dir| git_bash(&dir.join("Programs").join("Git"))),
+        );
+    let on_path = env.path_dirs.iter().flat_map(|dir| {
+        let beside_git = is_file(&dir.join("git.exe"))
+            .then(|| dir.parent().map(git_bash))
+            .flatten();
+        std::iter::once(dir.join("bash.exe")).chain(beside_git)
+    });
+    if let Some(found) = installed
+        .chain(on_path)
+        .find(|candidate| !is_wsl_bash_launcher(candidate) && is_file(candidate))
+    {
+        return Some(found);
+    }
+    env.path_dirs
+        .iter()
+        .map(|dir| dir.join("bash.exe"))
+        .chain(
+            env.system_root
+                .iter()
+                .map(|root| root.join("System32").join("bash.exe")),
+        )
+        .find(|candidate| is_wsl_bash_launcher(candidate) && is_file(candidate))
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_bash_command(
     cwd: &Path,
@@ -6851,17 +7495,11 @@ pub(crate) async fn run_bash_command(
         ));
     }
 
-    let shell = shell_path.unwrap_or_else(|| {
-        for path in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"] {
-            if Path::new(path).exists() {
-                return path;
-            }
-        }
-        "sh"
-    });
+    let shell = shell_path.map_or_else(default_bash_shell, |path| Ok(path.to_string()))?;
+    let shell = shell.as_str();
 
     let mut cmd = command_with_default_sigpipe_in_dir(shell, cwd)
-        .map_err(|e| Error::tool("bash", format!("Failed to prepare shell: {e}")))?;
+        .map_err(|e| Error::tool("bash", format!("Failed to prepare shell {shell}: {e}")))?;
     cmd.arg("-c")
         .arg(&command)
         .current_dir(cwd)
@@ -6880,22 +7518,20 @@ pub(crate) async fn run_bash_command(
     // can be killed reliably even if the shell exits first.
     isolate_command_process_group(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Error::tool("bash", format!("Failed to spawn shell: {e}")))?;
-    attach_child_job_discipline(&child);
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::tool("bash", "Missing stdout".to_string()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| Error::tool("bash", "Missing stderr".to_string()))?;
-
-    // Wrap in ProcessGuard for cleanup (including tree kill)
+    let child = spawn_command_with_job_discipline(&mut cmd)
+        .map_err(|e| Error::tool("bash", format!("Failed to spawn shell {shell}: {e}")))?;
     let mut guard = ProcessGuard::new(child, ProcessCleanupMode::ProcessGroupTree);
+
+    let stdout = guard
+        .child
+        .as_mut()
+        .and_then(|child| child.stdout.take())
+        .ok_or_else(|| Error::tool("bash", "Missing stdout".to_string()))?;
+    let stderr = guard
+        .child
+        .as_mut()
+        .and_then(|child| child.stderr.take())
+        .ok_or_else(|| Error::tool("bash", "Missing stderr".to_string()))?;
 
     // We use a bounded channel to provide backpressure. If the child process
     // produces output faster than the async loop can drain it (and spill to disk),
@@ -7220,14 +7856,8 @@ pub(crate) async fn run_bash_command_pty(
         ));
     }
 
-    let shell = shell_path.unwrap_or_else(|| {
-        for path in ["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"] {
-            if Path::new(path).exists() {
-                return path;
-            }
-        }
-        "sh"
-    });
+    let shell = shell_path.map_or_else(default_bash_shell, |path| Ok(path.to_string()))?;
+    let shell = shell.as_str();
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -7254,7 +7884,7 @@ pub(crate) async fn run_bash_command_pty(
     let mut child = pair
         .slave
         .spawn_command(pty_cmd)
-        .map_err(|e| Error::tool("bash", format!("Failed to spawn shell on PTY: {e}")))?;
+        .map_err(|e| Error::tool("bash", format!("Failed to spawn shell {shell} on PTY: {e}")))?;
     // Drop our handle to the slave side so the master sees EOF when the child
     // exits; otherwise the pump thread would block forever.
     drop(pair.slave);
@@ -7515,8 +8145,11 @@ impl Tool for BashTool {
         };
 
         // Mediation gate (bd-cv653.1.7): classify before spawn against
-        // `bash.mediation`. `forced` beats any approval override; off mode
-        // is byte-identical to the pre-mediation path.
+        // `bash.mediation`. This runs on the execution path, so it applies
+        // whatever the approval mode said — including yolo — and `off` is
+        // byte-identical to the pre-mediation path. (`bash.mediationForced`
+        // was meant to select this; it turned out to be the only behaviour,
+        // and nothing reads the field. See `config::BashSettings`.)
         if let Some(mediation) = &self.mediation {
             let mode =
                 crate::bash_mediation::MediationMode::from_setting(mediation.mediation.as_deref());
@@ -8054,9 +8687,18 @@ impl Tool for LearnTool {
                 "learn requires a non-empty lesson".to_string(),
             ));
         }
-        let content = input.context.as_deref().map_or_else(
-            || input.lesson.clone(),
-            |ctx| format!("{}\n\nContext: {ctx}", input.lesson),
+        // Screen each source before composing the memory, and before
+        // truncating a description or slugifying a filename. Those operations
+        // can otherwise cut a key into an unrecognizable but still sensitive
+        // fragment, or defeat an anchored user credential pattern.
+        let lesson = self.store.screen_text(&input.lesson);
+        let context = input
+            .context
+            .as_deref()
+            .map(|context| self.store.screen_text(context));
+        let content = context.as_deref().map_or_else(
+            || lesson.clone(),
+            |context| format!("{lesson}\n\nContext: {context}"),
         );
         let memory = self.store.retain(
             crate::memory::MemoryKind::Lesson,
@@ -8067,14 +8709,17 @@ impl Tool for LearnTool {
         let mut lines = vec![format!("Lesson captured [{}].", memory.id)];
         let mut promoted: Option<serde_json::Value> = None;
         if input.promote.unwrap_or(false) {
-            let name = input
+            let requested_name = input
                 .skill_name
+                .as_deref()
+                .map(|name| self.store.screen_text(name));
+            let name = requested_name
                 .as_deref()
                 .map(slugify)
                 .filter(|slug| slug != "lesson")
-                .unwrap_or_else(|| slugify(&input.lesson));
-            let description: String = input.lesson.chars().take(200).collect();
-            match crate::skills_managed::create(&name, &description, &content) {
+                .unwrap_or_else(|| slugify(&lesson));
+            let description: String = lesson.chars().take(200).collect();
+            match crate::skills_managed::create(&name, &description, &memory.content) {
                 Ok(info) => {
                     lines.push(format!(
                         "Promoted to managed skill '{name}' ({}).",
@@ -8279,7 +8924,7 @@ struct HubInput {
     ready: Option<HubReadyInput>,
     /// Survive session exit (state file re-discovery).
     detached: Option<bool>,
-    /// `logs`: opaque cursor from a previous page (incremental read).
+    /// `logs` or `agent inbox`: opaque cursor from a previous page.
     cursor: Option<u64>,
     /// `logs`: last N lines (snapshot read).
     tail: Option<usize>,
@@ -8300,7 +8945,7 @@ struct HubInput {
     action: Option<String>,
     /// `jobs`: job id for wait/cancel.
     job_id: Option<String>,
-    /// `agent steer|send`: sender label recorded on the bus message.
+    /// `agent steer|send`: parent label, or the authenticated child's own run id.
     from: Option<String>,
     /// `jobs`: wait budget in milliseconds.
     timeout_ms: Option<u64>,
@@ -8349,11 +8994,18 @@ impl Tool for HubTool {
          gates: ready.log regex AND ready.port TCP accept, both must pass \
          within ready.timeoutSecs — start returns only after readiness is \
          observed), `ps` (list services), `logs` (tail/grep/incremental \
-         cursor reads with bounded wait), `send` (PTY stdin: text, named \
+         cursor reads with bounded wait; raw logs retain the first 16 MiB \
+         per run, live tails keep streaming, and logCapture reports loss \
+         and I/O errors), `send` (PTY stdin: text, named \
          keys, signals), `stop` (graceful tree termination), `restart` \
          (retained launch spec), `describe` (full descriptor), `jobs` \
          (background bash jobs: list/wait/cancel), `agent` (subagent children: \
-         roster/transcript/steer/kill/revive/send/inbox)."
+         roster/transcript/steer/kill/revive/send/inbox; revive executes a \
+         settled native child's original assignment with its retained launch \
+         policy and transcript context, and waits for the replacement result). \
+         Native children use agent roster/send/inbox to reach their parent's hub; \
+         roster returns selfId, send accepts a live sibling id or parent, and inbox \
+         defaults to the caller. Include hub in a child's declared tools to enable messaging."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -8365,7 +9017,7 @@ impl Tool for HubTool {
                     "enum": ["start", "ps", "logs", "stop", "restart", "describe", "send", "jobs", "agent"],
                     "description": "Operation"
                 },
-                "name": { "type": "string", "description": "Service name (unique per project)" },
+                "name": { "type": "string", "description": "Service name, child run id, or parent for agent send/inbox; a child inbox defaults to itself" },
                 "application": { "type": "string", "description": "Program to spawn (start)" },
                 "args": { "type": "array", "items": { "type": "string" }, "description": "Program arguments (start)" },
                 "cwd": { "type": "string", "description": "Working directory (start; default: session cwd)" },
@@ -8379,8 +9031,8 @@ impl Tool for HubTool {
                     },
                     "description": "Readiness gates; all supplied gates must pass"
                 },
-                "detached": { "type": "boolean", "description": "Survive session exit (default false)" },
-                "cursor": { "type": "integer", "description": "logs: opaque cursor for incremental reads" },
+                "detached": { "type": "boolean", "description": "Skip session-exit cleanup (default false); PTY ownership remains in this Pi process, with no cross-process reattachment" },
+                "cursor": { "type": "integer", "description": "logs or agent inbox: nextCursor from the preceding page" },
                 "tail": { "type": "integer", "description": "logs: last N lines" },
                 "grep": { "type": "string", "description": "logs: substring filter" },
                 "waitMs": { "type": "integer", "description": "logs: bounded wait in ms (max 60000)" },
@@ -8389,7 +9041,7 @@ impl Tool for HubTool {
                 "keys": { "type": "array", "items": { "type": "string" }, "description": "send: named keys (ENTER, TAB, ESCAPE, CTRL_C, CTRL_D, UP, DOWN, LEFT, RIGHT)" },
                 "signal": { "type": "string", "description": "send: SIGINT, SIGTERM, SIGHUP, SIGQUIT, or SIGKILL" },
                 "action": { "type": "string", "enum": ["list", "wait", "cancel", "roster", "transcript", "steer", "kill", "revive", "send", "inbox"], "description": "jobs: list/wait/cancel; agent: roster/transcript/steer/kill/revive/send/inbox" },
-                "from": { "type": "string", "description": "agent steer/send: sender label recorded on the bus message" },
+                "from": { "type": "string", "description": "agent steer/send: parent sender label; native children may only identify themselves" },
                 "jobId": { "type": "string", "description": "jobs: job id for wait/cancel" },
                 "timeoutMs": { "type": "integer", "description": "jobs: wait budget in ms" }
             },
@@ -8410,33 +9062,177 @@ impl Tool for HubTool {
         &self,
         _tool_call_id: &str,
         input: serde_json::Value,
-        _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
     ) -> Result<ToolOutput> {
         let input: HubInput =
             serde_json::from_value(input).map_err(|e| Error::validation(e.to_string()))?;
         let op = input.op.trim().to_ascii_lowercase();
-        let dispatched = self.dispatch(&op, &input).await;
-        let (text, details, is_error) = match dispatched {
-            Ok((text, details)) => (text, details, false),
+        let dispatched = if op == "agent" && crate::agent_hub::ipc::inherited_channel_present() {
+            Self::dispatch_inherited_agent(&input).await
+        } else if op == "agent"
+            && input
+                .action
+                .as_deref()
+                .is_some_and(|action| action.eq_ignore_ascii_case("revive"))
+        {
+            match input.name.as_deref().filter(|id| !id.trim().is_empty()) {
+                Some(id) => crate::subagents::revive_child(id, on_update).await,
+                None => Err(Error::validation(
+                    "hub agent revive requires name (child run id)",
+                )),
+            }
+        } else {
+            self.dispatch(&op, &input)
+                .await
+                .map(|(text, details)| ToolOutput {
+                    content: vec![ContentBlock::Text(TextContent::new(text))],
+                    details: Some(details),
+                    is_error: false,
+                })
+        };
+        Ok(match dispatched {
+            Ok(output) => output,
             Err(err) => {
                 // Domain refusals (PI_HUB_*) surface as tool results the
                 // model can read, matching the jobs capacity contract.
-                (
-                    err.to_string(),
-                    serde_json::json!({ "error": err.to_string() }),
-                    true,
-                )
+                ToolOutput {
+                    content: vec![ContentBlock::Text(TextContent::new(err.to_string()))],
+                    details: Some(serde_json::json!({ "error": err.to_string() })),
+                    is_error: true,
+                }
             }
-        };
-        Ok(ToolOutput {
-            content: vec![ContentBlock::Text(TextContent::new(text))],
-            details: Some(details),
-            is_error,
         })
     }
 }
 
 impl HubTool {
+    async fn dispatch_inherited_agent(input: &HubInput) -> Result<ToolOutput> {
+        use crate::agent_hub::ipc::{Action, Request, call_from_env};
+
+        let action = input.action.as_deref().unwrap_or("roster").trim();
+        let action = if action.eq_ignore_ascii_case("roster") {
+            Action::Roster
+        } else if action.eq_ignore_ascii_case("send") {
+            Action::Send
+        } else if action.eq_ignore_ascii_case("inbox") {
+            Action::Inbox
+        } else {
+            return Err(Error::tool(
+                "hub",
+                "PI_HUB_IPC_ACTION: a native child may only use agent roster, send, or inbox",
+            ));
+        };
+        let reply = call_from_env(Request {
+            action,
+            name: input.name.clone(),
+            text: input.text.clone(),
+            claimed_from: input.from.clone(),
+            cursor: input.cursor,
+        })
+        .await?
+        .ok_or_else(|| Error::tool("hub", "PI_HUB_IPC_CONFIG: inherited channel is unavailable"))?;
+        let (text, details) = Self::format_agent_reply(reply);
+        Ok(ToolOutput {
+            content: vec![ContentBlock::Text(TextContent::new(text))],
+            details: Some(details),
+            is_error: false,
+        })
+    }
+
+    fn format_agent_reply(reply: crate::agent_hub::ipc::Reply) -> (String, serde_json::Value) {
+        use crate::agent_hub::ipc::Reply;
+
+        match reply {
+            Reply::Roster {
+                self_id,
+                children,
+                truncated,
+            } => {
+                let lines = children
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "{} [{} kind={}] {}",
+                            entry.id,
+                            entry.status.as_str(),
+                            entry.kind.as_str(),
+                            entry.task,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut text = format!(
+                    "You are {self_id}. {} child run(s):\n{}",
+                    children.len(),
+                    lines.join("\n"),
+                );
+                if truncated {
+                    text.push_str(
+                        "\n[Roster exceeds the response limit; showing a bounded prefix.]",
+                    );
+                }
+                let details = serde_json::json!({
+                    "schema": "pi.agent-hub.roster/v1",
+                    "selfId": self_id,
+                    "children": children,
+                    "truncated": truncated,
+                });
+                (text, details)
+            }
+            Reply::Sent { message } => {
+                let text = format!("Message queued for {} (seq {}).", message.to, message.seq);
+                (text, serde_json::json!(message))
+            }
+            Reply::Inbox {
+                id,
+                messages,
+                next_cursor,
+                has_more,
+                oldest_cursor,
+            } => {
+                let text = if messages.is_empty() {
+                    format!("{id}: inbox empty.")
+                } else {
+                    let lines = messages
+                        .iter()
+                        .map(|message| {
+                            format!("#{} from {}: {}", message.seq, message.from, message.body)
+                        })
+                        .collect::<Vec<_>>();
+                    format!("{id}: {} message(s):\n{}", messages.len(), lines.join("\n"))
+                };
+                let details = serde_json::json!({
+                    "schema": "pi.agent-hub.inbox/v1",
+                    "id": id,
+                    "messages": messages,
+                    "nextCursor": next_cursor,
+                    "hasMore": has_more,
+                    "oldestCursor": oldest_cursor,
+                });
+                (text, details)
+            }
+        }
+    }
+
+    fn append_log_capture_notice(text: &mut String, capture: &crate::hub::LogCapture) {
+        if capture.truncated {
+            let _ = write!(
+                text,
+                "\n[Raw service log is incomplete: {} of {} bytes retained, {} omitted; \
+                 per-artifact limit {} bytes. Live tails are retained separately.]",
+                capture.retained_bytes,
+                capture.observed_bytes,
+                capture.dropped_bytes,
+                capture.byte_limit
+            );
+        }
+        if let Some(error) = &capture.write_error {
+            let _ = write!(text, "\n[Service log artifact error: {error}]");
+        }
+        if let Some(error) = &capture.read_error {
+            let _ = write!(text, "\n[Service output capture error: {error}]");
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn dispatch(&self, op: &str, input: &HubInput) -> Result<(String, serde_json::Value)> {
         let name_required = |op: &str| -> Result<String> {
@@ -8474,19 +9270,23 @@ impl HubTool {
                     ready,
                     detached: input.detached.unwrap_or(false),
                 };
-                let snapshot = crate::hub::start(&spec)?;
+                let snapshot = crate::hub::run_service_request(move |request| {
+                    crate::hub::start_for_request(&spec, request)
+                })
+                .await?;
                 let details = serde_json::to_value(&snapshot)?;
-                let text = format!(
+                let mut text = format!(
                     "Service '{name}' is running (pid {}, log: {}).",
                     snapshot
                         .pid
                         .map_or_else(|| "?".to_string(), |pid| pid.to_string()),
                     snapshot.log_path
                 );
+                Self::append_log_capture_notice(&mut text, &snapshot.log_capture);
                 (text, details)
             }
             "ps" => {
-                let services = crate::hub::ps()?;
+                let services = crate::hub::run_service_request(|_| crate::hub::ps()).await?;
                 let details = serde_json::json!({
                     "schema": crate::hub::SERVICE_SCHEMA,
                     "services": services,
@@ -8497,7 +9297,7 @@ impl HubTool {
                     let lines: Vec<String> = services
                         .iter()
                         .map(|svc| {
-                            format!(
+                            let mut text = format!(
                                 "{}: {} (pid {}, command `{}`, log {})",
                                 svc.name,
                                 svc.status,
@@ -8505,7 +9305,9 @@ impl HubTool {
                                     .map_or_else(|| "n/a".to_string(), |pid| pid.to_string()),
                                 svc.command,
                                 svc.log_path
-                            )
+                            );
+                            Self::append_log_capture_notice(&mut text, &svc.log_capture);
+                            text
                         })
                         .collect();
                     format!("{} service(s):\n{}", services.len(), lines.join("\n"))
@@ -8514,41 +9316,62 @@ impl HubTool {
             }
             "logs" => {
                 let name = name_required("logs")?;
-                let page = crate::hub::logs(
-                    &name,
-                    input.cursor,
-                    input.tail,
-                    input.grep.as_deref(),
-                    input.wait_ms.unwrap_or(0),
-                )?;
+                let cursor = input.cursor;
+                let tail = input.tail;
+                let grep = input.grep.clone();
+                let wait_ms = input.wait_ms.unwrap_or(0);
+                let page = crate::hub::run_service_request(move |request| {
+                    crate::hub::logs_for_request(
+                        &name,
+                        cursor,
+                        tail,
+                        grep.as_deref(),
+                        wait_ms,
+                        request,
+                    )
+                })
+                .await?;
                 let details = serde_json::to_value(&page)?;
                 let mut text = page.lines.join("\n");
                 if text.is_empty() {
                     text = "(no new lines)".to_string();
                 }
+                if page.lost_lines != 0 {
+                    let _ = write!(
+                        text,
+                        "\n[{} requested log lines were evicted; oldest available cursor: {}.]",
+                        page.lost_lines, page.oldest_cursor
+                    );
+                }
+                Self::append_log_capture_notice(&mut text, &page.log_capture);
                 (text, details)
             }
             "stop" => {
                 let name = name_required("stop")?;
-                let snapshot = crate::hub::stop(&name)?;
+                let stop_name = name.clone();
+                let snapshot =
+                    crate::hub::run_service_request(move |_| crate::hub::stop(&stop_name)).await?;
                 let details = serde_json::to_value(&snapshot)?;
-                (
-                    format!("Service '{name}' stopped (status: {}).", snapshot.status),
-                    details,
-                )
+                let mut text = format!("Service '{name}' stopped (status: {}).", snapshot.status);
+                Self::append_log_capture_notice(&mut text, &snapshot.log_capture);
+                (text, details)
             }
             "restart" => {
                 let name = name_required("restart")?;
-                let snapshot = crate::hub::restart(&name)?;
+                let restart_name = name.clone();
+                let snapshot = crate::hub::run_service_request(move |request| {
+                    crate::hub::restart_for_request(&restart_name, request)
+                })
+                .await?;
                 let details = serde_json::to_value(&snapshot)?;
-                (
-                    format!("Service '{name}' restarted (status: {}).", snapshot.status),
-                    details,
-                )
+                let mut text = format!("Service '{name}' restarted (status: {}).", snapshot.status);
+                Self::append_log_capture_notice(&mut text, &snapshot.log_capture);
+                (text, details)
             }
             "describe" => {
                 let name = name_required("describe")?;
-                let snapshot = crate::hub::describe(&name)?;
+                let snapshot =
+                    crate::hub::run_service_request(move |_| crate::hub::describe(&name)).await?;
                 let details = serde_json::to_value(&snapshot)?;
                 (
                     serde_json::to_string_pretty(&snapshot).unwrap_or_default(),
@@ -8557,45 +9380,55 @@ impl HubTool {
             }
             "send" => {
                 let name = name_required("send")?;
-                let mut actions = Vec::new();
-                if let Some(text) = input.text.as_deref() {
-                    crate::hub::send_text(&name, text, input.enter.unwrap_or(true))?;
-                    actions.push(format!("sent {} byte(s) of text", text.len()));
-                }
-                if let Some(keys) = input.keys.as_ref()
-                    && !keys.is_empty()
-                {
-                    crate::hub::send_keys(&name, keys)?;
-                    actions.push(format!("sent keys: {}", keys.join(", ")));
-                }
-                if let Some(signal) = input.signal.as_deref() {
-                    let mapped = match signal.to_ascii_uppercase().as_str() {
-                        "SIGINT" => sysinfo::Signal::Interrupt,
-                        "SIGTERM" => sysinfo::Signal::Term,
-                        "SIGHUP" => sysinfo::Signal::Hangup,
-                        "SIGQUIT" => sysinfo::Signal::Quit,
-                        "SIGKILL" => sysinfo::Signal::Kill,
-                        other => {
-                            return Err(Error::validation(format!(
-                                "Unknown signal '{other}'; expected SIGINT, SIGTERM, SIGHUP, \
-                                 SIGQUIT, or SIGKILL"
-                            )));
-                        }
-                    };
-                    crate::hub::send_signal(&name, mapped)?;
-                    actions.push(format!("sent {}", signal.to_ascii_uppercase()));
-                }
-                if actions.is_empty() {
-                    return Err(Error::validation(
-                        "hub send requires text, keys, or signal".to_string(),
-                    ));
-                }
-                let details = serde_json::json!({
-                    "schema": "pi.hub.send.v1",
-                    "name": name,
-                    "actions": actions,
-                });
-                (format!("To '{name}': {}", actions.join("; ")), details)
+                let text = input.text.clone();
+                let enter = input.enter.unwrap_or(true);
+                let keys = input.keys.clone();
+                let signal = input.signal.clone();
+                crate::hub::run_service_request(move |request| {
+                    let mut actions = Vec::new();
+                    if let Some(text) = text.as_deref() {
+                        request.check()?;
+                        crate::hub::send_text(&name, text, enter)?;
+                        actions.push(format!("sent {} byte(s) of text", text.len()));
+                    }
+                    if let Some(keys) = keys.as_ref()
+                        && !keys.is_empty()
+                    {
+                        request.check()?;
+                        crate::hub::send_keys(&name, keys)?;
+                        actions.push(format!("sent keys: {}", keys.join(", ")));
+                    }
+                    if let Some(signal) = signal.as_deref() {
+                        let mapped = match signal.to_ascii_uppercase().as_str() {
+                            "SIGINT" => sysinfo::Signal::Interrupt,
+                            "SIGTERM" => sysinfo::Signal::Term,
+                            "SIGHUP" => sysinfo::Signal::Hangup,
+                            "SIGQUIT" => sysinfo::Signal::Quit,
+                            "SIGKILL" => sysinfo::Signal::Kill,
+                            other => {
+                                return Err(Error::validation(format!(
+                                    "Unknown signal '{other}'; expected SIGINT, SIGTERM, SIGHUP, \
+                                     SIGQUIT, or SIGKILL"
+                                )));
+                            }
+                        };
+                        request.check()?;
+                        crate::hub::send_signal(&name, mapped)?;
+                        actions.push(format!("sent {}", signal.to_ascii_uppercase()));
+                    }
+                    if actions.is_empty() {
+                        return Err(Error::validation(
+                            "hub send requires text, keys, or signal".to_string(),
+                        ));
+                    }
+                    let details = serde_json::json!({
+                        "schema": "pi.hub.send.v1",
+                        "name": name,
+                        "actions": actions,
+                    });
+                    Ok((format!("To '{name}': {}", actions.join("; ")), details))
+                })
+                .await?
             }
             "jobs" => {
                 let owner_session_id = self.job_session_scope.session_id().await?;
@@ -8763,39 +9596,50 @@ impl HubTool {
                     .ok_or_else(|| {
                         Error::validation(format!("hub agent {action} requires text"))
                     })?;
-                let message = crate::agent_hub::registry()
-                    .lock()
-                    .map_err(|_| Error::tool("hub", "agent registry lock poisoned"))?
-                    .steer(&id, &from, &body)?;
-                let details = serde_json::to_value(&message)?;
-                (
-                    format!("Steering queued for {id} (seq {}).", message.seq),
-                    details,
-                )
+                let message = {
+                    let mut registry = crate::agent_hub::registry()
+                        .lock()
+                        .map_err(|_| Error::tool("hub", "agent registry lock poisoned"))?;
+                    if action == "send" {
+                        registry.bus_send(&id, &from, &body)?
+                    } else {
+                        registry.steer(&id, &from, &body)?
+                    }
+                };
+                if action == "send" {
+                    Self::format_agent_reply(crate::agent_hub::ipc::Reply::Sent { message })
+                } else {
+                    let details = serde_json::to_value(&message)?;
+                    (
+                        format!("Steering queued for {id} (seq {}).", message.seq),
+                        details,
+                    )
+                }
             }
             "kill" => {
                 let id = id_required("kill")?;
-                let entry = {
-                    let reg = crate::agent_hub::registry()
+                {
+                    let mut reg = crate::agent_hub::registry()
                         .lock()
                         .map_err(|_| Error::tool("hub", "agent registry lock poisoned"))?;
-                    reg.get(&id)
-                        .ok_or_else(|| Error::validation(format!("hub: unknown child '{id}'")))?
-                };
-                if entry.status.settled() {
-                    return Err(Error::validation(format!(
-                        "hub: cannot kill '{id}' — already {}",
-                        entry.status.as_str()
-                    )));
+                    let entry = reg
+                        .get(&id)
+                        .ok_or_else(|| Error::validation(format!("hub: unknown child '{id}'")))?;
+                    if entry.status.settled() {
+                        return Err(Error::validation(format!(
+                            "hub: cannot kill '{id}' — already {}",
+                            entry.status.as_str()
+                        )));
+                    }
+                    if let Some(pid) = reg.control_pid(&id) {
+                        // Historical PIDs remain in the roster after reaping.
+                        // Only a live process grants authority to signal it.
+                        crate::tools::kill_process_group_tree(Some(pid));
+                    }
+                    // A reaped child may still be awaiting ordered writeback.
+                    // Revoking it must prevent application even without a PID.
+                    reg.mark_killed(&id);
                 }
-                if let Some(pid) = entry.pid {
-                    // Process-tree kill so the child's bash descendants die too.
-                    crate::tools::kill_process_group_tree(Some(pid));
-                }
-                crate::agent_hub::registry()
-                    .lock()
-                    .map_err(|_| Error::tool("hub", "agent registry lock poisoned"))?
-                    .mark_killed(&id);
                 let details = serde_json::json!({
                     "schema": "pi.agent-hub.kill/v1",
                     "id": id,
@@ -8803,45 +9647,13 @@ impl HubTool {
                 });
                 (format!("Child {id} killed by operator."), details)
             }
-            "revive" => {
-                let id = id_required("revive")?;
-                let (entry, _task) = crate::agent_hub::registry()
-                    .lock()
-                    .map_err(|_| Error::tool("hub", "agent registry lock poisoned"))?
-                    .revive(&id)?;
-                // The revived task is queued as a steering continuation: the
-                // next subagent tool call can launch it; the registry entry
-                // already records the lineage so the roster shows it.
-                let details = serde_json::to_value(&entry)?;
-                (
-                    format!(
-                        "Revival registered as {} (continues {id}); relaunch via the subagent tool with the recorded task.",
-                        entry.id
-                    ),
-                    details,
-                )
-            }
             "inbox" => {
                 let id = id_required("inbox")?;
-                let messages = crate::agent_hub::registry()
+                let page = crate::agent_hub::registry()
                     .lock()
                     .map_err(|_| Error::tool("hub", "agent registry lock poisoned"))?
-                    .inbox(&id);
-                let details = serde_json::json!({
-                    "schema": "pi.agent-hub.inbox/v1",
-                    "id": id,
-                    "messages": messages,
-                });
-                let text = if messages.is_empty() {
-                    format!("{id}: inbox empty.")
-                } else {
-                    let lines: Vec<String> = messages
-                        .iter()
-                        .map(|m| format!("#{} from {}: {}", m.seq, m.from, m.body))
-                        .collect();
-                    format!("{id}: {} message(s):\n{}", messages.len(), lines.join("\n"))
-                };
-                (text, details)
+                    .inbox_page(&id, input.cursor)?;
+                Self::format_agent_reply(page)
             }
             other => {
                 return Err(Error::validation(format!(
@@ -9869,7 +10681,7 @@ impl EditTool {
     /// `edit` over `ssh://host/path` (bd-cv653.6.5): fetch the FULL remote
     /// content (never truncated — an editor on a truncated view would
     /// overwrite real data), run the same replacement core as local edits,
-    /// then stage + rename atomically on the remote host.
+    /// then stage and check the original bytes before remote replacement.
     async fn execute_ssh_edit(&self, input: &EditInput) -> Result<ToolOutput> {
         let url = input.path.clone();
         let raw = asupersync::runtime::spawn_blocking_io(move || {
@@ -9888,7 +10700,7 @@ impl EditTool {
         let write_url = input.path.clone();
         let payload = outcome.final_content.clone();
         let write_details = asupersync::runtime::spawn_blocking_io(move || {
-            crate::url_router::ssh_write_document(&write_url, &payload)
+            crate::url_router::ssh_replace_document(&write_url, &raw, &payload)
                 .map_err(std::io::Error::other)
         })
         .await
@@ -9924,7 +10736,7 @@ impl EditTool {
 impl HashlineEditTool {
     /// `hashline_edit` over `ssh://host/path` (bd-cv653.6.5): full remote
     /// fetch, the same anchor-validation/splice core as local hashline
-    /// edits (stale anchors rejected), atomic remote staging.
+    /// edits (stale anchors rejected), and a remote original-content guard.
     async fn execute_ssh_hashline_edit(&self, input: &HashlineEditInput) -> Result<ToolOutput> {
         let url = input.path.clone();
         let raw = asupersync::runtime::spawn_blocking_io(move || {
@@ -9951,7 +10763,7 @@ impl HashlineEditTool {
         let write_url = input.path.clone();
         let payload = outcome.final_content.clone();
         let write_details = asupersync::runtime::spawn_blocking_io(move || {
-            crate::url_router::ssh_write_document(&write_url, &payload)
+            crate::url_router::ssh_replace_document(&write_url, raw_content.as_bytes(), &payload)
                 .map_err(std::io::Error::other)
         })
         .await
@@ -13326,40 +14138,123 @@ impl ProcessGuard {
         }
     }
 
+    pub(crate) fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.as_mut().and_then(|child| child.stdin.take())
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.as_mut().and_then(|child| child.stdout.take())
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.as_mut().and_then(|child| child.stderr.take())
+    }
+
     pub(crate) fn try_wait_child(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.child
+        let status = self
+            .child
             .as_mut()
-            .map_or(Ok(None), std::process::Child::try_wait)
+            .map_or(Ok(None), std::process::Child::try_wait)?;
+        #[cfg(windows)]
+        if status.is_some()
+            && self.cleanup_mode == ProcessCleanupMode::ProcessGroupTree
+            && let Some(child) = &self.child
+        {
+            // Descendants can retain stdout after their root exits. Close the
+            // retained Job before the output-drain phase waits for pipe EOF.
+            terminate_reaped_child_discipline(child.id());
+        }
+        Ok(status)
     }
 
     pub(crate) fn kill(&mut self) -> Option<std::process::ExitStatus> {
         if let Some(mut child) = self.child.take() {
-            cleanup_child(Some(child.id()), self.cleanup_mode);
-            let _ = child.kill();
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if self.cleanup_mode == ProcessCleanupMode::ProcessGroupTree {
+                        // A previous poll may already have released the Job.
+                        // Never fall back to walking an exited root's PID.
+                        terminate_reaped_child_discipline(child.id());
+                    }
+                    return Some(status);
+                }
+                Ok(None) => {
+                    cleanup_child(Some(child.id()), self.cleanup_mode);
+                    let _ = child.kill();
+                }
+                Err(_) => {
+                    // An ambiguous wait error does not establish ownership
+                    // of a live PID. Release only our retained Windows Job;
+                    // the reaper below still owns the actual child handle.
+                    #[cfg(windows)]
+                    if self.cleanup_mode == ProcessCleanupMode::ProcessGroupTree {
+                        let _ = win_job::terminate(child.id());
+                    }
+                }
+            }
             std::thread::spawn(move || {
                 let _ = child.wait();
             });
-            // We cannot return the exit status synchronously without blocking,
-            // so we return None to indicate the process was forcefully killed.
+            // A live or unconfirmed child is reaped without blocking callers.
             return None;
         }
         None
     }
 
-    pub(crate) fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        if let Some(mut child) = self.child.take() {
-            return child.wait();
+    /// Stop an owned process tree and reap its root before returning. Blocking
+    /// subprocess workers use this path when their terminal result requires an
+    /// exit status; async callers can retain the nonblocking `kill` path.
+    pub(crate) fn terminate_and_wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let reaped = self.try_wait_child()?.is_some();
+        if let Some(child) = self.child.as_mut() {
+            if reaped {
+                if self.cleanup_mode == ProcessCleanupMode::ProcessGroupTree {
+                    // Retire only the owned group/Job. The root PID may have
+                    // been reused since try_wait, so never walk its children.
+                    terminate_reaped_child_discipline(child.id());
+                }
+            } else {
+                cleanup_child(Some(child.id()), self.cleanup_mode);
+                // The tree kill can already have ended the root. Still wait
+                // for its actual status if the direct kill races that exit.
+                let _ = child.kill();
+            }
         }
-        Err(std::io::Error::other("Already waited"))
+        // A wait error leaves this guard armed for a later cleanup attempt.
+        self.wait()
+    }
+
+    pub(crate) fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("Already waited"))?;
+        // Keep ownership on wait errors so a later retry or Drop still has
+        // the child handle and its registered Windows Job available.
+        let status = child.wait()?;
+        #[cfg(windows)]
+        if self.cleanup_mode == ProcessCleanupMode::ProcessGroupTree {
+            terminate_reaped_child_discipline(child.id());
+        }
+        drop(self.child.take());
+        Ok(status)
     }
 }
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            match child.try_wait() {
-                Ok(None) => {}
-                Ok(Some(_)) | Err(_) => return,
+            let status = child.try_wait();
+            #[cfg(windows)]
+            if !matches!(status, Ok(None))
+                && self.cleanup_mode == ProcessCleanupMode::ProcessGroupTree
+            {
+                // Even an ambiguous wait error must release our owned Job.
+                // Do not infer that the root was reaped or walk its PID.
+                let _ = win_job::terminate(child.id());
+            }
+            if !matches!(status, Ok(None)) {
+                return;
             }
             let cleanup_mode = self.cleanup_mode;
             std::thread::spawn(move || {
@@ -13371,26 +14266,20 @@ impl Drop for ProcessGuard {
     }
 }
 
-/// Attach a freshly-spawned child to platform tree-discipline bookkeeping.
+/// Spawn with Windows Job membership established before any child code runs.
 ///
-/// Windows assigns the child to a kill-on-close Job object so later
-/// `kill_process_group_tree` / `terminate_process_group_tree` calls reap the
-/// whole descendant tree, including processes spawned between the kill-time
-/// snapshot and the kill (bd-9jgrt item 1). Unix needs nothing here: the
-/// child already leads its own process group. Hub PTY services are out of
-/// scope (portable-pty children keep the walk-based discipline).
-// Const only on unix where the body degenerates to `let _`; the windows
-// branch calls non-const job registration, so the lint cannot hold for both
-// targets at once.
-#[allow(clippy::missing_const_for_fn)]
-pub(crate) fn attach_child_job_discipline(child: &std::process::Child) -> bool {
+/// Unix callers configure their process group on `command` before calling.
+/// A returned child owns exactly one registered Job on Windows. The caller
+/// must immediately retain its cleanup guard and release the discipline when
+/// the root is reaped. There is deliberately no post-spawn attachment API:
+/// replacing an owned kill-on-close Job can terminate a live child.
+pub(crate) fn spawn_command_with_job_discipline(
+    command: &mut Command,
+) -> std::io::Result<std::process::Child> {
     #[cfg(windows)]
-    return win_job::attach(child);
+    return win_job::spawn(command);
     #[cfg(not(windows))]
-    {
-        let _ = child;
-        true
-    }
+    command.spawn()
 }
 
 /// Terminate descendants still covered by an already-reaped root's platform
@@ -13421,50 +14310,71 @@ mod win_job {
     //! job's handle terminates every current member in one shot.
 
     use std::collections::HashMap;
-    use std::os::windows::io::AsRawHandle;
-    use std::process::Child;
+    use std::os::windows::process::{CommandExt as _, ProcThreadAttributeList};
+    use std::process::{Child, Command};
     use std::sync::{LazyLock, Mutex};
 
     use win32job::{ExtendedLimitInfo, Job};
 
     static REGISTRY: LazyLock<Mutex<HashMap<u32, Job>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
+    const PROC_THREAD_ATTRIBUTE_JOB_LIST: usize = 0x0002_000d;
 
-    /// Assign `child` to a fresh kill-on-close job and remember it by pid.
-    ///
-    /// Returns whether the child is now covered by a registered Job. Most
-    /// callers can retain the walk-based fallback on failure; subprocess
-    /// surfaces that cannot safely tolerate inherited handles can fail closed.
-    // `win_job` is a private module, so `pub` here is already crate-limited.
-    pub fn attach(child: &Child) -> bool {
-        let Ok(mut map) = REGISTRY.lock() else {
-            return false;
-        };
+    pub fn spawn(command: &mut Command) -> std::io::Result<Child> {
+        spawn_in_registry(command, &REGISTRY, |_, _| Ok(()))
+    }
+
+    fn spawn_in_registry(
+        command: &mut Command,
+        registry: &Mutex<HashMap<u32, Job>>,
+        before_registration: impl FnOnce(&Child, &Job) -> std::io::Result<()>,
+    ) -> std::io::Result<Child> {
+        let mut map = registry
+            .lock()
+            .map_err(|_| std::io::Error::other("Windows Job registry is poisoned"))?;
         prune_dead_entries(&mut map);
-        let mut info = ExtendedLimitInfo::new();
-        info.limit_kill_on_job_close();
-        let Ok(job) = Job::create_with_limit_info(&info) else {
-            return false;
-        };
-        // RawHandle is *mut c_void; win32job takes the isize numeric handle.
-        if job.assign_process(child.as_raw_handle() as isize).is_err() {
-            // Never assigned, so closing harms nothing.
+        // Nothing fallible remains in registry publication after OS spawn.
+        map.try_reserve(1).map_err(std::io::Error::other)?;
+        let mut limits = ExtendedLimitInfo::new();
+        limits.limit_kill_on_job_close();
+        let job = Job::create_with_limit_info(&limits).map_err(std::io::Error::other)?;
+
+        // Windows 10 / Server 2016+: PROC_THREAD_ATTRIBUTE_JOB_LIST assigns
+        // membership inside CreateProcess, before the first thread can run.
+        // The owned Job and this actual HANDLE-sized array both outlive the
+        // attribute list and spawn. Passing the array itself (not a slice or
+        // pointer to a temporary) supplies the exact documented value size.
+        let job_handles = [job.handle()];
+        let attributes = ProcThreadAttributeList::build()
+            .attribute(PROC_THREAD_ATTRIBUTE_JOB_LIST, &job_handles)
+            .finish()?;
+        let mut child = command.spawn_with_attributes(&attributes)?;
+        drop(attributes);
+        if let Err(error) = before_registration(&child, &job) {
             drop(job);
-            return false;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
         }
         map.insert(child.id(), job);
-        true
+        Ok(child)
     }
 
     /// Kill the tree rooted at `pid` via its job, returning whether one
     /// existed. Dropping the stored `Job` closes the handle, and
     /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` does the actual termination.
     pub fn terminate(pid: u32) -> bool {
-        REGISTRY
+        terminate_in_registry(pid, &REGISTRY)
+    }
+
+    fn terminate_in_registry(pid: u32, registry: &Mutex<HashMap<u32, Job>>) -> bool {
+        // Refuse new spawns after a registry panic, but preserve cleanup of
+        // Jobs already owned by callers. Keep the mutex poisoned afterward.
+        let job = registry
             .lock()
-            .ok()
-            .and_then(|mut map| map.remove(&pid))
-            .is_some()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&pid);
+        job.is_some()
     }
 
     /// Drop entries whose root process no longer exists so the map (and its
@@ -13485,6 +14395,248 @@ mod win_job {
         for pid in dead {
             // Jobs whose root died are empty; dropping just reclaims the handle.
             map.remove(&pid);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::windows::io::AsRawHandle;
+        use std::path::Path;
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        const FIXTURE: &str = "tools::win_job::tests::atomic_job_child_fixture";
+        const ROLE_ENV: &str = "PI_TEST_ATOMIC_JOB_ROLE";
+        const PID_FILE_ENV: &str = "PI_TEST_ATOMIC_JOB_PID_FILE";
+
+        fn fixture_command(role: &str, pid_file: &Path) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", FIXTURE, "--nocapture"])
+                .env(ROLE_ENV, role)
+                .env(PID_FILE_ENV, pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            command
+        }
+
+        #[test]
+        fn atomic_job_child_fixture() {
+            let Ok(role) = std::env::var(ROLE_ENV) else {
+                return;
+            };
+            let pid_file = std::env::var_os(PID_FILE_ENV).unwrap();
+            if role == "root" || role == "root-exit" {
+                // Deliberately spawn before any parent-side registration can
+                // run. This descendant must inherit containment at birth.
+                let mut descendant = fixture_command("descendant", Path::new(&pid_file))
+                    .spawn()
+                    .unwrap();
+                std::fs::write(&pid_file, descendant.id().to_string()).unwrap();
+                if role == "root-exit" {
+                    let exit_gate = Path::new(&pid_file).with_extension("exit");
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !exit_gate.exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_secs(30));
+                let _ = descendant.kill();
+                let _ = descendant.wait();
+            } else {
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        }
+
+        fn descendant_pid(path: &Path) -> u32 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(text) = std::fs::read_to_string(path)
+                    && let Ok(pid) = text.parse()
+                {
+                    return pid;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture did not publish its descendant"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn wait_for_exit(child: &mut Child) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("contained process did not exit after its Job closed");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[test]
+        fn child_and_first_descendant_are_contained_before_registration() {
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("descendant.pid");
+            let registry = Mutex::new(HashMap::new());
+            let mut child = spawn_in_registry(
+                &mut fixture_command("root", &pid_file),
+                &registry,
+                |child, job| {
+                    let descendant = descendant_pid(&pid_file);
+                    let members = job.query_process_id_list().unwrap();
+                    assert!(members.contains(&usize::try_from(child.id()).unwrap()));
+                    assert!(
+                        members.contains(&usize::try_from(descendant).unwrap()),
+                        "the first descendant escaped before parent-side registration"
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let job = registry.lock().unwrap().remove(&child.id()).unwrap();
+            drop(job);
+            wait_for_exit(&mut child);
+            assert!(registry.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn poisoned_registry_refuses_before_the_child_is_created() {
+            let registry = Mutex::new(HashMap::new());
+            let _ = std::panic::catch_unwind(|| {
+                let _guard = registry.lock().unwrap();
+                panic!("injected registry poison");
+            });
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("must-not-run.pid");
+            let mut spawned = false;
+            let error = spawn_in_registry(
+                &mut fixture_command("root", &pid_file),
+                &registry,
+                |_, _| {
+                    spawned = true;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("registry is poisoned"));
+            assert!(!spawned);
+            assert!(!pid_file.exists());
+        }
+
+        #[test]
+        fn poisoned_registry_still_releases_an_owned_job() {
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("descendant.pid");
+            let registry = Mutex::new(HashMap::new());
+            let mut child = spawn_in_registry(
+                &mut fixture_command("root", &pid_file),
+                &registry,
+                |child, job| {
+                    let descendant = descendant_pid(&pid_file);
+                    let members = job.query_process_id_list().unwrap();
+                    assert!(members.contains(&usize::try_from(child.id()).unwrap()));
+                    assert!(members.contains(&usize::try_from(descendant).unwrap()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let _ = std::panic::catch_unwind(|| {
+                let _guard = registry.lock().unwrap();
+                panic!("injected poison after owned spawn");
+            });
+            assert!(terminate_in_registry(child.id(), &registry));
+            wait_for_exit(&mut child);
+            assert!(!terminate_in_registry(child.id(), &registry));
+            assert!(registry.is_poisoned());
+            assert!(
+                registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn failed_publication_reaps_the_child_and_does_not_register_a_job() {
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("descendant.pid");
+            let registry = Mutex::new(HashMap::new());
+            // A separate nested Job keeps a queryable observer after the
+            // production Job closes, without relying on a recycled PID probe.
+            let observer = Job::create().unwrap();
+            let mut observed_spawn = false;
+            let error = spawn_in_registry(
+                &mut fixture_command("root", &pid_file),
+                &registry,
+                |child, job| {
+                    let descendant = descendant_pid(&pid_file);
+                    let members = job.query_process_id_list().unwrap();
+                    assert!(members.contains(&usize::try_from(child.id()).unwrap()));
+                    assert!(members.contains(&usize::try_from(descendant).unwrap()));
+                    observer
+                        .assign_process(child.as_raw_handle() as isize)
+                        .unwrap();
+                    observed_spawn = true;
+                    Err(std::io::Error::other("injected publication refusal"))
+                },
+            )
+            .unwrap_err();
+            assert!(observed_spawn);
+            assert_eq!(error.to_string(), "injected publication refusal");
+            assert!(registry.lock().unwrap().is_empty());
+            assert!(
+                observer.query_process_id_list().unwrap().is_empty(),
+                "the failed spawn must finish reaping before returning its error"
+            );
+        }
+
+        #[test]
+        fn process_guard_releases_the_job_when_its_root_exits() {
+            for completion in [
+                "try_wait",
+                "wait",
+                "terminate_and_wait",
+                "kill",
+                "try_wait_then_kill",
+                "drop",
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let pid_file = directory.path().join("descendant.pid");
+                let mut child = spawn(&mut fixture_command("root-exit", &pid_file)).unwrap();
+                let pid = child.id();
+                let descendant = descendant_pid(&pid_file);
+                assert!(
+                    REGISTRY.lock().unwrap()[&pid]
+                        .query_process_id_list()
+                        .unwrap()
+                        .contains(&usize::try_from(descendant).unwrap())
+                );
+                std::fs::write(pid_file.with_extension("exit"), "exit").unwrap();
+                wait_for_exit(&mut child);
+                let mut guard = super::super::ProcessGuard::new(
+                    child,
+                    super::super::ProcessCleanupMode::ProcessGroupTree,
+                );
+                match completion {
+                    "try_wait" => assert!(guard.try_wait_child().unwrap().is_some()),
+                    "wait" => assert!(guard.wait().unwrap().success()),
+                    "terminate_and_wait" => assert!(guard.terminate_and_wait().unwrap().success()),
+                    "kill" => assert!(guard.kill().unwrap().success()),
+                    "try_wait_then_kill" => {
+                        assert!(guard.try_wait_child().unwrap().is_some());
+                        assert!(guard.kill().unwrap().success());
+                        assert!(guard.kill().is_none());
+                    }
+                    _ => drop(guard),
+                }
+                assert!(!REGISTRY.lock().unwrap().contains_key(&pid));
+            }
         }
     }
 }
@@ -13512,7 +14664,7 @@ fn kill_process_tree_with(pid: Option<u32>, signal: sysinfo::Signal, include_pro
     };
 
     // Windows fast path: children spawned through
-    // `attach_child_job_discipline` carry a Job object containing their whole
+    // `spawn_command_with_job_discipline` carry a Job object containing their whole
     // descendant tree, so dropping the job kills everyone in one shot —
     // including grandchildren that appeared after this function would
     // otherwise have taken its snapshot (bd-9jgrt item 1). Pids without a
@@ -13651,14 +14803,13 @@ impl JobGatedChildLaunch {
     }
 }
 
-/// Prepare a command whose Windows target cannot spawn before Job attachment.
+/// Prepare a command whose Windows target waits for its owner's launch gate.
 ///
 /// Unix already creates a new process-group leader before the target image
-/// runs. Windows has no equivalent `Command` API for atomic Job assignment, so
-/// a copy of Pi waits on a private file gate using only in-process operations.
-/// Once the parent attaches that wrapper to the Job and opens the gate, the
-/// real target is spawned as a Job member and all of its descendants inherit
-/// the same kill-on-close discipline.
+/// runs. On Windows, a copy of Pi waits on a private file gate using only
+/// in-process operations. Spawn that wrapper with atomic Job membership,
+/// retain its owner and check cancellation before opening the gate. The real
+/// target then inherits the same kill-on-close discipline as the wrapper.
 pub(crate) fn command_with_job_gate_in_dir(
     program: impl AsRef<OsStr>,
     args: &[OsString],
@@ -13703,10 +14854,10 @@ pub(crate) fn command_with_job_gate_in_dir(
     }
 }
 
-/// Run the Windows half of the private pre-Job launch gate, if requested.
+/// Run the Windows half of the private target launch gate, if requested.
 ///
 /// This is called before normal CLI initialization. The wait itself never
-/// spawns a process, which is the property that closes the spawn-to-Job race.
+/// spawns a process, so cancellation can still prevent the target launch.
 #[cfg(windows)]
 #[doc(hidden)]
 pub fn run_windows_share_job_child_if_requested() -> Option<i32> {
@@ -14626,6 +15777,248 @@ mod tests {
     use proptest::prelude::*;
     #[cfg(target_os = "linux")]
     use std::time::Duration;
+
+    /// A Windows-shaped environment for [`find_windows_bash`] with the given
+    /// `PATH`. Which files exist is up to each test. Paths are built with
+    /// `join`, so the tests run on any OS.
+    fn windows_shell_env(path_dirs: Vec<PathBuf>) -> WindowsShellEnv {
+        WindowsShellEnv {
+            program_files: vec![PathBuf::from("C:").join("Program Files")],
+            local_app_data: Some(
+                PathBuf::from("C:")
+                    .join("Users")
+                    .join("me")
+                    .join("AppData")
+                    .join("Local"),
+            ),
+            system_root: Some(PathBuf::from("C:").join("Windows")),
+            path_dirs,
+        }
+    }
+
+    fn system32() -> PathBuf {
+        PathBuf::from("C:").join("Windows").join("System32")
+    }
+
+    fn pick(env: &WindowsShellEnv, existing: &[PathBuf]) -> Option<PathBuf> {
+        find_windows_bash(env, |path| existing.iter().any(|file| file == path))
+    }
+
+    /// GH #182: with WSL's System32\bash.exe first on PATH, Git for
+    /// Windows in Program Files still wins.
+    #[test]
+    fn windows_bash_prefers_git_for_windows_over_the_wsl_launcher() {
+        let git_bash = PathBuf::from("C:")
+            .join("Program Files")
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
+        let wsl = system32().join("bash.exe");
+        let env = windows_shell_env(vec![system32()]);
+        assert_eq!(pick(&env, &[wsl, git_bash.clone()]), Some(git_bash));
+    }
+
+    /// Per-user Git installs live under %LOCALAPPDATA%\Programs\Git.
+    #[test]
+    fn windows_bash_finds_a_per_user_git_install() {
+        let git_bash = PathBuf::from("C:")
+            .join("Users")
+            .join("me")
+            .join("AppData")
+            .join("Local")
+            .join("Programs")
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
+        let env = windows_shell_env(Vec::new());
+        assert_eq!(pick(&env, std::slice::from_ref(&git_bash)), Some(git_bash));
+    }
+
+    /// A bash.exe on PATH (MSYS2 here) beats WSL's launcher even when the
+    /// launcher's directory comes first on PATH.
+    #[test]
+    fn windows_bash_takes_a_path_bash_before_the_wsl_launcher() {
+        let msys = PathBuf::from("C:").join("msys64").join("usr").join("bin");
+        let env = windows_shell_env(vec![system32(), msys.clone()]);
+        let existing = [system32().join("bash.exe"), msys.join("bash.exe")];
+        assert_eq!(pick(&env, &existing), Some(msys.join("bash.exe")));
+    }
+
+    /// Git's default PATH option adds only `Git\cmd`; its bash is found
+    /// next to it, wherever Git was installed.
+    #[test]
+    fn windows_bash_derives_git_bash_from_git_cmd_on_path() {
+        let git = PathBuf::from("D:").join("Tools").join("Git");
+        let env = windows_shell_env(vec![system32(), git.join("cmd")]);
+        let existing = [
+            system32().join("bash.exe"),
+            git.join("cmd").join("git.exe"),
+            git.join("bin").join("bash.exe"),
+        ];
+        assert_eq!(
+            pick(&env, &existing),
+            Some(git.join("bin").join("bash.exe"))
+        );
+    }
+
+    /// GH #182's setup: only WSL's launcher exists. It is used as the last
+    /// resort, from PATH or from %SystemRoot%\System32.
+    #[test]
+    fn windows_bash_falls_back_to_the_wsl_launcher() {
+        let wsl = system32().join("bash.exe");
+        assert_eq!(
+            pick(
+                &windows_shell_env(vec![system32()]),
+                std::slice::from_ref(&wsl)
+            ),
+            Some(wsl.clone())
+        );
+        assert_eq!(
+            pick(&windows_shell_env(Vec::new()), std::slice::from_ref(&wsl)),
+            Some(wsl)
+        );
+    }
+
+    /// Logs at WARN on `target` while `emit` runs and returns what was written.
+    fn warnings_on_target(target: &str, emit: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(format!("{target}=warn")))
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = captured
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes).expect("utf-8 log output")
+    }
+
+    /// Falling back to WSL's launcher explains itself once per process, on
+    /// the user-diagnostic channel: that commands run inside WSL, the UNC
+    /// working-directory caveat, and how to pick a shell with `shell_path`.
+    /// A native bash never triggers it.
+    #[test]
+    fn wsl_launcher_fallback_notices_once_on_the_user_channel() {
+        let shown = std::sync::atomic::AtomicBool::new(false);
+        let wsl = system32().join("bash.exe");
+        let git_bash = PathBuf::from("C:")
+            .join("Program Files")
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
+
+        let mut results = Vec::new();
+        let logged = warnings_on_target(crate::config::USER_DIAGNOSTIC_TARGET, || {
+            results.push(notice_wsl_bash_once(&git_bash, &shown));
+            results.push(notice_wsl_bash_once(&wsl, &shown));
+            results.push(notice_wsl_bash_once(&wsl, &shown));
+        });
+        assert_eq!(results, [false, true, false]);
+        assert_eq!(logged.matches("WSL's bash.exe").count(), 1, "{logged}");
+        assert!(
+            logged.contains("inside the default WSL Linux distro"),
+            "{logged}"
+        );
+        assert!(logged.contains("UNC"), "{logged}");
+        assert!(logged.contains("\"shell_path\""), "{logged}");
+        assert!(logged.contains(&wsl.display().to_string()), "{logged}");
+
+        // Nothing is shown for a native bash even before any WSL notice.
+        let fresh = std::sync::atomic::AtomicBool::new(false);
+        let quiet = warnings_on_target(crate::config::USER_DIAGNOSTIC_TARGET, || {
+            assert!(!notice_wsl_bash_once(&git_bash, &fresh));
+        });
+        assert!(quiet.is_empty(), "{quiet}");
+    }
+
+    #[test]
+    fn windows_bash_is_none_without_any_bash() {
+        let env = windows_shell_env(vec![system32()]);
+        assert_eq!(pick(&env, &[]), None);
+        assert!(NO_WINDOWS_BASH.contains("shell_path"));
+    }
+
+    #[test]
+    fn wsl_launcher_detection() {
+        assert!(is_wsl_bash_launcher(&system32().join("bash.exe")));
+        assert!(is_wsl_bash_launcher(
+            &PathBuf::from("C:")
+                .join("WINDOWS")
+                .join("SYSTEM32")
+                .join("bash.exe")
+        ));
+        assert!(is_wsl_bash_launcher(
+            &PathBuf::from("C:")
+                .join("Users")
+                .join("me")
+                .join("AppData")
+                .join("Local")
+                .join("Microsoft")
+                .join("WindowsApps")
+                .join("bash.exe")
+        ));
+        assert!(!is_wsl_bash_launcher(
+            &PathBuf::from("C:")
+                .join("Program Files")
+                .join("Git")
+                .join("bin")
+                .join("bash.exe")
+        ));
+    }
+
+    /// Empty and relative `PATH` entries are never searched for bash.exe.
+    #[test]
+    fn windows_bash_path_skips_empty_and_relative_entries() {
+        let absolute = std::env::temp_dir();
+        let path = std::env::join_paths([
+            PathBuf::new(),
+            PathBuf::from("."),
+            PathBuf::from("relative").join("bin"),
+            absolute.clone(),
+        ])
+        .expect("joinable PATH");
+        assert_eq!(absolute_path_dirs(&path), vec![absolute]);
+    }
+
+    /// The process environment reader runs on every OS; `PATH` is always
+    /// set for the test process.
+    #[test]
+    fn windows_shell_env_reads_path_from_the_process() {
+        let env = WindowsShellEnv::from_process();
+        assert!(!env.path_dirs.is_empty());
+        let _ = find_windows_bash(&env, Path::is_file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_bash_shell_on_unix_is_an_absolute_bash_or_sh() {
+        let shell = default_bash_shell().expect("unix always has a default");
+        assert!(shell == "sh" || shell.ends_with("/bash"), "{shell}");
+    }
 
     #[cfg(unix)]
     struct UnixModeGuard {
@@ -20012,6 +21405,35 @@ mod tests {
         assert!(!result.to_string_lossy().starts_with("~/"));
     }
 
+    /// Windows models write `~\Documents\x`; that must reach the home
+    /// directory there, while on Unix `~\x` stays a literal relative name.
+    #[test]
+    fn test_home_relative_rest_accepts_backslash_only_where_it_separates() {
+        assert_eq!(home_relative_rest("~/a/b.txt", false), Some("a/b.txt"));
+        assert_eq!(home_relative_rest("~/a/b.txt", true), Some("a/b.txt"));
+        assert_eq!(
+            home_relative_rest("~\\Documents\\b.txt", true),
+            Some("Documents\\b.txt")
+        );
+        assert_eq!(home_relative_rest("~\\Documents\\b.txt", false), None);
+        assert_eq!(home_relative_rest("~user/b.txt", true), None);
+        assert_eq!(home_relative_rest("a/~/b.txt", true), None);
+        assert_eq!(home_relative_rest("~", true), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_path_backslash_tilde_expands_on_windows() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let cwd = PathBuf::from(r"C:\work\project");
+        assert_eq!(
+            resolve_path(r"~\notes\todo.txt", &cwd),
+            home.join("notes").join("todo.txt")
+        );
+    }
+
     fn arbitrary_text() -> impl Strategy<Value = String> {
         prop::collection::vec(any::<u8>(), 0..512)
             .prop_map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -21476,5 +22898,273 @@ mod tests {
             !registry.is_discoverable("current_time"),
             "current_time must be essential-tier (directly callable)"
         );
+    }
+}
+
+#[cfg(test)]
+mod known_tool_name_tests {
+    use super::*;
+
+    /// Joined after construction by the session host, so the registry builds
+    /// nothing for them and neither does this test.
+    const HOST_COUPLED: &[&str] = &["ask", "todo", "submit_plan"];
+
+    /// What the registry holds for a request naming nothing at all.
+    ///
+    /// Not necessarily zero — some tools join regardless of `--tools` — so
+    /// "this name built something" has to be measured as a difference.
+    fn baseline_tool_count(dir: &std::path::Path) -> usize {
+        ToolRegistry::new(&[], dir, None).tools().len()
+    }
+
+    #[test]
+    fn tool_registry_builds_every_listed_name() {
+        // The direction that matters: a name in KNOWN_TOOL_NAMES that builds
+        // nothing is pi promising a tool it will then drop in silence, which
+        // is the whole defect the list exists to report.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let baseline = baseline_tool_count(dir.path());
+        let mut built_nothing = Vec::new();
+        for name in ToolRegistry::KNOWN_TOOL_NAMES {
+            if HOST_COUPLED.contains(name) {
+                continue;
+            }
+            if ToolRegistry::new(&[name], dir.path(), None).tools().len() <= baseline {
+                built_nothing.push(*name);
+            }
+        }
+        assert!(
+            built_nothing.is_empty(),
+            "listed but built nothing beyond the {baseline}-tool baseline: \
+             {built_nothing:?} — either the arm went away or the name is \
+             misspelled in KNOWN_TOOL_NAMES"
+        );
+    }
+
+    #[test]
+    fn every_registerable_tool_is_named_in_one_of_the_two_lists() {
+        // The direction `tool_registry_builds_every_listed_name` leaves open,
+        // and the one that shipped a false warning: a tool the registry really
+        // does build, named in neither list, is reported to the user as "not a
+        // tool pi provides". Seven were in that state — xdev, manage_skill and
+        // the five memory-bank tools — because they join outside the --tools
+        // match and nothing measured that.
+        //
+        // Build with everything the config can switch on, so config-gated
+        // tools are present rather than silently skipped.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "memory": {"backend": "local"},
+            "browser": {"enableBrowser": true},
+            "computer": {"enableComputer": true},
+            "media": {
+                "enableInspectImage": true,
+                "enableGenerateImage": true,
+                "enableTts": true,
+                "enableReadMedia": true
+            }
+        }))
+        .expect("config");
+        let enabled: Vec<&str> = ToolRegistry::KNOWN_TOOL_NAMES.to_vec();
+        let registry = ToolRegistry::new(&enabled, dir.path(), Some(&config));
+
+        let unnamed: Vec<String> = registry
+            .tools()
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .filter(|name| {
+                !ToolRegistry::KNOWN_TOOL_NAMES.contains(&name.as_str())
+                    && !ToolRegistry::TOOLS_NOT_SELECTED_BY_FLAG
+                        .iter()
+                        .any(|(listed, _)| listed == name)
+            })
+            .collect();
+        assert!(
+            unnamed.is_empty(),
+            "the registry builds {unnamed:?}, which appears in neither \
+             KNOWN_TOOL_NAMES nor TOOLS_NOT_SELECTED_BY_FLAG — `--tools` will \
+             tell a user these are not tools pi provides"
+        );
+
+        // And the converse for the new list: a name here that the registry
+        // never produces would be advice pointing at nothing.
+        let built: Vec<String> = registry
+            .tools()
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        let phantom: Vec<&str> = ToolRegistry::TOOLS_NOT_SELECTED_BY_FLAG
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !built.iter().any(|b| b == name))
+            .collect();
+        assert!(
+            phantom.is_empty(),
+            "listed as provided-but-unselectable yet never registered: {phantom:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_tool_the_flag_cannot_select_is_not_called_unknown() {
+        for name in [
+            "xdev",
+            "manage_skill",
+            "retain",
+            "recall",
+            "reflect",
+            "memory_edit",
+            "learn",
+        ] {
+            assert!(
+                unknown_tool_names(&[name]).is_empty(),
+                "{name} is a tool pi provides; --tools must not call it unknown"
+            );
+            let advice = unselectable_tool_names(&[name]);
+            assert_eq!(advice.len(), 1, "{name} should be explained, not ignored");
+            assert!(
+                !advice[0].1.is_empty(),
+                "{name} needs advice a user can act on"
+            );
+        }
+        // A genuine typo is still a typo.
+        assert_eq!(unknown_tool_names(&["bsah"]), vec!["bsah".to_string()]);
+        assert!(unselectable_tool_names(&["bsah"]).is_empty());
+    }
+
+    #[test]
+    fn host_coupled_names_are_listed_and_build_nothing_here() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let baseline = baseline_tool_count(dir.path());
+        for name in HOST_COUPLED {
+            assert!(
+                ToolRegistry::KNOWN_TOOL_NAMES.contains(name),
+                "{name} would be reported as a typo"
+            );
+            assert_eq!(
+                ToolRegistry::new(&[name], dir.path(), None).tools().len(),
+                baseline,
+                "{name} now builds in the registry; move it out of HOST_COUPLED"
+            );
+        }
+    }
+
+    #[test]
+    fn a_misspelled_tool_name_is_reported_and_a_real_one_is_not() {
+        assert_eq!(
+            unknown_tool_names(&["read", "bsah", "edit"]),
+            vec!["bsah".to_string()]
+        );
+        assert!(unknown_tool_names(&["read", "ask", "todo", "submit_plan"]).is_empty());
+        assert_eq!(
+            unknown_tool_names(&["completely_made_up"]),
+            vec!["completely_made_up".to_string()]
+        );
+        assert!(unknown_tool_names(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_default_tool_set_is_entirely_honoured() {
+        // `--tools`' own default must not contain a name pi drops.
+        use clap::Parser as _;
+        let cli = crate::cli::Cli::parse_from(["pi"]);
+        let requested = cli.enabled_tools();
+        assert!(!requested.is_empty(), "the default set should not be empty");
+        assert!(
+            unknown_tool_names(&requested).is_empty(),
+            "pi's own default --tools names something it drops: {:?}",
+            unknown_tool_names(&requested)
+        );
+    }
+}
+
+#[cfg(test)]
+mod host_picker_registry_tests {
+    use super::*;
+
+    #[test]
+    fn host_picker_survives_shallow_registry_clones_without_model_ask() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let registry = ToolRegistry::new(&["read"], dir.path(), None);
+            assert!(registry.get("ask").is_none());
+            let picker = registry.host_ask_tool();
+            picker.set_handler(std::sync::Arc::new(|request| {
+                Box::pin(async move {
+                    Ok(crate::ask::AskResponse {
+                        answers: vec![crate::ask::AskAnswer {
+                            question_id: request.questions[0]
+                                .id
+                                .clone()
+                                .unwrap_or_else(|| "q".into()),
+                            selected: vec!["Allow once".into()],
+                            other: None,
+                        }],
+                        dismissed: false,
+                    })
+                })
+            }));
+            let clone = registry.clone_shallow().host_ask_tool();
+            let response = clone
+                .prompt_installed(crate::ask::AskRequest {
+                    questions: vec![crate::ask::AskQuestion {
+                        id: Some("q".into()),
+                        header: None,
+                        question: "Host decision?".into(),
+                        options: vec![
+                            crate::ask::AskOption {
+                                label: "Deny".into(),
+                                description: None,
+                            },
+                            crate::ask::AskOption {
+                                label: "Allow once".into(),
+                                description: None,
+                            },
+                        ],
+                        recommended: None,
+                        multi: false,
+                    }],
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.answers[0].selected, ["Allow once"]);
+        });
+    }
+
+    #[test]
+    fn default_registry_computer_uses_host_picker_before_native_input() {
+        asupersync::test_utils::run_test(|| async {
+            let dir = tempfile::tempdir().unwrap();
+            let config: Config = serde_json::from_value(serde_json::json!({
+                "computer": { "enableComputer": true, "requireApproval": true }
+            }))
+            .unwrap();
+            let registry = ToolRegistry::new(&["computer"], dir.path(), Some(&config));
+            let picker = registry.host_ask_tool();
+            picker.set_handler(std::sync::Arc::new(|request| {
+                Box::pin(async move {
+                    Ok(crate::ask::AskResponse {
+                        answers: vec![crate::ask::AskAnswer {
+                            question_id: request.questions[0].id.clone().unwrap(),
+                            selected: vec!["Deny".into()],
+                            other: None,
+                        }],
+                        dismissed: false,
+                    })
+                })
+            }));
+            let error = registry
+                .get("computer")
+                .unwrap()
+                .execute(
+                    "host-picker",
+                    serde_json::json!({"action":"key_type","text":"must-not-reach-native"}),
+                    None,
+                )
+                .await
+                .expect_err("host denial must stop before native input");
+            let message = error.to_string();
+            assert!(message.contains("not approved"), "{message}");
+            assert!(!message.contains("no approval handler"), "{message}");
+        });
     }
 }

@@ -73,7 +73,7 @@ export function MessageQueue({
             <span className="text-foreground/60 min-w-0 flex-1 truncate text-[13.5px]">
               {message.text}
             </span>
-            <ArrowUpIcon className="text-foreground/25 size-3 shrink-0" />
+            <ArrowUpIcon className="text-foreground/25 size-[var(--size-icon-sm)] shrink-0" />
             {onCancel && (
               <button
                 type="button"
@@ -81,7 +81,7 @@ export function MessageQueue({
                 onClick={() => onCancel(message.id)}
                 className={cn(ghostButton, "size-6 shrink-0")}
               >
-                <XIcon className="size-3.5" />
+                <XIcon className="size-[var(--size-icon-md)]" />
               </button>
             )}
           </li>

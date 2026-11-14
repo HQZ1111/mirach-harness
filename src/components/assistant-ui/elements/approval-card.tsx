@@ -49,7 +49,7 @@ export function ApprovalCard({
     >
       <div className="flex items-center gap-3">
         <span className="bg-foreground/[0.05] text-foreground/45 flex size-9 shrink-0 items-center justify-center rounded-xl">
-          <TerminalIcon className="size-4" />
+          <TerminalIcon className="size-[var(--size-icon-lg)]" />
         </span>
         <div className="flex flex-col">
           <p className="text-[13.5px] font-medium">{title}</p>
@@ -107,17 +107,17 @@ export function ApprovalCard({
           >
             {state === "running" ? (
               <>
-                <Loader2Icon className="text-foreground/45 size-3.5 animate-spin" />
+                <Loader2Icon className="text-foreground/45 size-[var(--size-icon-md)] animate-spin" />
                 Approved, running
               </>
             ) : state === "denied" ? (
               <>
-                <XIcon className="text-foreground/45 size-3.5" />
+                <XIcon className="text-foreground/45 size-[var(--size-icon-md)]" />
                 Denied
               </>
             ) : (
               <>
-                <CheckIcon className="size-3.5 text-emerald-500" />
+                <CheckIcon className="size-[var(--size-icon-md)] text-emerald-500" />
                 Finished with exit 0
               </>
             )}

@@ -5,6 +5,7 @@ import { useThreadTokenUsage } from "@assistant-ui/ai-sdk";
 import { type FC, type ReactNode } from "react";
 import {
   ContextDisplayBar as ContextDisplayBarBase,
+  ContextDisplayBreakdownButton as ContextDisplayBreakdownButtonBase,
   ContextDisplayContent,
   ContextDisplayRing as ContextDisplayRingBase,
   ContextDisplayRoot as ContextDisplayRootBase,
@@ -96,6 +97,15 @@ const ContextDisplayText: FC<WiredPresetProps> = ({ usage, ...rest }) =>
     <WiredText {...rest} />
   );
 
+const WiredBreakdownButton = createWiredPreset(ContextDisplayBreakdownButtonBase);
+
+const ContextDisplayButton: FC<WiredPresetProps> = ({ usage, ...rest }) =>
+  usage !== undefined ? (
+    <ContextDisplayBreakdownButtonBase usage={usage} {...rest} />
+  ) : (
+    <WiredBreakdownButton {...rest} />
+  );
+
 const ContextDisplay = {} as {
   Root: typeof ContextDisplayRoot;
   Trigger: typeof ContextDisplayTrigger;
@@ -103,6 +113,7 @@ const ContextDisplay = {} as {
   Ring: typeof ContextDisplayRing;
   Bar: typeof ContextDisplayBar;
   Text: typeof ContextDisplayText;
+  Button: typeof ContextDisplayButton;
 };
 
 ContextDisplay.Root = ContextDisplayRoot;
@@ -111,6 +122,7 @@ ContextDisplay.Content = ContextDisplayContent;
 ContextDisplay.Ring = ContextDisplayRing;
 ContextDisplay.Bar = ContextDisplayBar;
 ContextDisplay.Text = ContextDisplayText;
+ContextDisplay.Button = ContextDisplayButton;
 
 export {
   ContextDisplay,
@@ -120,4 +132,5 @@ export {
   ContextDisplayRing,
   ContextDisplayBar,
   ContextDisplayText,
+  ContextDisplayButton,
 };

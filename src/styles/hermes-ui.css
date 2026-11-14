@@ -1,0 +1,260 @@
+/* ── hermes 桌面端组件类（镜像树专用）──────────────────────────────
+ *
+ * 和 hermes-tokens.css 同一理由：`src/hermes-mirror/` 里的组件除了用 tailwind
+ * 工具类，还直接用上游 `styles.css` 里定义的一批**语义类名**。宿主没有这些
+ * 定义，class 名就是空字符串 —— 输入框没有边框/内阴影、弹层滚动条是系统粗条、
+ * 引用链接没有颜色、标题栏图标 16px 而不是 13.9px。
+ *
+ * 实测（scripts/tmp-class-gap2.mjs，从两个真实入口做可达性遍历）镜像树用到
+ * 15 个上游类名，其中 13 个宿主缺失。这里逐条照抄上游规则（`apps/desktop/
+ * src/styles.css`），只做两处必要改动：
+ *   1. `.row-hover` 的两条规则引用 `.session-row-tail` / `.session-row-kebab`
+ *      —— 那是 hermes 会话侧栏的行内元素，宿主侧栏是自己的实现，这两个类
+ *      在本宿主不存在，规则本身也无副作用（`:has` 不命中就整条不生效），
+ *      保留原样以便上游同步。
+ *   2. `.xterm` 规则属于集成终端；宿主终端是 xterm.js 但主题由 JS 注入，
+ *      只保留滚动条那三条（无主题冲突）。
+ *
+ * 没搬的：`.shimmer` / `.underline` / `.group` / `.wordmark` —— 前三个是
+ * tailwind 工具类或分组标记（由 tailwind 生成/仅作 `group` 变体锚点），
+ * `.wordmark` 属于空聊天页的品牌字，能力页不渲染它。
+ *
+ * 注意：CSS 注释里禁止半角星号紧跟斜杠连写（会提前闭合注释）。
+ */
+
+/* 标题栏控件：codicon.css 是无层级（`font: 16px/1`），tailwind 的 @layer
+   工具类打不过它，所以字号只能在这里定。镜像的 button.tsx 用
+   `titlebar-icon-button` + `h-(--titlebar-control-height)`。 */
+.titlebar-icon-button .codicon[class*='codicon-'] {
+  font-size: var(--titlebar-icon-size);
+}
+
+/* 输入框 chrome（镜像 components/ui/control.ts / input.tsx 的共享外观）。
+   边框强度只由 --dt-input-border 一个旋钮驱动：hover ×2、focus 实色。只让
+   border-color 过渡——半透明底色在窗口 backdrop-blur 上做动画会闪。 */
+.desktop-input-chrome {
+  background: color-mix(in srgb, var(--dt-card) var(--dt-input-bg), transparent);
+  border-color: color-mix(in srgb, var(--dt-composer-ring) var(--dt-input-border), transparent);
+  box-shadow: var(--dt-input-inset);
+  transition: border-color 200ms ease-out;
+}
+
+.desktop-input-chrome:hover {
+  border-color: color-mix(in srgb, var(--dt-composer-ring) calc(var(--dt-input-border) * 2), transparent);
+}
+
+/* `[data-state='open']` 让触发器在下拉打开期间保持"聚焦"外观——Radix 把焦点
+   移进列表，触发器自己会丢 :focus。 */
+.desktop-input-chrome:focus,
+.desktop-input-chrome:focus-within,
+.desktop-input-chrome[data-state='open'] {
+  border-color: var(--dt-composer-ring);
+  box-shadow: none;
+  outline: none;
+}
+
+.desktop-input-chrome[aria-invalid='true'] {
+  border-color: var(--dt-destructive);
+}
+
+/* 滚动条：Chromium 121+ 偏好标准 scrollbar-* 并忽略 ::-webkit-scrollbar，
+   但平台的 thin 在 mac 上仍显粗。用 webkit 拿真正细的拇指，标准属性只在
+   非 webkit 引擎（Firefox）生效。所有原生滚动容器共用同一套 hover 才显形的
+   拇指，几何在 hover 前后不变（显形不改变内容宽度）。
+
+   `.dt-portal-scrollbar` 是给 Radix 传送到 body 的弹层用的变体——那些节点
+   在 #root 的 `.scrollbar-dt` 作用域之外。 */
+.scrollbar-dt .scrollbar-fade::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  transition: none;
+}
+
+.scrollbar-fade:hover::-webkit-scrollbar-thumb,
+.scrollbar-dt .scrollbar-fade:hover::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--dt-scrollbar-thumb) 18%, transparent);
+}
+
+.scrollbar-fade:hover::-webkit-scrollbar-thumb:hover,
+.scrollbar-dt .scrollbar-fade:hover::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--dt-scrollbar-thumb) 40%, transparent);
+}
+
+.dt-portal-scrollbar::-webkit-scrollbar {
+  width: 0.5rem;
+  height: 0.5rem;
+}
+
+.dt-portal-scrollbar::-webkit-scrollbar-track,
+.dt-portal-scrollbar::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.dt-portal-scrollbar::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999rem;
+  background-clip: padding-box;
+}
+
+.dt-portal-scrollbar:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--dt-scrollbar-thumb) 28%, transparent);
+}
+
+.dt-portal-scrollbar:hover::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--dt-scrollbar-thumb) 50%, transparent);
+  background-clip: padding-box;
+}
+
+.dt-portal-scrollbar::-webkit-scrollbar-button {
+  display: none;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .dt-portal-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  .dt-portal-scrollbar:hover,
+  .scrollbar-overlay:hover {
+    scrollbar-color: color-mix(in srgb, var(--dt-scrollbar-thumb) 28%, transparent) transparent;
+  }
+
+  /* Firefox 不动画 scrollbar-color，不做过渡。 */
+  .scrollbar-fade {
+    scrollbar-color: transparent transparent;
+  }
+
+  .scrollbar-fade:hover {
+    scrollbar-color: color-mix(in srgb, var(--dt-scrollbar-thumb) 18%, transparent) transparent;
+  }
+}
+
+/* 行 hover 的联动显隐（PR 角标让位给尾部数字）。宿主侧栏不渲染这两个类，
+   规则空转；保留以便与上游同步。 */
+.row-hover:has([data-pr-link]:hover) .session-row-tail {
+  opacity: 1;
+}
+
+.row-hover:has([data-pr-link]:hover) .session-row-kebab {
+  pointer-events: none;
+  opacity: 0;
+}
+
+/* 内联引用（.ref）：一条粘贴的链接、一个 `@file:`、一个 `/skill` —— 都是同一
+   物种，在输入框里和发出后渲染成同一形态。引用是**文字**，不是徽章：只上色
+   + 可选图标，无底色、无内边距、无边框。`data-ref` 决定色相；没有 data-ref
+   就是普通链接（保留主链接色）。 */
+.ref,
+[data-ref] {
+  --ref-color: var(--dt-primary);
+}
+
+[data-ref='file'],
+[data-ref='folder'],
+[data-ref='line'],
+[data-ref='terminal'] {
+  --ref-color: var(--ui-text-secondary);
+}
+
+[data-ref='url'],
+[data-ref='image'],
+[data-ref='session'],
+[data-ref='theme'] {
+  --ref-color: color-mix(in srgb, var(--ui-accent-secondary) 82%, var(--foreground));
+}
+
+[data-ref='command'],
+[data-ref='tool'] {
+  --ref-color: color-mix(in srgb, var(--ui-accent) 82%, var(--foreground));
+}
+
+[data-ref='skill'],
+[data-ref='git'],
+[data-ref='diff'],
+[data-ref='staged'] {
+  --ref-color: color-mix(in srgb, var(--ui-warm) 82%, var(--foreground));
+}
+
+[data-ref='agent'] {
+  --ref-color: color-mix(in srgb, var(--ui-accent) 82%, var(--foreground));
+}
+
+[data-ref='human'] {
+  --ref-color: color-mix(in srgb, var(--ui-warm) 82%, var(--foreground));
+}
+
+[data-ref='broadcast'] {
+  --ref-color: color-mix(in srgb, var(--foreground) 70%, var(--ui-accent));
+}
+
+.ref {
+  /* 正文链接继承周围文字的字重：@tailwindcss/typography 的 `prose a {
+     font-weight: 500 }` 权重高于锚点上的工具类，覆盖只能写在共享类上。 */
+  font-weight: inherit;
+  color: var(--ref-color);
+  text-decoration: none;
+  /* 换行时按行片段断开，而不是整体变成一个参差的盒子。 */
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+:where(a, button).ref:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* 前导字形：用 em 定尺寸（跟随文字缩放），用 margin 而非 flex gap 间隔——
+   `.ref` 必须保持 inline 盒，长 URL 才能像周围正文一样断行。 */
+.ref > :where(svg, i.codicon) {
+  margin-inline-end: 0.25em;
+  opacity: 0.8;
+}
+
+.ref > svg {
+  display: inline-block;
+  width: 0.875em;
+  height: 0.875em;
+  vertical-align: -0.1em;
+}
+
+.ref > i.codicon {
+  font-size: 0.875em;
+}
+
+/* 抖动网点（镜像 app/shell/sidebar-label.tsx 的 2px 方块）：用重复锥形渐变
+   做 1px 棋盘，颜色取 currentColor 所以跟随父级文字色。 */
+.dither {
+  background: repeating-conic-gradient(currentColor 0% 25%, transparent 0% 50%) 0 0 / 0.125rem 0.125rem;
+}
+
+/* 深链接定位后的字段闪烁（镜像 app/settings/use-deep-link-highlight.ts 加/
+   移除这个类，1.6s 后自动摘掉）。 */
+.setting-field-highlight {
+  animation: setting-field-flash 1.6s ease-out;
+}
+
+@keyframes setting-field-flash {
+  from {
+    background-color: color-mix(in srgb, var(--dt-primary) 18%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setting-field-highlight {
+    animation: none;
+  }
+}
+
+/* 集成终端的滚动条（镜像 themes/types.ts 提到的 xterm 面）。宿主终端用
+   xterm.js 且主题由 JS 注入，这里只管滚动条几何。 */
+.xterm .xterm-scrollable-element > .scrollbar,
+.xterm .xterm-scrollable-element > .scrollbar.invisible.fade {
+  transition: opacity 150ms ease-out;
+}
+
+.xterm:not(:hover) .xterm-scrollable-element > .scrollbar {
+  opacity: 0;
+}

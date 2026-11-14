@@ -79,7 +79,7 @@ export function ReviewableDiff({
                         onClick={() => onDiscard(hunk.id)}
                         className="text-foreground/45 hover:bg-foreground/[0.06] hover:text-foreground/90 flex h-6 items-center gap-1 rounded-full px-2 text-[11px] font-medium transition-[background-color,color,scale] duration-150 active:scale-[0.96]"
                       >
-                        <XIcon className="size-3" />
+                        <XIcon className="size-[var(--size-icon-sm)]" />
                         Discard
                       </button>
                     )}
@@ -90,7 +90,7 @@ export function ReviewableDiff({
                         onClick={() => onKeep(hunk.id)}
                         className="flex h-6 items-center gap-1 rounded-full bg-emerald-500/12 px-2 text-[11px] font-medium text-emerald-700 transition-[background-color,scale] duration-150 hover:bg-emerald-500/20 active:scale-[0.96] dark:text-emerald-300"
                       >
-                        <CheckIcon className="size-3" />
+                        <CheckIcon className="size-[var(--size-icon-sm)]" />
                         Keep
                       </button>
                     )}

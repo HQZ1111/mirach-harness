@@ -14,20 +14,21 @@
     "windows": [
       {
         "title": "Mirach Harness",
-        "width": 1800,
-        "height": 1000,
+        "width": 1280,
+        "height": 820,
         "minWidth": 600,
         "minHeight": 600,
         "center": true,
         "dragDropEnabled": false,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "shadow": true,
+        "visible": false,
         "additionalBrowserArgs": "--remote-debugging-port=9223"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost https://raw.githubusercontent.com https://*.githubusercontent.com https://github.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* ipc: http://ipc.localhost https://raw.githubusercontent.com https://api.github.com https://github.com"
     }
   },
   "bundle": {

@@ -15,6 +15,15 @@ use super::transport::{DEFAULT_MCP_TIMEOUT, MCP_PROTOCOL_VERSION, McpTransport};
 use super::trust::{TrustDecision, TrustStore, TrustWriteGuard};
 use crate::error::{Error, Result};
 
+mod calls;
+mod catalog;
+mod connection;
+#[cfg(test)]
+mod live_catalog_tests;
+mod output_schema;
+
+pub use output_schema::McpOutputSchema;
+
 #[cfg(test)]
 type TestTransportFactory = dyn Fn() -> Box<dyn McpTransport> + Send + Sync;
 #[cfg(test)]
@@ -162,10 +171,17 @@ fn parse_tool_list(result: &Value) -> Result<Vec<McpToolMeta>> {
                     format!("tools/list entry {index} must have an object inputSchema"),
                 )
             })?;
+        // Admit every advertised contract before any page becomes mountable.
+        // `null` is malformed metadata, not an absent output contract.
+        let output_schema = tool
+            .get("outputSchema")
+            .map(McpOutputSchema::compile)
+            .transpose()?;
         parsed.push(McpToolMeta {
             name: name.to_string(),
             description: description.to_string(),
             input_schema,
+            output_schema,
         });
     }
     Ok(parsed)
@@ -180,6 +196,9 @@ pub struct McpToolMeta {
     pub description: String,
     /// JSON Schema for the tool input.
     pub input_schema: Value,
+    /// Optional, compiled contract for successful structured tool results.
+    /// Clones share a validator so in-flight calls retain their own contract.
+    pub output_schema: Option<McpOutputSchema>,
 }
 
 /// Runtime health for the `/mcp` view.
@@ -226,7 +245,7 @@ struct ServerEntry {
     restarts: Mutex<RestartState>,
     /// bd-hyik7: extension-supplied working-directory override for this
     /// server; relative spec values anchor to the manager cwd at
-    /// registration so the bound identity stays deterministic.
+    /// registration so the bound identity and spawn environment stay deterministic.
     cwd_override: Option<PathBuf>,
 }
 
@@ -366,14 +385,22 @@ impl McpManager {
         }
     }
 
-    /// Discover + build in one step.
+    /// Discover + build in one step, enforcing the established workspace-trust
+    /// decision at discovery time: an untrusted workspace never opens
+    /// project-native or foreign project configs, while explicit CLI files
+    /// and global Pi configuration remain eligible.
     ///
     /// # Errors
     ///
     /// Never fails on discovery problems (warnings are collected); the
     /// `Result` is for forward compatibility.
-    pub fn bootstrap(cwd: &Path, global_dir: &Path, cli_paths: &[PathBuf]) -> Result<Self> {
-        let discovery = super::config::discover(cwd, global_dir, cli_paths);
+    pub fn bootstrap(
+        cwd: &Path,
+        global_dir: &Path,
+        cli_paths: &[PathBuf],
+        project_trusted: bool,
+    ) -> Result<Self> {
+        let discovery = super::config::discover(cwd, global_dir, cli_paths, project_trusted);
         Ok(Self::new(cwd, global_dir, discovery))
     }
 
@@ -681,28 +708,10 @@ impl McpManager {
                 "connection changed before tools/list dispatch",
             ));
         }
-        let result = match transport
-            .request("tools/list", serde_json::json!({}), DEFAULT_MCP_TIMEOUT)
-            .await
-        {
-            Ok(result) => result,
-            Err(err) => {
-                Self::fail_transport_generation(entry, &transport, &err);
-                return Err(err);
-            }
-        };
+        // A server's catalog may span several opaque cursor pages. Retain
+        // the connection lane and publish only the complete validated set.
+        let tools = self.collect_tool_catalog(entry, &transport).await?;
         self.check_running()?;
-        if let Err(err) = self.check_trust(entry) {
-            Self::close_revoked_transport(entry, &transport).await;
-            return Err(err);
-        }
-        let tools = match parse_tool_list(&result) {
-            Ok(tools) => tools,
-            Err(err) => {
-                Self::fail_transport_generation(entry, &transport, &err);
-                return Err(err);
-            }
-        };
         // Narrow the final cross-process revocation window immediately before
         // publishing schemas, then bind publication to this exact connection.
         if let Err(err) = self.check_trust(entry) {
@@ -937,18 +946,12 @@ impl McpManager {
         Ok(())
     }
 
-    async fn ensure_ready(&self, entry: &Arc<ServerEntry>) -> Result<()> {
-        let cx = crate::agent_cx::AgentCx::for_current_or_request();
-        let _connect_guard =
-            asupersync::sync::OwnedMutexGuard::lock(Arc::clone(&entry.connect_lane), cx.cx())
-                .await
-                .map_err(|_| tool_err("MCP_CANCELLED", "cancelled while connecting server"))?;
-
-        self.ensure_ready_in_lane(entry).await
-    }
-
     #[allow(clippy::too_many_lines)]
-    async fn ensure_ready_in_lane(&self, entry: &Arc<ServerEntry>) -> Result<()> {
+    async fn ensure_ready_in_lane_inner(
+        &self,
+        entry: &Arc<ServerEntry>,
+        attempt: &mut connection::ConnectionAttempt<'_>,
+    ) -> Result<()> {
         self.check_running()?;
         if let Err(err) = self.check_trust(entry) {
             let transport = { Self::lock(&entry.transport).take() };
@@ -982,6 +985,11 @@ impl McpManager {
         // can all take time. Re-read the shared store at the last feasible seam
         // before transport construction or process creation.
         self.check_trust(entry)?;
+        connection::check_transport_owner(
+            &crate::agent_cx::AgentCx::for_current_or_request(),
+            &entry.config,
+        )?;
+        attempt.begin();
         let transport: Arc<dyn McpTransport> = match self.spawn_transport(entry).await {
             Ok(transport) => Arc::from(transport),
             Err(err) => {
@@ -990,6 +998,7 @@ impl McpManager {
             }
         };
         let mut private_transport = PrivateHandshakeTransport::new(Arc::clone(&transport));
+        attempt.observe(Arc::clone(&transport));
         if let Err(err) = self.check_running() {
             transport.close().await;
             return Err(err);
@@ -1125,6 +1134,8 @@ impl McpManager {
 
     async fn spawn_transport(&self, entry: &Arc<ServerEntry>) -> Result<Box<dyn McpTransport>> {
         let config = entry.config.clone();
+        let owner = crate::agent_cx::AgentCx::for_current_or_request();
+        connection::check_transport_owner(&owner, &config)?;
         let cwd = entry.effective_cwd(&self.inner.cwd);
         let trust_path = self.inner.trust_path.clone();
         #[cfg(test)]
@@ -1137,7 +1148,11 @@ impl McpManager {
         // them off the async worker so the startup deadline can still be
         // polled. The production runtime supplies a bounded blocking pool.
         let result = asupersync::runtime::spawn_blocking(move || {
+            // The pool thread's ambient authority is not the request owner's.
+            // Keep both secret resolution and process construction attenuated.
+            let _owner_guard = owner.cx().clone().set_current_restricted();
             let ensure_active = || {
+                connection::check_transport_owner(&owner, &config)?;
                 if abandoned_worker.load(Ordering::Acquire) {
                     Err(tool_err(
                         "MCP_STARTUP_CANCELLED",
@@ -1173,8 +1188,12 @@ impl McpManager {
                         format!("server {:?} is http-shaped but has no url", config.name),
                     )
                 })?;
-                let headers =
-                    resolve_secrets(&config.headers, super::config::validate_http_header_value)?;
+                let headers = resolve_server_secrets(
+                    &config.headers,
+                    config.provenance,
+                    super::config::validate_http_header_value,
+                    &cwd,
+                )?;
                 ensure_active()?;
                 return Ok(
                     Box::new(super::transport::HttpTransport::new(&url, headers)?)
@@ -1187,7 +1206,12 @@ impl McpManager {
                     format!("server {:?} has no command or url", config.name),
                 )
             })?;
-            let env = resolve_secrets(&config.env, super::config::validate_env_value)?;
+            let env = resolve_server_secrets(
+                &config.env,
+                config.provenance,
+                super::config::validate_env_value,
+                &cwd,
+            )?;
             ensure_active()?;
             let transport =
                 super::transport::StdioTransport::spawn(&command, &config.args, &env, &cwd)?;
@@ -1200,75 +1224,6 @@ impl McpManager {
         .await;
         attempt.disarm();
         result
-    }
-
-    /// Call one tool on one server.
-    ///
-    /// Trust-gated. When the transport dies mid-call, the server is reconnected
-    /// for later calls, but the failed call is not replayed: the server may
-    /// have performed a side effect before its response was lost.
-    ///
-    /// # Errors
-    ///
-    /// Trust-gated; transport and server errors carry taxonomy codes.
-    pub async fn call_tool(&self, server: &str, tool: &str, arguments: Value) -> Result<Value> {
-        let entry = self.entry(server)?;
-        self.ensure_ready(&entry).await?;
-        let transport = Self::lock(&entry.transport).clone().ok_or_else(|| {
-            tool_err(
-                "MCP_TRANSPORT_UNAVAILABLE",
-                "the connection disappeared before tools/call was dispatched",
-            )
-        })?;
-        match self
-            .call_on_transport(&entry, &transport, tool, &arguments)
-            .await
-        {
-            Ok(value) => Ok(value),
-            Err(err) if is_indeterminate_call_delivery(&err) => {
-                let recovery = self
-                    .recover_after_indeterminate_call(&entry, &transport, &err)
-                    .await;
-                Err(tool_err(
-                    "MCP_DELIVERY_INDETERMINATE",
-                    format!(
-                        "server {:?} lost its transport during tools/call; the request may have completed and was not retried; {recovery}",
-                        entry.config.name
-                    ),
-                ))
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    async fn call_on_transport(
-        &self,
-        entry: &Arc<ServerEntry>,
-        transport: &Arc<dyn McpTransport>,
-        tool: &str,
-        arguments: &Value,
-    ) -> Result<Value> {
-        // The connection lane intentionally does not span a potentially long
-        // tool call. Re-authorize at the request boundary so a trust decision
-        // changed by another manager cannot be bypassed by an already-live
-        // transport.
-        self.check_running()?;
-        self.check_trust(entry)?;
-        let result = transport
-            .request(
-                "tools/call",
-                serde_json::json!({ "name": tool, "arguments": arguments }),
-                DEFAULT_MCP_TIMEOUT,
-            )
-            .await;
-        self.check_running()?;
-        let result = result?;
-        if let Err(err) = self.check_trust(entry) {
-            Self::close_revoked_transport(entry, transport).await;
-            return Err(err);
-        }
-        Self::record_operational_success(entry, transport);
-        Ok(result)
     }
 
     async fn recover_after_indeterminate_call(
@@ -1475,7 +1430,7 @@ impl McpManager {
                     Self::record_failure(entry, &error);
                     (true, owned)
                 }
-                None if current.is_none() => {
+                Some(_) | None if current.is_none() => {
                     Self::record_failure(entry, &error);
                     (true, None)
                 }
@@ -1497,6 +1452,31 @@ impl McpManager {
     // Guard scope is deliberate; tightening drops would change lock-hold semantics.
     #[allow(clippy::significant_drop_in_scrutinee)]
     async fn connect_trusted_with_budget(&self, budget: Duration) {
+        self.connect_trusted_with_policy(budget, false).await;
+    }
+
+    /// Reuse the bounded, trust-gated connection owner at a request boundary.
+    /// Fresh catalogs are left untouched; failed or expired discovery cannot
+    /// keep advertising the prior catalog as current.
+    pub(crate) async fn refresh_stale_tools(&self) {
+        self.connect_trusted_with_policy(STARTUP_CONNECT_BUDGET, true)
+            .await;
+    }
+
+    fn catalog_is_fresh(entry: &ServerEntry) -> bool {
+        let transport = Self::lock(&entry.transport);
+        transport
+            .as_ref()
+            .is_some_and(|transport| transport.is_alive())
+            && matches!(&*Self::lock(&entry.health), ServerHealth::Ready { .. })
+            && Self::lock(&entry.tools_cache)
+                .as_ref()
+                .is_some_and(|(at, _)| at.elapsed() <= TOOL_CACHE_TTL)
+    }
+
+    // Generation capture and catalog publication retain the connection lane.
+    #[allow(clippy::significant_drop_in_scrutinee)]
+    async fn connect_trusted_with_policy(&self, budget: Duration, stale_only: bool) {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let Ok(store) = self.trust_store() else {
@@ -1508,6 +1488,7 @@ impl McpManager {
         for entry in servers.values().filter(|entry| {
             store.decision(&entry.config.name, &self.trust_fingerprint_for(entry))
                 == TrustDecision::Acknowledged
+                && (!stale_only || !Self::catalog_is_fresh(entry))
         }) {
             let entry = Arc::clone(entry);
             let completed = Arc::new(AtomicBool::new(false));
@@ -1525,7 +1506,9 @@ impl McpManager {
                 )
                 .await;
                 if let Ok(connect_guard) = connect_guard {
-                    if self.ensure_ready_in_lane(&entry).await.is_ok() {
+                    if (!stale_only || !Self::catalog_is_fresh(&entry))
+                        && self.ensure_ready_in_lane(&entry).await.is_ok()
+                    {
                         // Capture and list one exact generation while retaining
                         // the same lane. Timeout cleanup can then safely compare
                         // this snapshot with the transport whose request hung.
@@ -1745,13 +1728,104 @@ fn is_indeterminate_call_delivery(err: &Error) -> bool {
     )
 }
 
+/// ACP values are already literal values, not pi's configuration language.
+/// Keep this decision at the actual transport-construction seam: a literal
+/// `$CMD:` header must not gain process-execution semantics after trust.
+fn resolve_server_secrets(
+    entries: &[(String, String)],
+    provenance: Provenance,
+    validate_value: fn(&str) -> std::result::Result<(), String>,
+    cwd: &Path,
+) -> Result<Vec<(String, String)>> {
+    if provenance != Provenance::Acp {
+        return resolve_secrets(entries, validate_value, cwd);
+    }
+    entries
+        .iter()
+        .map(|(name, value)| {
+            validate_value(value).map_err(|_| {
+                tool_err("MCP_CONFIG_INVALID", "invalid literal ACP env/header value")
+            })?;
+            Ok((name.clone(), value.clone()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod acp_literal_tests {
+    use super::*;
+
+    #[test]
+    fn acp_transport_construction_never_resolves_references_or_trims_literals() {
+        let entries = vec![
+            (
+                "A".to_string(),
+                "$ENV:PI_ACP_SHOULD_NOT_RESOLVE".to_string(),
+            ),
+            ("B".to_string(), "$CMD:exit 97".to_string()),
+            ("C".to_string(), "  literal spaces  ".to_string()),
+        ];
+        let resolved = resolve_server_secrets(
+            &entries,
+            Provenance::Acp,
+            super::super::config::validate_env_value,
+            Path::new("."),
+        )
+        .expect("literal ACP values");
+        assert_eq!(resolved, entries);
+        assert!(
+            resolve_server_secrets(
+                &[("TOKEN".into(), "bad\r\nvalue".into())],
+                Provenance::Acp,
+                super::super::config::validate_http_header_value,
+                Path::new("."),
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_commands_read_from_the_server_workspace_without_changing_process_cwd() {
+        let project = tempfile::tempdir().expect("project");
+        let other = tempfile::tempdir().expect("other project");
+        std::fs::write(
+            project.path().join("credential.txt"),
+            "selected-workspace-token",
+        )
+        .expect("project credential fixture");
+        std::fs::write(
+            other.path().join("credential.txt"),
+            "different-workspace-token",
+        )
+        .expect("other credential fixture");
+        let process_cwd = std::env::current_dir().expect("process cwd");
+        let entries = vec![("TOKEN".to_string(), "$CMD:cat credential.txt".to_string())];
+        for validate in [
+            super::super::config::validate_env_value as fn(&str) -> std::result::Result<(), String>,
+            super::super::config::validate_http_header_value,
+        ] {
+            let resolved =
+                resolve_server_secrets(&entries, Provenance::GlobalPi, validate, project.path())
+                    .expect("resolve in selected workspace");
+            assert_eq!(resolved[0].1, "selected-workspace-token");
+            let resolved =
+                resolve_server_secrets(&entries, Provenance::GlobalPi, validate, other.path())
+                    .expect("resolve in another selected workspace");
+            assert_eq!(resolved[0].1, "different-workspace-token");
+        }
+        assert_eq!(std::env::current_dir().expect("unchanged cwd"), process_cwd);
+    }
+}
+
 /// Resolve `$ENV:`/`$CMD:` secret references in env/header values.
 fn resolve_secrets(
     entries: &[(String, String)],
     validate_value: fn(&str) -> std::result::Result<(), String>,
+    cwd: &Path,
 ) -> Result<Vec<(String, String)>> {
     resolve_secrets_with(entries, validate_value, |raw| {
-        crate::auth::resolve_secret_reference(raw)
+        crate::auth::resolve_secret_reference(raw, cwd)
     })
 }
 
@@ -2155,7 +2229,9 @@ mod tests {
             .expect("acknowledge fixture execution");
     }
 
-    fn trusted_fixture_manager(temp: &tempfile::TempDir) -> (McpManager, Arc<ServerEntry>) {
+    pub(super) fn trusted_fixture_manager(
+        temp: &tempfile::TempDir,
+    ) -> (McpManager, Arc<ServerEntry>) {
         let cwd = temp.path().join("project");
         let global = temp.path().join("global");
         std::fs::create_dir_all(&cwd).expect("project directory");
@@ -2228,6 +2304,7 @@ mod tests {
                     name: format!("{name}-tool"),
                     description: String::new(),
                     input_schema: serde_json::json!({}),
+                    output_schema: None,
                 }],
             ));
             *McpManager::lock(&entry.health) = ServerHealth::Ready { tools: 1 };
@@ -2422,6 +2499,7 @@ mod tests {
                 name: "stale".to_string(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
             }],
         ));
         *McpManager::lock(&entry.health) = ServerHealth::Ready { tools: 1 };
@@ -2616,9 +2694,10 @@ mod tests {
             count: 2,
             next_retry_at: Some(Instant::now() + Duration::from_secs(10)),
         };
-        runtime
+        let stale_error = runtime
             .block_on(manager.call_on_transport(&entry, &stale, "echo", &serde_json::json!({})))
-            .expect("stale transport response is still a completed call");
+            .expect_err("a superseded transport must not dispatch a tool call");
+        assert!(stale_error.to_string().contains("MCP_TRANSPORT_SUPERSEDED"));
         assert_eq!(
             McpManager::lock(&entry.restarts).count,
             2,
@@ -2754,6 +2833,7 @@ mod tests {
                         name: "replacement-tool".to_string(),
                         description: String::new(),
                         input_schema: serde_json::json!({}),
+                        output_schema: None,
                     }],
                 ));
                 *McpManager::lock(&contender_entry.health) = ServerHealth::Ready { tools: 1 };
@@ -2969,6 +3049,7 @@ mod tests {
                 name: "replacement-tool".to_string(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
             }],
         ));
         *McpManager::lock(&entry.health) = ServerHealth::Ready { tools: 1 };
@@ -3222,6 +3303,7 @@ mod tests {
                 name: "replacement-tool".to_string(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                output_schema: None,
             }],
         ));
         *McpManager::lock(&entry.health) = ServerHealth::Ready { tools: 1 };
@@ -3267,7 +3349,7 @@ mod tests {
     fn stale_malformed_tools_list_cannot_poison_replacement() {
         assert_stale_tools_list_preserves_replacement(
             serde_json::json!({"tools": [{"name": "broken"}]}),
-            "MCP_PROTOCOL",
+            "MCP_TRANSPORT_SUPERSEDED",
         );
     }
 
@@ -3397,9 +3479,13 @@ mod tests {
             }),
         );
         let entry = manager.entry("cwd-srv").expect("registered cwd server");
+        // The message has always said "canonicalized" and the expectation was
+        // the raw path. On macOS a tempdir lives under `/var`, a symlink into
+        // `/private/var`, so the two never matched there.
+        let expected_cwd = std::fs::canonicalize(&helper_dir).expect("canonicalize ext cwd");
         assert_eq!(
             entry.cwd_override.as_deref(),
-            Some(helper_dir.as_path()),
+            Some(expected_cwd.as_path()),
             "cwd override stored (canonicalized)"
         );
 

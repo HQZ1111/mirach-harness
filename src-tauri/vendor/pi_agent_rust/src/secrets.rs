@@ -1,25 +1,32 @@
 //! Secrets obfuscation vault (bd-cv653.7.9).
 //!
 //! Credential-shaped values are replaced with stable placeholders before
-//! provider calls and restored on the way back: read .env → tool result →
-//! provider payload never flows raw. The vault map lives in memory for the
-//! session and dies with it — session files and compaction summaries carry
-//! placeholders only.
+//! provider calls and restored before local tool execution. The raw-value
+//! map lives in memory for the session and dies with it; callers must apply
+//! the appropriate outbound/export transform before publishing transcript
+//! text, since the local transcript may retain user-authored input.
 //!
 //! Detection: versioned pattern rules (sk-ant-*, sk-* including dotted
-//! BaiLian-style keys, gh?_*, AKIA*, AIza*, xox[bap]-*, JWTs, private-key
-//! headers, DSN/connection strings, generic KEY=value high-entropy
-//! assignments) with a measured false-positive budget. This module is the
-//! SINGLE detector for the whole program (bd-cv653.4.1's memory screener
-//! composes with it).
+//! BaiLian-style keys, gh?_*, AKIA*, AIza*, xox[bap]-*, JWTs, complete private
+//! key envelopes, DSN/connection strings, generic KEY=value high-entropy
+//! assignments). This module is the SINGLE detector for the whole program;
+//! memory and crash-report screening compose with it.
 //!
 //! Modes (`secrets.mode`): `off` | `obfuscate` (default) | `block`
 //! (refuse to send, loud named error). Audit events per transform are
 //! redacted (counts only, never values).
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use crate::error::{Error, Result};
+
+mod structured;
+pub use structured::transform_outbound_json;
+pub(crate) use structured::{
+    discover_outbound_json, mask_known_json, restore_inbound_json, transform_assistant_replay_json,
+};
 
 /// Tool-result schema tag for secrets operations.
 pub const SECRETS_SCHEMA: &str = "pi.secrets.v1";
@@ -68,7 +75,7 @@ impl SecretsMode {
 pub struct SecretsSettings {
     /// off | obfuscate | block (default obfuscate).
     pub mode: Option<String>,
-    /// User-added regex patterns (each match becomes a placeholder).
+    /// User-added regex patterns (each nonempty match becomes a placeholder).
     pub extra_patterns: Option<Vec<String>>,
 }
 
@@ -93,18 +100,20 @@ fn dotted_without_digit(value: &str) -> bool {
     value.contains('.') && !value.bytes().any(|b| b.is_ascii_digit())
 }
 
-/// Versioned in-tree rules (bump SECRETS_RULESET_VERSION when editing).
+/// Versioned in-tree rules (bump when detection semantics change).
 ///
-/// v2 (gh #211): provider keys may carry `.` inside the token (Alibaba
-/// BaiLian issues `sk-sp-H.EEDDM.…` keys through the OpenAI-compatible
-/// surface; JWTs are three dot-separated base64url segments). Dots are
-/// accepted only *between* token characters — never leading, trailing, or
-/// doubled — so a key at the end of a sentence does not swallow the period,
-/// and dots do not count toward the minimum length, so `sk-a.b.c` shapes
-/// stay below the bar. Rules are ordered most-specific first: overlapping
-/// hits are resolved by start offset and then rule order, so the audit
-/// label names the tightest rule.
-pub const SECRETS_RULESET_VERSION: u32 = 2;
+/// v2 added dotted provider keys without consuming trailing punctuation or
+/// treating dots as token characters for the minimum length.
+/// v3 protects the entire private-key envelope, including encrypted-key
+/// metadata and truncated bodies, and unions overlapping matches so a short
+/// match cannot expose the tail of a longer credential. The first rule in a
+/// merged region supplies its diagnostic label; rule order breaks start ties.
+/// v4 recognizes quoted assignment keys in JSON/configuration text too.
+/// v5 no longer matches `sk-` keys directly after a letter, so identifiers
+/// such as `task-management-service` are not credentials.
+/// v6 recognizes keys after literal control escapes in debug/serialized text
+/// without allowing matches inside ordinary identifiers.
+pub const SECRETS_RULESET_VERSION: u32 = 6;
 
 /// Token body: `min` or more characters from `class`, with single dots
 /// permitted between characters, ending on a `tail_class` character (the
@@ -120,18 +129,26 @@ fn rules() -> &'static Vec<Rule> {
     static RULES: std::sync::LazyLock<Vec<Rule>> = std::sync::LazyLock::new(|| {
         const TOKEN: &str = r"A-Za-z0-9_\-";
         const ALNUM: &str = "A-Za-z0-9";
+        // Not directly after a letter: identifiers such as
+        // `task-management-service` or an MCP tool `mcp__task-master-ai__x`
+        // contain `sk-` mid-word. Group 1 is the key, so `_sk-`, `2sk-` and
+        // percent-encoded `%22sk-` are still found (`\b` would miss them).
+        // Debug/JSON text can spell a preceding control character as `\n`
+        // or `\t`. Recognize the complete escape as a boundary, keeping its
+        // bytes outside group 1 so redaction never changes the encoding.
+        const SK_PREFIX: &str = r"(?:^|[^A-Za-z]|\\[bfnrtv])";
         let sk_body = dotted_body(TOKEN, ALNUM, 16);
         vec![
             // Before `openai-key`: same prefix, tighter shape.
             Rule {
                 name: "anthropic-key",
-                regex: regex::Regex::new(&format!(r"sk-ant-{sk_body}")).expect("rule"),
+                regex: regex::Regex::new(&format!(r"{SK_PREFIX}(sk-ant-{sk_body})")).expect("rule"),
                 label: "anthropic_key",
                 reject: None,
             },
             Rule {
                 name: "openai-key",
-                regex: regex::Regex::new(&format!(r"sk-{sk_body}")).expect("rule"),
+                regex: regex::Regex::new(&format!(r"{SK_PREFIX}(sk-{sk_body})")).expect("rule"),
                 label: "openai_key",
                 reject: None,
             },
@@ -157,6 +174,8 @@ fn rules() -> &'static Vec<Rule> {
             },
             Rule {
                 name: "private-key",
+                // `scan` extends this marker through its matching footer.
+                // Masking only the header leaves the private material intact.
                 regex: regex::Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").expect("rule"),
                 label: "private_key",
                 reject: None,
@@ -195,13 +214,12 @@ fn rules() -> &'static Vec<Rule> {
                 label: "dsn",
                 reject: None,
             },
-            // Generic KEY=value assignments with a high-entropy value:
-            // 16+ token characters (dots allowed between them), no spaces,
-            // ending on a base64/alphanumeric character.
+            // Quoted or bare assignment keys; group 1 is still ONLY the
+            // value. JSON's closing key quote must not bypass this rule.
             Rule {
                 name: "generic-assignment",
                 regex: regex::Regex::new(&format!(
-                    r#"(?i)(?:api[_-]?key|secret|token|password|passwd|pwd)\s*[=:]\s*['"]?({})['"]?"#,
+                    r#"(?i)["']?(?:api[_-]?key|secret|token|password|passwd|pwd)["']?\s*[=:]\s*['"]?({})['"]?"#,
                     dotted_body(r"A-Za-z0-9+/=_\-", "A-Za-z0-9+/=", 16)
                 ))
                 .expect("rule"),
@@ -223,42 +241,83 @@ pub struct Detection {
 }
 
 /// Scan text for credential shapes. User patterns compose on top.
+///
+/// Returns sorted, nonempty, nonoverlapping byte ranges. Every byte covered
+/// by any matching rule is covered by the result. Overlapping matches form
+/// one region; adjacent independent matches remain separate. Consumers can
+/// replace these ranges in order without exposing overlapping suffixes.
 #[must_use]
 pub fn scan(text: &str, extra_patterns: &[regex::Regex]) -> Vec<Detection> {
     let mut out = Vec::new();
     for rule in rules() {
+        let mut covered_until = 0;
         for caps in rule.regex.captures_iter(text) {
-            // When a rule isolates the value in group 1 (the KEY=value
-            // assignment shape), vault only the value: vaulting the whole
-            // `KEY=value` corrupts inbound restores (`export X=KEY=value`)
-            // and leaves a bare echo of the value unmasked.
+            // Group 1 isolates the value in KEY=value assignments. Keep the
+            // assignment key outside the vault so inbound restores remain values.
             let m = caps.get(1).or_else(|| caps.get(0)).expect("match group 0");
-            if rule.reject.is_some_and(|reject| reject(m.as_str())) {
+            if m.start() < covered_until || rule.reject.is_some_and(|reject| reject(m.as_str())) {
                 continue;
             }
+            let end = if rule.name == "private-key" {
+                private_key_end(text, m.start(), m.end())
+            } else {
+                m.end()
+            };
+            // A missing footer protects the remainder. Do not repeatedly
+            // search that same suffix for nested or malformed opening markers.
+            covered_until = end;
             out.push(Detection {
                 start: m.start(),
-                end: m.end(),
+                end,
                 rule: rule.name,
                 label: rule.label,
             });
         }
     }
-    for (index, pattern) in extra_patterns.iter().enumerate() {
+    for pattern in extra_patterns {
         for m in pattern.find_iter(text) {
-            out.push(Detection {
-                start: m.start(),
-                end: m.end(),
-                rule: "user",
-                label: USER_LABELS[index % USER_LABELS.len()],
-            });
+            if !m.is_empty() {
+                out.push(Detection {
+                    start: m.start(),
+                    end: m.end(),
+                    rule: "user",
+                    label: "user_pattern",
+                });
+            }
         }
     }
-    out.sort_by_key(|d| d.start);
-    out
+    merge_detections(out)
 }
 
-const USER_LABELS: &[&str] = &["user_pattern"];
+/// PEM labels are ASCII and the marker regex already validated the bounds.
+/// Match the exact label, not just the next END line: a mismatched footer
+/// cannot terminate a secret and expose the rest. A truncated envelope is
+/// ambiguous, so fail closed through the end of the supplied text.
+fn private_key_end(text: &str, start: usize, header_end: usize) -> usize {
+    const BEGIN: &str = "-----BEGIN ";
+    const DASHES: &str = "-----";
+    let label = &text[start + BEGIN.len()..header_end - DASHES.len()];
+    let footer = format!("-----END {label}-----");
+    text[header_end..]
+        .find(&footer)
+        .map_or(text.len(), |offset| header_end + offset + footer.len())
+}
+
+fn merge_detections(mut detections: Vec<Detection>) -> Vec<Detection> {
+    // Stable sort preserves specific-rule precedence for equal start offsets.
+    detections.sort_by_key(|detection| detection.start);
+    let mut merged: Vec<Detection> = Vec::with_capacity(detections.len());
+    for detection in detections {
+        if let Some(previous) = merged.last_mut()
+            && detection.start < previous.end
+        {
+            previous.end = previous.end.max(detection.end);
+        } else {
+            merged.push(detection);
+        }
+    }
+    merged
+}
 
 /// Does the text contain any credential shape?
 #[must_use]
@@ -271,7 +330,7 @@ pub fn contains_secret(text: &str, extra_patterns: &[regex::Regex]) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Session-scoped placeholder map. Lives in memory; dies with the session.
-#[derive(Debug, Default)]
+#[derive(Clone, Default)]
 pub struct SecretVault {
     /// real value → placeholder (stable per session).
     by_value: std::collections::HashMap<String, String>,
@@ -281,8 +340,67 @@ pub struct SecretVault {
     next: u64,
 }
 
+impl std::fmt::Debug for SecretVault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretVault")
+            .field("entries", &self.by_value.len())
+            .finish_non_exhaustive()
+    }
+}
+
+type MaskReplacements<'a> = BTreeMap<Cow<'a, str>, &'a str>;
+
+/// An overlapping combination with no exact registered value cannot be
+/// restored safely by a read-only masker. Do not label it with a different
+/// credential's placeholder; redact it explicitly instead.
+const OVERLAP_REDACTION: &str = "<pi-secret:redacted>";
+
+fn placeholder_pattern() -> &'static regex::Regex {
+    static PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"<pi-secret:[0-9a-f]{6,16}>").expect("placeholder grammar")
+    });
+    &PATTERN
+}
+
+fn inside_placeholder(start: usize, end: usize, protected: &[(usize, usize)]) -> bool {
+    protected
+        .iter()
+        .any(|&(left, right)| start >= left && end <= right)
+}
+
+/// Find literal values against the ORIGINAL input, including overlapping
+/// occurrences. Advancing one Unicode scalar after a match preserves byte
+/// boundaries without skipping the final occurrence of a repeated value.
+fn literal_detections<'a>(
+    text: &str,
+    values: impl IntoIterator<Item = &'a str>,
+    protected: &[(usize, usize)],
+) -> Vec<Detection> {
+    let mut detections = Vec::new();
+    for value in values {
+        if value.is_empty() {
+            continue;
+        }
+        let mut offset = 0;
+        while let Some(relative) = text[offset..].find(value) {
+            let start = offset + relative;
+            let end = start + value.len();
+            if !inside_placeholder(start, end, protected) {
+                detections.push(Detection {
+                    start,
+                    end,
+                    rule: "known-value",
+                    label: "known_secret",
+                });
+            }
+            offset = start + value.chars().next().expect("nonempty value").len_utf8();
+        }
+    }
+    detections
+}
+
 impl SecretVault {
-    fn placeholder_for(&mut self, value: &str, label: &str) -> String {
+    fn placeholder_for(&mut self, value: &str, _label: &str) -> String {
         if let Some(existing) = self.by_value.get(value) {
             return existing.clone();
         }
@@ -291,37 +409,155 @@ impl SecretVault {
         self.by_value.insert(value.to_string(), placeholder.clone());
         self.by_placeholder
             .insert(placeholder.clone(), value.to_string());
-        let _ = label;
         placeholder
     }
 
-    /// Restore any placeholders in `text` to their real values.
+    fn protected_placeholders(&self, text: &str) -> Vec<(usize, usize)> {
+        placeholder_pattern()
+            .find_iter(text)
+            .filter(|found| self.by_placeholder.contains_key(found.as_str()))
+            .map(|found| (found.start(), found.end()))
+            .collect()
+    }
+
+    /// Restore placeholders from the input exactly once. A stored value may
+    /// itself contain placeholder-shaped text; it is data, not a second
+    /// substitution program. Unknown/malformed placeholders remain unchanged.
     #[must_use]
     pub fn restore(&self, text: &str) -> String {
-        let mut out = text.to_string();
-        for (placeholder, real) in &self.by_placeholder {
-            if out.contains(placeholder.as_str()) {
-                out = out.replace(placeholder.as_str(), real);
-            }
+        let mut out = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for found in placeholder_pattern().find_iter(text) {
+            out.push_str(&text[cursor..found.start()]);
+            out.push_str(
+                self.by_placeholder
+                    .get(found.as_str())
+                    .map_or(found.as_str(), String::as_str),
+            );
+            cursor = found.end();
         }
+        out.push_str(&text[cursor..]);
         out
     }
 
-    /// Mask any real values in `text` back to placeholders (echo hygiene).
-    /// Longest value first: when one vaulted value is a substring of
-    /// another, masking the shorter one first would leave fragments of the
-    /// longer secret exposed (HashMap order is arbitrary).
-    #[must_use]
-    pub fn mask(&self, text: &str) -> String {
-        let mut pairs: Vec<(&String, &String)> = self.by_placeholder.iter().collect();
-        pairs.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
-        let mut out = text.to_string();
-        for (placeholder, real) in pairs {
-            if out.contains(real.as_str()) {
-                out = out.replace(real.as_str(), placeholder);
+    fn mask_replacements(&self) -> MaskReplacements<'_> {
+        // Exact raw values take precedence if one secret's JSON spelling is
+        // another independently registered raw value.
+        let mut replacements: MaskReplacements<'_> = self
+            .by_value
+            .iter()
+            .map(|(value, placeholder)| (Cow::Borrowed(value.as_str()), placeholder.as_str()))
+            .collect();
+        for (value, placeholder) in &self.by_value {
+            // JSON string serialization cannot fail. Retain only the string
+            // contents, so quotes surrounding an export field stay intact.
+            let encoded = serde_json::to_string(value).expect("serialize secret string");
+            let escaped = &encoded[1..encoded.len() - 1];
+            if escaped != value {
+                replacements
+                    .entry(Cow::Owned(escaped.to_string()))
+                    .or_insert(placeholder.as_str());
             }
         }
+        replacements
+    }
+
+    fn mask_literal_text(&self, text: &str, replacements: &MaskReplacements<'_>) -> String {
+        let protected = self.protected_placeholders(text);
+        let detections = merge_detections(literal_detections(
+            text,
+            replacements.keys().map(AsRef::as_ref),
+            &protected,
+        ));
+        let mut out = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for detection in detections {
+            out.push_str(&text[cursor..detection.start]);
+            let value = &text[detection.start..detection.end];
+            out.push_str(
+                replacements
+                    .get(value)
+                    .copied()
+                    .unwrap_or(OVERLAP_REDACTION),
+            );
+            cursor = detection.end;
+        }
+        out.push_str(&text[cursor..]);
         out
+    }
+
+    #[allow(clippy::option_if_let_else)]
+    fn mask_json_document(
+        &self,
+        text: &str,
+        replacements: &MaskReplacements<'_>,
+    ) -> Option<String> {
+        if !matches!(text.trim_start().chars().next()?, '{' | '[' | '"') {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let masked = if let Some(placeholder) = self.by_value.get(text.trim()) {
+            serde_json::Value::String(placeholder.clone())
+        } else {
+            // A collision is not a successful projection with fewer fields.
+            // Exports cannot return an error, so make the whole omitted JSON
+            // document visible without disclosing any of its original bytes.
+            structured::mask_known_json_with_replacements(&value, self, replacements)
+                .unwrap_or_else(|_| serde_json::Value::String(OVERLAP_REDACTION.to_string()))
+        };
+        if masked == value {
+            // Screening must not reformat clean structured data.
+            return Some(text.to_string());
+        }
+        Some(serde_json::to_string(&masked).expect("serialize masked JSON value"))
+    }
+
+    fn mask_json_lines(&self, text: &str, replacements: &MaskReplacements<'_>) -> Option<String> {
+        let mut output = String::with_capacity(text.len());
+        let mut saw_document = false;
+        for line in text.split_inclusive('\n') {
+            let (body, ending) = line
+                .strip_suffix("\r\n")
+                .map(|body| (body, "\r\n"))
+                .or_else(|| line.strip_suffix('\n').map(|body| (body, "\n")))
+                .unwrap_or((line, ""));
+            if body.trim().is_empty() {
+                output.push_str(line);
+                continue;
+            }
+            // Only take the line-oriented route when every nonblank line is
+            // structured JSON. Otherwise mask the full text, so multiline
+            // plaintext credentials are never split into unmatchable pieces.
+            output.push_str(&self.mask_json_document(body, replacements)?);
+            output.push_str(ending);
+            saw_document = true;
+        }
+        saw_document.then_some(output)
+    }
+
+    /// Mask remembered values, including JSON-escaped multiline credentials.
+    /// JSON documents/JSONL are transformed structurally so escaped quotes,
+    /// backslashes, object keys and control characters cannot corrupt the
+    /// export or make a caller discard the redaction on a parse failure.
+    ///
+    /// Literal matches are unioned against the original input, never against
+    /// generated placeholders. Unregistered overlapping combinations use an
+    /// explicit non-restorable redaction marker rather than a wrong credential.
+    #[must_use]
+    pub fn mask(&self, text: &str) -> String {
+        if self.by_value.is_empty() {
+            return text.to_string();
+        }
+        let replacements = self.mask_replacements();
+        if let Some(masked) = self.mask_json_document(text, &replacements) {
+            return masked;
+        }
+        if text.contains('\n')
+            && let Some(masked) = self.mask_json_lines(text, &replacements)
+        {
+            return masked;
+        }
+        self.mask_literal_text(text, &replacements)
     }
 
     #[cfg(test)]
@@ -336,36 +572,37 @@ impl SecretVault {
 pub struct TransformAudit {
     pub schema: String,
     pub direction: String,
+    /// Number of distinct redacted regions, not the number of overlapping rules.
     pub detections: usize,
     pub rules: Vec<String>,
 }
 
-/// The outbound transform: replace detections with stable placeholders.
-/// Returns the transformed text + audit.
+/// Replace newly detected AND remembered values with stable placeholders.
+///
+/// Learn detections first so a bare echo earlier in the same text is protected
+/// too. Remembered values remain protected after their assignment/type hint
+/// disappears from later context, including after compaction.
 pub fn obfuscate(
     text: &str,
     vault: &mut SecretVault,
     extra_patterns: &[regex::Regex],
 ) -> (String, TransformAudit) {
-    let detections = scan(text, extra_patterns);
-    if detections.is_empty() {
-        return (
-            text.to_string(),
-            TransformAudit {
-                schema: SECRETS_SCHEMA.to_string(),
-                direction: "outbound".to_string(),
-                detections: 0,
-                rules: Vec::new(),
-            },
-        );
+    let protected = vault.protected_placeholders(text);
+    let mut detections = scan(text, extra_patterns);
+    detections.retain(|detection| !inside_placeholder(detection.start, detection.end, &protected));
+    for detection in &detections {
+        let _ = vault.placeholder_for(&text[detection.start..detection.end], detection.label);
     }
+    detections.extend(literal_detections(
+        text,
+        vault.by_value.keys().map(String::as_str),
+        &protected,
+    ));
+    let detections = merge_detections(detections);
     let mut out = String::with_capacity(text.len());
     let mut cursor = 0;
     let mut rules_hit: Vec<String> = Vec::new();
     for detection in &detections {
-        if detection.start < cursor {
-            continue; // overlapping rule hit
-        }
         out.push_str(&text[cursor..detection.start]);
         let value = &text[detection.start..detection.end];
         let placeholder = vault.placeholder_for(value, detection.label);
@@ -444,6 +681,70 @@ mod tests {
         assert!(!contains_secret("let timeout = 30;", &[]));
         assert!(!contains_secret("use std::collections::HashMap;", &[]));
         assert!(!contains_secret("const MAX: usize = 1024;", &[]));
+    }
+
+    #[test]
+    fn sk_rules_do_not_match_inside_identifiers() {
+        // Regression: `sk-` matched mid-word, so a model's own
+        // `mkdir task-management-service` wedged signed replay and an MCP
+        // server key such as `task-master-ai` was refused on every request.
+        for clean in [
+            "mkdir task-management-service",
+            "mcp__task-master-ai__get_tasks",
+            "cd risk-assessment-pipeline-v2",
+            "disk-ant-performance-tuning-guide",
+            r"\ntask-management-service",
+            r"\tmcp__task-master-ai__get_tasks",
+            "nsk-0123456789abcdefghijklmn",
+            "rsk-ant-api03-aaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!contains_secret(clean, &[]), "{clean}");
+        }
+        for key in [
+            "OPENAI_API_KEY=sk-proj-0123456789abcdefghij",
+            "\"sk-ant-api03-aaaaaaaaaaaaaaaaaaaa\"",
+            "Authorization: Bearer sk-0123456789abcdefghijklmn",
+            "Bearer%20sk-0123456789abcdefghijklmn",
+            "OPENAI_KEY_sk-0123456789abcdefghijklmn",
+            "sk-0123456789abcdefghijklmn",
+        ] {
+            assert!(contains_secret(key, &[]), "{key}");
+        }
+        // The key alone is the detection, never the character before it.
+        let detections = scan("token:sk-0123456789abcdefghijklmn", &[]);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].start, "token:".len());
+    }
+
+    #[test]
+    fn sk_rules_detect_keys_after_escaped_control_boundaries() {
+        for (key, rule) in [
+            ("sk-0123456789abcdefghijklmn", "openai-key"),
+            ("sk-ant-api03-aaaaaaaaaaaaaaaaaaaa", "anthropic-key"),
+        ] {
+            for escape in [r"\n", r"\t", r"\r", r"\b", r"\f", r"\v", r"\r\n", r"\\n"] {
+                let prefix = format!("π: before{escape}");
+                let input = format!("{prefix}{key}{escape}after");
+                let detections = scan(&input, &[]);
+                assert_eq!(detections.len(), 1, "{input}");
+                let detection = &detections[0];
+                assert_eq!(detection.start, prefix.len());
+                assert_eq!(&input[detection.start..detection.end], key);
+                assert_eq!(detection.rule, rule);
+
+                let mut vault = SecretVault::default();
+                let (protected, audit) = obfuscate(&input, &mut vault, &[]);
+                assert_eq!(
+                    protected,
+                    format!("{prefix}<pi-secret:000001>{escape}after")
+                );
+                assert_eq!(audit.detections, 1);
+                assert_eq!(vault.restore(&protected), input);
+                let error = gate_outbound(&input, SecretsMode::Block, &[]).unwrap_err();
+                assert!(error.to_string().contains("PI_SECRET_BLOCK"));
+                assert!(!error.to_string().contains(key));
+            }
+        }
     }
 
     #[test]
@@ -534,14 +835,11 @@ mod tests {
             ("aws", concat!("AKIA", "IOSFODNN7EXAMPLE"), "aws-access-key"),
             (
                 "google",
-                // mirach vendor 脱敏（GitHub push protection）：上游原值是
-                // 字母序假夹具，占位化——上游真源不动，同步时重打。
                 "AIzaSyMIRACH-VENDOR-REDACTED",
                 "google-api-key",
             ),
             (
                 "slack bot",
-                // mirach vendor 脱敏（GitHub push protection）：同上假夹具。
                 "xoxb-MIRACH-VENDOR-REDACTED",
                 "slack-token",
             ),
@@ -676,9 +974,354 @@ mod tests {
     #[test]
     fn overlapping_hits_collapse_cleanly() {
         let mut vault = SecretVault::default();
-        // The generic rule overlaps the specific sk- rule: one placeholder.
         let (out, audit) = obfuscate("api_key=sk-aaaaaaaaaaaaaaaaaaaaaaaa", &mut vault, &[]);
-        assert!(out.contains("<pi-secret:"), "{out}");
-        assert!(audit.detections >= 1);
+        assert_eq!(out, "api_key=<pi-secret:000001>");
+        assert_eq!(audit.detections, 1);
+    }
+
+    #[test]
+    fn complete_private_keys_are_one_restorable_region() {
+        for label in [
+            "PRIVATE KEY",
+            "RSA PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "DSA PRIVATE KEY",
+            "OPENSSH PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+        ] {
+            for newline in ["\n", "\r\n", "\\n"] {
+                let key = format!(
+                    "-----BEGIN {label}-----{newline}Proc-Type: 4,ENCRYPTED{newline}DEK-Info: AES-256-CBC,0123456789ABCDEF{newline}U1lOVEhFVElDLUtFWS1CT0RZ{newline}-----END {label}-----"
+                );
+                let input = format!("before\n{key}\nafter");
+                let hits = scan(&input, &[]);
+                assert_eq!(hits.len(), 1, "{label}, {newline:?}");
+                assert_eq!(&input[hits[0].start..hits[0].end], key);
+                assert_eq!(hits[0].rule, "private-key");
+                let mut vault = SecretVault::default();
+                let (masked, audit) = obfuscate(&input, &mut vault, &[]);
+                assert_eq!(masked, "before\n<pi-secret:000001>\nafter");
+                assert_eq!(audit.detections, 1);
+                assert_eq!(vault.restore(&masked), input);
+                assert_eq!(vault.mask(&input), masked);
+                assert_eq!(obfuscate(&input, &mut vault, &[]).0, masked);
+                assert!(gate_outbound(&input, SecretsMode::Block, &[]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_or_mismatched_private_key_envelopes_fail_closed() {
+        for suffix in [
+            "",
+            "\n-----END PUBLIC KEY-----\nMORE-PRIVATE-MATERIAL",
+            "\n-----END EC PRIVATE KEY-----\nMORE-PRIVATE-MATERIAL",
+            concat!("\n-----BEGIN ", "PRIVATE KEY-----\nNESTED-PRIVATE-MATERIAL"),
+        ] {
+            // Fragmented so the repository self-scan never sees a literal header.
+            let header = concat!("-----BEGIN ", "RSA PRIVATE KEY-----");
+            let input = format!("safe prefix\n{header}\nPRIVATE-BODY{suffix}");
+            let hits = scan(&input, &[]);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].end, input.len());
+            let mut vault = SecretVault::default();
+            let (masked, _) = obfuscate(&input, &mut vault, &[]);
+            assert_eq!(masked, "safe prefix\n<pi-secret:000001>");
+            assert_eq!(vault.restore(&masked), input);
+        }
+    }
+
+    #[test]
+    fn separate_pem_blocks_do_not_swallow_intervening_safe_text() {
+        let first = concat!(
+            "-----BEGIN ",
+            "PRIVATE KEY-----\nFIRST-BODY\n-----END PRIVATE KEY-----"
+        );
+        let second = concat!(
+            "-----BEGIN ",
+            "EC PRIVATE KEY-----\nSECOND-BODY\n-----END EC PRIVATE KEY-----"
+        );
+        let input = format!("{first}\nsafe separator\n{second}\nsafe tail");
+        let mut vault = SecretVault::default();
+        let (masked, audit) = obfuscate(&input, &mut vault, &[]);
+        assert_eq!(
+            masked,
+            "<pi-secret:000001>\nsafe separator\n<pi-secret:000002>\nsafe tail"
+        );
+        assert_eq!(audit.detections, 2);
+        assert_eq!(vault.restore(&masked), input);
+        for public in [
+            "-----BEGIN PUBLIC KEY-----\nPUBLIC-BODY\n-----END PUBLIC KEY-----",
+            "-----BEGIN CERTIFICATE-----\nPUBLIC-CERT\n-----END CERTIFICATE-----",
+        ] {
+            assert!(scan(public, &[]).is_empty());
+        }
+    }
+
+    #[test]
+    fn overlapping_user_patterns_redact_the_entire_transitive_union() {
+        let input = "prefix abcdefghij suffix";
+        for patterns in [["abcde", "defgh", "ghij"], ["ghij", "defgh", "abcde"]] {
+            let patterns: Vec<_> = patterns
+                .into_iter()
+                .map(|pattern| regex::Regex::new(pattern).unwrap())
+                .collect();
+            let hits = scan(input, &patterns);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(&input[hits[0].start..hits[0].end], "abcdefghij");
+            let mut vault = SecretVault::default();
+            let (masked, audit) = obfuscate(input, &mut vault, &patterns);
+            assert_eq!(masked, "prefix <pi-secret:000001> suffix");
+            assert_eq!(audit.detections, 1);
+            assert_eq!(vault.restore(&masked), input);
+        }
+    }
+
+    #[test]
+    fn same_start_short_matches_cannot_hide_longer_or_adjacent_matches() {
+        let patterns =
+            ["abc", "abcdef", "bcde", "XYZ"].map(|pattern| regex::Regex::new(pattern).unwrap());
+        let input = "α abcdefXYZ ω";
+        let hits = scan(input, &patterns);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(&input[hits[0].start..hits[0].end], "abcdef");
+        assert_eq!(&input[hits[1].start..hits[1].end], "XYZ");
+        let mut vault = SecretVault::default();
+        let (masked, _) = obfuscate(input, &mut vault, &patterns);
+        assert_eq!(masked, "α <pi-secret:000001><pi-secret:000002> ω");
+        assert_eq!(vault.restore(&masked), input);
+    }
+
+    #[test]
+    fn zero_width_user_matches_are_not_credentials() {
+        let patterns =
+            ["", "^", "$", "SENSITIVE"].map(|pattern| regex::Regex::new(pattern).unwrap());
+        assert!(scan("", &patterns).is_empty());
+        assert!(scan("ordinary text", &patterns).is_empty());
+        assert!(gate_outbound("ordinary text", SecretsMode::Block, &patterns).is_ok());
+        let mut vault = SecretVault::default();
+        let (masked, audit) = obfuscate("before SENSITIVE after", &mut vault, &patterns);
+        assert_eq!(masked, "before <pi-secret:000001> after");
+        assert_eq!(audit.detections, 1);
+    }
+
+    #[test]
+    fn quoted_configuration_keys_vault_only_the_credential_value() {
+        let secret = "hunter2hunter2hunter2";
+        for key in [
+            "apiKey", "API_KEY", "secret", "token", "password", "passwd", "pwd",
+        ] {
+            for quote in ["\"", "'", ""] {
+                let input = format!("{quote}{key}{quote}: \"{secret}\"");
+                let hits = scan(&input, &[]);
+                assert_eq!(hits.len(), 1);
+                assert_eq!(&input[hits[0].start..hits[0].end], secret);
+                let mut vault = SecretVault::default();
+                let (masked, _) = obfuscate(&input, &mut vault, &[]);
+                assert_eq!(
+                    masked,
+                    format!("{quote}{key}{quote}: \"<pi-secret:000001>\"")
+                );
+                assert_eq!(vault.restore(&masked), input);
+            }
+        }
+        for input in [
+            "\"apiKey\": \"process.env.OPENAI_API_KEY\"",
+            "'password': 'self.config.database.password'",
+            "\"token\": \"docs.example.com\"",
+        ] {
+            assert!(scan(input, &[]).is_empty());
+        }
+    }
+
+    #[test]
+    fn discovery_protects_bare_echoes_before_and_after_the_assignment() {
+        let secret = "hunter2hunter2hunter2";
+        let input = format!("echo {secret}; API_KEY={secret}; again {secret}");
+        let mut vault = SecretVault::default();
+        let (masked, audit) = obfuscate(&input, &mut vault, &[]);
+        assert_eq!(
+            masked,
+            "echo <pi-secret:000001>; API_KEY=<pi-secret:000001>; again <pi-secret:000001>"
+        );
+        assert_eq!(audit.detections, 3);
+        assert_eq!(vault.len(), 1);
+        assert_eq!(vault.restore(&masked), input);
+        let (later, audit) = obfuscate(&format!("only {secret} remains"), &mut vault, &[]);
+        assert_eq!(later, "only <pi-secret:000001> remains");
+        assert_eq!(audit.detections, 1);
+        assert_eq!(audit.rules, ["known_secret"]);
+    }
+
+    #[test]
+    fn restore_does_not_interpret_inserted_values_as_more_placeholders() {
+        let mut vault = SecretVault::default();
+        let first_value = "A:<pi-secret:000002>";
+        let second_value = "B:<pi-secret:000001>";
+        let first = vault.placeholder_for(first_value, "user");
+        let second = vault.placeholder_for(second_value, "user");
+        assert_eq!(
+            vault.restore(&format!("{first}|{second}")),
+            format!("{first_value}|{second_value}")
+        );
+        let unknown = "<pi-secret:ffffff> <pi-secret:bad> <pi-secret:000001";
+        assert_eq!(vault.restore(unknown), unknown);
+    }
+
+    #[test]
+    fn known_placeholders_are_not_rewritten_by_literal_or_custom_matches() {
+        let mut vault = SecretVault::default();
+        let pattern = regex::Regex::new("SENSITIVE|000001").unwrap();
+        let patterns = [pattern];
+        let (masked, _) = obfuscate("SENSITIVE", &mut vault, &patterns);
+        assert_eq!(masked, "<pi-secret:000001>");
+        let (again, audit) = obfuscate(&masked, &mut vault, &patterns);
+        assert_eq!(again, masked);
+        assert_eq!(audit.detections, 0);
+        let _ = vault.placeholder_for("000001", "user");
+        assert_eq!(vault.mask(&masked), masked);
+    }
+
+    #[test]
+    fn json_masking_preserves_structure_and_escaped_secret_values() {
+        let mut vault = SecretVault::default();
+        let secret = "line one\r\nquote=\"x\"; path=C:\\keys\\value\tend";
+        let placeholder = vault.placeholder_for(secret, "user");
+        let input = serde_json::json!({
+            "nested": [{"credential": secret, "safe": 42}],
+            "clean": "unchanged",
+            "keyed": {secret: "kept"}
+        });
+        let encoded = serde_json::to_string_pretty(&input).unwrap();
+        let masked = vault.mask(&encoded);
+        let decoded: serde_json::Value = serde_json::from_str(&masked).unwrap();
+        assert_eq!(decoded["nested"][0]["credential"], placeholder);
+        assert_eq!(decoded["nested"][0]["safe"], 42);
+        assert_eq!(decoded["clean"], "unchanged");
+        assert_eq!(decoded["keyed"][&placeholder], "kept");
+        assert!(!masked.contains("line one"));
+        assert!(!masked.contains("keys"));
+        let clean = " { \"safe\" : 42, \"text\" : \"unchanged\" } \n";
+        assert_eq!(vault.mask(clean), clean);
+        assert_eq!(vault.mask(&masked), masked);
+    }
+
+    #[test]
+    fn json_lines_masking_keeps_record_boundaries_and_safe_primitives() {
+        let mut vault = SecretVault::default();
+        let secret = "first line\nsecond line";
+        let placeholder = vault.placeholder_for(secret, "user");
+        let numeric = vault.placeholder_for("1234567890123456", "user");
+        let first = serde_json::json!({"content": secret, "safe": true}).to_string();
+        let second = serde_json::json!({"token": 1_234_567_890_123_456_u64, "safe": 7}).to_string();
+        let input = format!("{first}\r\n\r\n{second}\n");
+        let masked = vault.mask(&input);
+        assert!(masked.contains("\r\n\r\n"));
+        assert!(masked.ends_with('\n'));
+        let records: Vec<serde_json::Value> = masked
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["content"], placeholder);
+        assert_eq!(records[0]["safe"], true);
+        assert_eq!(records[1]["token"], numeric);
+        assert_eq!(records[1]["safe"], 7);
+    }
+
+    #[test]
+    fn plain_scalar_text_masking_preserves_text_semantics() {
+        let mut vault = SecretVault::default();
+        let number = vault.placeholder_for("1234567890123456", "user");
+        let boolean = vault.placeholder_for("true", "user");
+        let empty = vault.placeholder_for("null", "user");
+
+        for (text, expected) in [
+            ("1234567890123456", number),
+            ("true", boolean),
+            ("null", empty),
+        ] {
+            let masked = vault.mask(text);
+            assert_eq!(masked, expected, "bare text must not acquire JSON quotes");
+            assert_eq!(vault.restore(&masked), text);
+            assert_eq!(vault.mask(&masked), masked);
+        }
+        assert_eq!(vault.mask(" 42 \n"), " 42 \n");
+    }
+
+    #[test]
+    fn ambiguous_json_exports_redact_instead_of_silently_discarding_members() {
+        let mut vault = SecretVault::default();
+        let secret = "credential-for-export";
+        let placeholder = vault.placeholder_for(secret, "user");
+        let input = serde_json::json!({
+            secret: "original member",
+            placeholder: "different member",
+        });
+
+        let output = vault.mask(&input.to_string());
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+            serde_json::json!(OVERLAP_REDACTION),
+            "ambiguous documents must not look like successful partial exports",
+        );
+        assert!(!output.contains(secret));
+        assert_eq!(input.as_object().unwrap().len(), 2);
+        assert_eq!(vault.mask(&output), output);
+    }
+
+    #[test]
+    fn prefixed_logs_and_plain_multiline_values_both_mask_without_cascading() {
+        let mut vault = SecretVault::default();
+        let secret = "α secret\nβ secret";
+        let placeholder = vault.placeholder_for(secret, "user");
+        let encoded = serde_json::to_string(secret).unwrap();
+        assert_eq!(
+            vault.mask(&format!("log={encoded}")),
+            format!("log=\"{placeholder}\"")
+        );
+        assert_eq!(
+            vault.mask(&format!("before\n{secret}\nafter")),
+            format!("before\n{placeholder}\nafter")
+        );
+    }
+
+    #[test]
+    fn overlapping_remembered_values_never_expose_a_suffix_or_restore_the_wrong_key() {
+        let mut vault = SecretVault::default();
+        let _ = vault.placeholder_for("abcdef", "user");
+        let _ = vault.placeholder_for("defghi", "user");
+        assert_eq!(
+            vault.mask("safe abcdefghi safe"),
+            format!("safe {OVERLAP_REDACTION} safe")
+        );
+        let (masked, audit) = obfuscate("safe abcdefghi safe", &mut vault, &[]);
+        assert_eq!(masked, "safe <pi-secret:000003> safe");
+        assert_eq!(audit.detections, 1);
+        assert_eq!(vault.restore(&masked), "safe abcdefghi safe");
+        assert_eq!(vault.mask("safe abcdefghi safe"), masked);
+    }
+
+    #[test]
+    fn repeated_overlapping_literals_cover_the_last_match_too() {
+        let mut vault = SecretVault::default();
+        let _ = vault.placeholder_for("aaa", "user");
+        let (masked, _) = obfuscate("aaaa", &mut vault, &[]);
+        assert_eq!(masked, "<pi-secret:000002>");
+        assert_eq!(vault.restore(&masked), "aaaa");
+        assert_eq!(vault.mask("aaaa"), masked);
+    }
+
+    #[test]
+    fn vault_debug_never_prints_values_or_the_raw_value_map() {
+        let mut vault = SecretVault::default();
+        let _ = vault.placeholder_for("private-debug-canary", "user");
+        let debug = format!("{vault:?}");
+        assert!(debug.contains("entries: 1"));
+        assert!(!debug.contains("private-debug-canary"));
+        assert!(!debug.contains("<pi-secret:"));
+        assert!(!debug.contains("by_value"));
     }
 }

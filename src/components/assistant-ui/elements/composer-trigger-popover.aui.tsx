@@ -102,7 +102,7 @@ const Categories: FC<CategoriesProps> = ({
                 <Icon className="text-muted-foreground size-4" />
                 {cat.label}
               </span>
-              <ChevronRightIcon className="text-muted-foreground size-4" />
+              <ChevronRightIcon className="text-muted-foreground size-[var(--size-icon-lg)]" />
             </ComposerPrimitive.Unstable_TriggerPopoverCategoryItem>
           );
         })}
@@ -140,7 +140,7 @@ const Items: FC<ItemsProps> = ({
           className="flex flex-col"
         >
           <ComposerPrimitive.Unstable_TriggerPopoverBack className="text-muted-foreground hover:bg-accent flex cursor-pointer items-center gap-1.5 border-b px-3 py-2 text-xs tracking-wide uppercase transition-colors">
-            <ChevronLeftIcon className="size-3.5" />
+            <ChevronLeftIcon className="size-[var(--size-icon-md)]" />
             {backLabel}
           </ComposerPrimitive.Unstable_TriggerPopoverBack>
 

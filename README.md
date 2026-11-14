@@ -1,30 +1,47 @@
 # Mirach Harness
 
-MIRACH 的**布局骨架试验田**（立项 2026-09-21）：验证"布局核心用 dockview 库 + 适配层自写"
-这条路线，替代直接提取 hermes 的 14k 行 pane-shell。目录结构对照 hermes `apps/desktop`。
+MIRACH 的桌面壳与布局骨架（立项 2026-09-21）：Tauri 3 + wry(WebView2) +
+dockview 三栏布局 + assistant-ui 聊天层 + pi 引擎（AG-UI HTTP+SSE）。
+
+**新会话先读 `AGENTS.md`（工程约束/踩坑）与 `docs/HANDOFF.md`（当前状态/未做）。**
 
 ## 跑起来
 
 ```bash
 npm install
-npm run dev     # http://127.0.0.1:1430（1420 留给主工程 MIRACH）
-npm run typecheck
+npm run tauri dev        # vite 1430 + Tauri 窗
+npx tsc --noEmit         # 类型门禁
+npm test                 # vitest（507 用例）
+cd src-tauri && cargo test   # Rust（53 用例）
 ```
 
-## 布局架构（C 路线）
+全量重编（换依赖/运行时后，避免并行 OOM）：`cd src-tauri && cargo build -j 1`。
 
-| 职责 | 归属 | 说明 |
-|---|---|---|
-| 分栏 / 页签 / 拖拽停靠 / 分栏拖宽 / 序列化 | **dockview 库**（内建） | 树模型、落点预览、sash 全是库的事 |
-| 窗格注册表 | `src/components/layout/panes.tsx` | id → { component, title, 约束, 默认尺寸 }，hermes contrib 概念的极简版 |
-| 初始布局 + 持久化 | `src/components/layout/dock-layout.tsx` + `persistence.ts` | 布局变化防抖序列化进 localStorage；回读按**不可信输入**处理（版本号 + try/catch，照抄 hermes 的原则） |
-| 宽高手感 | 同上，数值逐字来自 hermes | sessions 237/360、files+review 237/(160-320)、bots 260、终端 20vh/80vh 无下限；约束挂载重放（不序列化）、resize 重算、双击 sash 回默认 |
-| 窗格内容 | `src/components/panes/` | 占位壳，未来逐个换真组件 |
+## 结构
 
-加新窗格 = `panes.tsx` 注册一行 + 写组件。
+| 目录 | 职责 |
+|---|---|
+| `src/components/layout/` | dockview 壳（`dockview-shell.tsx`）、栏动词（`dockview-column-ops.ts`）、收放约束状态机（`column-constraints.ts`） |
+| `src/components/panes/` | 窗格：左栏、对话、会话分栏、文件树、终端、预览、打开页 |
+| `src/components/assistant-ui/` | 聊天层：runtime、轮次归约（`turn-actor`）、工具呈现、活动面板 |
+| `src/lib/` | IPC / 通道 / 窗口 / 转义层等基础设施 |
+| `src/styles/` | `tokens.css`（令牌唯一源头）+ 各域样式 |
+| `src-tauri/src/` | Rust：`agui.rs`（HTTP+SSE 与映射器）、`pi_session.rs`（多柄引擎）、`fs.rs`、`terminal.rs`、`session_meta.rs`、`main.rs`（窗口/托盘/DWM 圆角） |
+| `crates/agent-protocol/` | 前后端事件协议类型骨架（未接线） |
+
+## 文档
+
+- `AGENTS.md` — 工程须知（必读）
+- `docs/HANDOFF.md` — 交接快照
+- `docs/architecture.md` — 分层与真相源
+- `docs/layout-design.md` — 布局语义
+- `docs/pi-integration.md` — pi SDK 集成规范
+- 其余：`elements-wiring.md`（组件接线清单）、`engine-gaps.md`（引擎缺数据）、
+  `pi-coverage.md`（能力覆盖）、`ui-token-plan.md`（令牌体系）、
+  `upstream-feature-requests.md`（上游 FR）
 
 ## 与 hermes 的关系
 
-- **复制的**：持久化"不可信输入"原则、窗格注册表概念、初始布局对照 hermes Default 预设（左会话 | 主区 | 右文件 | 底终端）。
-- **没有复制的**：hermes 的树引擎/网格解算/sash 数学（dockview 内建替代）；插件停靠不变量、窄视口边缘浮层等 hermes 特有语义（等需要时再在适配层实现）。
-- 依赖：react 19 + dockview 8.3（`dockview` = vanilla 核心，`dockview-react` = React 绑定，8.x 拆成了两个包）。
+hermes（`G:\参考文档`）是本工程的**参考实现与素材库**——组件、i18n 三件套、
+交互语义都照抄；被替换的只有传输层（gateway → Rust 命令 → pi SDK）与布局层
+（pane-shell → dockview）。

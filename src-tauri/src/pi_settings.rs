@@ -49,7 +49,7 @@ fn models_config_path() -> PathBuf {
 /// 存在但解析失败 → Err（禁止兜底——坏文件必须可见）。
 /// 注：不做 pi Config 结构校验——原始文档如实返回，结构校验在写入侧
 /// （pi 自己 load 时不认识的键会忽略、错误类型才报错）。
-fn read_json_document(path: &Path) -> Result<Option<serde_json::Value>, String> {
+pub(crate) fn read_json_document(path: &Path) -> Result<Option<serde_json::Value>, String> {
     if !path.exists() {
         return Ok(None);
     }
@@ -84,6 +84,13 @@ fn write_json_document(
     validate: impl Fn(&serde_json::Value) -> Result<(), String>,
 ) -> Result<(), String> {
     validate(value)?;
+    atomic_write_json(path, value)
+}
+
+/// 原子写入（临时文件 + rename），无 schema 校验——调用方自带校验
+/// （auth.json 的校验器在 pi_keys.rs：object 检查；pi 的 AuthDocument
+/// 类型未从稳定面导出，不做结构校验）。
+pub(crate) fn atomic_write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     let mut contents = serde_json::to_string_pretty(value)
         .map_err(|e| format!("配置序列化失败: {e}"))?;
     contents.push('\n');
@@ -109,6 +116,16 @@ fn write_json_document(
             // rename 失败时清掉临时文件（失败信息本身已传播，这里只清场）
             let _ = std::fs::remove_file(&tmp);
         })
+}
+
+/// pi_keys.rs 用的写入口（同 atomic_write_json，命名对齐调用方语义）。
+pub(crate) fn write_json_document_public(
+    path: &Path,
+    value: &serde_json::Value,
+    validate: impl Fn(&serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    validate(value)?;
+    atomic_write_json(path, value)
 }
 
 /// settings.json 写入前校验：必须是 JSON object（上游 load_settings_json_
@@ -166,6 +183,125 @@ pub fn pi_set_models_config(value: serde_json::Value) -> Result<(), String> {
     on_big_stack(move || {
         write_json_document(&models_config_path(), &value, validate_models_document)
     })?
+}
+
+/// 把"用户刚选的模型"写回 settings.json 的默认值
+/// （`default_provider` / `default_model`）。
+///
+/// 为什么必须有这一步（2026-10-26 用户报："模型选择是假的，无论选哪个用的
+/// 都是之前设置的，甚至不在模型选择器里的模型"）：
+///
+/// 上游 `AgentSession::set_provider_model` 只换**当前会话**的 provider 实现
+/// 与会话头。新建会话走 `create_agent_session`，模型来自
+/// `settings.json` 的 `default_provider/default_model`。不写回 →
+/// 用户选的模型只活到本次会话结束；下一条新会话回到那个旧默认值，若它
+/// 已失效（provider 不在 models.json、模型不在目录里），pi 会回落到内置
+/// 目录第一项——于是"选哪个都用之前那个，甚至不在选择器里"。
+///
+/// 语义：**读-改-写**（保留 settings.json 里其余全部字段，只动这两个）。
+/// 读失败 / 校验失败一律 Err（规矩 12：错误就是错误）；文件不存在 = 从
+/// 空对象起（上游缺文件即默认配置，同 read_json_document 语义）。
+pub(crate) fn persist_default_model(provider: &str, model_id: &str) -> Result<(), String> {
+    let path = settings_path();
+    let mut doc = read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({}));
+    let Some(obj) = doc.as_object_mut() else {
+        return Err(format!(
+            "settings.json 不是 JSON object，无法写回默认模型: {}",
+            path.display()
+        ));
+    };
+    // 用 pi 的字段别名写（defaultProvider/defaultModel 与 snake_case 上游
+    // 都认；这里写 snake_case，与现有文件一致）
+    obj.insert(
+        "default_provider".to_string(),
+        serde_json::Value::String(provider.to_string()),
+    );
+    obj.insert(
+        "default_model".to_string(),
+        serde_json::Value::String(model_id.to_string()),
+    );
+    write_json_document(&path, &doc, validate_settings_document)
+}
+
+/// GPT-Live 语音配置写回（voice.gpt_live 段，2026-11-12 设置页「语音」节
+/// 的数据面）。语义同 persist_default_model：**读-改-写**，保留 settings.json
+/// 其余字段。`api_key` **只写不读**（status 永不回显）；空串 = 清除该项。
+/// 返回写后的就绪判定（available/mode/model/voice/reason——无 key）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn persist_voice_live_config(
+    api_key: Option<String>,
+    mode: Option<String>,
+    model: Option<String>,
+    voice: Option<String>,
+    moss_api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let path = settings_path();
+    let mut doc = read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({}));
+    let Some(obj) = doc.as_object_mut() else {
+        return Err(format!(
+            "settings.json 不是 JSON object，无法写 voice 段: {}",
+            path.display()
+        ));
+    };
+    let voice_section = obj
+        .entry("voice")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("settings.json 的 voice 段不是 object")?;
+
+    if let Some(mode) = mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // 归一拼法（voice_chat_mode 的容忍集），存 canonical 值
+        let mode = if mode == "gpt-live" || mode == "gptlive" || mode == "live" {
+            "gpt-live"
+        } else if mode == "moss-live" || mode == "moss" {
+            "moss-live"
+        } else {
+            "chained"
+        };
+        voice_section.insert("voice_chat_mode".into(), serde_json::Value::String(mode.into()));
+    }
+
+    let live = voice_section
+        .entry("gpt_live")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("settings.json 的 voice.gpt_live 段不是 object")?;
+
+    apply_voice_live_field(live, "api_key", &api_key);
+    apply_voice_live_field(live, "model", &model);
+    apply_voice_live_field(live, "voice", &voice);
+
+    // MOSS Live（模思）key：voice.moss_live 段（独立于 OpenAI 链）
+    if moss_api_key.is_some() {
+        let moss = voice_section
+            .entry("moss_live")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("settings.json 的 voice.moss_live 段不是 object")?;
+        apply_voice_live_field(moss, "api_key", &moss_api_key);
+    }
+
+    write_json_document(&path, &doc, validate_settings_document)?;
+    // 写后回读就绪判定（available 会因 key 落盘翻转；**永不回显 key**）
+    crate::pi_voice_live::voice_live_status()
+}
+
+/// 单字段写入（Some 空 = 清除；None = 不动）。模块级 helper——闭包会与
+/// 外层可变借用冲突。
+fn apply_voice_live_field(
+    live: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    v: &Option<String>,
+) {
+    match v.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => {
+            live.insert(key.to_string(), serde_json::Value::String(s.to_string()));
+        }
+        Some(_) => {
+            live.remove(key);
+        }
+        None => {}
+    }
 }
 
 /// 各提供方凭据存在性（§7-7 设置页）。**绝不返回 key 内容**——只报

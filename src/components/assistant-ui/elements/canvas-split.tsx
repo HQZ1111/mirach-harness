@@ -93,7 +93,7 @@ export function CanvasSplitHeader({
       )}
       {...props}
     >
-      <FileTextIcon className="text-foreground/35 size-3.5 shrink-0" />
+      <FileTextIcon className="text-foreground/35 size-[var(--size-icon-md)] shrink-0" />
       <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
         {title}
       </span>
@@ -111,7 +111,7 @@ export function CanvasSplitHeader({
       >
         {saved ? (
           <span className="flex items-center gap-1">
-            <CheckIcon className="size-3" />
+            <CheckIcon className="size-[var(--size-icon-sm)]" />
             saved
           </span>
         ) : (
@@ -128,7 +128,7 @@ export function CanvasSplitHeader({
           "size-7 shrink-0 disabled:pointer-events-none disabled:opacity-30",
         )}
       >
-        <CopyIcon className="size-3.5" />
+        <CopyIcon className="size-[var(--size-icon-md)]" />
       </button>
       <button
         type="button"
@@ -140,7 +140,7 @@ export function CanvasSplitHeader({
           "size-7 shrink-0 disabled:pointer-events-none disabled:opacity-30",
         )}
       >
-        <XIcon className="size-3.5" />
+        <XIcon className="size-[var(--size-icon-md)]" />
       </button>
     </div>
   );

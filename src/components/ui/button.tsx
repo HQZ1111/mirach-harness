@@ -18,6 +18,11 @@ const buttonVariants = cva(
         ghost:
           "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
+        // hermes 桌面端 variant 集合（catalog/连接器页面在用）：
+        // - text：纯文字动作（章节标题里的「查看全部」、弹层里的「清除筛选」）
+        // - chip：带浅底的可点标签（catalog 元数据 chip）
+        text: "text-muted-foreground hover:text-foreground",
+        chip: "bg-(--ui-bg-quinary) text-(--ui-text-secondary) hover:bg-(--ui-bg-quaternary) hover:text-foreground",
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",
@@ -28,6 +33,10 @@ const buttonVariants = cva(
         "icon-xs": "size-6 rounded-md [&_svg:not([class*='size-'])]:size-3",
         "icon-sm": "size-8",
         "icon-lg": "size-10",
+        // hermes 的两个行内档：text = 无内距无高度（嵌进标题/句子），
+        // inline = 同字号但保留一点横向内距（章节标题里的链接式按钮）
+        text: "h-auto gap-1 p-0 text-inherit font-inherit",
+        inline: "h-auto gap-1 px-0 py-0 text-inherit font-inherit",
       },
     },
     defaultVariants: {

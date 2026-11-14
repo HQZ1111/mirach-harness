@@ -104,7 +104,7 @@ export function EmptyStateComposer({
           "flex size-8 items-center justify-center rounded-full disabled:pointer-events-none disabled:opacity-30",
         )}
       >
-        <ArrowUpIcon className="size-4" />
+        <ArrowUpIcon className="size-[var(--size-icon-lg)]" />
       </button>
     </div>
   );

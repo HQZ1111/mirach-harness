@@ -50,7 +50,7 @@ export function ScheduleCard({
     >
       <div className="flex items-center gap-2.5">
         <span className="bg-foreground/[0.05] text-foreground/45 flex size-7 shrink-0 items-center justify-center rounded-lg">
-          <ClockIcon className="size-3.5" />
+          <ClockIcon className="size-[var(--size-icon-md)]" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-[13.5px] font-medium">{name}</span>
@@ -94,9 +94,9 @@ export function ScheduleCard({
         {history.map((run) => (
           <div key={run.id} className="flex items-baseline gap-2">
             {run.ok ? (
-              <CheckIcon className="size-3 shrink-0 translate-y-0.5 text-emerald-500" />
+              <CheckIcon className="size-[var(--size-icon-sm)] shrink-0 translate-y-0.5 text-emerald-500" />
             ) : (
-              <XIcon className="size-3 shrink-0 translate-y-0.5 text-red-500" />
+              <XIcon className="size-[var(--size-icon-sm)] shrink-0 translate-y-0.5 text-red-500" />
             )}
             <span className="text-foreground/60 min-w-0 flex-1 truncate text-xs">
               {run.at}

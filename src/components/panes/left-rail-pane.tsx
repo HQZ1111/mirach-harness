@@ -1,32 +1,40 @@
 /**
- * 左侧栏（docs/layout-design.md v6.0 §3）——会话列表/机器人花名册双视图，
- * 无页签条。顶带 = logo + **Mirach 文字**；点击 Mirach 文字切换两视图
- * （文字 hover 变色/按压效果，与页签"文字即按钮"范式同款）。
- * v5.0 以前 sessions/bots 是两个独立页签；v5.0 起合为一个窗格内切换。
- * 2026-10-06：**视图指示字删除**（logo 行右下的「会话/机器人」小字）——
- * Mirach 文字是唯一切换钮，指示字冗余（用户截图定稿）。
+ * 左侧栏（docs/layout-design.md v6.0 §3）——单视图（会话列表）。
+ * 顶带 = logo + **Mirach 文字**；点击 Mirach = 开合「机器人」弹出栏
+ * （2026-11-07 完整移植 hermes 机器人页：原"会话/机器人双视图切换"改为
+ * **左栏右侧弹出独立栏**，用户定稿口径。按钮态跟随面板在场——✕ 关闭 /
+ * 存档恢复都反映到高亮）。
  */
-import { useState } from 'react'
+import { useEffect } from 'react'
 
 import { AssistantSessionsPane } from '@/components/panes/assistant-sessions-pane'
-import { BotsPane } from '@/components/panes/bots-pane'
 import { RailLogoLeading } from '@/components/layout/rail-logo-leading'
 import { RailUserZone } from '@/components/layout/rail-user-zone'
-
-type LeftRailView = 'sessions' | 'bots'
+import {
+  botsPanelStore,
+  syncBotsPanelOpen,
+  toggleBotsPanel,
+  useBotsPanelOpen,
+} from '@/components/panes/hub/bots-panel-actions'
 
 export function LeftRailPane() {
-  const [view, setView] = useState<LeftRailView>('sessions')
+  const botsOpen = useBotsPanelOpen()
+  // 挂载同步一次（fromJSON 恢复的面板不走 didAddPanel——布局事件在 boot
+  // 路径不可依赖，读最终态最稳）；之后由 shell 的 didAdd/didRemove 事件驱动
+  useEffect(() => {
+    syncBotsPanelOpen()
+  }, [])
   return (
     <div className="left-rail-pane" data-slot="left-rail-pane">
       <div className="left-rail-logo-row">
         <RailLogoLeading
-          wordTitle="点击切换 会话 / 机器人"
-          onWordClick={() => setView((v) => (v === 'sessions' ? 'bots' : 'sessions'))}
+          wordTitle="点击打开 / 收起 机器人"
+          onWordClick={toggleBotsPanel}
+          wordActive={botsOpen}
         />
       </div>
       <div className="left-rail-body">
-        {view === 'sessions' ? <AssistantSessionsPane /> : <BotsPane />}
+        <AssistantSessionsPane />
       </div>
       {/* 底部用户区（2026-10-19，用户："参考 zcode 下面的用户"）：
           头像 + 设置钮，贴左栏底。通知卡留位：将来在 .rail-user-zone

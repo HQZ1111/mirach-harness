@@ -1,18 +1,29 @@
 /* ============================================================
- * base.css — 应用壳层：窗体 / 壳 / 标题栏 / 窗口控制钮 / 状态栏
+ * base.css — 应用壳层：窗体 / 壳 / 标题栏 / 窗口控制钮
  * 颜色/间距一律引用 tokens.css 的令牌。
  * ============================================================ */
 
 * { box-sizing: border-box; }
 
-/* ── 窗体（Tauri 无边框透明窗：白色圆角软件，圆角外透桌面；圆角 40，
-   用户 2026-10-05 定稿） ──
-   tauri.conf: decorations:false + transparent:true + shadow:false。
-   **关键（品红测试实证）**：白底必须画在 .app-shell 上（html/body 必须
-   transparent）——html 无背景时 body 的背景会传播到整个 canvas 且不受
-   body 圆角裁切，圆角外永远是 body 的底色（四个角的真凶）。
-   圆角画在 .app-shell 上裁自己的白底，圆角外→透明→桌面。 */
-html, body { background: transparent; height: 100%; margin: 0; }
+/* ── 窗体（Tauri 无边框窗） ──
+   **窗口外观交给系统**（2026-10-25 定稿）：`decorations: false` +
+   `shadow: true` + Rust 侧 `DWMWCP_DONOTROUND` → 窗口是**直角矩形 +
+   Windows 的系统投影**，没有标题栏。
+
+   外壳（`.app-shell`）因此也是直角、铺满窗口矩形（`--radius-shell = 0`）：
+   窗口不透明（`transparent: false`），CSS 若画大弧，弧外会露出白块。
+
+   **栏卡片仍保留圆角**（`--radius-pane: 25px`）+ `--shadow-pane` 投影：
+   三栏的白卡浮在 `--surface-shell` 底色上，"容器悬浮感"靠这两者表达。 */
+
+/* `background: transparent` 的理由不变（DWM 负责窗口外形，CSS 不画底），
+   但**必须同时给 html 一个不透明底色**（2026-10-30 修"白屏→黑屏"）：
+   窗口是 `transparent: false`，WebView2 在 CSS 求值前先画自己的默认白底
+   （白屏），样式生效后 html 仍透明 → 露出合成器未着色的黑底（黑屏），
+   直到 React 首帧。实测设置窗 First paint = 2988ms，前两段都是纯等待。
+   给 html 定底色后，两段都变成外壳色，只剩一次从内联色到变量的细微过渡。
+   index.html 的内联 <style> 是同一件事的更早一道保险（样式表加载前）。 */
+html, body { background: var(--surface-shell); height: 100%; margin: 0; }
 
 body {
   color: var(--text);
@@ -22,36 +33,57 @@ body {
 #root { height: 100%; }
 
 .app-shell {
-  background: var(--surface);
-  /* ── 方案 B 同心圆角（2026-10-16 阶段 7）──────────────────────────
-     用户定稿：外壳圆角走"前沿大圆角"（50+），且内外要做成**同心**——
-     同心规则 = 内圆角 ≈ 外圆角 − 内缩。取值：
-       壳 56 (= --scale-radius-shell)
-       内缩 8 (= --shell-inset)
-       内层 48 (= --scale-radius-shell-inner，56 − 8)
-     实现：壳 padding 8 造出内缩，内层容器（.app-main）自带 48 圆角并
-     overflow:hidden——三栏由**内层**裁切，不再是壳直接裁（那样方块顶角
-     会顶到大圆角弧线上）。 */ 
-  border-radius: var(--radius-shell);
+  /* 外壳底色（2026-10-19 三栏卡片化）：三栏是白卡，卡外这层是"软件背景"
+     ——取值 = 旧主对话颜色层的视觉色（见 tokens.css --surface-shell）。 */
+  background: var(--surface-shell);
+  /* 圆角与投影都由系统画（2026-10-25 用户定稿：回到 Tauri 原生壳）：
+     `decorations: false` + `shadow: true` → Win11 的 DWM 给无边框窗口画
+     标准圆角（约 8px）与系统投影。CSS 这边**不再画圆角/阴影**，壳铺满
+     窗口矩形（`#root` 无 padding），否则 CSS 的 35px 弧会和 DWM 的 8px 弧
+     互相裁切。 */
   color: var(--text);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   height: 100%;
-  overflow: hidden;
-  padding: var(--shell-inset);
+  /* **必须定位**：`.app-titlebar` 是 `position:absolute; top/left:0`，
+     壳不定位时标题栏相对视口定位。 */
+  position: relative;
+  width: 100%;
 }
 
-/* 内层容器（dockview 主区）获得同心内圆角：三栏在它里面被裁 */
+/* 铺满窗口：不再有透明边距（阴影由 DWM 画在窗口之外）。 */
+#root {
+  box-sizing: border-box;
+  height: 100%;
+}
+
+/* 内层容器（dockview 主区）：铺满壳，四周留 --pane-edge 的内距给三栏卡片。
+   2026-10-19 三栏卡片化 / 2026-10-21 两档间距：
+     · 窗边 → 卡片 = --pane-edge (10)
+     · 卡片 ↔ 卡片 = --pane-gap (8)
+   窗边那一档由 .app-main 与 .dv-view 分摊：本层取 "edge − gap/2" = 6，
+   .dv-view 取 gap/2 = 4 —— 两者相加 10，而相邻两栏的 .dv-view 相加 8。
+   dockview 根是 100% 宽的普通 div（不是绝对定位），padding 缩的是它的
+   丈量基准，列宽会跟着收敛，不会溢出。
+
+   `border-radius` 现在读 `--radius-shell`（= 0，直角）：外壳圆角由 DWM
+   决定，CSS 这边不再画（见 tokens.css 的 --radius-shell 段）。 */
 .app-main {
-  border-radius: var(--radius-shell-inner);
+  border-radius: var(--radius-shell);
   overflow: hidden;
+  padding: calc(var(--pane-edge) - var(--pane-gap) / 2);
 }
 
-/* 最大化态：窗角清零——与 Rust 端区域清空（main.rs win_shape::
-   sync_round_region 的 is_maximized 守卫）同一状态源（window-controls
-   写的 data-maximized），避免最大化时屏角露出圆角楔形（页面画布
-   #1F1F1F 或桌面）。 */
-html[data-maximized='true'] .app-shell { border-radius: 0; }
+/* 最大化态：清掉一切圆角/阴影残留。
+   `--shell-shadow-margin` 已是 0（无透明边距），这里保留覆盖是给 resize
+   手柄与拖窗判定用的统一入口（它们读该令牌；0 即贴边）。 */
+html[data-maximized='true'] {
+  --shell-shadow-margin: 0px;
+}
+
+html[data-maximized='true'] .app-shell,
+html[data-maximized='true'] .app-main { border-radius: 0; }
 
 /* 纯浏览器直开（无 Tauri）：无透明窗体差异，样式一致 */
 body.in-browser { background: var(--surface); }
@@ -93,9 +125,10 @@ body.in-browser { background: var(--surface); }
 }
 
 /* ── 自绘窗口控制圆点（用户定稿 2026-10-02：四钮改 20px 圆点） ──
-   位置：绝对定位右上，距上缘 --win-dot-top(25)、右缘 --win-dot-right(50
-   避开 50px 圆角)；间距 --win-dot-gap(20)。色值 --win-dot-{close,maximize,
-   minimize,sidebar}（用户指定字面值）。悬停轻微放大反馈。 */
+   位置：绝对定位右上，距上缘 --win-dot-top、右缘 --win-dot-right（避开
+   圆角弧线）；间距 --win-dot-gap。色值 --win-dot-{close,maximize,
+   minimize,sidebar}（用户指定字面值）。悬停轻微放大反馈。
+   （具体像素值以 tokens.css 为准——本注释不再复述，避免漂移。） */
 .win-dot-controls {
   align-items: center;
   display: flex;
@@ -123,26 +156,3 @@ body.in-browser { background: var(--surface); }
 .win-dot[data-dot-role='maximize'] { --dot-color: var(--win-dot-maximize); }
 .win-dot[data-dot-role='minimize'] { --dot-color: var(--win-dot-minimize); }
 .win-dot[data-dot-role='sidebar'] { --dot-color: var(--win-dot-sidebar); }
-
-/* ── 状态栏（用户：高度 20；内容左右避开圆角区——2026-10-16 阶段 7：
-   壳圆角 40→56 + 内缩 8，故留白 = 内缩 + 42 与原 50 同视觉余量）。
-   描边已去——用户 2026-10-05"底栏的描边还在" ── */
-.app-statusbar {
-  align-items: center;
-  background: transparent;
-  color: var(--text-2);
-  display: flex;
-  flex: none;
-  font-size: var(--font-caption);
-  gap: 6px;
-  height: 20px;
-  padding: 0 calc(var(--shell-inset) + 42px);
-}
-
-.statusbar-pill {
-  background: var(--scale-gray-a2);
-  border-radius: var(--scale-radius-xs);
-  padding: 1px 8px;
-}
-
-.statusbar-spacer { flex: 1; }

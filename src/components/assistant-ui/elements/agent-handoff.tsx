@@ -38,7 +38,7 @@ export function AgentHandoff({
             settled && "opacity-45",
           )}
         >
-          <BotIcon className="size-3" />
+          <BotIcon className="size-[var(--size-icon-sm)]" />
           {from}
         </span>
 
@@ -57,7 +57,7 @@ export function AgentHandoff({
               : "bg-blue-500/12 text-blue-700 dark:bg-blue-400/15 dark:text-blue-300",
           )}
         >
-          <BotIcon className="size-3" />
+          <BotIcon className="size-[var(--size-icon-sm)]" />
           {to}
         </span>
       </div>

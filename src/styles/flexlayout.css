@@ -5,7 +5,7 @@
 
 /* ── FlexLayout 宿主 ── */
 /* flexlayout 的 .flexlayout__layout 是 position:absolute; inset:0，
-   锚定到最近的定位祖先——宿主必须 relative，否则盖住标题栏/状态栏。 */
+   锚定到最近的定位祖先——宿主必须 relative，否则盖住标题栏。 */
 /* 手感对齐 hermes（pane-shell tree-split.tsx 的 Sash）：
    - 常驻 1px 发丝线，hover/拖动全亮 accent；
    - 命中区 8px（::before 提供，不占布局）；
@@ -16,7 +16,7 @@
    图标 50 + gap 12 之后，左缘 83；70 = 83 - 容器原 10 - 边框 1 - 字形
    差 2）。 */
 
-/* ── 条隐藏（「切换标签」）形态：顶带（--logo-strip-h=85）**保留**——内容不从 tabset
+/* ── 条隐藏（「切换标签」）形态：顶带（--logo-strip-h=75）**保留**——内容不从 tabset
    顶开始（用户 2026-10-03："和左侧栏一样"）。enableTabStrip=false 时
    flexlayout 不渲染 tabbar_outer（display:none 仍在 DOM，:has 不可靠）—
    由 StripHiddenTitleOverlay 的 measure 循环给 tabset 打
@@ -59,10 +59,82 @@
    （"终端的标签样式没统一"的根源）。 */
 /* ── dockview 组样式（v8.0 M1 起，2026-10-14 补）── */
 
-/* 面板栏标签条：**占满顶带**——条高 = --logo-strip-h(85)，从窗口顶起画，
-   标签底边与顶带底边（85 线）重合（用户 2026-10-15 定稿："面板栏的高度
+/* ── 三栏卡片化（2026-10-19 用户定稿）───────────────────────────────
+   外壳底色 = --surface-shell，三栏各是一张白底圆角卡片浮在上面：
+     · 内缩/圆角几何见 tokens.css「三栏卡片化」段（窗边 --pane-edge=10、
+       栏间 --pane-gap=8、圆角 25 是纯视觉值不与 DWM 同心）；
+     · 内缩只能落在 **.dv-view 的 padding** 上——.dv-view 是 dockview 逐帧
+       写 inline width/left 的定位载体，直接改它的 width/margin 会与模型
+       打架（同"宽度不能用 CSS transition"那条教训）；padding 在
+       box-sizing:border-box 之内，库算的列宽不受影响，groupview 跟着缩。
+     · overflow:auto 改 hidden：内距使 0 宽列出现"padding 比 width 大"
+       的退化盒（border-box 的宽度不会被压到 padding 之下），auto 会在
+       缝隙里生出一条滚动条；各面板内容自己管滚动，不需要它。
+     · 白底/圆角落在 .dv-groupview（库自带 overflow:hidden，圆弧自然裁切）。 */
+/* 只认**叶子视图**（`.dv-view` 的直接子级是 `.dv-groupview`）：任何层级
+   的 split 都穷举不到固定深度——用户左右/上下分栏后会出现
+   `.dv-view > .dv-branch-node > .dv-split-view-container > …` 的嵌套，
+   写死 `.dv-grid-view > ...` 三代选择器只命中顶层三栏，分栏出来的新面板
+   既没有内距也没有圆角（2026-10-19 用户："分栏后这个容器的间距也有吧"）。
+   用 `:has(> .dv-groupview)` 同时解决"任意深度"和"分支包装层不重复加
+   padding"两件事：包着 branch 的 `.dv-view` 不带 groupview 子级，自然
+   不命中——否则嵌套 split 会在每一层各叠 5px。
+   另外要盖掉 dockview 自己的不透明底：
+     .dv-dockview { background: var(--dv-group-view-background-color) } = white
+   ——它铺在卡片之间，缝隙会变成白色而不是外壳色（实测：缝隙 255,255,255）。
+   dockview 的壳/网格/分支/视图容器全部透到 .app-shell 的 --surface-shell。 */
+.dockview-host .dv-dockview,
+.dockview-host .dv-shell,
+.dockview-host .dv-shell-middle-column,
+.dockview-host .dv-grid-view,
+.dockview-host .dv-branch-node,
+.dockview-host .dv-split-view-container,
+.dockview-host .dv-view-container,
+.dockview-host .dv-view {
+  background-color: transparent;
+}
+
+.dockview-host .dv-split-view-container > .dv-view-container > .dv-view:has(> .dv-groupview) {
+  overflow: hidden;
+  /* 两档间距（2026-10-21）：窗边 10、栏间 8。本层只出 gap 的一半
+     （4），另一半由 .app-main 的 padding 在窗边补足（见 base.css）。 */
+  padding: calc(var(--pane-gap) / 2);
+}
+
+/* 0 宽列：padding 必须清零（否则 border-box 恒有 2×4 的盒子，隐藏不干净，
+   还会吞掉邻居左缘的点击）。补间过程中的收缩不受影响——宽度降到 8 以下
+   时卡片内容本来就已经是 0。
+   收回/展开两条路径都不会有可见跳变：展开方向在补间开始**前**就摘掉了
+   data-dv-collapsed（setColumnCollapsed 的 `setCollapsedAttr(group,false)`），
+   padding 与宽度同一帧恢复。 */
+.dockview-host .dv-split-view-container > .dv-view-container > .dv-view:has(> .dv-groupview[data-dv-collapsed]) {
+  padding: 0;
+  pointer-events: none;
+}
+
+.dockview-host .dv-split-view-container > .dv-view-container > .dv-view > .dv-groupview {
+  background-color: var(--surface);
+  border-radius: var(--radius-pane);
+  /* 卡片投影（2026-10-21 用户："栏的容器加个阴影效果"）。令牌里写了两段
+     叠影的取值理由；此处只负责挂载。注意阴影画在 .dv-view 的 padding 区
+     （4px）里，正好落在两卡之间的缝隙与窗边留白上，不会被 overflow 裁掉
+     ——.dv-view 的 overflow:hidden 裁的是它自己的内容盒之外的部分，而
+     .dv-groupview 的 box-shadow 画在**它自己**的盒外，位于 .dv-view 的
+     内容盒之内（padding 区），可见。 */
+  box-shadow: var(--shadow-pane);
+}
+
+/* 面板栏标签条内容与卡片内容线对齐（条是 chrome，但贴着卡片左缘起排会
+   和下方文件树的 20px 内容线错开） */
+.dockview-host .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) {
+  padding-left: var(--rail-gutter);
+  padding-right: var(--rail-gutter);
+}
+
+/* 面板栏标签条：**占满顶带**——条高 = --logo-strip-h(75)，从卡片顶起画，
+   标签底边与顶带底边重合（用户 2026-10-15 定稿："面板栏的高度
    调高，让面板栏标签页的底部和顶栏的底部重合"；原形态 = 35 高条下移到
-   顶带之下 85..120 的位置）。选择器只命中「有可见标签条的组」：hideHeader
+   顶带之下的位置）。选择器只命中「有可见标签条的组」：hideHeader
    组的 bar 是 display:none，面板栏组是 display:flex（实测）。窗控制圆点
    浮层（.app-titlebar，z-index 50）在右上角压于其上，点按不受影响。 */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) {
@@ -70,11 +142,12 @@
   height: var(--logo-strip-h);
 }
 
-/* 条内动作区对齐链（85 高条，2026-10-15）：dockview 的 .dv-react-part 壳是
-   block 盒——箭头钮/总览钮的 align-self 不生效、叠在条顶（实测箭头 0..15、
-   总览 21..41）。两层壳（动作容器 + react-part）改 flex 行：箭头钮的
-   self-stretch 接上（满条高、图标垂直居中）、总览钮 20×20 落条中线、
-   右动作区两国横向排布（原 block 流里 24px 宽壳会让它们纵排折叠）。 */
+/* 条内动作区对齐链（75 高条，2026-10-15 / 顶带 85→75 于 2026-10-19）：
+   dockview 的 .dv-react-part 壳是 block 盒——箭头钮/总览钮的 align-self
+   不生效、叠在条顶（实测箭头 0..15、总览 21..41）。两层壳（动作容器 +
+   react-part）改 flex 行：箭头钮的 self-stretch 接上（满条高、图标垂直
+   居中）、总览钮 20×20 落条中线、右动作区两国横向排布（原 block 流里
+   24px 宽壳会让它们纵排折叠）。 */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-pre-actions-container,
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-left-actions-container,
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-right-actions-container {
@@ -91,20 +164,47 @@
 /* 条内标签 = beUI Tabs **pill 变体**（用户 2026-10-15："标签条要 beUI tabs
    overflow 样式啊，现在是 underline 样式"——beui.dev 的 Overflow demo 即
    pill：选中 = 品牌色实心胶囊 + 白字（bg-primary + text-primary-foreground），
-   未选中 = 素底文字）。dockview 的 .dv-tab 是 85 满高盒（命中面/拖拽面），
-   胶囊画在内层（.dv-default-tab 高度包内容、.dv-open-tab 同款）——底对齐
-   到 85 线内缘（留 4px 呼吸），✕ 钮随胶囊内联（dockview 只对 active 签
-   显示 ✕，不冲突）。 */
+   未选中 = 素底文字）。dockview 的 .dv-tab 是满条高盒（命中面/拖拽面），
+   胶囊画在内层（.dv-default-tab 高度包内容、.dv-open-tab 同款）。
+
+   **2026-11-01 改居中**（用户："按钮和标签中的文字没有居中对齐啊"）。
+   原设计是 `align-items: flex-end` + `padding-bottom: 4px`（"胶囊贴条
+   底内缘、与顶带底边重合"，2026-10-15 的顶带定稿）——但条里的动作钮
+   （总览/加号）挂在 `align-items: center` 的容器里，两套对齐基准不同，
+   实测标签文字 centerY=68 vs 按钮 centerY=48，**低 20px**。
+
+   为什么改成 center 而不是把按钮也改 flex-end：条高 75 是"占满顶带"的
+   视觉定稿，但**内容**（胶囊 + 按钮）作为一组应当整体居中——底部对齐会
+   让 75 高的条在视觉上"上重下轻"。改 center 后三者同轴（实测都是 48）。 */
+/* ── 打开页无标签（ZCode 语义，2026-11-01 用户定稿）──
+   "zcode打开页是没有标签的"：面板列只剩「打开页」锚时，整条标签条隐藏
+   ——launcher 是栏的空态，不是一张签。判据 = :has 命中 openTab 自定义签
+   （.dv-open-tab-title 只在这张签里渲染）。生命周期保证「open 与实签同组」
+   只是瞬时（实签抵达即撤锚，dockview-shell handlePanelAdded），稳态下
+   [打开|文件树] 形态不存在，本规则不会误伤实签的标签条。 */
+.dv-tabs-and-actions-container:has(.dv-open-tab-title) {
+  display: none;
+}
+/* 条隐藏后内容**留在原竖位**（2026-11-01 用户："打开页没有标签了怎么
+   整体往上移了"）：条占的是 --logo-strip-h(75) 顶带，隐藏后 launcher
+   内容顶到了卡顶——给内容容器补回同高内距，起点与有标签时一致（顶带
+   下方，与左栏入口条内容同一线）。
+   判据直接挂在内容上（open-page 在场 = launcher 态；dockview 同组非活动
+   面板会卸载，实签在场时本元素不存在）。**不能用 :has 嵌 :has**——
+   `:has(> x:has(y))` 是非法选择器，整条被静默丢弃（2026-11-01 实测）。 */
+.dv-content-container:has([data-slot='open-page']) {
+  padding-top: var(--logo-strip-h);
+}
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab {
-  align-items: flex-end;
+  align-items: center;
   display: flex;
-  padding: 0 2px 4px;
+  padding: 0 2px;
 }
 /* 自定义签（tabComponent: openTab）外层还有 dockview 的 .dv-react-part
    block 壳——不改成 flex 的话胶囊被压顶（实测 open-tab 0..27 悬顶）。
-   react-part 拉伸满高 + flex-end 同 .dv-tab 底对齐链。 */
+   react-part 拉伸满高 + 与 .dv-tab 同一对齐基准。 */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab > .dv-react-part {
-  align-items: flex-end;
+  align-items: center;
   display: flex;
   height: 100%;
 }
@@ -240,6 +340,13 @@
 .rail-logo-leading .rail-logo-word-btn:active {
   color: var(--logo-word-btn-hover-color);
   opacity: var(--logo-word-btn-active-opacity);
+}
+
+/* Mirach 切换钮的"在场"态（2026-11-07）：机器人弹出栏开着 = 文字加深
+   （aria-pressed 驱动，与面板 ✕ / 存档恢复同源）。 */
+.rail-logo-leading .rail-logo-word-btn.rail-logo-word-active,
+.rail-logo-leading .rail-logo-word-btn.rail-logo-word-active:hover {
+  color: var(--logo-word-btn-hover-color);
 }
 
 /* 主对话栏专属：页签文字从中线开始往右排（双行块占左半——用户定稿）。
@@ -474,8 +581,12 @@
    无需槽位还原规则）。
    ══════════════════════════════════════════════════════════════════════ */
 
-/* 标签总览触发钮（rightHeaderActionsComponent 挂载；仅面板栏多签组出现）。
-   2026-10-16 阶段 3：ghost 方盒(20×20/4px) → **圆形图标钮**（24×24/50%）——
+/* 标签总览触发钮（**prefixHeaderActionsComponent** 挂载 = 标签条最左、
+   tabs 之前；2026-11-01 从 right 挪到 prefix，用户："标签的前面应该有个
+   按钮，点击能打开，选择标签"）。**有条就出现**——原「仅多签组出现」
+   （`panels.length <= 2` 隐藏）已在 2026-10-31 去掉，那条规则让面板栏
+   只有 1 个标签时整个入口消失。
+   2026-10-16 阶段 3：ghost 方盒(20×20/4px) → **圆形图标钮**（28×28/50%）——
    用户定稿"按钮命中盒改成正方形的，换成圆形"。正方形是圆形的**前提**
    （width === height，否则 50% 渲成椭圆），故尺寸与圆角成对取自刻度。 */
 .tab-overview-trigger {
@@ -530,6 +641,38 @@
 .tab-new-trigger:focus-visible {
   outline: 2px solid var(--tab-text-active);
   outline-offset: 1px;
+}
+
+/* 两钮的**图标**尺寸（2026-10-26 盒子/图标分离）：盒子 28（命中区），
+   图标 16——中间那圈透明就是命中余量，视觉不变但更好点。
+   `tab-overview-trigger` 现在装的是双箭头容器（见下），单箭头规则只留
+   `tab-new-trigger`。 */
+.tab-new-trigger > svg {
+  height: var(--size-icon-glyph);
+  width: var(--size-icon-glyph);
+}
+
+/* 标签总览钮的**双下箭头**（2026-11-01 用户："换成两个向下的符号图标，
+   现在只有一个向下的符号"）。
+   两个 chevron 竖叠、负间距收拢。
+   **容器高度必须是 auto 而不是 --size-icon-glyph(16px)**：两个 12px 箭头
+   减去 4px 重叠 = 20px 实际内容高，钉死 16px 会把第二只裁掉一半（实测
+   截图只看得到第一只的尖端）。容器只约束宽度，高度由内容决定，外层
+   28px 圆钮仍居中容纳。 */
+.tab-overview-chevrons {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  width: var(--size-icon-glyph);
+}
+.tab-overview-chevrons > svg {
+  height: var(--size-icon-sm);
+  width: var(--size-icon-sm);
+  flex: none;
+}
+.tab-overview-chevrons > svg + svg {
+  margin-top: -5px;
 }
 
 /* ── 标签条溢出：两端渐隐（beUI TabsList 语义，2026-10-15）──

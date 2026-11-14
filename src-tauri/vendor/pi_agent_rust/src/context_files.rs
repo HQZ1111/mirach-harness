@@ -12,14 +12,15 @@
 //! | Cline | `.clinerules` file or `.clinerules/*.md` dir | always |
 //! | Copilot | `.github/copilot-instructions.md` | always |
 //! | Copilot scoped | `.github/instructions/*.instructions.md` | frontmatter `applyTo` globs |
-//! | Windsurf | `.windsurfrules` file or `.windsurf/rules/*` dir | always |
+//! | Windsurf legacy | `.windsurfrules` | always |
+//! | Windsurf rules | `.windsurf/rules/*` | frontmatter `trigger` / `globs` / `description` |
 //! | Gemini | `GEMINI.md` | always |
 //!
 //! Codex `AGENTS.md` and Claude `CLAUDE.md` are pi's native conventions and
 //! stay owned by [`crate::app`]'s project-context loader; this module skips
-//! them (native wins) and also drops any foreign rule whose content is
-//! byte-identical to another already-collected rule (first occurrence wins,
-//! discovery order below).
+//! them (native wins) and also drops foreign rules with identical content
+//! and activation scopes (first occurrence wins, discovery order below).
+//! Identical bodies with different scopes must not erase one another.
 //!
 //! Import is strictly read-only: parsers take bytes already read from disk
 //! and never write foreign files.
@@ -73,6 +74,11 @@ pub struct ForeignRule {
     pub globs: Vec<String>,
     /// Inject unconditionally into the system context block.
     pub always_apply: bool,
+    /// Selection hint for an on-demand rule. Only this description, not the
+    /// rule body, is exposed until the agent reads the file when relevant.
+    /// `None` on an unscoped, non-always rule means explicit requests only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Workspace-relative source path.
     pub source: String,
     /// Which convention the rule was parsed from.
@@ -101,9 +107,10 @@ impl ForeignRules {
         self.rules.is_empty() && self.truncated_rules == 0
     }
 
-    /// Rules injected unconditionally (always-apply and unscoped).
+    /// Rules injected unconditionally. An explicitly inactive rule without
+    /// globs is on-demand, not an unconditional rule.
     pub fn always_rules(&self) -> impl Iterator<Item = &ForeignRule> {
-        self.rules.iter().filter(|rule| !rule.is_scoped())
+        self.rules.iter().filter(|rule| rule.always_apply)
     }
 
     /// Glob-scoped rules awaiting path activation.
@@ -133,6 +140,25 @@ impl ForeignRules {
                 block,
                 "{scoped} additional path-scoped rule(s) will be provided when matching files are touched."
             );
+        }
+        for rule in self
+            .rules
+            .iter()
+            .filter(|rule| !rule.always_apply && !rule.is_scoped())
+        {
+            if let Some(description) = &rule.description {
+                let _ = writeln!(
+                    block,
+                    "On-demand rule at `{}`: {description}\nRead this rule file only when that description is relevant to the current task.",
+                    rule.source
+                );
+            } else {
+                let _ = writeln!(
+                    block,
+                    "On-demand rule at `{}`: read only when explicitly requested; not automatically applied.",
+                    rule.source
+                );
+            }
         }
         if self.truncated_rules > 0 {
             let _ = writeln!(
@@ -180,7 +206,10 @@ impl ScopedRuleMatcher {
                 } else {
                     format!("**/{glob}")
                 };
-                match globset::Glob::new(&anchored) {
+                match globset::GlobBuilder::new(&anchored)
+                    .literal_separator(true)
+                    .build()
+                {
                     Ok(compiled) => {
                         builder.add(compiled);
                         added += 1;
@@ -213,10 +242,34 @@ impl ScopedRuleMatcher {
     /// suffix when it lives inside the workspace).
     #[must_use]
     pub fn matching_rules(&self, path: &Path, workspace_root: &Path) -> Vec<usize> {
-        let relative = path.strip_prefix(workspace_root).unwrap_or(path);
+        let relative = if path.is_absolute() {
+            let Ok(relative) = path.strip_prefix(workspace_root) else {
+                return Vec::new();
+            };
+            relative
+        } else {
+            path.strip_prefix(workspace_root).unwrap_or(path)
+        };
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let mut components = Vec::new();
+        for component in normalized.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    if components.pop().is_none() {
+                        return Vec::new();
+                    }
+                }
+                _ => components.push(component),
+            }
+        }
+        if components.is_empty() {
+            return Vec::new();
+        }
+        let normalized = components.join("/");
         self.entries
             .iter()
-            .filter(|(_, set)| set.is_match(relative))
+            .filter(|(_, set)| set.is_match(&normalized))
             .map(|(index, _)| *index)
             .collect()
     }
@@ -289,7 +342,9 @@ pub fn discover_foreign_rules(workspace_root: &Path) -> ForeignRules {
             }
         },
     );
-    // Windsurf: single file or rules directory.
+    // Windsurf: legacy files are unconditional; directory rules declare
+    // their own trigger. Treating every trigger as plain text activates
+    // manual and path-specific instructions on unrelated tasks.
     if let Some(content) = read_rule_file(&workspace_root.join(".windsurfrules")) {
         rules.push(plain_rule(
             &workspace_root.join(".windsurfrules"),
@@ -302,12 +357,7 @@ pub fn discover_foreign_rules(workspace_root: &Path) -> ForeignRules {
         &workspace_root.join(".windsurf").join("rules"),
         None,
         &mut |path, content| {
-            rules.push(plain_rule(
-                path,
-                workspace_root,
-                content,
-                ForeignRuleFormat::Windsurf,
-            ));
+            rules.push(parse_windsurf_rule(path, workspace_root, &content));
         },
     );
     // Gemini.
@@ -321,20 +371,30 @@ pub fn discover_foreign_rules(workspace_root: &Path) -> ForeignRules {
     }
 
     // Native precedence + dedupe: drop any foreign rule identical to a native
-    // context file (AGENTS.md / CLAUDE.md at the workspace root) or to an
-    // earlier foreign rule.
-    let mut seen: HashSet<String> = HashSet::new();
+    // context file (AGENTS.md / CLAUDE.md at the workspace root). Foreign
+    // duplicates must also have equivalent activation scopes: dropping a
+    // Rust rule because a TypeScript rule has the same body loses coverage.
+    let mut native_bodies: HashSet<String> = HashSet::new();
     for native in ["AGENTS.md", "CLAUDE.md"] {
         if let Some(content) = read_rule_file(&workspace_root.join(native)) {
-            seen.insert(normalized_body(&content));
+            native_bodies.insert(normalized_body(&content));
         }
     }
     let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
     for rule in rules {
-        if rule.content.trim().is_empty() {
+        let body = normalized_body(&rule.content);
+        if body.is_empty() || native_bodies.contains(&body) {
             continue;
         }
-        if seen.insert(normalized_body(&rule.content)) {
+        let mut scope = if rule.always_apply {
+            Vec::new()
+        } else {
+            rule.globs.clone()
+        };
+        scope.sort();
+        scope.dedup();
+        if seen.insert((body, rule.always_apply, scope, rule.description.clone())) {
             deduped.push(rule);
         }
     }
@@ -345,7 +405,10 @@ pub fn discover_foreign_rules(workspace_root: &Path) -> ForeignRules {
     let mut spent = 0usize;
     let mut truncated = 0usize;
     for rule in deduped {
-        let cost = rule.content.len();
+        let cost = rule
+            .content
+            .len()
+            .saturating_add(rule.description.as_ref().map_or(0, String::len));
         if truncated > 0 || spent.saturating_add(cost) > FOREIGN_RULES_BUDGET_BYTES {
             truncated += 1;
             continue;
@@ -365,10 +428,8 @@ fn normalized_body(content: &str) -> String {
 }
 
 fn relative_display(path: &Path, workspace_root: &Path) -> String {
-    path.strip_prefix(workspace_root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+    rel.to_string_lossy().replace('\\', "/")
 }
 
 fn read_rule_file(path: &Path) -> Option<String> {
@@ -418,6 +479,7 @@ fn plain_rule(
         content,
         globs: Vec::new(),
         always_apply: true,
+        description: None,
         source: relative_display(path, workspace_root),
         format,
     }
@@ -432,27 +494,46 @@ fn split_simple_frontmatter(content: &str) -> (Vec<(String, String)>, String) {
     if !matches!(lines.next(), Some(first) if first.trim() == "---") {
         return (Vec::new(), content.to_string());
     }
-    let mut fields = Vec::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
     let mut closed = false;
+    let mut block_scalar = false;
     for line in lines.by_ref() {
         if line.trim() == "---" {
             closed = true;
             break;
         }
-        if let Some((key, value)) = line.split_once(':') {
+        // Fold indented YAML block scalars into a selection hint. A colon
+        // within the description is content, not another frontmatter key.
+        if block_scalar
+            && (line.starts_with(' ') || line.starts_with('\t') || line.trim().is_empty())
+        {
+            if let Some((_, value)) = fields.last_mut() {
+                if !value.is_empty() && !line.trim().is_empty() {
+                    value.push(' ');
+                }
+                value.push_str(line.trim());
+            }
+            continue;
+        }
+        block_scalar = false;
+        // Recognize sequence entries before key/value pairs: glob paths
+        // may contain a colon, which must not start a bogus field.
+        if let Some(item) = line.trim().strip_prefix("- ") {
+            if let Some((_, value)) = fields.last_mut() {
+                if !value.is_empty() {
+                    value.push(',');
+                }
+                value.push_str(item.trim());
+            }
+        } else if let Some((key, value)) = line.split_once(':') {
             let key = key.trim();
             if !key.is_empty() {
-                fields.push((key.to_string(), value.trim().to_string()));
-            }
-        } else if let Some((last_key, last_value)) = fields.last_mut() {
-            // YAML list items (`- "*.ts"`) under the previous key.
-            let item = line.trim();
-            if let Some(item) = item.strip_prefix('-') {
-                let _ = last_key;
-                if !last_value.is_empty() {
-                    last_value.push(',');
-                }
-                last_value.push_str(item.trim());
+                let value = value.trim();
+                block_scalar = matches!(value, ">" | ">-" | ">+" | "|" | "|-" | "|+");
+                fields.push((
+                    key.to_string(),
+                    if block_scalar { "" } else { value }.to_string(),
+                ));
             }
         }
     }
@@ -462,39 +543,123 @@ fn split_simple_frontmatter(content: &str) -> (Vec<(String, String)>, String) {
     (fields, lines.collect::<Vec<_>>().join("\n"))
 }
 
-/// Parse a comma-separated (or YAML-list-flattened) glob field value.
+/// Remove quotes only when they enclose the entire scalar, not a sequence
+/// such as `"*.rs", "*.ts"`. Preserve glob escapes for `globset` to interpret.
+fn quoted_scalar(value: &str) -> Option<&str> {
+    let quote = value.chars().next()?;
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (index, character) in value.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' && quote == '"' {
+            escaped = true;
+        } else if character == quote {
+            return (index + 1 == value.len()).then_some(&value[1..index]);
+        }
+    }
+    None
+}
+
+/// Parse comma-separated scalars, YAML flow lists, or flattened block lists.
+/// Commas inside brace alternatives, character classes, quotes, and escaped
+/// literals belong to the glob; splitting them silently disables valid rules.
 fn parse_glob_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .map(|glob| glob.trim_matches('"').trim_matches('\'').trim())
-        .filter(|glob| !glob.is_empty() && *glob != "[]")
+    let value = value.trim();
+    let value = quoted_scalar(value).unwrap_or_else(|| {
+        value
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .unwrap_or(value)
+    });
+    let mut globs = Vec::new();
+    let mut start = 0usize;
+    let mut braces = 0usize;
+    let mut in_class = false;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if in_class {
+            if character == ']' {
+                in_class = false;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' if value[start..index].trim().is_empty() => quote = Some(character),
+            '[' => in_class = true,
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            ',' if braces == 0 => {
+                push_glob(&mut globs, &value[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    push_glob(&mut globs, &value[start..]);
+    globs
+}
+
+fn push_glob(globs: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    let value = quoted_scalar(value).unwrap_or(value).trim();
+    if !value.is_empty() {
+        globs.push(value.to_string());
+    }
+}
+
+fn rule_description(fields: &[(String, String)]) -> Option<String> {
+    fields
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "description")
+        .map(|(_, value)| quoted_scalar(value).unwrap_or(value).trim())
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .collect()
 }
 
 /// Cursor `.mdc`: frontmatter `description` / `globs` / `alwaysApply`.
 fn parse_cursor_mdc(path: &Path, workspace_root: &Path, content: &str) -> ForeignRule {
     let (fields, body) = split_simple_frontmatter(content);
     let mut globs = Vec::new();
-    let mut always_apply = false;
+    let mut always_apply = None;
     for (key, value) in &fields {
         match key.as_str() {
             "globs" => globs = parse_glob_list(value),
-            "alwaysApply" => always_apply = value.trim() == "true",
+            "alwaysApply" => always_apply = Some(value.trim() == "true"),
             _ => {}
         }
     }
-    // MDC semantics: no globs and no alwaysApply means "agent-requested" /
-    // description-gated; pi treats content-bearing rules without scoping as
-    // always-apply so they are not silently dropped.
-    if globs.is_empty() {
-        always_apply = true;
-    }
+    // Preserve the plain/unscoped fallback, but never override an explicit
+    // alwaysApply: false. Such a rule without globs is on-demand.
+    let always_apply = always_apply.unwrap_or(globs.is_empty());
+    let description = if !always_apply && globs.is_empty() {
+        rule_description(&fields)
+    } else {
+        None
+    };
     ForeignRule {
         content: body,
         globs,
         always_apply,
+        description,
         source: relative_display(path, workspace_root),
         format: ForeignRuleFormat::CursorMdc,
     }
@@ -513,9 +678,47 @@ fn parse_copilot_scoped(path: &Path, workspace_root: &Path, content: &str) -> Fo
         content: body,
         globs: if always_apply { Vec::new() } else { globs },
         always_apply,
+        description: None,
         source: relative_display(path, workspace_root),
         format: ForeignRuleFormat::CopilotScoped,
     }
+}
+
+/// Windsurf workspace rules declare one of four activation modes. Unknown
+/// or incomplete triggers remain on-demand, never silently become global.
+fn parse_windsurf_rule(path: &Path, workspace_root: &Path, content: &str) -> ForeignRule {
+    let (fields, body) = split_simple_frontmatter(content);
+    let trigger = fields
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "trigger")
+        .map(|(_, value)| quoted_scalar(value).unwrap_or(value).trim());
+    let mut rule = plain_rule(path, workspace_root, body, ForeignRuleFormat::Windsurf);
+    match trigger {
+        None | Some("always_on") => {}
+        Some("glob") => {
+            rule.always_apply = false;
+            rule.globs = fields
+                .iter()
+                .rev()
+                .find(|(key, _)| key == "globs")
+                .map(|(_, value)| parse_glob_list(value))
+                .unwrap_or_default();
+        }
+        Some("model_decision") => {
+            rule.always_apply = false;
+            rule.description = rule_description(&fields);
+        }
+        Some("manual") => rule.always_apply = false,
+        Some(trigger) => {
+            tracing::debug!(
+                "unknown rule trigger {trigger:?} from {}; keeping rule on-demand",
+                rule.source
+            );
+            rule.always_apply = false;
+        }
+    }
+    rule
 }
 
 #[cfg(test)]
@@ -765,5 +968,297 @@ mod tests {
         let rule = rules.rules.first().expect("copilot rule present");
         assert!(rule.always_apply);
         assert!(rule.globs.is_empty());
+    }
+
+    #[test]
+    fn glob_lists_preserve_alternatives_classes_and_escapes() {
+        for (input, expected) in [
+            (
+                "**/*.{ts,tsx},server/**/*.rs",
+                vec!["**/*.{ts,tsx}", "server/**/*.rs"],
+            ),
+            (
+                r#""*.ts,src/**/*.{js,jsx}""#,
+                vec!["*.ts", "src/**/*.{js,jsx}"],
+            ),
+            (
+                r#"["*.rs", "src/**/*.{js,jsx}"]"#,
+                vec!["*.rs", "src/**/*.{js,jsx}"],
+            ),
+            ("['*.py', 'scripts/**']", vec!["*.py", "scripts/**"]),
+            ("[a,b]*.rs,*.py", vec!["[a,b]*.rs", "*.py"]),
+            (r"name\,part.rs,*.py", vec![r"name\,part.rs", "*.py"]),
+            (
+                "src/{a,{b,c}}/*.rs,*.py",
+                vec!["src/{a,{b,c}}/*.rs", "*.py"],
+            ),
+            ("日本語/*.{rs,ts},*.py", vec!["日本語/*.{rs,ts}", "*.py"]),
+            ("{*.rs,*.ts", vec!["{*.rs,*.ts"]),
+            ("[]", vec![]),
+        ] {
+            assert_eq!(parse_glob_list(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn imported_brace_globs_activate_for_each_alternative() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(
+            root,
+            ".cursor/rules/frontend.mdc",
+            "---\nglobs: [\"src/**/*.{ts,tsx}\", \"*.vue\"]\nalwaysApply: false\n---\nFrontend standards.",
+        );
+        write(
+            root,
+            ".github/instructions/backend.instructions.md",
+            "---\napplyTo: 'server/**/*.{rs,go}'\n---\nBackend standards.",
+        );
+        let rules = discover_foreign_rules(root);
+        let matcher = ScopedRuleMatcher::new(&rules.rules);
+        for path in ["src/main.ts", "src/ui/view.tsx", "ui/view.vue"] {
+            assert_eq!(matcher.matching_rules(Path::new(path), root), vec![0]);
+        }
+        for path in ["server/main.rs", "server/api/main.go"] {
+            assert_eq!(matcher.matching_rules(Path::new(path), root), vec![1]);
+        }
+        assert!(
+            matcher
+                .matching_rules(Path::new("src/main.py"), root)
+                .is_empty()
+        );
+        let block = rules.system_prompt_block().expect("scoped notice");
+        assert!(!block.contains("Frontend standards."));
+        assert!(!block.contains("Backend standards."));
+    }
+
+    #[test]
+    fn scoped_matches_stay_inside_workspace_and_respect_directory_depth() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("workspace");
+        write(
+            &root,
+            ".cursor/rules/ts.mdc",
+            "---\nglobs: src/*.ts\n---\nTS.",
+        );
+        let rules = discover_foreign_rules(&root);
+        let matcher = ScopedRuleMatcher::new(&rules.rules);
+        for path in [
+            "src/main.ts",
+            "./src/main.ts",
+            "src/sub/../main.ts",
+            r"src\main.ts",
+        ] {
+            assert_eq!(matcher.matching_rules(Path::new(path), &root), vec![0]);
+        }
+        for path in ["src/sub/main.ts", "../src/main.ts", "src/../../src/main.ts"] {
+            assert!(matcher.matching_rules(Path::new(path), &root).is_empty());
+        }
+        assert!(
+            matcher
+                .matching_rules(&tmp.path().join("src/main.ts"), &root)
+                .is_empty()
+        );
+        assert!(
+            matcher
+                .matching_rules(&root.join("../src/main.ts"), &root)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn deduplication_keeps_distinct_scopes_and_collapses_reordered_scopes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for (name, globs) in [("a", "*.ts,*.tsx"), ("b", "*.rs"), ("c", "*.tsx,*.ts,*.ts")] {
+            write(
+                root,
+                &format!(".cursor/rules/{name}.mdc"),
+                &format!("---\nglobs: {globs}\n---\nShared standards."),
+            );
+        }
+        let rules = discover_foreign_rules(root);
+        assert_eq!(rules.rules.len(), 2);
+        let matcher = ScopedRuleMatcher::new(&rules.rules);
+        assert_eq!(matcher.matching_rules(Path::new("lib.tsx"), root), vec![0]);
+        assert_eq!(matcher.matching_rules(Path::new("lib.rs"), root), vec![1]);
+    }
+
+    #[test]
+    fn explicit_inactive_rule_is_not_promoted_to_global_context() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(
+            root,
+            ".cursor/rules/manual.mdc",
+            "---\nalwaysApply: false\nglobs: []\n---\nOnly for a requested migration.",
+        );
+        let rules = discover_foreign_rules(root);
+        assert_eq!(rules.rules.len(), 1);
+        assert_eq!(rules.always_rules().count(), 0);
+        assert!(ScopedRuleMatcher::new(&rules.rules).is_empty());
+        let block = rules.system_prompt_block().expect("on-demand notice");
+        assert!(block.contains(".cursor/rules/manual.mdc"));
+        assert!(!block.contains("Only for a requested migration."));
+    }
+
+    #[test]
+    fn windsurf_triggers_control_prompt_injection_and_path_activation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for (name, frontmatter, body) in [
+            ("always", "trigger: always_on", "Global coding standards."),
+            (
+                "frontend",
+                "trigger: 'glob'\nglobs: [\"src/**/*.{ts,tsx}\"]",
+                "Frontend implementation details.",
+            ),
+            (
+                "migration",
+                "trigger: model_decision\ndescription: >-\n  Database tasks: migrations\n  and schema changes.\nglobs: **",
+                "Detailed database migration procedure.",
+            ),
+            (
+                "manual",
+                "trigger: manual\ndescription: Never select this automatically.\nglobs: **",
+                "Explicit maintenance procedure.",
+            ),
+        ] {
+            write(
+                root,
+                &format!(".windsurf/rules/{name}.md"),
+                &format!("---\n{frontmatter}\n---\n{body}"),
+            );
+        }
+        let rules = discover_foreign_rules(root);
+        assert_eq!(rules.rules.len(), 4);
+        assert_eq!(rules.always_rules().count(), 1);
+        assert_eq!(rules.scoped_rules().count(), 1);
+        let block = rules.system_prompt_block().expect("rules block");
+        assert!(block.contains("Global coding standards."));
+        assert!(block.contains("Database tasks: migrations and schema changes."));
+        assert!(block.contains(".windsurf/rules/migration.md"));
+        assert!(block.contains(".windsurf/rules/manual.md"));
+        for hidden in [
+            "trigger:",
+            "Frontend implementation details.",
+            "Detailed database migration procedure.",
+            "Explicit maintenance procedure.",
+            "Never select this automatically.",
+        ] {
+            assert!(!block.contains(hidden), "must not inject {hidden}");
+        }
+        let matcher = ScopedRuleMatcher::new(&rules.rules);
+        for path in ["src/main.ts", "src/ui/view.tsx"] {
+            let matches = matcher.matching_rules(Path::new(path), root);
+            assert_eq!(matches.len(), 1);
+            assert_eq!(
+                rules.rules[matches[0]].source,
+                ".windsurf/rules/frontend.md"
+            );
+        }
+        assert!(
+            matcher
+                .matching_rules(Path::new("src/main.rs"), root)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn incomplete_and_unknown_windsurf_triggers_never_become_global() {
+        let root = Path::new("workspace");
+        for frontmatter in [
+            "trigger: glob",
+            "trigger: glob\nglobs: []",
+            "trigger: model_decision",
+            "trigger: model_decision\ndescription: ''",
+            "trigger: future_mode\nglobs: **\ndescription: Not authorized.",
+            "trigger: ''",
+        ] {
+            let rule = parse_windsurf_rule(
+                &root.join(".windsurf/rules/guarded.md"),
+                root,
+                &format!("---\n{frontmatter}\n---\nGuarded instructions."),
+            );
+            assert!(!rule.always_apply, "frontmatter: {frontmatter}");
+            assert!(rule.globs.is_empty());
+            assert!(rule.description.is_none());
+            assert_eq!(rule.content, "Guarded instructions.");
+        }
+    }
+
+    #[test]
+    fn cursor_description_selects_on_demand_without_injecting_body() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(
+            root,
+            ".cursor/rules/review.mdc",
+            "---\nalwaysApply: false\ndescription: \"Security review of authentication changes\"\n---\nDetailed security review checklist.",
+        );
+        let rules = discover_foreign_rules(root);
+        assert_eq!(rules.always_rules().count(), 0);
+        assert_eq!(rules.scoped_rules().count(), 0);
+        let block = rules.system_prompt_block().expect("description hint");
+        assert!(block.contains("Security review of authentication changes"));
+        assert!(block.contains(".cursor/rules/review.mdc"));
+        assert!(!block.contains("Detailed security review checklist."));
+        assert!(!block.contains("read only when explicitly requested"));
+    }
+
+    #[test]
+    fn selection_descriptions_participate_in_deduplication_and_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for (name, description) in [("a", "Database changes"), ("b", "API changes")] {
+            write(
+                root,
+                &format!(".windsurf/rules/{name}.md"),
+                &format!(
+                    "---\ntrigger: model_decision\ndescription: {description}\n---\nShared checklist."
+                ),
+            );
+        }
+        let rules = discover_foreign_rules(root);
+        assert_eq!(
+            rules.rules.len(),
+            2,
+            "distinct selection hints must survive"
+        );
+        let block = rules.system_prompt_block().expect("selection hints");
+        assert!(block.contains("Database changes"));
+        assert!(block.contains("API changes"));
+        assert!(!block.contains("Shared checklist."));
+
+        let large = tempfile::tempdir().expect("tempdir");
+        write(
+            large.path(),
+            ".windsurf/rules/huge.md",
+            &format!(
+                "---\ntrigger: model_decision\ndescription: {}\n---\nBody.",
+                "d".repeat(FOREIGN_RULES_BUDGET_BYTES)
+            ),
+        );
+        let rules = discover_foreign_rules(large.path());
+        assert!(rules.rules.is_empty());
+        assert_eq!(rules.truncated_rules, 1);
+    }
+
+    #[test]
+    fn frontmatter_sequence_colons_and_description_block_scalars_are_content() {
+        let (fields, body) = split_simple_frontmatter(
+            "---\nglobs:\n  - \"src/namespace:*.rs\"\n  - \"*.ts\"\ndescription: |\n  Use for: API changes\n  involving authentication.\nalwaysApply: false\n---\nRule body.",
+        );
+        assert_eq!(fields.len(), 3);
+        assert_eq!(
+            parse_glob_list(&fields[0].1),
+            vec!["src/namespace:*.rs", "*.ts"]
+        );
+        assert_eq!(
+            rule_description(&fields).as_deref(),
+            Some("Use for: API changes involving authentication.")
+        );
+        assert_eq!(fields[2], ("alwaysApply".to_string(), "false".to_string()));
+        assert_eq!(body, "Rule body.");
     }
 }

@@ -85,7 +85,7 @@ export function McpServerPanel({
                 expanded && "rotate-90",
               )}
             />
-            <PlugIcon className="text-foreground/35 size-3.5 shrink-0" />
+            <PlugIcon className="text-foreground/35 size-[var(--size-icon-md)] shrink-0" />
             <span className="min-w-0 flex-1 truncate text-[13.5px]">
               {server.name}
             </span>

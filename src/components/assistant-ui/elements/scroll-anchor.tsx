@@ -130,7 +130,7 @@ export function ScrollAnchor({
             "fade-in slide-in-from-bottom-2 animate-in absolute inset-x-0 bottom-3 mx-auto flex w-fit items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs transition-transform duration-200 hover:-translate-y-px",
           )}
         >
-          <ArrowDownIcon className="size-3 opacity-60" />
+          <ArrowDownIcon className="size-[var(--size-icon-sm)] opacity-60" />
           {newCount} new {newCount === 1 ? "message" : "messages"}
         </button>
       )}

@@ -41,8 +41,15 @@ describe('resolveContextMenuScope', () => {
     expect(resolveContextMenuScope(stubEl(null, true))).toBe('editable')
   })
 
-  it('lets Radix-owned surfaces keep the whole gesture (session rows)', () => {
+  it('lets self-managed surfaces keep the whole gesture (session rows)', () => {
     expect(resolveContextMenuScope(stubEl(CONTEXT_MENU_OWNER_SELECTOR))).toBe('owned')
+  })
+
+  it('机器人行根（data-roster-key，2026-11-07 移植）→ owned', () => {
+    // 行根右键自管（bots-pane.tsx 的 onContextMenu 开行菜单）——全局监听早退
+    expect(
+      resolveContextMenuScope(stubElMatching(['[data-roster-key]', CONTEXT_MENU_OWNER_SELECTOR])),
+    ).toBe('owned')
   })
 
   it('editable wins over owned (a field inside an owned surface stays native)', () => {

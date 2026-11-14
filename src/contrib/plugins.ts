@@ -1,0 +1,46 @@
+/**
+ * 插件注册表——hermes `contrib/plugins.ts` 的宿主对偶：bundled 插件静态
+ * import（首批两个：mirach-connections / mirach-pkg）。挂载 = activatePlugin
+ * 的贡献表按 area 消费（settings-overlay 消费 settings.page 区）。
+ */
+import type { Contribution, ContributionArea } from './types'
+import { activatePlugin } from './context'
+
+import ConnectionsPlugin from './mirach-connections/plugin'
+import PkgPlugin from './mirach-pkg/plugin'
+
+// 静态 import（hermes 的 import.meta.glob eager 同语义；首批两插件常开）
+const BUNDLED = [ConnectionsPlugin, PkgPlugin]
+
+export interface ActivatedPlugins {
+  contributions: Record<ContributionArea, Contribution[]>
+}
+
+let activated: ActivatedPlugins | null = null
+
+/** 激活全部 bundled 插件（幂等——重复调用返回同一份贡献表）。 */
+export function activateBundledPlugins(): ActivatedPlugins {
+  if (activated) return activated
+  const contributions: Record<ContributionArea, Contribution[]> = {
+    'settings.page': [],
+    'bots.roster.grouping': [],
+  }
+  for (const plugin of BUNDLED) {
+    try {
+      const byArea = activatePlugin(plugin)
+      for (const area of Object.keys(byArea) as ContributionArea[]) {
+        contributions[area]!.push(...byArea[area]!)
+      }
+    } catch (e) {
+      // 插件注册失败 = 该插件的贡献缺席（错误隔离，hermes runtime-loader
+      // 同语义——不是能力边界），console 可见不炸宿主
+      console.error(`[contrib] 插件 ${plugin.id} 注册失败——贡献缺席`, e)
+    }
+  }
+  activated = { contributions }
+  return activated
+}
+
+export function usePluginContributions(): Record<ContributionArea, Contribution[]> {
+  return activateBundledPlugins().contributions
+}

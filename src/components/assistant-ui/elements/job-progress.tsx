@@ -64,9 +64,9 @@ export function JobProgress({
     >
       <div className="flex items-center gap-2.5">
         {finished ? (
-          <CheckIcon className="size-3.5 shrink-0 text-emerald-500" />
+          <CheckIcon className="size-[var(--size-icon-md)] shrink-0 text-emerald-500" />
         ) : (
-          <Loader2Icon className="text-foreground/35 size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+          <Loader2Icon className="text-foreground/35 size-[var(--size-icon-md)] shrink-0 animate-spin motion-reduce:animate-none" />
         )}
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">
           {title}
@@ -81,7 +81,7 @@ export function JobProgress({
             onClick={onCancel}
             className={cn(ghostButton, "size-6 shrink-0")}
           >
-            <XIcon className="size-3.5" />
+            <XIcon className="size-[var(--size-icon-md)]" />
           </button>
         )}
       </div>

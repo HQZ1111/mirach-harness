@@ -32,7 +32,7 @@ export function MemoryChips({
       {...props}
     >
       <div className="flex items-center gap-1.5">
-        <BrainIcon className="text-foreground/30 size-3.5" />
+        <BrainIcon className="text-foreground/30 size-[var(--size-icon-md)]" />
         <span className={cn(mono, "text-foreground/35")}>
           {fresh > 0 ? `remembered ${fresh}` : "memory"}
         </span>
@@ -57,7 +57,7 @@ export function MemoryChips({
                 onClick={() => onForget(chip.id)}
                 className={cn(ghostButton, "size-4")}
               >
-                <XIcon className="size-2.5" />
+                <XIcon className="size-[var(--size-icon-xs)]" />
               </button>
             )}
           </span>

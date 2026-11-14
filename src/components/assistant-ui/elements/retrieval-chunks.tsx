@@ -43,7 +43,7 @@ export function RetrievalChunks({
           "text-foreground/70 inline-flex w-fit items-center gap-1.5 rounded-full px-3.5 py-2 text-xs",
         )}
       >
-        <DatabaseIcon className="text-foreground/40 size-3" />
+        <DatabaseIcon className="text-foreground/40 size-[var(--size-icon-sm)]" />
         {query}
       </span>
 

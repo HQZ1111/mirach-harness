@@ -47,9 +47,9 @@ export function AgentPlan({
             <li key={step} className="flex items-center gap-2.5 text-[13.5px]">
               <span className="flex size-4 shrink-0 items-center justify-center">
                 {done ? (
-                  <CheckIcon className="text-foreground/35 size-3.5" />
+                  <CheckIcon className="text-foreground/35 size-[var(--size-icon-md)]" />
                 ) : active ? (
-                  <Loader2Icon className="text-foreground/90 size-3.5 animate-spin motion-reduce:animate-none" />
+                  <Loader2Icon className="text-foreground/90 size-[var(--size-icon-md)] animate-spin motion-reduce:animate-none" />
                 ) : (
                   <span
                     aria-hidden

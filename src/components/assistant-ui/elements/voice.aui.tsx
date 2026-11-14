@@ -112,7 +112,7 @@ export const VoiceConnectButton: FC = () => {
       disabled={runOwnsThread}
       onClick={() => connect()}
     >
-      <PhoneIcon className="size-4" />
+      <PhoneIcon className="size-[var(--size-icon-lg)]" />
       Connect
     </Button>
   );

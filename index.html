@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/brand/logo.png" />
     <title>Mirach Harness</title>
+    <!-- 首屏底色（2026-10-30）：在样式表与 React 挂载**之前**就定下窗口的
+         颜色。此前 html/body 是 transparent（base.css:18），WebView2 会先
+         露出自己的默认白底（用户看到的"白屏"），样式注入后仍透明 → 露出
+         合成器未着色的黑底（"黑屏"），直到 React 首帧才出内容（实测
+         2988ms）。这个内联块让前两段都变成外壳色，只剩一次颜色跳变。
+         取值必须与 tokens.css 的 --surface-shell 一致；改一处要改两处
+         （内联样式拿不到 CSS 变量，只能写字面值）。 -->
+    <style>
+      html,
+      body {
+        background: #e9eeef;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

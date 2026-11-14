@@ -69,24 +69,39 @@ export function radialResolve(
  * dropTarget 与 RootDropTargetService 都读 host.options.dropPositionResolver），
  * 所以必须自行区分「谁在问」：
  *
- * **只覆盖组内容目标（.dv-content-container），其余（root 整布局目标）
- * 回 null = 放弃覆盖**。CDP 实锤（2026-10-16）：不区分时 root 也按径向解，
- * 整个窗口被 root 抢成「布局边缘投放」——标签拖到对话列下缘松手变成
- * 整行全宽底栏（dockToLayoutEdge），而非对话列内的上下分栏。root 原生
- * 语义 = 窗口外缘 10px 像素带的整布局停靠（DEFAULT_ROOT_OVERLAY_MODEL
- * activationSize:pixels 10）；本应用三栏定式 + hermes 语义（分栏只相对
- * 悬停组）不需要它 → root 一律放弃。
+ * **只覆盖组内容目标，其余（root 整布局目标）回 null = 放弃覆盖**。
+ * CDP 实锤（2026-10-16）：不区分时 root 也按径向解，整个窗口被 root 抢成
+ * 「布局边缘投放」——标签拖到对话列下缘松手变成整行全宽底栏
+ * （dockToLayoutEdge），而非对话列内的上下分栏。root 原生语义 = 窗口外缘
+ * 10px 像素带的整布局停靠；本应用三栏定式 + hermes 语义（分栏只相对悬停组）
+ * 不需要它 → root 一律放弃。
  *
- * 区分依据 = `event.currentTarget`（HTML5 后端：handler 注册在目标元素上，
- * 分发期间 currentTarget = 该元素；内容目标 = .dv-content-container，
- * root = 宿主元素）。pointer 后端（触屏）其 currentTarget 不可靠（窗口级
- * 监听分发）→ classList 检查不命中即 null，触屏回退 dockview 默认 quadrant
- * （不劣于引入本 resolver 之前）。
+ * ## 判别方式（2026-10-22 重写：pointer 后端下旧判别恒失效）
+ *
+ * 旧实现只认 `event.currentTarget.classList.contains('dv-content-container')`
+ * ——那是 **HTML5 后端**的假设（handler 注册在目标元素上，分发期间
+ * currentTarget 就是目标）。本项目用 `dndStrategy="pointer"`，pointer 后端的
+ * move 监听挂在 **window** 上，`currentTarget` 是 window、没有 classList →
+ * 判别恒 false → resolver 恒返回 null → **所有落点被放弃**：overlay 不显示、
+ * 松手不生效，标签根本拖不出分栏（2026-10-22 用户报障的根因）。
+ *
+ * 现在按 **zones 集合**判别（与后端无关，来自目标自己的
+ * `acceptedTargetZones`）：
+ *   · 组内容目标 = 五方位全集（top/bottom/left/right/center）——见
+ *     dockview-core `content.ts` 的 pointerDropTarget；
+ *   · root 整布局目标只收左右/上下这类子集（`DEFAULT_ROOT_OVERLAY_MODEL`
+ *     的像素带），且不带 center。
+ * 所以 `zones.size === 5 && zones.has('center')` ⇒ 内容目标，其余放弃。
+ * 这个判据在 HTML5 与 pointer 两个后端下都成立。
  */
 export const radialDropResolver: PositionResolver = {
   resolve: (args) => {
+    // ① 精确判据（HTML5 后端仍可用，且能覆盖将来 dockview 改 zone 配置）
     const current = args.event.currentTarget as HTMLElement | null
-    if (!current || !current.classList.contains('dv-content-container')) return null
+    const isContentTargetByDom = current?.classList?.contains('dv-content-container') ?? false
+    // ② 后端无关判据：五方位全集只属于组内容目标
+    const isContentTargetByZones = args.zones.size === 5 && args.zones.has('center')
+    if (!isContentTargetByDom && !isContentTargetByZones) return null
     const position = radialResolve(args.zones, args.x, args.y, args.width, args.height)
     return position ? { position } : null
   },

@@ -88,7 +88,7 @@ export function ImageGeneration({
             generating && "pointer-events-none opacity-0",
           )}
         >
-          <RefreshCwIcon className="size-3" />
+          <RefreshCwIcon className="size-[var(--size-icon-sm)]" />
         </button>
       </div>
     </div>

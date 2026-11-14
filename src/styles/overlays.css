@@ -1,29 +1,15 @@
 /* ============================================================
- * overlays.css — 宿主层绝对定位面：主区调色层（main-tint.tsx）+
- * 全局设置浮层（settings-overlay.tsx，portal 到 body 的模态）
+ * overlays.css — 宿主层绝对定位面：全局设置浮层
+ * （settings-overlay.tsx，portal 到 body 的模态）
  *
  * **已删的死规则（2026-10-18 审计 + 运行时核验）**：
  *   .fl-edit-veils / .fl-edit-veil / .fl-edit-chip（edit-veils.tsx v5.0 删）
  *   .fl-drop-overlay / -zone-anchor / -sheet / -sheet-active / -caret
  *   + @keyframes fl-drop-fade（drop-overlay.tsx v8.0 删）
  * 核验：CDP 里这些选择器 querySelectorAll 全部为 0。
+ * **2026-10-21 再删**：`.main-tint`（主区调色层，用户："颜色层不要了，
+ *   直接删除"）——组件 main-tint.tsx 已一并删除。
  * ============================================================ */
-
-/* ── 装饰叠片 ──
-   主区调色层：颜色/圆角走令牌（--main-tint-*），顶部避 100 页签带的
-   偏移在 chrome-overlays.tsx 里用 calc + --logo-strip-h（横/竖轨都避）。
-   **z -1 = 垫到窗格文字组件下面**（用户：现在盖主文字了）——flexlayout
-   背景全透明，颜色层从内容后面透出来；宿主 isolation: isolate 保证 -1
-   不掉到 app 白底之下。
-   （左栏 logo 已迁入会话页签条 leading——onRenderTabSet 注入，样式见
-   flexlayout.css 的 .rail-logo-leading；宿主层浮层方案退役。） */
-.main-tint {
-  background: var(--main-tint-color);
-  border-radius: var(--main-tint-radius);
-  pointer-events: none;
-  position: absolute;
-  z-index: var(--z-tint);
-}
 
 /* ── 全局设置浮层（settings-overlay.tsx，§7-7）——portal 到 body，
    遮罩 + 居中卡片。主从两栏（hermes settings 同构）：.set-card 是
@@ -71,6 +57,189 @@
   user-select: none;
 }
 
+/* ── 设置页专用：beui 形态的"两段各自带头"（2026-10-23）──────────────
+   用户："现在是不是有个顶栏，beui 的没有顶栏啊"——对，beui 的
+   AnimatedSidebar 是 `<aside>`（自带 header）+ `<main>`（自带 header），
+   没有横跨两栏的带子。
+
+   **左栏必须是"一整块"**（2026-10-23 二次修正，用户："左栏设置的下面
+   有横线？整个页面还有个白色的顶栏？"）：第一版把 head 与 nav 做成两个
+   grid 单元格，于是 ①head 是卡片白底、nav 是 #fafafa → 交界那条色阶
+   被看成"横线"；②head 只有 172px 宽但和右栏 668px 的白底头同高无缝 →
+   840px 宽的白色横条，读成"顶栏"；③`.set-nav` 的 border-right 只画在
+   第二行 → 竖分隔线在顶部 48px 断开。
+   故包一层 `.set-rail`：一个背景 + 一条 border-right + 内部 flex 竖排
+   （head 固定 48 / nav 吃剩余并滚动）。这与上游 `<aside>` 的整体背景
+   同构，三个症状一起消失。
+
+     ┌──────────────┬──────────────────────┐
+     │  设置         │  外观              ✕ │  ← 无分隔线（上游 inset header 也没有）
+     │──────────────│                      │
+     │  基础设置     │  该设置项尚未接线      │
+     │    常规       │                      │
+     └──────────────┴──────────────────────┘
+      └ 一整块灰底（含头）   └ 一整块白底
+
+   为什么用修饰类而不是直接改 `.set-card`：bots-dialog 与
+   pi-resources-dialog 也吃 `.set-card` / `.set-header`，它们的标题确实
+   需要横跨（一个没有左导航，另一个的左导航没有分组标题）。 */
+.set-card--split {
+  /* 单行：左右各一列、各占满高。左栏内部自己竖排 head + nav。 */
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.set-card--split > .set-rail {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.set-card--split > .set-content {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* ── 设置独立窗口形态（2026-10-23，`variant="window"`）───────────────
+   同一个内容树（左栏 + 右栏 + inset 头），外壳换成"铺满整个窗口"：
+
+     · **无遮罩**：窗口本身就是边界，没有"外面"可点（浮层的点遮罩关闭在
+       这里没有意义）
+     · **无居中/固定尺寸**：`.set-card` 的 `position:fixed` + `width:840px`
+       + `height:70vh` 全部清零——那三个值是"卡片浮在页面上"的语义
+     · **壳圆角改由窗口根画**：见下面的 `.settings-window-root`
+     · **拖拽区**：`.set-nav-head` 与 `.set-inset-head` 都是 48px 的空白带，
+       设为 `-webkit-app-region: drag` 的等价物 —— WebView2 没有那个属性，
+       用 `data-tauri-drag-region` 由前端监听（见 settings-window.tsx） */
+.set-card--window {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  height: 100%;
+  max-height: none;
+  max-width: none;
+  overflow: hidden;
+  position: static;
+  width: 100%;
+}
+
+/* ── 岛式布局（2026-10-23 用户定稿）────────────────────────────────
+   用户："设置页做成岛式的，左侧给圆角加阴影，右侧直接用和主页一样的背景色"。
+
+   三层，各司其职：
+     `.settings-window-root`  = 窗口壳：底色 + 圆角 + 投影 + 透明边距
+     `.set-rail`              = **岛**：四角圆 + 自己的投影，浮在壳上
+     `.set-content`           = 直接坐壳底（透明），与主页同一底色
+
+   为什么左栏四角都要圆（而不是只圆左边）：岛是独立浮起的一块，四条边都
+   是它的轮廓；只圆左边会读成"被窗口左边缘切掉一角的整块"，不是岛。
+
+   为什么右栏不也做成岛：用户明确要它"和主页一样的背景色"——主页的内容区
+   就是坐在壳底上的，没有第二层卡。 */
+.settings-window-root {
+  background: var(--surface-shell);
+  border-radius: var(--radius-shell);
+  /* 投影已移出 CSS（2026-10-25）：由 Rust 的 win_shadow 层绘制——窗口
+     区域裁掉了 40px 边距，CSS box-shadow 会被一起裁掉。见 tokens.css
+     的 --shell-shadow-margin 段与 src-tauri/src/win_shadow.rs。 */
+  /* 边距走 `#root` 的 padding（与主窗同一处理，见 base.css 的 #root 段）：
+     本层用 margin 会把 body 的 scrollHeight 撑大 → 文档比窗口大一圈 →
+     WebView2 在窗口矩形边缘渲染出那条"外框线"。
+     本层只需要铺满 `#root` 的 padding 内框。 */
+  height: 100%;
+  overflow: hidden;
+  width: 100%;
+}
+
+/* 窗口形态下卡片自身不再画圆角/底色——壳与岛分别负责（见下方两条规则）。 */
+
+/* 两个头都是拖窗区（48px 空白带，无按钮）——与主窗顶带同一交互语义。
+   `cursor: default` 明确它不是可点元素。 */
+.set-nav-head,
+.set-inset-head {
+  cursor: default;
+}
+
+/* 右栏 inset 头的右侧有 ✕ 按钮，那一段不能拖窗（按钮自己 stopPropagation） */
+.set-inset-head .set-close {
+  cursor: pointer;
+}
+
+/* 设置窗根：**窗口壳**（底色 + 圆角 + 投影 + 透明边距）——定义在上面的
+   「岛式布局」段，不要在这里再写一条（后写的会覆盖圆角/阴影/边距）。
+   主窗的 `.app-shell` 是同一套值（base.css），两个窗口视觉一致。 */
+
+.set-rail {
+  background: color-mix(in srgb, var(--hover-wash) 40%, transparent);
+  border-right: 1px solid var(--stroke-soft);
+  border-bottom-left-radius: var(--radius-panel-lg);
+  border-top-left-radius: var(--radius-panel-lg);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── 窗口形态的左栏 = 独立的岛（2026-10-23 用户定稿）─────────────────
+   浮层形态里左栏是卡片内部的一条灰带（只圆左边、有 border-right）；
+   窗口形态里它是一块**浮在壳上的卡**：四角都圆、自己带投影、四周留出
+   与壳底的分隔。
+
+   为什么这里要覆盖 `.set-rail` 而不是另写一套：内容树只有一份（见
+   settings-overlay.tsx 头注释），差异仅在外壳。三条差异都用
+   `.set-card--window >` 前缀限定，浮层形态（以及 bots-dialog /
+   pi-resources-dialog 复用的 `.set-nav`）完全不受影响。 */
+.set-card--window > .set-rail {
+  /* 岛的底色用卡片白（不是灰带）：它现在是"浮起的卡"，与右栏的白卡同级 */
+  background: var(--surface);
+  /* **同心**（2026-10-23 用户："背景圆角太大，和里面的同心啊"）：
+     壳 35 = 岛 25 + 内缩 10 —— 与主窗「壳 vs 栏卡片」同一套几何
+     （tokens.css: --scale-radius-shell = --radius-pane + --pane-edge）。
+     岛的四边都圆：它是独立浮块，四条边都是它的轮廓。 */
+  border-radius: var(--radius-pane);
+  /* 不再需要右分隔线：投影本身就把岛与右栏分开了 */
+  border-right: none;
+  /* 内缩 = --pane-edge（10），与主窗「窗边 → 卡片」同档 */
+  margin: var(--pane-edge);
+  margin-right: 0;
+  /* 岛的投影：与主窗栏卡片同一档（--shadow-pane） */
+  box-shadow: var(--shadow-pane);
+}
+
+/* 左栏头（beui AnimatedSidebarHeader 的形态：一行标题）。
+   高度 = 右栏 inset 头（两者同为 48px）——不齐会让两栏的"第一行"错开，
+   卡片看起来是歪的。**不画底部分隔线**：它与下面的 nav 同一块底色，
+   画线就又是用户报的那条"横线"。 */
+.set-nav-head {
+  align-items: center;
+  color: var(--text);
+  display: flex;
+  flex-shrink: 0;
+  font-size: var(--font-body);
+  font-weight: var(--weight-semibold);
+  height: 48px;
+  padding: 0 var(--space-stack-sm);
+  user-select: none;
+}
+
+/* 右栏固定 inset 头（beui AnimatedSidebarInset 的 `<header>`：视图名 + 动作）。
+   **不随正文滚动**——它是 .set-content 的直接子级，滚动只发生在 .set-scroll 里。
+   **无底部分隔线**（上游也没有）：卡片白底 + 下方白底正文，画线就是一条
+   横跨右栏的"顶栏"边。层次由标题字重承担。 */
+.set-inset-head {
+  align-items: center;
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--space-inline);
+  height: 48px;
+  justify-content: space-between;
+}
+
+.set-inset-title {
+  color: var(--text);
+  font-size: var(--font-body);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
 .set-title {
   color: var(--text);
   font-size: var(--font-body);
@@ -109,31 +278,86 @@
   gap: var(--space-inline-xs);
 }
 
-/* 左导航（节列表）：图标 + 名称；选中态 accent 底/边（铁律：全部走令牌） */
+/* 左导航（节列表）：**分组结构**（用户 2026-10-22 定稿：5 组 20 项）。
+   行/组标题/子级的**视觉与动效由 beui AnimatedSidebar 的菜单 parts 承担**
+   （2026-10-23 落地，见 src/components/motion/animated-sidebar.tsx 文件头：
+   删掉 Provider 状态机 / Ctrl+B 快捷键 / 移动端抽屉与 body 滚动锁 / 折叠态，
+   保留全部菜单项与子选项 + layoutId 滑动 pill + clip-path 子级 stagger）。
+   本文件只保留**容器**样式（底色 / 分隔线 / 滚动 / 内距），不再画行。
+   节列表宽度仍是 --dialog-nav-w（172px），故容器左右内距与组内 px-2 对齐。
+
+   **共享面（已核）**：pi-resources-dialog 仍复用 .set-nav / .set-nav-item
+   （它没有接 motion，是普通按钮列表）——那边继续吃下面的 .set-nav-item
+   家族规则，改动只影响它自己，不会与设置页的 motion 版混用。 */
 .set-nav {
-  background: color-mix(in srgb, var(--hover-wash) 40%, transparent);
-  border-right: 1px solid var(--stroke-soft);
+  /* 背景与右分隔线已上移到 .set-rail（左栏整块，含头）——本层只负责
+     滚动与内距。内距 = beui AnimatedSidebarContent 的 px-2 py-2（8px）。 */
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 10px 8px;
+  padding: 8px;
 }
 
+/* ── 颜色接回 mirach 令牌（2026-10-23）──────────────────────────────
+   beui 的 parts 全部用 shadcn 令牌：组标题 `text-muted-foreground`
+   （oklch 0.556 ≈ #7a7a7a）、行 `text-muted-foreground` + hover
+   `text-foreground`（≈#1a1a1a）。两条后果：
+
+   ① **层级塌陷**——组标题与行文字变成同一个灰，"这是段名 / 这是选项"
+      的区分只剩字号（10 vs 14）。本工程的口径是段头更浅（--text-4
+      #a0a0ac）、行更深（--text-2 #5a5a5a），层级靠明度也靠字号。
+   ② **悬停对比过猛**——#7a7a7a → #1a1a1a 是一次跳变，比本工程其它列表
+      （--text-2 → --text）明显重。
+
+   故只覆盖**颜色**（不改任何动效/尺寸/圆角）：组标题 → --text-4，
+   行 → --text-2、悬停/选中 → --text。选择器带 .set-nav 前缀，不影响
+   entry-bar / file-tree 两个同样用 SharedLayoutBg 的地方。 */
+.set-nav [data-slot='sidebar-group-label'] {
+  color: var(--text-4);
+}
+
+.set-nav [data-slot='sidebar-menu-item'] button,
+.set-nav [data-slot='sidebar-menu-item'] a {
+  color: var(--text-2);
+}
+
+.set-nav [data-slot='sidebar-menu-item'] button:hover,
+.set-nav [data-slot='sidebar-menu-item'] a:hover,
+.set-nav [data-slot='sidebar-menu-item'] button[aria-current='page'],
+.set-nav [data-slot='sidebar-menu-item'] a[aria-current='page'] {
+  color: var(--text);
+}
+
+/* 图标跟随行文字（beui 让 icon 继承 currentColor，故无需单独规则；
+   这里只补一条：选中态图标也走 --text，避免与行文字不同步）。 */
+.set-nav [data-slot='sidebar-menu-item'] [aria-current='page'] svg {
+  color: var(--text);
+}
+
+/* ── 以下是 pi-resources-dialog 的普通按钮列表样式（设置页已改用
+   AnimatedSidebarMenu*，不再命中这些规则）。组标题/空态行仍两边共用。 ── */
+
+/* 菜单项：min-h-9(36px) / rounded-xl(12px) / px-3(12px) / 图标 16 + 文字。
+   高度写死 36 而非 min-height：行内只有图标与单行文字，min-height 在长标签
+   换行时会让行高抖动；标签走省略号（.set-nav-item-label 已配）。 */
 .set-nav-item {
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-surface);
   color: var(--text-2);
   cursor: pointer;
   display: flex;
   flex-shrink: 0;
-  font-size: var(--font-sm);
+  font-size: var(--font-body);
   gap: var(--space-inline);
-  padding: 6px 10px;
+  height: 36px;
+  padding: 0 var(--space-stack-sm);
   text-align: left;
+  transition: background-color var(--dur-fast) var(--beui-ease-out),
+    color var(--dur-fast) var(--beui-ease-out);
   width: 100%;
 }
 
@@ -142,13 +366,21 @@
   color: var(--text);
 }
 
+/* 键盘焦点环：与鼠标 hover 区分（组内 Tab 只在选中项上，↑/↓ 会移动焦点） */
 .set-nav-item:focus-visible {
   border-color: color-mix(in srgb, var(--fl-accent) 60%, transparent);
 }
 
+/* 选中态：beui 用 bg-muted + 前景色。**本工程不能照抄 --muted**——
+   tailwind.css 的 --muted = oklch(0.97 0 0) ≈ #f2f2f2，而 .set-nav 的
+   底色本身已是 hover-wash 40%（≈#fafafa），行 hover 再叠 --hover-wash
+   (0.05 黑) 也正好落到 ≈#f2f2f2——选中与悬停会**完全同色**，分组导航
+   里"当前在哪一节"就看不出来了。故取灰阶刻度的下一档
+   --scale-gray-a4（0.12 黑 ≈#e0e0e0，与左侧栏会话行选中底同重量级），
+   并保留前景色 + 字重表达层级：选中 = 更实的底 + 全黑文字 + 600；
+   悬停 = 淡洗底 + 全黑文字。 */
 .set-nav-item.is-active {
-  background: color-mix(in srgb, var(--fl-accent) 12%, transparent);
-  border-color: color-mix(in srgb, var(--fl-accent) 45%, transparent);
+  background: var(--scale-gray-a4);
   color: var(--text);
   font-weight: var(--weight-semibold);
 }
@@ -159,7 +391,7 @@
 }
 
 .set-nav-item.is-active .set-nav-item-icon {
-  color: var(--fl-accent);
+  color: var(--text);
 }
 
 .set-nav-item-label {
@@ -169,14 +401,91 @@
   white-space: nowrap;
 }
 
-/* 右内容区：只渲染选中节，独立滚动 */
+/* 子级空态行（「插件集成」组）：文案行，不是按钮。
+   **竖线与缩进已由 AnimatedSidebarMenuSub 承担**（`ml-5 border-l pl-3`，
+   即 20px 缩进 + 1px 竖线 + 12px 内距）——这里只给文字色与行距，
+   不再自己画竖线（否则会与组件的竖线并排成两条）。 */
+.set-nav-empty {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  padding: 4px 0;
+}
+
+/* 导航子项（hermes 的层级导航：提供方的 账号/API 密钥/自定义端点 等）。
+   外壳 = AnimatedSidebarMenuSub（左竖线 + 缩进 + clip-path 揭开，与空组
+   同一原语）；本类只负责按钮自身的文字色与行高。选中态 = 文字全亮
+   （行文字用 --text-2，选中走 --text——与左导航行同一分层）。 */
+.set-nav-subitem {
+  background: transparent;
+  border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  display: block;
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  padding: 4px 0;
+  text-align: left;
+  width: 100%;
+}
+
+.set-nav-subitem:hover {
+  color: var(--text);
+}
+
+/* 右内容区（beui AnimatedSidebarInset 形态）：固定 inset 头 + 独立滚动正文。
+   **overflow 从本层移到 .set-scroll**——头必须不滚（它是"视图名"，
+   滚走就失去了导航定位）。 */
 .set-content {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  padding: 0 20px;
+}
+
+/* 版本英雄区（hermes VersionHero 的移植，2026-10-24）：logo + 应用名 +
+   版本行。logo 走 /brand/logo.png（与左栏 logo 同源）。 */
+.set-about-hero {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.set-about-logo {
+  height: 48px;
+  width: 48px;
+}
+
+.set-about-name {
+  font-size: var(--font-title);
+  font-weight: var(--weight-semibold);
+  line-height: 1.3;
+}
+
+/* 窗口形态的右栏：**直接坐壳底**（用户 2026-10-23："右侧直接用和主页一样的
+   背景色"）。不铺白、不画圆角、不加投影——它不是卡，是壳的内容面。
+   左栏的岛（上面的 `.set-card--window > .set-rail`）靠自己的投影与壳底
+   分开；这一侧的分隔由岛承担，不需要边框。
+
+   内距与岛**同档对齐**：岛上下各留 --pane-edge，右栏也留同样的上/下/右，
+   否则标题贴壳顶、正文贴壳底，看着像"内容溢出了"。左侧留 --pane-edge
+   （岛右侧 margin 为 0，留白在这里给）。 */
+.set-card--window > .set-content {
+  background: transparent;
+  padding: var(--pane-edge) 20px var(--pane-edge) var(--pane-edge);
+}
+
+/* 正文滚动容器：节内容 + 底部留白。`min-height: 0` 是 flex 子级能收缩
+   的前提（否则内容撑高父级、滚动条不出现）。 */
+.set-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  padding: 0 20px 20px;
+  padding: 12px 0 20px;
 }
 
 .set-section {
@@ -201,6 +510,37 @@
 .set-section-title {
   color: var(--text);
   font-size: var(--font-body);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
+/* 节内子块标题（2026-10-22 合并节引入：模型 = 默认模型 + 重试与故障转移；
+   安全 = 提供方凭据 + 原始配置；记忆 = 上下文压缩）。
+   与节标题的区别：字号同 body 但字重常规 + 次级色，且顶部留白更大——它
+   是"一个面板里的第二块"，不是新面板（sticky 节头才是面板级分隔）。 */
+.set-sub-title {
+  color: var(--text-2);
+  font-size: var(--font-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  margin: var(--space-stack-sm) 0 0;
+}
+
+/* 占位节面板（未接线的 16 项）：明确说"没有数据面"，不造假控件。
+   视觉是虚线框 + 弱色文字——比错误条轻（这不是错误），比正常字段重
+   （用户点进来要立刻知道这里没东西）。 */
+.set-placeholder {
+  border: 1px dashed var(--stroke-soft);
+  border-radius: var(--radius-surface);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-inline-xs);
+  padding: var(--space-stack-sm) var(--space-stack);
+}
+
+.set-placeholder-title {
+  color: var(--text-3);
+  font-size: var(--font-sm);
   font-weight: var(--weight-semibold);
   margin: 0;
 }
@@ -437,10 +777,723 @@
 .set-about-defs dt { color: var(--text-4); }
 .set-about-defs dd { margin: 0; }
 
+/* ── 账户页（openhuman AccountPanel 的移植，2026-10-25）───────────────
+   结构照上游：TileGrid(2) 卡片网格 → Card（圆角 12 / 1px 描边 / 表面色）
+   → Field 行（左 label+desc、右 control，行间 divide-y 由 border-top
+   模拟）→ 会话卡里的危险按钮。上游用 shadcn 令牌（text-content /
+   bg-surface / border-line），这里全部接 mirach 令牌（--text* /
+   --surface / --stroke*）——与「颜色只从令牌取」的既有纪律一致。 */
+.set-acct-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 720px) {
+  .set-acct-grid { grid-template-columns: 1fr 1fr; }
+}
+
+.set-acct-card {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pane);
+  overflow: hidden;
+}
+
+/* 上游 Card title：12px 半粗、弱色、卡内 16px 上内距。 */
+.set-acct-card-head {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  padding: 16px 16px 0;
+}
+
+.set-acct-card-body > * + * { border-top: 1px solid var(--stroke-soft); }
+
+/* 上游 Field 行：左右分布，16/12 内距；窄屏堆叠。 */
+.set-acct-field {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.set-acct-field-text { min-width: 0; flex: 1 1 auto; }
+
+.set-acct-field-label {
+  color: var(--text);
+  display: block;
+  font-size: var(--font-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.set-acct-field-desc {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+  margin: 2px 0 0;
+}
+
+.set-acct-field-control { flex: 0 0 auto; }
+
+/* 资料行（上游 Card 无 title 的头部块）：名字 16px 半粗 + 副行弱色。 */
+.set-acct-profile-row {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 16px;
+}
+
+.set-acct-profile-text { min-width: 0; }
+
+.set-acct-profile-name {
+  color: var(--text);
+  font-size: var(--font-body);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-acct-profile-sub {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  margin-top: 2px;
+}
+
+/* 宿主事实说明（无云端账户 / 凭据计数）：比 hint 更弱，跟在卡片末尾。 */
+.set-acct-note {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+  margin: 0;
+  padding: 0 16px 14px;
+}
+
+.set-acct-row-error {
+  border-top: 1px solid var(--stroke-soft);
+  padding: 12px 16px;
+}
+
+/* 危险按钮（上游 tone="danger" 的珊瑚红）：描边与文字走 destructive，
+   悬停才上淡底——与普通 set-btn 明确区分（不可逆操作不读成同级）。 */
+.set-btn-danger {
+  border-color: color-mix(in srgb, var(--destructive) 55%, transparent);
+  color: var(--destructive);
+}
+
+.set-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  border-color: var(--destructive);
+  color: var(--destructive);
+}
+
+/* 二次确认对话框（上游 AlertDialog：点外部不关闭）。 */
+.set-acct-dialog-backdrop {
+  align-items: center;
+  background: color-mix(in srgb, #000 38%, transparent);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 24px;
+  position: fixed;
+  z-index: 60;
+}
+
+.set-acct-dialog {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pane);
+  box-shadow: var(--shadow-pane);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 460px;
+  padding: 18px 20px 16px;
+  width: 100%;
+}
+
+.set-acct-dialog-title {
+  color: var(--text);
+  font-size: var(--font-body);
+  font-weight: var(--weight-semibold);
+  margin: 0;
+}
+
+.set-acct-dialog-desc {
+  color: var(--text-2);
+  font-size: var(--font-sm);
+  line-height: 1.65;
+}
+
+.set-acct-dialog-desc p { margin: 0 0 8px; }
+.set-acct-dialog-desc p:last-child { margin-bottom: 0; }
+
+.set-acct-dialog-desc ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.set-acct-dialog-desc li { margin-bottom: 2px; }
+
+.set-acct-dialog-irreversible {
+  color: var(--destructive);
+  font-weight: var(--weight-semibold);
+}
+
+.set-acct-dialog-note { color: var(--text-4); font-size: var(--font-caption); }
+
+.set-acct-dialog-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* ── 个性页（2026-10-26 openhuman PersonaPanel 移植）───────────────────
+   结构照上游（卡片圆角 12 / 行内 padding 16-12 / 标题 12px 半粗 / 模板卡
+   三列），配色接 mirach 令牌（--surface / --stroke / --text-*），与账户页
+   .set-acct-* 同一套视觉语言——两页都来自 openhuman，不能各长一副样子。 */
+
+.set-persona {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.set-persona-card {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pane);
+  overflow: hidden;
+}
+
+.set-persona-card-head {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--stroke-soft);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.set-persona-card-head-text { min-width: 0; }
+
+.set-persona-card-title {
+  color: var(--text);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  margin: 0;
+}
+
+.set-persona-card-desc {
+  color: var(--text-3);
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  margin: 4px 0 0;
+}
+
+.set-persona-card-head-right { flex: 0 0 auto; }
+
+.set-persona-card-body > * + * { border-top: 1px solid var(--stroke-soft); }
+
+.set-persona-card-pad { padding: 16px; }
+
+.set-persona-card-foot {
+  align-items: center;
+  border-top: 1px solid var(--stroke-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+/* 引导式三字段 */
+.set-persona-guided {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.set-persona-field-label {
+  color: var(--text);
+  display: block;
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.set-persona-field-help {
+  color: var(--text-3);
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  margin: 2px 0 0;
+}
+
+.set-persona-note {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.set-persona-textarea {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-control);
+  box-sizing: border-box;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--font-sm);
+  line-height: 1.55;
+  padding: 8px 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+.set-persona-textarea:focus {
+  border-color: var(--fl-accent);
+  outline: none;
+}
+
+.set-persona-textarea:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.set-persona-textarea--code {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: var(--font-caption);
+  line-height: 1.6;
+}
+
+.mt-2 { margin-top: 8px; }
+
+/* 模板卡（上游 3 列；窄屏单列） */
+.set-persona-templates {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .set-persona-templates { grid-template-columns: minmax(0, 1fr); }
+}
+
+.set-persona-tile {
+  background: transparent;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.set-persona-tile:hover:not(:disabled) {
+  background: var(--hover-wash);
+  border-color: color-mix(in srgb, var(--text) 24%, transparent);
+}
+
+.set-persona-tile:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.set-persona-tile--on {
+  background: var(--select-wash);
+  border-color: var(--fl-accent);
+}
+
+.set-persona-tile--static { cursor: default; }
+
+.set-persona-tile-title {
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+.set-persona-tile-desc {
+  color: var(--text-3);
+  font-size: var(--font-caption);
+  line-height: 1.4;
+}
+
+/* 引导式 / 高级 分段钮（上游 ToggleGroup） */
+.set-persona-seg {
+  background: var(--hover-wash);
+  border-radius: var(--radius-control);
+  display: inline-flex;
+  padding: 2px;
+}
+
+.set-persona-seg-btn {
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: var(--font-caption);
+  font-weight: 500;
+  padding: 4px 10px;
+}
+
+.set-persona-seg-btn:hover { color: var(--text); }
+
+.set-persona-seg-btn--on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pane);
+}
+
+/* 保存条（上游 sticky bottom；这里用同色浮条，不吸底——设置页滚动容器
+   自己管滚动，吸底会与右栏 inset 头打架） */
+.set-persona-savebar {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pane);
+  box-shadow: var(--shadow-pane);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.set-persona-savebar-text {
+  color: var(--text-3);
+  font-size: var(--font-sm);
+}
+
+.set-persona-savebar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ── 用量页（2026-10-26 ZCode AppUsagePanel 移植）─────────────────────
+   上游用 recharts；宿主不引新依赖，趋势图 = 内联 SVG 折线，模型占比 =
+   横向堆叠条。配色照 ZCode appUsageChartPalette 的 6 色（组件内联，
+   不在这里——那是数据驱动的颜色，不是主题令牌）。 */
+
+.set-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 概览条（上游 AppUsageLifetimeSummaryStrip：一行五格 + 细分隔线） */
+.set-usage-strip {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-pane);
+  display: flex;
+  overflow: hidden;
+}
+
+.set-usage-strip-cell-wrap {
+  align-items: stretch;
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.set-usage-strip-divider {
+  align-self: center;
+  background: var(--stroke-soft);
+  height: 28px;
+  width: 1px;
+}
+
+.set-usage-strip-cell {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 12px 8px;
+  text-align: center;
+}
+
+.set-usage-strip-value {
+  color: var(--text);
+  font-size: var(--font-body-lg);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-usage-strip-label {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 区间选择行 */
+.set-usage-range-row {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.set-usage-range-title {
+  color: var(--text);
+  font-size: var(--font-sm);
+  font-weight: 500;
+}
+
+/* 热力图：52 列等分（上游同款——不产生第二个横向滚动区） */
+.set-usage-heatmap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.set-usage-heatmap-grid {
+  display: grid;
+  gap: 2px 2px;
+  width: 100%;
+}
+
+.set-usage-heatmap-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.set-usage-heatmap-cell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  width: 100%;
+}
+
+.set-usage-heatmap-cell--l0 { background: var(--hover-wash); }
+.set-usage-heatmap-cell--l1 { background: color-mix(in srgb, var(--fl-accent) 25%, transparent); }
+.set-usage-heatmap-cell--l2 { background: color-mix(in srgb, var(--fl-accent) 45%, transparent); }
+.set-usage-heatmap-cell--l3 { background: color-mix(in srgb, var(--fl-accent) 70%, transparent); }
+.set-usage-heatmap-cell--l4 { background: var(--fl-accent); }
+
+.set-usage-heatmap-months {
+  display: grid;
+  gap: 0 2px;
+  width: 100%;
+}
+
+.set-usage-heatmap-month {
+  color: var(--text-4);
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.set-usage-heatmap-legend {
+  align-items: center;
+  color: var(--text-4);
+  display: flex;
+  font-size: 10px;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.set-usage-heatmap-legend .set-usage-heatmap-cell {
+  aspect-ratio: 1;
+  width: 10px;
+}
+
+/* 按天趋势（内联 SVG） */
+.set-usage-trend { display: flex; flex-direction: column; gap: 6px; }
+
+.set-usage-trend-svg {
+  display: block;
+  height: auto;
+  width: 100%;
+}
+
+.set-usage-trend-area {
+  fill: color-mix(in srgb, var(--fl-accent) 12%, transparent);
+}
+
+.set-usage-trend-line {
+  fill: none;
+  stroke: var(--fl-accent);
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.set-usage-trend-dot { fill: var(--fl-accent); }
+
+.set-usage-trend-axis {
+  color: var(--text-4);
+  display: flex;
+  font-size: 10px;
+  justify-content: space-between;
+}
+
+/* 按模型占比 */
+.set-usage-models { display: flex; flex-direction: column; gap: 12px; }
+
+.set-usage-models-bar {
+  border-radius: 4px;
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  width: 100%;
+}
+
+.set-usage-models-seg { min-width: 2px; }
+
+.set-usage-models-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.set-usage-models-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.set-usage-models-dot {
+  border-radius: 2px;
+  flex: 0 0 auto;
+  height: 8px;
+  width: 8px;
+}
+
+.set-usage-models-name {
+  color: var(--text-2);
+  flex: 1 1 auto;
+  font-size: var(--font-caption);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-usage-models-count {
+  color: var(--text-4);
+  flex: 0 0 auto;
+  font-size: var(--font-caption);
+}
+
+.set-usage-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+
+/* ── 模型选择器的 provider 分组（2026-10-26）───────────────────────────
+   用户先报"没有按名称分组显示，像 zcode 和 hermes 一样"，分组后紧接着报
+   "显示的不一样，不能折叠啊"——72 项照样一屏铺满，分组只是多了三行标题。
+
+   所以组标题做成**折叠开关**（ZCode 的 provider 行同款：顶层一行一个
+   provider，模型收在里面）：默认只展开当前选中模型那一组，点标题切换。
+   颜色/字号接回 mirach 令牌（不用 shadcn 的 muted-foreground 灰度，
+   与设置页左栏组标题保持同一个灰）。 */
+
+.set-model-group-head {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text-3);
+  cursor: pointer;
+  display: flex;
+  font-size: 11px;
+  font-weight: 500;
+  gap: 6px;
+  letter-spacing: 0.02em;
+  padding: 6px 8px 4px;
+  text-align: left;
+  width: 100%;
+}
+
+.set-model-group-head:hover:not(:disabled) {
+  background: var(--hover-wash);
+  color: var(--text);
+}
+
+/* 搜索态下组标题只是标签（点击不折叠——结果是跨组的） */
+.set-model-group-head:disabled {
+  cursor: default;
+}
+
+.set-model-group-head[data-group-selected='true'] {
+  color: var(--text);
+}
+
+.set-model-group-chevron {
+  flex: 0 0 auto;
+  height: 12px;
+  transition: transform 0.12s var(--beui-ease-out);
+  width: 12px;
+}
+
+.set-model-group-chevron--open {
+  transform: rotate(90deg);
+}
+
+.set-model-group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 收起时显示"这一组里当前选的是谁"（ZCode 的 groupSelected + check 同语义） */
+.set-model-group-current {
+  color: var(--text-4);
+  flex: 0 1 auto;
+  font-weight: 400;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-model-group-count {
+  color: var(--text-4);
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 组间留白（不画分隔线——靠标题分组，ZCode 同款） */
+[data-slot='model-selector-list'] [cmdk-group] + [cmdk-group] {
+  margin-top: 2px;
+}
+
+
 /* ── assistant-ui message-actions（官方 elements 模板）──────────────
    feedback 能力未接入（runtime 无 FeedbackAdapter）时隐藏反馈两钮——
    与旧版 AuiIf capabilities.feedback 门控等价（能力驱动的渲染选择，
    非吞错；接入 FeedbackAdapter 后移除容器上的 .aui-hide-reactions 即恢复）。 */
 .aui-hide-reactions [aria-label^="Mark response"] {
   display: none;
+}
+
+/* ── 会话内查找高亮（CSS Custom Highlight API，不动 DOM）────────────
+   registry 名与 conversation-find.ts 的 FIND_*_HIGHLIGHT_NAME 常量同源。
+   黄色高亮是搜索命中通用语义（ZCode 同色 #fde68a / #facc15）。 */
+::highlight(mirach-conversation-find) {
+  background-color: #fde68a;
+  color: #1f2328;
+}
+
+::highlight(mirach-conversation-find-active) {
+  background-color: #facc15;
+  color: #1f2328;
 }

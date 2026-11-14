@@ -180,8 +180,9 @@ pub struct RewindOutcome {
 pub async fn summarize_span(
     span: &[Message],
     provider: std::sync::Arc<dyn crate::provider::Provider>,
-    api_key: &str,
+    stream_options: &crate::provider::StreamOptions,
     settings: &crate::compaction::ResolvedCompactionSettings,
+    privacy: &crate::compaction::CompactionPrivacy,
 ) -> Result<String> {
     if span.is_empty() {
         return Ok(String::new());
@@ -202,12 +203,13 @@ pub async fn summarize_span(
     let result = crate::compaction::compact(
         preparation,
         provider,
-        api_key,
+        stream_options,
         Some(
             "Summarize this span as a concise rewind report: what was explored, \
              what was decided, what remains open. Preserve file paths, \
              decisions, and constraints.",
         ),
+        privacy,
     )
     .await?;
     Ok(result.summary)
@@ -269,7 +271,9 @@ pub fn fresh_stream_state(agent: &mut crate::agent::Agent, session: &mut Session
     // A millisecond stamp alone can collide across rapid calls; the uuid
     // suffix keeps every /fresh a genuinely new provider session id.
     let new_id = format!("fresh-{}-{}", now_ms(), uuid::Uuid::new_v4().simple());
-    agent.stream_options_mut().session_id = Some(new_id.clone());
+    // Rebinding (not just setting session_id) re-derives the session-scoped
+    // prompt cache key too, which is what actually resets provider caching.
+    crate::app::rebind_stream_options_session(agent.stream_options_mut(), &new_id);
     session.append_custom_entry(
         "fresh".to_string(),
         Some(serde_json::json!({
@@ -295,6 +299,19 @@ pub struct RetryPreparation {
 pub struct RetryPlan {
     /// Text of the abandoned user turn to re-issue.
     pub text: String,
+    /// Tree entry id of the abandoned user entry.
+    pub abandoned_entry_id: String,
+    /// Leaf id observed while planning. Apply refuses if the live leaf moved.
+    pub original_leaf_id: Option<String>,
+    /// Parent of the abandoned user entry. The retried turn lands here.
+    pub expected_parent_id: Option<String>,
+}
+
+/// Read-only retry plan retaining the complete native user input.
+#[derive(Debug, Clone)]
+pub struct RetryContentPlan {
+    /// The abandoned user turn, preserving block order and attachment data.
+    pub content: UserContent,
     /// Tree entry id of the abandoned user entry.
     pub abandoned_entry_id: String,
     /// Leaf id observed while planning. Apply refuses if the live leaf moved.
@@ -337,16 +354,16 @@ enum RetryDisposition {
 #[derive(Debug, Clone)]
 struct ProjectedPathMessage {
     disposition: RetryDisposition,
-    text: Option<String>,
+    content: Option<UserContent>,
     entry_id: Option<String>,
     parent_id: Option<String>,
 }
 
 impl ProjectedPathMessage {
-    const fn candidate(text: String, entry_id: String, parent_id: Option<String>) -> Self {
+    const fn candidate(content: UserContent, entry_id: String, parent_id: Option<String>) -> Self {
         Self {
             disposition: RetryDisposition::Candidate,
-            text: Some(text),
+            content: Some(content),
             entry_id: Some(entry_id),
             parent_id,
         }
@@ -355,7 +372,7 @@ impl ProjectedPathMessage {
     const fn barrier() -> Self {
         Self {
             disposition: RetryDisposition::Barrier,
-            text: None,
+            content: None,
             entry_id: None,
             parent_id: None,
         }
@@ -364,7 +381,7 @@ impl ProjectedPathMessage {
     const fn skip() -> Self {
         Self {
             disposition: RetryDisposition::Skip,
-            text: None,
+            content: None,
             entry_id: None,
             parent_id: None,
         }
@@ -387,21 +404,14 @@ impl RetryPathProjection {
     fn append(&mut self, entry: &SessionEntry) {
         match entry {
             SessionEntry::Message(message_entry) => match &message_entry.message {
-                SessionMessage::User {
-                    content: UserContent::Text(text),
-                    ..
-                } => match message_entry.base.id.clone() {
+                SessionMessage::User { content, .. } => match message_entry.base.id.clone() {
                     Some(entry_id) => self.projected.push(ProjectedPathMessage::candidate(
-                        text.clone(),
+                        content.clone(),
                         entry_id,
                         message_entry.base.parent_id.clone(),
                     )),
                     None => self.projected.push(ProjectedPathMessage::barrier()),
                 },
-                SessionMessage::User {
-                    content: UserContent::Blocks(_),
-                    ..
-                } => self.projected.push(ProjectedPathMessage::barrier()),
                 SessionMessage::BashExecution { extra, .. } => {
                     let excluded = extra
                         .get("excludeFromContext")
@@ -511,14 +521,33 @@ fn project_retry_path(session: &Session) -> Vec<ProjectedPathMessage> {
 /// a candidate because it is stored as a real user entry, not a rewind Custom.
 #[must_use]
 pub fn plan_retry(session: &Session) -> Option<RetryPlan> {
+    let plan = plan_retry_content(session)?;
+    let UserContent::Text(text) = plan.content else {
+        return None;
+    };
+    Some(RetryPlan {
+        text,
+        abandoned_entry_id: plan.abandoned_entry_id,
+        original_leaf_id: plan.original_leaf_id,
+        expected_parent_id: plan.expected_parent_id,
+    })
+}
+
+/// Select the latest durable user input without flattening native content.
+///
+/// Uses the same compaction, rewind, and non-user barriers as [`plan_retry`],
+/// while also accepting block-based user entries. Callers must validate the
+/// selected blocks before applying the plan or dispatching another turn.
+#[must_use]
+pub fn plan_retry_content(session: &Session) -> Option<RetryContentPlan> {
     let projected = project_retry_path(session);
     for item in projected.into_iter().rev() {
         match item.disposition {
             RetryDisposition::Skip => {}
             RetryDisposition::Barrier => return None,
             RetryDisposition::Candidate => {
-                return Some(RetryPlan {
-                    text: item.text?,
+                return Some(RetryContentPlan {
+                    content: item.content?,
                     abandoned_entry_id: item.entry_id?,
                     original_leaf_id: session.leaf_id().map(str::to_string),
                     expected_parent_id: item.parent_id,
@@ -535,16 +564,44 @@ pub fn apply_retry_plan(
     session: &mut Session,
     plan: &RetryPlan,
 ) -> std::result::Result<(), RetryApplyError> {
-    if session.leaf_id() != plan.original_leaf_id.as_deref() {
+    apply_retry_target(
+        session,
+        plan.original_leaf_id.as_deref(),
+        &plan.abandoned_entry_id,
+        plan.expected_parent_id.as_deref(),
+    )
+}
+
+/// Apply a native retry plan using the same leaf checks as [`apply_retry_plan`].
+/// Does not persist and leaves the abandoned entries in the session tree.
+pub fn apply_retry_content_plan(
+    session: &mut Session,
+    plan: &RetryContentPlan,
+) -> std::result::Result<(), RetryApplyError> {
+    apply_retry_target(
+        session,
+        plan.original_leaf_id.as_deref(),
+        &plan.abandoned_entry_id,
+        plan.expected_parent_id.as_deref(),
+    )
+}
+
+fn apply_retry_target(
+    session: &mut Session,
+    original_leaf_id: Option<&str>,
+    abandoned_entry_id: &str,
+    expected_parent_id: Option<&str>,
+) -> std::result::Result<(), RetryApplyError> {
+    if session.leaf_id() != original_leaf_id {
         return Err(RetryApplyError::LeafChanged);
     }
     let abandoned = session
-        .get_entry(&plan.abandoned_entry_id)
+        .get_entry(abandoned_entry_id)
         .ok_or(RetryApplyError::AbandonedMissing)?;
-    if abandoned.base().parent_id != plan.expected_parent_id {
+    if abandoned.base().parent_id.as_deref() != expected_parent_id {
         return Err(RetryApplyError::ParentMismatch);
     }
-    let navigated = if let Some(parent) = &plan.expected_parent_id {
+    let navigated = if let Some(parent) = expected_parent_id {
         session.navigate_to(parent)
     } else {
         session.reset_leaf();
@@ -572,6 +629,69 @@ pub fn prepare_retry_branch(session: &mut Session) -> Option<RetryPreparation> {
         text: plan.text,
         abandoned_entry_id: plan.abandoned_entry_id,
     })
+}
+
+/// What [`rewind_to_user_entry`] hands back for the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindPreparation {
+    /// The rewound message's text.
+    pub text: String,
+    /// Images the message carried, which the editor can't hold.
+    pub dropped_images: usize,
+}
+
+/// Rewind to just before a user message (OMP `/branch`, double-Esc).
+///
+/// Moves the leaf to the parent of the user message `entry_id` on the current
+/// path, so whatever is sent next lands as its sibling while the old path
+/// stays in the tree. `None` when `entry_id` is not a user message on the
+/// current path. Does not persist.
+pub fn rewind_to_user_entry(session: &mut Session, entry_id: &str) -> Option<RewindPreparation> {
+    let (parent_id, prepared) =
+        session
+            .entries_for_current_path()
+            .into_iter()
+            .find_map(|entry| {
+                let SessionEntry::Message(message) = entry else {
+                    return None;
+                };
+                if message.base.id.as_deref() != Some(entry_id) {
+                    return None;
+                }
+                let SessionMessage::User { content, .. } = &message.message else {
+                    return None;
+                };
+                let prepared = match content {
+                    UserContent::Text(text) => RewindPreparation {
+                        text: text.clone(),
+                        dropped_images: 0,
+                    },
+                    UserContent::Blocks(blocks) => RewindPreparation {
+                        text: blocks
+                            .iter()
+                            .filter_map(|block| match block {
+                                crate::model::ContentBlock::Text(text) => Some(text.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        dropped_images: blocks
+                            .iter()
+                            .filter(|block| matches!(block, crate::model::ContentBlock::Image(_)))
+                            .count(),
+                    },
+                };
+                Some((message.base.parent_id.clone(), prepared))
+            })?;
+    match parent_id {
+        Some(parent) => {
+            if !session.navigate_to(&parent) {
+                return None;
+            }
+        }
+        None => session.reset_leaf(),
+    }
+    Some(prepared)
 }
 
 #[cfg(test)]
@@ -645,6 +765,54 @@ mod tests {
         assert_eq!(session.leaf_id(), Some(first_answer.as_str()));
         assert!(session.get_entry(&first_user).is_some());
         assert!(session.get_entry(&abandoned).is_some());
+    }
+
+    #[test]
+    fn rewind_to_user_entry_branches_before_the_chosen_message() {
+        let mut session = Session::in_memory();
+        let first = session.append_message(session_user("first question"));
+        session.append_message(session_assistant("first answer"));
+        let second = session.append_message(session_user("second question"));
+        let second_answer = session.append_message(session_assistant("second answer"));
+
+        // The first message has no parent: the leaf resets to the root.
+        let mut from_root = session.clone();
+        let prepared = rewind_to_user_entry(&mut from_root, &first).expect("rewind");
+        assert_eq!(prepared.text, "first question");
+        assert_eq!(from_root.leaf_id(), None);
+
+        // A later message: the leaf moves to its parent, and sending again
+        // makes a sibling while the old path stays in the tree.
+        let prepared = rewind_to_user_entry(&mut session, &second).expect("rewind");
+        assert_eq!(prepared.text, "second question");
+        assert_eq!(prepared.dropped_images, 0);
+        assert_eq!(session.entries_for_current_path().len(), 2);
+        let sibling = session.append_message(session_user("second, reworded"));
+        assert_ne!(sibling, second);
+        assert!(session.get_entry(&second_answer).is_some());
+
+        // Not a user message, or not on the current path: refused.
+        assert!(rewind_to_user_entry(&mut session, &second_answer).is_none());
+        assert!(rewind_to_user_entry(&mut session, &second).is_none());
+        assert!(rewind_to_user_entry(&mut session, "no-such-id").is_none());
+    }
+
+    #[test]
+    fn rewind_to_user_entry_keeps_text_and_counts_images() {
+        let mut session = Session::in_memory();
+        let id = session.append_message(SessionMessage::from(Message::User(UserMessage {
+            content: UserContent::Blocks(vec![
+                crate::model::ContentBlock::Text(crate::model::TextContent::new("look at this")),
+                crate::model::ContentBlock::Image(crate::model::ImageContent {
+                    data: String::from("aGk="),
+                    mime_type: String::from("image/png"),
+                }),
+            ]),
+            timestamp: 0,
+        })));
+        let prepared = rewind_to_user_entry(&mut session, &id).expect("rewind");
+        assert_eq!(prepared.text, "look at this");
+        assert_eq!(prepared.dropped_images, 1);
     }
 
     #[test]
@@ -737,6 +905,58 @@ mod tests {
     }
 
     #[test]
+    fn native_retry_uses_the_visible_turn_after_a_synthetic_rewind() {
+        use crate::model::{ContentBlock, MediaContent, TextContent};
+
+        let mut session = Session::in_memory();
+        session.append_message(session_user("earlier question"));
+        let parent = session.append_message(session_assistant("earlier answer"));
+        let content = UserContent::Blocks(vec![
+            ContentBlock::Text(TextContent::new("  listen\n")),
+            ContentBlock::Media(MediaContent {
+                data: "YQ==".to_string(),
+                mime_type: "audio/wav".to_string(),
+                name: Some("voice.wav".to_string()),
+            }),
+            ContentBlock::Text(TextContent::new(" \t\n")),
+        ]);
+        let native = session.append_message(SessionMessage::User {
+            content: content.clone(),
+            timestamp: Some(0),
+        });
+        session.append_message(session_assistant("native answer"));
+        let checkpoint = mark_checkpoint(&mut session, "keep native", None, &[]);
+        let hidden = session.append_message(session_user("hidden later question"));
+        session.append_message(session_assistant("hidden answer"));
+        session.append_custom_entry(
+            "rewind".to_string(),
+            Some(serde_json::json!({
+                "checkpointEntryId": checkpoint.entry_id,
+                "summary": "the hidden turn was summarized",
+            })),
+        );
+        let leaf = session.leaf_id().map(str::to_string);
+        assert!(prepare_retry_branch(&mut session).is_none());
+        assert_eq!(session.leaf_id(), leaf.as_deref());
+        let plan = plan_retry_content(&session).expect("visible native user turn");
+        assert_eq!(plan.abandoned_entry_id, native);
+        assert_eq!(plan.expected_parent_id.as_deref(), Some(parent.as_str()));
+        assert_eq!(
+            serde_json::to_value(&plan.content).unwrap(),
+            serde_json::to_value(&content).unwrap()
+        );
+        apply_retry_content_plan(&mut session, &plan).expect("native retry");
+        assert_eq!(session.leaf_id(), Some(parent.as_str()));
+        assert!(session.get_entry(&native).is_some());
+        assert!(session.get_entry(&hidden).is_some());
+        assert_eq!(
+            apply_retry_content_plan(&mut session, &plan),
+            Err(RetryApplyError::LeafChanged),
+            "a consumed retry plan cannot silently rewind another turn"
+        );
+    }
+
+    #[test]
     fn plan_retry_treats_bash_execution_as_barrier() {
         let mut session = Session::in_memory();
         session.append_message(session_user("older prompt"));
@@ -749,6 +969,7 @@ mod tests {
             None,
         );
         assert!(plan_retry(&session).is_none());
+        assert!(plan_retry_content(&session).is_none());
     }
 
     #[test]
@@ -757,6 +978,7 @@ mod tests {
         let older = session.append_message(session_user("older prompt"));
         session.append_branch_summary(older, "left a branch".to_string(), None, None);
         assert!(plan_retry(&session).is_none());
+        assert!(plan_retry_content(&session).is_none());
     }
 
     #[test]
@@ -771,6 +993,7 @@ mod tests {
             None,
         );
         assert!(plan_retry(&session).is_none());
+        assert!(plan_retry_content(&session).is_none());
     }
 
     #[test]

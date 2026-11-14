@@ -66,11 +66,11 @@ export function BackgroundInbox({
           <>
             <span className="flex size-3.5 shrink-0 items-center justify-center">
               {run.state === "running" ? (
-                <Loader2Icon className="text-foreground/30 size-3 animate-spin motion-reduce:animate-none" />
+                <Loader2Icon className="text-foreground/30 size-[var(--size-icon-sm)] animate-spin motion-reduce:animate-none" />
               ) : run.state === "failed" ? (
-                <XIcon className="size-3 text-red-500" />
+                <XIcon className="size-[var(--size-icon-sm)] text-red-500" />
               ) : (
-                <CheckIcon className="size-3 text-emerald-500" />
+                <CheckIcon className="size-[var(--size-icon-sm)] text-emerald-500" />
               )}
             </span>
 

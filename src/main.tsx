@@ -14,10 +14,22 @@ import 'harmonyos-sans-sc-webfont-splitted'
 // 定位/尺寸/overflow 规则全在此表；漏掉它布局渲染成堆叠裸 div（M4 实锤：
 // "内容全错位"根因 = M1 写壳时忘了这条 import）。
 import 'dockview-react/dist/styles/dockview.css'
+// codicon 字体（@vscode/codicons dist，与 hermes 桌面端同一份包）：
+// hermes 的 Codicon 组件（审查面板/技能与中心/连接器整套图标）按名字取字形，
+// 必须与上游同源——手抄零星 SVG path 不现实。排在自有样式之前，
+// 让 styles/*.css 可覆盖（.codicon 的 font-family/size 由组件内联控制）。
+import '@vscode/codicons/dist/codicon.css'
 // 样式分层（见 src/styles/tokens.css 头注释）：令牌 → 壳 → flexlayout
 // → 窗格 → 叠片。规则文件里禁止写字面值，取值一律进 tokens.css。
 // （editor.css 已删：.ep-*/.ze-* 对应组件在 v5.0/v8.0 两轮删除后无消费方）
 import './styles/tokens.css'
+// hermes 镜像树的 --ui-* / --dt-* / --theme-* 令牌（补齐 tokens.css 未定义的
+// 56 个；必须在 tokens.css 之后——两者都是 :root，后者胜出，而本文件刻意
+// 不重复定义已验收的宿主别名）
+import './styles/hermes-tokens.css'
+// hermes 镜像树直接用到的上游语义类（.desktop-input-chrome / .ref /
+// .dt-portal-scrollbar / .dither / .setting-field-highlight 等 13 个）
+import './styles/hermes-ui.css'
 import './styles/base.css'
 import './styles/flexlayout.css'
 import './styles/panes.css'
@@ -29,46 +41,93 @@ import './styles/ui-primitives.css'
 // 组件工具类可覆盖上方体系的同面规则）
 import './styles/tailwind.css'
 
-import { App } from './app'
-import { AppContextMenu, openAppContextMenu } from './components/layout/app-context-menu'
 import { inTauri } from './lib/tauri-window'
-import { resolveContextMenuScope } from './components/panes/session-manage/context-menu-scope'
 
+/**
+ * 窗口分派（2026-10-23 起真正生效）。
+ *
+ * `app/index.tsx` 的注释早就写着"按 `?win=` 分派"，但**从来没有这段代码**
+ * ——之前只有主窗，那句话是空头注释。设置独立窗口（Rust 侧
+ * `WebviewUrl::App("index.html?win=settings")`）需要它，故在此落地。
+ *
+ * `?win=quick` / `?win=hud` 仍**未接**：骨架在 `app/quick-entry/` 与
+ * `app/hud/`，但没有窗口创建方。这里不为它们写假分支——落到默认主窗，
+ * 行为与今天一致。
+ *
+ * ## 为什么两棵树必须**动态** import（2026-10-30 实锤）
+ *
+ * 此前 `App` / `SettingsWindowRoot` / `AppContextMenu` 全是**静态** import。
+ * 静态 import 会在模块图求值阶段无条件加载整棵子树——于是设置窗（只渲染
+ * `SettingsWindowRoot`）**仍然把整个主窗拉了进来**。CDP 实测设置窗首个
+ * 文档的 198 个 `/src/` 模块里 **144 个是 `components/`**，含 dockview、
+ * assistant-ui、thread.*（全是聊天界面的东西，设置窗一个都不渲染）。
+ * 代价：首帧 2988ms，用户看到"白屏 → 黑屏 → 才出页面"。
+ *
+ * 改成按 `?win=` 分支动态 import 后，两个窗口各只加载自己那棵树。
+ * **不要为了"简洁"改回静态 import**——那会把这次 3 秒的等待原样还回来。
+ */
+const winParam =
+  typeof window === 'undefined'
+    ? null
+    : new URLSearchParams(window.location.search).get('win')
+
+/** 设置独立窗口：**不渲染**主窗壳与全局右键菜单（那是主窗的东西）。 */
+const isSettingsWindow = winParam === 'settings'
 
 // 纯浏览器直开（无 Tauri 透明窗体）：铺满不圆角，见 base.css 窗体段
 if (!inTauri) document.body.classList.add('in-browser')
 
-// 全局右键范围裁定（hermes app-context-menu 体系的 Tauri 语义裁剪，纯函数
-// 见 context-menu-scope.ts）。capture 段一次监听、全应用一个裁定：
-// - editable（input/textarea/contenteditable）→ 放行 WebView2 原生编辑菜单；
-// - owned（自带 Radix ContextMenu 的面：会话行 / 文件树行）→ 早退，让
-//   Radix 自己的 handler 开菜单并压原生菜单——这里抢跑 preventDefault 会
-//   令 composeEventHandlers 的 defaultPrevented 检查跳过 Radix 的开启分支
-//   （菜单不弹），故 owned 面既不 preventDefault 也不 stopPropagation；
-// - app（其余一切——v6.0：**含 flexlayout 窗格 body/页签条 chrome/页签
-//   按钮**）→ preventDefault 压掉 WebView2 默认菜单，openAppContextMenu
-//   开**唯一右键菜单**（ZoneMenu 体系与 flexlayout 自管页签菜单均已裁；
-//   「隐藏标签」目标 = 落点所在 .flexlayout__tabset 的模型 id，hermes
-//   toggleTargetZoneTabStrip 的"哪个栏"归属）。边框轨/页签弹层（flexlayout
-//   自管面）早退。
-window.addEventListener(
-  'contextmenu',
-  (event) => {
-    if (!(event.target instanceof Element)) return
-    if (resolveContextMenuScope(event.target) !== 'app') return
-    event.preventDefault()
-    // v8.0 dockview：右键落点分栏解析已随「隐藏标签」行废除（左/主栏组
-    // 恒无条、面板栏条恒显）——菜单布局行全部从栏旗标现读。
-    openAppContextMenu(event.clientX, event.clientY)
-  },
-  true,
-)
+const rootEl = document.getElementById('root')!
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-    {/* app 右键菜单（唯一右键菜单）+ 命令面板/设置浮层开关（app 根挂载，
-        树外——详情见 app-context-menu.tsx 文件头） */}
-    <AppContextMenu />
-  </StrictMode>
-)
+// 设置独立窗口：整窗只有设置页，不需要主窗的右键菜单体系（那个菜单的
+// 每一项——新建会话/布局/隐藏栏——在设置窗里全是无意义的）。
+if (isSettingsWindow) {
+  void import('./app/overlays/settings-window').then(({ SettingsWindowRoot }) => {
+    createRoot(rootEl).render(
+      <StrictMode>
+        <SettingsWindowRoot />
+      </StrictMode>,
+    )
+  })
+} else {
+  void Promise.all([
+    import('./app'),
+    import('./components/layout/app-context-menu'),
+    import('./components/panes/session-manage/context-menu-scope'),
+  ]).then(([{ App }, { AppContextMenu, openAppContextMenu }, { resolveContextMenuScope }]) => {
+    // 全局右键范围裁定（hermes app-context-menu 体系的 Tauri 语义裁剪，纯函数
+    // 见 context-menu-scope.ts）。capture 段一次监听、全应用一个裁定：
+    // - editable（input/textarea/contenteditable）→ 放行 WebView2 原生编辑菜单；
+    // - owned（自带 Radix ContextMenu 的面：会话行 / 文件树行）→ 早退，让
+    //   Radix 自己的 handler 开菜单并压原生菜单——这里抢跑 preventDefault 会
+    //   令 composeEventHandlers 的 defaultPrevented 检查跳过 Radix 的开启分支
+    //   （菜单不弹），故 owned 面既不 preventDefault 也不 stopPropagation；
+    // - app（其余一切——v6.0：**含 flexlayout 窗格 body/页签条 chrome/页签
+    //   按钮**）→ preventDefault 压掉 WebView2 默认菜单，openAppContextMenu
+    //   开**唯一右键菜单**（ZoneMenu 体系与 flexlayout 自管页签菜单均已裁；
+    //   「隐藏标签」目标 = 落点所在 .flexlayout__tabset 的模型 id，hermes
+    //   toggleTargetZoneTabStrip 的"哪个栏"归属）。边框轨/页签弹层（flexlayout
+    //   自管面）早退。
+    window.addEventListener(
+      'contextmenu',
+      (event) => {
+        if (!(event.target instanceof Element)) return
+        if (resolveContextMenuScope(event.target) !== 'app') return
+        event.preventDefault()
+        // v8.0 dockview：右键落点分栏解析已随「隐藏标签」行废除（左/主栏组
+        // 恒无条、面板栏条恒显）——菜单布局行全部从栏旗标现读。
+        openAppContextMenu(event.clientX, event.clientY)
+      },
+      true,
+    )
+
+    createRoot(rootEl).render(
+      <StrictMode>
+        <App />
+        {/* app 右键菜单（唯一右键菜单）+ 命令面板/设置浮层开关（app 根挂载，
+            树外——详情见 app-context-menu.tsx 文件头） */}
+        <AppContextMenu />
+      </StrictMode>,
+    )
+  })
+}

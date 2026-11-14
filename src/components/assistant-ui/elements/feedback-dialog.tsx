@@ -61,7 +61,7 @@ export function FeedbackDialog({
       >
         {sent && (
           <>
-            <CheckIcon className="size-4 shrink-0 text-emerald-500" />
+            <CheckIcon className="size-[var(--size-icon-lg)] shrink-0 text-emerald-500" />
             Thanks. That helps us tune the model.
           </>
         )}
@@ -71,7 +71,7 @@ export function FeedbackDialog({
         <>
           <div className="flex items-center gap-2.5">
             <span className="bg-foreground/[0.05] text-foreground/45 flex size-7 shrink-0 items-center justify-center rounded-lg">
-              <ThumbsDownIcon className="size-3.5" />
+              <ThumbsDownIcon className="size-[var(--size-icon-md)]" />
             </span>
             <span className="text-[13.5px] font-medium">What went wrong?</span>
             <span className={cn(mono, "text-foreground/30 ms-auto")}>

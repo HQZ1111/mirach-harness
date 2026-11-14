@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+mod media_duration;
+
 /// Maximum number of visible ASCII characters retained from an image MIME type.
 pub(crate) const MAX_IMAGE_MIME_TYPE_LEN: usize = 80;
 
@@ -303,14 +305,27 @@ where
 }
 
 impl MediaContent {
+    /// Inspect the container's duration without decoding its audio/video or
+    /// allocating a copy of the base64 payload. MP4/MOV/M4A, WebM, PCM/float
+    /// WAVE, FLAC, MP3 Xing/Info, and Ogg Vorbis/Opus metadata are supported.
+    /// Missing, malformed, ambiguous, or unsupported metadata returns `None`;
+    /// this is an estimate, not media validation.
+    #[must_use]
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        media_duration::inspect(&self.data, &self.mime_type)
+    }
+
     /// The model input capability this block needs (`video` or `audio`),
-    /// derived from the MIME type's top-level type. `None` for anything else.
+    /// derived case-insensitively from the MIME type's top-level type. `None`
+    /// for anything else; the stored MIME label remains unchanged.
     pub fn input_type(&self) -> Option<crate::provider::InputType> {
         let top_level = self.mime_type.split('/').next().unwrap_or("");
-        match top_level {
-            "video" => Some(crate::provider::InputType::Video),
-            "audio" => Some(crate::provider::InputType::Audio),
-            _ => None,
+        if top_level.eq_ignore_ascii_case("video") {
+            Some(crate::provider::InputType::Video)
+        } else if top_level.eq_ignore_ascii_case("audio") {
+            Some(crate::provider::InputType::Audio)
+        } else {
+            None
         }
     }
 
@@ -1410,6 +1425,27 @@ mod tests {
     }
 
     #[test]
+    fn media_input_type_accepts_mime_case_without_changing_payload_or_label() {
+        for (mime, expected) in [
+            ("VIDEO/MP4", Some(crate::provider::InputType::Video)),
+            (
+                "Audio/Ogg; codecs=opus",
+                Some(crate::provider::InputType::Audio),
+            ),
+            ("IMAGE/PNG", None),
+        ] {
+            let media = MediaContent {
+                data: "aGVsbG8=".to_string(),
+                mime_type: mime.to_string(),
+                name: None,
+            };
+            assert_eq!(media.input_type(), expected);
+            assert_eq!(media.mime_type, mime);
+            assert_eq!(media.data, "aGVsbG8=");
+        }
+    }
+
+    #[test]
     fn media_placeholder_and_size_formatting() {
         let media = MediaContent {
             data: "A".repeat(4 * 1024 * 1024), // 4 MiB of base64 → 3 MiB decoded
@@ -2244,11 +2280,29 @@ mod tests {
 
         #[test]
         fn proptest_content_block_roundtrip(block in content_block_strategy()) {
+            // Some fields are sanitized on the way in — `sanitize_media_name`
+            // drops control characters and bidi overrides and yields `None`
+            // when nothing printable survives. A block built in Rust can
+            // therefore hold a value no parsed block ever could: a media name
+            // of " " deserializes to `None`, and asserting plain identity here
+            // asserted that the sanitizer does not sanitize. It failed
+            // whenever the generator happened to produce such a name, which is
+            // rarely, which is the worst way for a test to be wrong.
+            //
+            // One roundtrip puts the block in the normalized form the wire can
+            // actually carry. The property that matters starts there: from a
+            // normalized block, serializing and parsing must change nothing.
+            // A genuinely dropped field still fails this, because it would
+            // differ between `normalized` and the value after reparsing.
             let serialized = serde_json::to_value(&block).expect("content block should serialize");
-            let parsed: ContentBlock = serde_json::from_value(serialized.clone())
+            let parsed: ContentBlock = serde_json::from_value(serialized)
                 .expect("serialized content block should deserialize");
-            let reserialized = serde_json::to_value(parsed).expect("re-serialize should succeed");
-            prop_assert_eq!(reserialized, serialized);
+            let normalized = serde_json::to_value(&parsed).expect("re-serialize should succeed");
+
+            let reparsed: ContentBlock = serde_json::from_value(normalized.clone())
+                .expect("normalized content block should deserialize");
+            let reserialized = serde_json::to_value(reparsed).expect("re-serialize should succeed");
+            prop_assert_eq!(reserialized, normalized);
         }
 
         #[test]

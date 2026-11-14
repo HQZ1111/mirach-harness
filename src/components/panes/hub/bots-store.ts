@@ -1,35 +1,39 @@
 /**
- * 机器人花名册存储（左栏「机器人」窗格 + BotsDialog 的共享投影）。
+ * 机器人花名册存储（机器人弹出栏 + BotsDialog 的共享投影）。
  *
- * bot 数据形状（hermes plugins/hermes-bots types.ts 的最小对偶——hermes
- * bot = profile 预设，字段取 pi 能承载的四项）：
- * - name：bot 名（会话以此命名，rename_session 语义）；
+ * bot 数据形状（hermes plugins/hermes-bots 的宿主对偶——hermes bot =
+ * profile 预设 + `ui_meta['hermes-bots']` 展示元数据；宿主两类合一存本地）：
+ * - name：bot 名（启动即以该名开会话，rename_session 语义）；
+ * - title：显示名称（hermes BotMeta.title 同语义——displayName 的第一优先）；
  * - systemPrompt：机器人人格（SessionOptions.system_prompt，sdk.rs:308）；
- * - provider/model：模型预设（"provider/modelId"——model-catalog-store
- *   的 id 形状一致，create_session_opts 拆分传参）；
+ * - provider/model：模型预设（"provider/modelId"——create_session_opts 拆分）；
  * - cwd：工作区目录（SessionOptions.working_directory，sdk.rs:311）；
- * - createdAt：创建时间戳（hermes BotMeta.created 同语义）。
+ * - color/shape/image/custom：头像（avatar.tsx BotFace 的外观四元组；
+ *   image = data URL——hermes 走 profiles.set_asset，宿主本地存）；
+ * - pinned/hidden：花名册置顶 / 隐藏（hidden-bots.ts 同语义——隐藏只影响
+ *   显示，行仍活着可从底部"已隐藏"区恢复）；
+ * - sectionId/sectionName：分区归属（user-sections.ts：成员资格在 bot 身上，
+ *   删分区不会孤儿任何人）；
+ * - createdAt：创建时间戳（BotMeta.created 同语义）。
  *
- * **存储裁定：本地 JSON（mirach.harness.bots.v1），不用 pi settings。**
- * 论证：①pi settings.json 是**全局单文档**（pi_settings.rs settings_path
- * 唯一路径），写 bot 预设要把自家 schema（Config 结构校验
- * validate_settings_document）外的键塞进去——pi 升级收键即坏；②bot 预设
- * 是**桌面侧的展示概念**（每个 bot = 一份 SessionOptions 参数包），真相
- * 边界与会话一致——会话真相在 pi、预设真相在宿主；③hermes 的 bot meta
- * 也是 profile.yaml ui_meta 之外的本地 plugin storage（data.ts saveBotMeta
- * 语义），宿主自存是照抄不是发明。
+ * **存储裁定：本地 JSON（v2 键），不用 pi settings。** 论证见 v1（pi
+ * settings 是全局单文档 + bot 预设是桌面侧展示概念）。**v2 迁移**（2026-11-07
+ * 完整移植 hermes 机器人页）：v1 键（mirach.harness.bots.v1）只含六字段，
+ * 读到即映射成 v2 形状升格（v1 原值保留不删——hermes 'bot-meta-v2-migrated'
+ * 同款不迁移先例）。
  *
- * zustand vanilla store（connection-store / session-workspace 同款形态）；
- * localStorage 持久化（layout-store 迁移先例：读写时机显式——load 挂载
- * 读、save 即写）。禁止兜底：JSON 损坏 console.error 后按空表起步（首次
- * 使用 = 无文件的正常态；损坏文件保留在键上不覆盖——用户可手动恢复）。
+ * zustand vanilla store；localStorage 持久化（读写时机显式）。禁止兜底：
+ * JSON 损坏 console.error 后按空表起步（损坏文件保留在键上不覆盖）。
  */
 
 import { createStore, useStore } from 'zustand'
+import type { BotMeta } from './bots-types'
 
-/** 机器人预设（hermes bot 的 pi 对偶：一份 SessionOptions 参数包）。 */
+/** 机器人预设（hermes bot 的 pi 对偶：一份 SessionOptions 参数包 + 花名册元数据）。 */
 export interface BotPreset {
   name: string
+  /** 显示名称（空 = 用 name——hermes displayName 的 title 优先级）。 */
+  title: string
   systemPrompt: string
   /** "provider/modelId"（model-catalog-store 的 id 形状）；空串 = pi 默认 */
   model: string
@@ -37,19 +41,69 @@ export interface BotPreset {
   cwd: string
   description: string
   createdAt: number
+  // ── hermes BotMeta 对偶字段 ──
+  color?: string
+  shape?: string
+  image?: null | string
+  /** 用户改过头像后置位（默认外观停止套用——hermes 同语义）。 */
+  custom?: boolean
+  pinned?: boolean
+  hidden?: boolean
+  sectionId?: null | string
+  sectionName?: null | string
+  /** 归属连接（多环境，2026-11-07）：'local' = 本机（真面）；远端连接的
+   *  bot 启动为占位（标红——pi 无远端 gateway）。缺省 = 'local'。 */
+  connectionId?: string
+  /** 永久会话文件路径（"one bot = one forever chat"——首启记录，再启
+   *  打开同一条会话，上下文保留。hermes canonical chat 的宿主对偶，
+   *  纯前端实现不改引擎）。 */
+  chatSessionPath?: null | string
+  /** 永久会话的 pi 身份（文件 header id——pi sessions 表只有 path 主键，
+   *  **name 无唯一索引**，同名会话会撞；sessionId 是无歧义锚）。与
+   *  chatSessionPath 成对记录（双锚才可信——见 botChatPaths）。 */
+  chatSessionId?: null | string
+  /** 技能白名单（hermes profile.skills 对偶）：pi_capabilities 里已装技能
+   *  的名字子集；空/缺省 = 不附加。启动时拼进 system prompt（pi 无
+   *  per-session 技能注入面，bot-launch 组合）。 */
+  skills?: string[]
+  /** 工具集白名单（hermes profile toolsets 对偶）：pi_capabilities 的
+   *  toolset key 子集；空/缺省 = 全局偏好/pi 默认集。启动时映射为
+   *  enabled_tools 传给 pi_create_bot_session（宿主 Rust 层透传
+   *  SessionOptions.enabled_tools）。 */
+  toolsets?: string[]
+}
+
+/** patchMeta 接受的元数据补丁形状（BotPreset 的展示/行为字段子集）。 */
+export type BotPatch = Partial<
+  Pick<BotPreset, 'pinned' | 'hidden' | 'sectionId' | 'sectionName' | 'color' | 'shape' | 'image' | 'custom' | 'title' | 'chatSessionPath' | 'chatSessionId' | 'connectionId' | 'skills' | 'toolsets'>
+>
+
+/** 用户自建分区（hermes user-sections：{id, name}，本地存储）。 */
+export interface BotSection {
+  id: string
+  name: string
 }
 
 interface BotsState {
   bots: BotPreset[]
+  sections: BotSection[]
   load: () => void
   save: (bots: BotPreset[]) => void
   upsert: (bot: BotPreset, previousName?: string) => void
   remove: (name: string) => void
+  saveSections: (sections: BotSection[]) => void
+  addSection: (name: string) => BotSection | null
+  renameSection: (id: string, name: string) => void
+  removeSection: (id: string) => void
+  /** 花名册元数据写穿（pinned/hidden/section/头像——hermes saveBotMeta 同款）。 */
+  patchMeta: (name: string, patch: BotPatch) => void
 }
 
-const STORAGE_KEY = 'mirach.harness.bots.v1'
+const STORAGE_KEY = 'mirach.harness.bots.v2'
+const LEGACY_KEY = 'mirach.harness.bots.v1'
+const SECTIONS_KEY = 'mirach.harness.bot-sections.v1'
 
-/** React 订阅（bots-pane / bots-dialog 用）。 */
+/** React 订阅（机器人弹出栏 / bots-dialog 用）。 */
 export const useBotsStore = <T,>(selector: (s: BotsState) => T): T =>
   useStore(botsStore, selector)
 
@@ -76,10 +130,40 @@ const parseStored = (raw: string | null): BotPreset[] => {
   )
 }
 
+const parseSections = (raw: string | null): BotSection[] => {
+  if (raw === null) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(
+      (s): s is BotSection =>
+        typeof s === 'object' && s !== null && typeof (s as BotSection).id === 'string' && typeof (s as BotSection).name === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
+/** v1 → v2 升格（v1 的六字段原样搬；v2 新字段走默认）。 */
+const migrateV1 = (raw: string | null): BotPreset[] => {
+  const legacy = parseStored(raw).map((b) => ({
+    ...b,
+    title: '',
+  }))
+  if (legacy.length > 0) {
+    // 升格结果写进 v2 键（v1 原值保留——hermes 迁移同款不删旧键）
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(legacy))
+  }
+  return legacy
+}
+
 export const botsStore = createStore<BotsState>((set, get) => ({
   bots: [],
+  sections: [],
   load: () => {
-    set({ bots: parseStored(localStorage.getItem(STORAGE_KEY)) })
+    const v2 = localStorage.getItem(STORAGE_KEY)
+    const bots = v2 === null ? migrateV1(localStorage.getItem(LEGACY_KEY)) : parseStored(v2)
+    set({ bots, sections: parseSections(localStorage.getItem(SECTIONS_KEY)) })
   },
   save: (bots) => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(bots))
@@ -97,6 +181,37 @@ export const botsStore = createStore<BotsState>((set, get) => ({
   remove: (name) => {
     get().save(get().bots.filter((b) => b.name !== name))
   },
+  saveSections: (sections) => {
+    localStorage.setItem(SECTIONS_KEY, JSON.stringify(sections))
+    set({ sections })
+  },
+  addSection: (name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return null
+    const section: BotSection = { id: `sec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: trimmed }
+    get().saveSections([...get().sections, section])
+    return section
+  },
+  renameSection: (id, name) => {
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const sections = get().sections.map((s) => (s.id === id ? { ...s, name: trimmed } : s))
+    get().saveSections(sections)
+    // 分区改名同步 bot 身上的 sectionName（hermes：名字随成员资格走）
+    get().save(
+      get().bots.map((b) => (b.sectionId === id ? { ...b, sectionName: trimmed } : b)),
+    )
+  },
+  removeSection: (id) => {
+    get().saveSections(get().sections.filter((s) => s.id !== id))
+    // 归属该分区的 bot 回到未分类（hermes：删分区不孤儿任何人）
+    get().save(
+      get().bots.map((b) => (b.sectionId === id ? { ...b, sectionId: null, sectionName: null } : b)),
+    )
+  },
+  patchMeta: (name, patch) => {
+    get().save(get().bots.map((b) => (b.name === name ? { ...b, ...patch } : b)))
+  },
 }))
 
 /** 模型预设 "provider/modelId" → (provider, modelId)；空串 = 两者皆 null
@@ -113,4 +228,24 @@ export function splitBotModel(model: string): {
   const idx = trimmed.indexOf('/')
   if (idx <= 0) return { provider: null, modelId: null }
   return { provider: trimmed.slice(0, idx), modelId: trimmed.slice(idx + 1) }
+}
+
+/** bot 显示名（hermes displayName 的宿主版：title 优先，回落 name）。 */
+export function botDisplayName(bot: BotPreset): string {
+  return bot.title.trim() || bot.name
+}
+
+/** bot 永久会话的路径集（会话侧栏隐藏过滤用——hermes "花名册是唯一入口"
+ *  的宿主实现：pi 无 hidden 会话面，隐藏只能做在前端显示层）。
+ *
+ * **只收双锚记录**（path + sessionId 都在）：旧版按 name 匹配记录的路径
+ * 没有身份校验，可能指向同名的用户会话——那种记录若参与过滤会误藏用户
+ * 会话；它在 bot 下次启动时经 pi_get_state 校验重新锚定（bot-launch），
+ * 之后才进入本集。 */
+export function botChatPaths(bots: readonly BotPreset[]): ReadonlySet<string> {
+  const out = new Set<string>()
+  for (const b of bots) {
+    if (b.chatSessionPath && b.chatSessionId) out.add(b.chatSessionPath)
+  }
+  return out
 }

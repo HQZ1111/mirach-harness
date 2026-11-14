@@ -12,8 +12,9 @@ import {
   type ReactNode,
 } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
-import { CheckIcon, ChevronDownIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCommandState } from "cmdk";
 // 2026-10-16 换 beUI goo 弹层（用户定稿"所有 panel 型浮层"）——原 Radix
 // ui/popover 的 API 面对位：方位/间距/圆角是 goo **根属性**（不是 content
 // 属性），子组件从 context 读；content 支持 onOpenAutoFocus（键盘焦点契约）。
@@ -58,6 +59,17 @@ export type ModelOption = {
    * configurable reasoning.
    */
   efforts?: boolean | readonly ModelSelectorEffortOption[];
+  /**
+   * 分组键（provider）。同键的模型归到同一个分组标题下。
+   *
+   * 本地扩展（2026-10-26 用户："输入框里的模型怎么没有按名称分组显示，
+   * 像 zcode 和 hermes 一样"）：上游 assistant-ui 的 ModelSelector 是扁平
+   * 列表，ZCode / hermes 都是"按 provider 分组 + 组标题"。
+   *
+   * 省略时落到 `description`（宿主把它填成 provider 名），再不行用
+   * `'其他'`——所以老调用点不改也自动分组。
+   */
+  group?: string;
 };
 
 function getModelEfforts(
@@ -242,7 +254,15 @@ function ModelSelectorRoot({
 
   return (
     <ModelSelectorContext.Provider value={contextValue}>
-      {/* goo 根属性承载 方位/对齐/间距（beUI API；content 侧不再接受） */}
+      {/* goo 根属性承载 方位/对齐/间距（beUI API；content 侧不再接受）
+          
+          **液滴粘性合并（goo）由令牌统一控制**（2026-11-01 用户："调用点
+          没传，直接在令牌中统一开关不行吗"）。默认关（tokens.css 的
+          `--beui-popover-goo: 0`）：面板 = 独立圆角矩形 + 投影，触发钮
+          （输入框下方的模型胶囊）不画副本、不被投影、也没有脖子。
+
+          此前这里手写关掉 goo 的 prop，标签总览/加号弹窗各写一遍——散在
+          调用点的布尔参数正是"有的有脖子有的没有"的成因，已全部删除。 */}
       <Popover
         align={align ?? "start"}
         open={open ?? false}
@@ -324,7 +344,7 @@ function ModelSelectorTrigger({
     >
       <button type="button">
         {children ?? <ModelSelectorValue />}
-        <ChevronDownIcon className="size-4 opacity-50" />
+        <ChevronDownIcon className="size-[var(--size-icon-lg)] opacity-50" />
       </button>
     </PopoverTrigger>
   );
@@ -408,11 +428,16 @@ export type ModelSelectorContentProps = Omit<
  * Hidden input that anchors cmdk's keyboard navigation, keeping the list
  * keyboard-operable without a visible search box. ModelSelectorContent renders
  * one automatically when unfiltered.
+ *
+ * **不要用 `CommandInput`**：它自带 InputGroup 外壳（搜索图标 + 边框 +
+ * `h-9`），`sr-only` 只把外层 div 裁成 1px，里面的框仍然参与布局/绘制——
+ * 实测面板顶部会多出一条带搜索图标的空行（用户："显示的不一样"）。
+ * 这里直接渲染 cmdk 的 `<input cmdk-input>`，`sr-only` 就能完整生效。
  */
 function ModelSelectorFocusAnchor() {
   return (
     <div className="sr-only">
-      <CommandInput readOnly aria-label="Model" />
+      <input aria-label="Model" cmdk-input="" readOnly type="text" />
     </div>
   );
 }
@@ -447,7 +472,15 @@ function ModelSelectorContent({
     >
       <Command
         className="bg-transparent"
-        shouldFilter={!unfiltered}
+        // **必须开过滤**（2026-10-26 改）：`shouldFilter={false}` 时 cmdk
+        // 不维护 `state.search`，`CommandInput` 的 onChange 只调外部回调——
+        // 于是"打字搜索"对列表毫无作用，分组折叠也不知道该展开哪一组
+        // （实测：输入 claude 后 72 项原样全在）。
+        //
+        // 隐藏输入锚（`ModelSelectorFocusAnchor`）仍走 `readOnly`，它的
+        // value 恒为空 → 过滤不生效，键盘导航照旧可用（cmdk 的 ↑↓ 走
+        // `[cmdk-item]:not([aria-disabled])`，与过滤无关）。
+        shouldFilter
         {...(value !== undefined ? { defaultValue: value } : {})}
       >
         {unfiltered && <ModelSelectorFocusAnchor />}
@@ -489,7 +522,70 @@ function ModelSelectorList({
   children,
   ...props
 }: ModelSelectorListProps) {
-  const { models } = useModelSelectorContext();
+  const { models, value } = useModelSelectorContext();
+  // cmdk 的搜索态。**只有 `searchable` 面板才有搜索框**（默认 composer 的
+  // 模型选择器是 `sr-only readOnly` 锚，永远不会有 search）——此时分组全部
+  // 展开，否则"搜到了但分组收着"会让人以为没有结果。
+  const search = useCommandState((state) => state.search);
+  const filteredCount = useCommandState((state) => state.filtered.count);
+  const searching = search.trim().length > 0;
+
+  // 按分组键聚合（保持首次出现顺序——pi_list_models 是稳定的目录序，
+  // 打乱会让用户每次打开看到不同顺序）。
+  //
+  // 2026-10-26 用户："输入框里的模型怎么没有按名称分组显示，像 zcode 和
+  // hermes 一样" → 按 provider 分组；随后："显示的不一样，不能折叠啊" →
+  // 分组必须可折叠，否则 72 项照样一屏铺满（分组只是多了三行标题）。
+  //
+  // 折叠语义对齐 ZCode 的 `ModelConfigSelect`（顶层只有 provider，模型收在
+  // 里面）：默认只展开**当前选中模型所在的那一组**，其余收起；点组标题切换。
+  const groups = useMemo(() => {
+    const byKey = new Map<string, { label: string; items: ModelOption[] }>();
+    for (const model of models) {
+      const key = model.group ?? model.description ?? '其他';
+      const existing = byKey.get(key);
+      if (existing === undefined) {
+        byKey.set(key, { label: key, items: [model] });
+      } else {
+        existing.items.push(model);
+      }
+    }
+    return [...byKey.entries()].map(([key, value]) => ({ key, ...value }));
+  }, [models]);
+
+  // 展开态：默认 = 选中模型所在组。用 Set 记住用户手动展开的组（多组同时
+  // 展开是合理操作——用户可能在比较两家的模型）。
+  const selectedGroupKey = useMemo(() => {
+    if (value === undefined) return groups[0]?.key;
+    return groups.find((group) => group.items.some((m) => m.id === value))?.key;
+  }, [groups, value]);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+    () => new Set(selectedGroupKey === undefined ? [] : [selectedGroupKey]),
+  );
+  // 选中模型变化时把它所在组补进展开集（切换模型后重开面板能直接看到它）。
+  useEffect(() => {
+    if (selectedGroupKey === undefined) return;
+    setExpanded((current) =>
+      current.has(selectedGroupKey) ? current : new Set([...current, selectedGroupKey]),
+    );
+  }, [selectedGroupKey]);
+
+  const toggleGroup = useCallback((key: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  // 空态：目录真的为空，或"搜索中且一条都没匹配"。
+  //
+  // **不能在收起的组上也报空**：cmdk 的 CommandEmpty 看 `filtered.count`，
+  // 而收起的组我们整组不渲染（不渲染才能让 ↑↓ 只走可见项），count 自然为 0
+  // ——那样一进面板就是"没有匹配的模型"。
+  const showEmpty =
+    models.length === 0 || (searching && filteredCount === 0);
 
   return (
     <CommandList
@@ -502,12 +598,56 @@ function ModelSelectorList({
     >
       {children ?? (
         <>
-          <ModelSelectorEmpty />
-          <CommandGroup>
-            {models.map((model) => (
-              <ModelSelectorItem key={model.id} model={model} />
-            ))}
-          </CommandGroup>
+          {showEmpty && <ModelSelectorEmpty />}
+          {groups.map((group) => {
+            const isOpen = searching || expanded.has(group.key);
+            const groupSelected = group.items.some((m) => m.id === value);
+            return (
+              <CommandGroup
+                data-slot="model-selector-group"
+                key={group.key}
+              >
+                {/* 组标题 = 折叠开关（ZCode 的 provider 行同款：一行只显示
+                    provider 名 + 模型数，模型收在里面）。 */}
+                <button
+                  aria-expanded={isOpen}
+                  className="set-model-group-head"
+                  data-group-selected={groupSelected ? 'true' : undefined}
+                  data-slot="model-selector-group-head"
+                  disabled={searching}
+                  onClick={() => toggleGroup(group.key)}
+                  type="button"
+                >
+                  <ChevronRightIcon
+                    aria-hidden
+                    className={cn(
+                      'set-model-group-chevron',
+                      isOpen && 'set-model-group-chevron--open',
+                    )}
+                  />
+                  <span className="set-model-group-label">{group.label}</span>
+                  {groupSelected && !isOpen && (
+                    <span className="set-model-group-current">
+                      {group.items.find((m) => m.id === value)?.name}
+                    </span>
+                  )}
+                  <span className="set-model-group-count">{group.items.length}</span>
+                </button>
+                {/* 收起的组整组不渲染：cmdk 的 ↑↓ 走的是全部 `[cmdk-item]`
+                    （不分可见性），渲染了隐藏项会让键盘跳到看不见的行上。 */}
+                {isOpen &&
+                  group.items.map((model) => (
+                    <ModelSelectorItem
+                      key={model.id}
+                      model={model}
+                      // 分组后每项下面的 provider 副标题是重复信息（整组都是
+                      // 同一个 provider），只在未分组时显示。
+                      showDescription={false}
+                    />
+                  ))}
+              </CommandGroup>
+            );
+          })}
         </>
       )}
     </CommandList>
@@ -547,6 +687,11 @@ export type ModelSelectorItemProps = Omit<
   "value"
 > & {
   model: ModelOption;
+  /**
+   * 是否显示 provider 副标题。分组渲染时传 `false`——整组同一个 provider，
+   * 每行再写一遍是纯重复（ZCode 的模型项也只显示模型名）。
+   */
+  showDescription?: boolean;
 };
 
 function ModelSelectorItem({
@@ -554,6 +699,7 @@ function ModelSelectorItem({
   className,
   children,
   onSelect,
+  showDescription = true,
   ...props
 }: ModelSelectorItemProps) {
   const { value, setValue, setOpen } = useModelSelectorContext();
@@ -583,7 +729,7 @@ function ModelSelectorItem({
           )}
           <span className="flex min-w-0 flex-col">
             <span className="truncate font-medium">{model.name}</span>
-            {model.description && (
+            {showDescription && model.description && (
               <span className="text-muted-foreground truncate text-xs">
                 {model.description}
               </span>
@@ -593,7 +739,7 @@ function ModelSelectorItem({
       )}
       {isSelected && (
         <span className="absolute end-3 top-2.5 flex size-4 items-center justify-center">
-          <CheckIcon className="size-4" />
+          <CheckIcon className="size-[var(--size-icon-lg)]" />
         </span>
       )}
     </CommandItem>

@@ -6,21 +6,37 @@ import {
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import { cva, type VariantProps } from "class-variance-authority";
-import { BrainIcon, ChevronDownIcon } from "lucide-react";
+import { BrainIcon, ChevronRightIcon } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import { QueuedSummaryContent } from "./queued-summary-content";
 
 export const ANIMATION_DURATION = 200;
 
 const ReasoningPreviewContext = createContext(false);
+
+interface ReasoningContextValue {
+  isStreaming: boolean;
+  isOpen: boolean;
+  duration: number | undefined;
+}
+
+const ReasoningContext = createContext<ReasoningContextValue | null>(null);
+
+/** 允许在 Reasoning 之外复用 trigger（旧 ReasoningGroup 包装等）。 */
+function useReasoningOptional() {
+  return useContext(ReasoningContext);
+}
 
 const reasoningVariants = cva("aui-reasoning-root mb-4 w-full", {
   variants: {
@@ -45,13 +61,9 @@ export type ReasoningRootProps = Omit<
     onOpenChange?: (open: boolean) => void;
     defaultOpen?: boolean;
     /**
-     * Whether the reasoning is currently streaming. While `true` the
-     * disclosure is held open with a bottom-pinned live preview; when
-     * streaming ends it returns to `defaultOpen`, and the first manual
-     * toggle takes over the open/close state permanently. The live preview
-     * keeps following the newest tokens while the disclosure is open during
-     * streaming, even after a manual toggle, and pauses while the reader is
-     * scrolled up.
+     * 是否正在流式输出。流式期间默认保持收起（ZCode
+     * `reasoning-streaming-auto-collapse.md`）：触发器后面接单行流式摘要；
+     * 用户仍可主动展开看完整内容（一旦手动切换，默认规则不再覆盖）。
      */
     streaming?: boolean;
     /** Called right before the disclosure animates, on toggle and on streaming transitions. */
@@ -73,10 +85,46 @@ function ReasoningRoot({
   const [userOpen, setUserOpen] = useState<boolean | null>(null);
 
   const isControlled = controlledOpen !== undefined;
-  const isOpen = isControlled
-    ? controlledOpen
-    : (userOpen ?? (streaming || initialOpen));
+  // **流式期间默认收起**（ZCode reasoning-streaming-auto-collapse.md 定稿）：
+  // thought 块本身已表达"正在思考"，流式阶段默认保持收起，触发器后面接单行
+  // 流式摘要；用户仍可主动展开看完整内容（userOpen 一旦有值就压过默认）。
+  const isOpen = isControlled ? controlledOpen : (userOpen ?? initialOpen);
+  // preview = 流式且展开（保留给 ReasoningContent 的底部渐隐）
   const isPreview = streaming === true && isOpen;
+
+  // ── 耗时（ZCode 同款）：流式开始时起表，结束时定格；展开态每秒刷新，
+  // 收起态不为了隐藏的耗时触发整块重渲。──
+  const [measuredDuration, setMeasuredDuration] = useState<number | undefined>(
+    undefined,
+  );
+  const startTimeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!streaming) {
+      if (startTimeRef.current !== null) {
+        setMeasuredDuration(
+          Math.ceil((Date.now() - startTimeRef.current) / 1000),
+        );
+        startTimeRef.current = null;
+      }
+      return;
+    }
+
+    if (startTimeRef.current === null) {
+      startTimeRef.current = Date.now();
+    }
+    if (!isOpen) return;
+
+    const updateDuration = () => {
+      if (startTimeRef.current === null) return;
+      setMeasuredDuration(
+        Math.max(1, Math.ceil((Date.now() - startTimeRef.current) / 1000)),
+      );
+    };
+    updateDuration();
+    const timer = window.setInterval(updateDuration, 1000);
+    return () => window.clearInterval(timer);
+  }, [isOpen, streaming]);
 
   const prevStreamingRef = useRef(streaming);
   useLayoutEffect(() => {
@@ -100,27 +148,38 @@ function ReasoningRoot({
     [onAnimationStart, isControlled, controlledOnOpenChange],
   );
 
+  const contextValue = useMemo<ReasoningContextValue>(
+    () => ({
+      isStreaming: streaming === true,
+      isOpen,
+      duration: measuredDuration,
+    }),
+    [streaming, isOpen, measuredDuration],
+  );
+
   return (
-    <Collapsible
-      data-slot="reasoning-root"
-      data-variant={variant}
-      open={isOpen}
-      onOpenChange={handleOpenChange}
-      className={cn(
-        "group/reasoning-root",
-        reasoningVariants({ variant, className }),
-      )}
-      style={
-        {
-          "--animation-duration": `${ANIMATION_DURATION}ms`,
-        } as React.CSSProperties
-      }
-      {...props}
-    >
-      <ReasoningPreviewContext.Provider value={isPreview}>
-        {children}
-      </ReasoningPreviewContext.Provider>
-    </Collapsible>
+    <ReasoningContext.Provider value={contextValue}>
+      <Collapsible
+        data-slot="reasoning-root"
+        data-variant={variant}
+        open={isOpen}
+        onOpenChange={handleOpenChange}
+        className={cn(
+          "group/reasoning-root",
+          reasoningVariants({ variant, className }),
+        )}
+        style={
+          {
+            "--animation-duration": `${ANIMATION_DURATION}ms`,
+          } as React.CSSProperties
+        }
+        {...props}
+      >
+        <ReasoningPreviewContext.Provider value={isPreview}>
+          {children}
+        </ReasoningPreviewContext.Provider>
+      </Collapsible>
+    </ReasoningContext.Provider>
   );
 }
 
@@ -162,47 +221,162 @@ function ReasoningFade({
   );
 }
 
+/**
+ * 折叠态单行流式摘要 = 文本里最后一条非空行（ZCode
+ * `resolveReasoningStreamingSummary`）。行号当动画 key：同一行内的新 token
+ * 原位刷新，出现新的非空行才纵向翻滚。
+ */
+export function resolveReasoningStreamingSummary(
+  streamingText: string,
+): { key: string; text: string } | null {
+  const lines = streamingText.replace(/\r\n?/gu, "\n").split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const text = lines[index]?.trim() ?? "";
+    if (text.length > 0) {
+      return { key: String(index), text };
+    }
+  }
+  return null;
+}
+
+const REASONING_SUMMARY_MASK =
+  "linear-gradient(to right, transparent 0, black 16px, black calc(100% - 16px), transparent 100%)";
+
+/** 横向溢出时才挂两侧 16px mask，短内容边缘不变淡。 */
+export function getReasoningSummaryMaskStyle(
+  isOverflowing: boolean,
+): CSSProperties | undefined {
+  if (!isOverflowing) return undefined;
+  return {
+    WebkitMaskImage: REASONING_SUMMARY_MASK,
+    maskImage: REASONING_SUMMARY_MASK,
+    WebkitMaskRepeat: "no-repeat",
+    maskRepeat: "no-repeat",
+    WebkitMaskSize: "100% 100%",
+    maskSize: "100% 100%",
+  };
+}
+
 function ReasoningTrigger({
   active,
-  duration,
+  duration: durationProp,
+  streamingText = "",
   className,
   ...props
 }: React.ComponentProps<typeof CollapsibleTrigger> & {
   active?: boolean;
+  /** 覆盖自测耗时（外部已有时长时用）。 */
   duration?: number;
+  /** 思考原文——折叠态单行摘要从这里派生。 */
+  streamingText?: string;
 }) {
-  const durationText = duration ? ` (${duration}s)` : "";
+  const ctx = useReasoningOptional();
+  const isStreaming = ctx?.isStreaming ?? active === true;
+  const isOpen = ctx?.isOpen ?? false;
+  const duration = durationProp ?? ctx?.duration;
+
+  const streamingSummary =
+    isStreaming && !isOpen ? resolveReasoningStreamingSummary(streamingText) : null;
+  const summaryViewportRef = useRef<HTMLSpanElement | null>(null);
+  const summaryTextRef = useRef<HTMLSpanElement | null>(null);
+  const [summaryOverflowing, setSummaryOverflowing] = useState(false);
+
+  useEffect(() => {
+    const viewport = summaryViewportRef.current;
+    if (!viewport || !streamingSummary) return;
+
+    const syncSummaryViewport = () => {
+      setSummaryOverflowing((current) => {
+        const next = viewport.scrollWidth > viewport.clientWidth + 1;
+        return current === next ? current : next;
+      });
+      // 超宽后普通 overflow-hidden 会固定显示旧前缀；每次内容增长把视口推到
+      // 末尾，让旧内容左移、最新 token 始终可见。
+      viewport.scrollLeft = viewport.scrollWidth;
+    };
+
+    syncSummaryViewport();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(syncSummaryViewport);
+    observer.observe(viewport);
+    if (summaryTextRef.current) observer.observe(summaryTextRef.current);
+    return () => observer.disconnect();
+  }, [streamingSummary?.text]);
+
+  const thinkingMessage =
+    isStreaming && !isOpen ? (
+      <span className="shimmer font-medium motion-reduce:animate-none">
+        正在思考
+      </span>
+    ) : duration === undefined ? (
+      <span className="inline-flex items-center gap-2">
+        <span className="text-muted-foreground font-medium">思考</span>
+        <span className="text-muted-foreground font-normal">·</span>
+        <span className="text-muted-foreground font-normal">持续了几秒</span>
+      </span>
+    ) : (
+      <span className="inline-flex items-center gap-2">
+        <span className="text-muted-foreground font-medium">思考</span>
+        <span className="text-muted-foreground font-normal">·</span>
+        <span className="text-muted-foreground font-normal tabular-nums">
+          持续了 {duration} 秒
+        </span>
+      </span>
+    );
 
   return (
     <CollapsibleTrigger
       data-slot="reasoning-trigger"
       className={cn(
-        "aui-reasoning-trigger group/trigger text-muted-foreground hover:text-foreground flex max-w-[75%] origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]",
+        "aui-reasoning-trigger group/trigger text-muted-foreground inline-flex max-w-full min-w-0 items-center gap-2 self-start py-1.5 text-sm transition-colors",
         className,
       )}
       {...props}
     >
       <BrainIcon
         data-slot="reasoning-trigger-icon"
-        className="aui-reasoning-trigger-icon size-4 shrink-0"
+        className="aui-reasoning-trigger-icon size-[var(--size-icon-md)] shrink-0"
       />
+      {/* 左侧语义标签固定宽度，只让右侧摘要占剩余空间——否则长摘要会把
+          「正在思考」挤成多行。 */}
       <span
         data-slot="reasoning-trigger-label"
-        className={cn(
-          "aui-reasoning-trigger-label-wrapper inline-block leading-none tabular-nums",
-          active && "shimmer motion-reduce:animate-none",
-        )}
+        className="aui-reasoning-trigger-label-wrapper shrink-0 whitespace-nowrap leading-none"
       >
-        Reasoning{durationText}
+        {thinkingMessage}
       </span>
-      <ChevronDownIcon
+      {streamingSummary ? (
+        <span className="text-muted-foreground shrink-0">·</span>
+      ) : null}
+      {streamingSummary ? (
+        <span
+          ref={summaryViewportRef}
+          data-slot="reasoning-trigger-summary"
+          data-reasoning-streaming-mask={summaryOverflowing ? "both" : "none"}
+          className="text-muted-foreground/80 min-w-0 flex-1 overflow-hidden whitespace-nowrap"
+          style={getReasoningSummaryMaskStyle(summaryOverflowing)}
+        >
+          <QueuedSummaryContent
+            contentKey={`reasoning-line:${streamingSummary.key}`}
+            contentRefreshVersion={streamingSummary.text}
+            primaryText={
+              <span ref={summaryTextRef} className="inline-block min-w-max">
+                {streamingSummary.text}
+              </span>
+            }
+            enabled
+          />
+        </span>
+      ) : null}
+      <ChevronRightIcon
         data-slot="reasoning-trigger-chevron"
         className={cn(
-          "aui-reasoning-trigger-chevron mt-0.5 size-4 shrink-0",
-          "transition-transform duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
-          "-rotate-90",
-          "group-data-open/trigger:rotate-0",
-          "group-data-panel-open/trigger:rotate-0",
+          "aui-reasoning-trigger-chevron size-[var(--size-icon-md)] shrink-0",
+          "transition-[opacity,transform] duration-(--animation-duration) ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+          // ZCode：收起时不占视觉噪声，悬停才浮出。
+          isOpen
+            ? "rotate-90 opacity-100"
+            : "rotate-0 opacity-0 group-hover/trigger:opacity-100",
         )}
       />
     </CollapsibleTrigger>
@@ -313,7 +487,12 @@ function ReasoningText({
       )}
       {...props}
     >
-      <div ref={contentRef} className="aui-reasoning-text-content space-y-4">
+      {/* 思考原文按纯文本展示并保留换行（ZCode 同款）：thought 可能很长且
+          持续追加，走 Markdown 每次 chunk 都要重解析，字越多越卡。 */}
+      <div
+        ref={contentRef}
+        className="aui-reasoning-text-content min-w-0 whitespace-pre-wrap break-words"
+      >
         {children}
       </div>
     </div>

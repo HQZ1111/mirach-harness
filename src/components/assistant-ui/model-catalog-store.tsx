@@ -48,7 +48,11 @@ function providerLogo(provider: string, id: string): ReactNode | undefined {
 
 /** pi 模型目录 → ModelSelector 选项；reasoning 模型带默认三档
  * （原 composer-wired 投影上移，逐行为保持不变）。图标 = 官方 logos 元素
- * （provider 可识别时；否则无图标，不冒充）。 */
+ * （provider 可识别时；否则无图标，不冒充）。
+ *
+ * `group` = provider（2026-10-26：模型选择器按 provider 分组显示，与 ZCode /
+ * hermes 一致）。`description` 保留 provider 名——它是分组键的兜底，也是
+ * 搜索关键词的来源之一。 */
 export function toModelOptions(entries: PiModelEntry[]): ModelOption[] {
   return entries.map((e) => {
     const logo = providerLogo(e.provider, e.id)
@@ -56,6 +60,7 @@ export function toModelOptions(entries: PiModelEntry[]): ModelOption[] {
       id: `${e.provider}/${e.id}`,
       name: e.name || e.id,
       description: e.provider,
+      group: e.provider,
       ...(logo === undefined ? {} : { icon: logo }),
       ...(e.reasoning ? { efforts: true as const } : {}),
     }

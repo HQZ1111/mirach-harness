@@ -94,7 +94,7 @@ export function CommandPalette({
       {...props}
     >
       <div className="flex items-center gap-2.5 px-3.5 py-3">
-        <SearchIcon className="text-foreground/30 size-3.5 shrink-0" />
+        <SearchIcon className="text-foreground/30 size-[var(--size-icon-md)] shrink-0" />
         <input
           value={query}
           onChange={(event) => onQueryChange?.(event.target.value)}

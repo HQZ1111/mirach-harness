@@ -74,7 +74,7 @@ export function CodeCopyButton({
       title={label}
       type="button"
     >
-      {isCopied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
+      {isCopied ? <CheckIcon className="size-[var(--size-icon-sm)]" /> : <CopyIcon className="size-[var(--size-icon-sm)]" />}
     </button>
   )
 }

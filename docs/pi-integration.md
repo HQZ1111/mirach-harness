@@ -2,8 +2,9 @@
 
 > 本文档是 pi 引擎接入 mirach-harness 的**落位规范**：每个能力住在哪一层、
 > 哪个文件、UI 哪个区域。实现与文档冲突时，以文档为准改代码。
-> 上游源码：`G:\pi_agent_rust-main`（版本 0.5.1，lib 名 `pi`，crate
-> `pi_agent_rust`，**工具链钉 nightly-2026-08-31**）。
+> 上游源码：`G:\pi_agent_rust-main`（版本 0.8.0，lib 名 `pi`，crate
+> `pi_agent_rust`，**工具链钉 nightly-2026-08-31**；2026-10-24 自 0.5.1 升级，
+> vendor 白名单重拷 + auth/secrets 脱敏补丁重打，见 AGENTS.md「pi 升级」段）。
 > v2 吸收了 agent-native 架构文档（Cargo Workspace 拆分 / 三通道 /
 > ActionRegistry / A2UI / delegate 队列）并逐点对照上游源码核实，
 > 修正了双方文档的失实处（§1.1 差异对照）。

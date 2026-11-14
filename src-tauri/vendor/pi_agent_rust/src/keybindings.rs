@@ -842,12 +842,15 @@ impl KeyBinding {
         let key_name: String = match key.code {
             F::Char(' ') => "space".to_string(),
             F::Char(c) => {
-                // Match the bubbletea Runes path: chars are lowercased and
-                // shift is not reported as a separate modifier.
+                // Match the bubbletea Runes path: chars are lowercased and a
+                // plain shift is not reported as a separate modifier (shift+p
+                // is just typing "P"). With ctrl or alt held, a reported
+                // shift is a deliberate chord: keep it, or ctrl+shift+p (the
+                // default for cycling models backward) collapses into ctrl+p.
                 return Some(Self {
                     key: c.to_lowercase().to_string(),
                     modifiers: KeyModifiers {
-                        shift: false,
+                        shift: base.shift && (base.ctrl || base.alt),
                         ..base
                     },
                 });
@@ -1142,6 +1145,86 @@ impl<'de> Deserialize<'de> for KeyBinding {
 // ============================================================================
 // Key Bindings Map
 // ============================================================================
+
+/// Render the `/hotkeys` listing for a catalog.
+///
+/// A free function rather than a method on either UI model because both stacks
+/// need it and they are behind different features: `interactive` is `tui`,
+/// `interactive_ftui` is `ftui`, and a build can have either. The body only
+/// ever read the catalog, so nothing is lost by moving it here.
+#[must_use]
+pub fn format_hotkeys(keybindings: &KeyBindings) -> String {
+    format_hotkeys_filtered(keybindings, |_| true)
+}
+
+/// Formats keybindings for display in `/hotkeys`, optionally filtering actions.
+#[must_use]
+pub fn format_hotkeys_filtered<F>(keybindings: &KeyBindings, mut filter: F) -> String
+where
+    F: FnMut(AppAction) -> bool,
+{
+    use std::fmt::Write;
+
+    let mut output = String::new();
+    let _ = writeln!(output, "Keyboard Shortcuts");
+    let _ = writeln!(output, "==================");
+    let _ = writeln!(output);
+    let _ = writeln!(
+        output,
+        "Config: {}",
+        KeyBindings::user_config_path().display()
+    );
+    let _ = writeln!(output);
+
+    for category in ActionCategory::all() {
+        let actions: Vec<_> = keybindings
+            .iter_category(*category)
+            .filter(|(action, _)| filter(*action))
+            .collect();
+
+        // Skip empty categories
+        if actions.iter().all(|(_, bindings)| bindings.is_empty()) {
+            continue;
+        }
+
+        let _ = writeln!(output, "## {}", category.display_name());
+        let _ = writeln!(output);
+
+        for (action, bindings) in actions {
+            if bindings.is_empty() {
+                continue;
+            }
+
+            // Format bindings as comma-separated list
+            let keys: Vec<_> = bindings
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect();
+            let keys_str = keys.join(", ");
+
+            let _ = writeln!(output, "  {:20} {}", keys_str, action.display_name());
+        }
+        let _ = writeln!(output);
+    }
+
+    output
+}
+
+/// Formats keybindings for display on the FrankenTUI stack, omitting actions
+/// that are currently unrouted/inert on FTUI.
+#[must_use]
+pub fn format_hotkeys_for_ftui(keybindings: &KeyBindings) -> String {
+    format_hotkeys_filtered(keybindings, |action| !is_inert_on_ftui(action))
+}
+
+/// Checks whether an action is currently unrouted/inert on the FTUI interactive stack.
+#[must_use]
+pub const fn is_inert_on_ftui(action: AppAction) -> bool {
+    matches!(
+        action,
+        AppAction::Copy | AppAction::Yank | AppAction::YankPop
+    )
+}
 
 /// Complete keybindings configuration.
 #[derive(Debug, Clone)]
@@ -1501,8 +1584,10 @@ impl KeyBindings {
         m.insert(AppAction::Tab, vec![KeyBinding::plain("tab")]);
 
         // Kill Ring
-        m.insert(AppAction::Yank, vec![KeyBinding::ctrl("y")]);
-        m.insert(AppAction::YankPop, vec![KeyBinding::alt("y")]);
+        // Yank and YankPop have no underlying kill ring implementation, so no default
+        // bindings are advertised; explicit bindings via keybindings.json remain valid.
+        m.insert(AppAction::Yank, vec![]);
+        m.insert(AppAction::YankPop, vec![]);
         m.insert(AppAction::Undo, vec![KeyBinding::ctrl("-")]);
 
         // Clipboard
@@ -1567,18 +1652,20 @@ impl KeyBindings {
         );
 
         // Session Picker
+        // Unimplemented actions have no default bindings so `/hotkeys` does not
+        // falsely advertise them; explicit bindings via keybindings.json remain valid.
+        // Session-picker controls. Scoped: `browse::action` resolves a key
+        // only against PICKER_ACTIONS, so these coexist with the same chords
+        // elsewhere the way DeleteSession=ctrl+d already coexists with Exit.
         m.insert(AppAction::ToggleSessionPath, vec![KeyBinding::ctrl("p")]);
         m.insert(AppAction::ToggleSessionSort, vec![KeyBinding::ctrl("s")]);
         m.insert(
             AppAction::ToggleSessionNamedFilter,
             vec![KeyBinding::ctrl("n")],
         );
-        m.insert(AppAction::RenameSession, vec![KeyBinding::ctrl("r")]);
+        m.insert(AppAction::RenameSession, vec![]);
         m.insert(AppAction::DeleteSession, vec![KeyBinding::ctrl("d")]);
-        m.insert(
-            AppAction::DeleteSessionNoninvasive,
-            vec![KeyBinding::ctrl("backspace")],
-        );
+        m.insert(AppAction::DeleteSessionNoninvasive, vec![]);
 
         m
     }
@@ -2788,6 +2875,17 @@ mod tests {
         }
 
         #[test]
+        fn ctrl_shift_char_keeps_shift_so_it_is_not_plain_ctrl() {
+            let b = KeyBinding::from_ftui_key(&fkey(
+                ftui::KeyCode::Char('P'),
+                ftui::Modifiers::CTRL | ftui::Modifiers::SHIFT,
+            ))
+            .unwrap();
+            assert_eq!(b, KeyBinding::ctrl_shift("p"));
+            assert_ne!(b, KeyBinding::ctrl("p"));
+        }
+
+        #[test]
         fn ctrl_char_and_named_keys() {
             let b =
                 KeyBinding::from_ftui_key(&fkey(ftui::KeyCode::Char('r'), ftui::Modifiers::CTRL))
@@ -2845,6 +2943,128 @@ mod tests {
                 KeyBinding::from_ftui_key(&fkey(ftui::KeyCode::Up, ftui::Modifiers::SHIFT))
                     .unwrap();
             assert_eq!(bindings.lookup(&page_up), Some(AppAction::PageUp));
+        }
+
+        #[test]
+        fn session_picker_default_bindings_and_hotkeys() {
+            let bindings = KeyBindings::default();
+            // The rule here is "unimplemented actions stay unbound, so
+            // /hotkeys never advertises a dead key". The three browse controls
+            // were unimplemented when that rule was written and are not any
+            // more: 1f2a2e7aa added `apply_browser_control` and the arms in
+            // `handle_browse_key` that reach it. Binding them is the same rule
+            // applied to the new facts, not an exception to it.
+            assert_eq!(
+                bindings.get_bindings(AppAction::ToggleSessionPath),
+                &[KeyBinding::ctrl("p")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::ToggleSessionSort),
+                &[KeyBinding::ctrl("s")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::ToggleSessionNamedFilter),
+                &[KeyBinding::ctrl("n")]
+            );
+            // Still genuinely unimplemented, so still unbound.
+            assert!(bindings.get_bindings(AppAction::RenameSession).is_empty());
+            assert!(
+                bindings
+                    .get_bindings(AppAction::DeleteSessionNoninvasive)
+                    .is_empty()
+            );
+
+            // DeleteSession is implemented and retains ctrl+d
+            assert_eq!(
+                bindings.get_bindings(AppAction::DeleteSession),
+                &[KeyBinding::ctrl("d")]
+            );
+
+            // Selection actions retain defaults
+            assert_eq!(
+                bindings.get_bindings(AppAction::SelectUp),
+                &[KeyBinding::plain("up")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::SelectDown),
+                &[KeyBinding::plain("down")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::SelectPageUp),
+                &[KeyBinding::plain("pageup")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::SelectPageDown),
+                &[KeyBinding::plain("pagedown")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::SelectConfirm),
+                &[KeyBinding::plain("enter")]
+            );
+            assert_eq!(
+                bindings.get_bindings(AppAction::SelectCancel),
+                &[KeyBinding::plain("escape"), KeyBinding::ctrl("c")]
+            );
+
+            // /hotkeys lists what works and nothing else: the three browse
+            // controls now appear because they now do something, while the
+            // two that remain unimplemented stay off the list.
+            let hotkeys = format_hotkeys(&bindings);
+            assert!(hotkeys.contains("## Session Picker"));
+            assert!(hotkeys.contains("Delete session"));
+            assert!(hotkeys.contains("Toggle path display"));
+            assert!(hotkeys.contains("Toggle sort mode"));
+            assert!(hotkeys.contains("Toggle named-only filter"));
+            assert!(!hotkeys.contains("Rename session"));
+            assert!(!hotkeys.contains("Delete session (when query empty)"));
+        }
+
+        #[test]
+        fn kill_ring_yank_and_yank_pop_are_unbound_by_default() {
+            let bindings = KeyBindings::default();
+            // Yank and YankPop are currently unimplemented across both stacks,
+            // so they must have empty defaults and not be advertised in /hotkeys.
+            assert!(bindings.get_bindings(AppAction::Yank).is_empty());
+            assert!(bindings.get_bindings(AppAction::YankPop).is_empty());
+            // Undo is implemented on FTUI and retains ctrl+-
+            assert_eq!(
+                bindings.get_bindings(AppAction::Undo),
+                &[KeyBinding::ctrl("-")]
+            );
+
+            let hotkeys = format_hotkeys(&bindings);
+            assert!(!hotkeys.contains("Paste most recently deleted text"));
+            assert!(!hotkeys.contains("Cycle through deleted text"));
+        }
+
+        #[test]
+        fn ftui_hotkeys_filter_omits_inert_actions() {
+            let bindings = KeyBindings::default();
+            let ftui_hotkeys = format_hotkeys_for_ftui(&bindings);
+
+            // Supported actions appear:
+            assert!(ftui_hotkeys.contains("Open model selector"));
+            assert!(ftui_hotkeys.contains("Show help"));
+            assert!(ftui_hotkeys.contains("Cycle thinking level"));
+            assert!(ftui_hotkeys.contains("Submit input"));
+            assert!(ftui_hotkeys.contains("Insert new line"));
+            // Routed on FTUI since ctrl+p model cycling was wired in.
+            assert!(ftui_hotkeys.contains("Cycle to next model"));
+            assert!(ftui_hotkeys.contains("Cycle to previous model"));
+            // Routed since mid-turn input goes through session_control.
+            assert!(ftui_hotkeys.contains("Queue follow-up message"));
+            assert!(ftui_hotkeys.contains("Restore queued messages to editor"));
+            // Routed with ctrl+o/ctrl+t/ctrl+g and OMP's ctrl+c clear.
+            assert!(ftui_hotkeys.contains("Collapse/expand tool output"));
+            assert!(ftui_hotkeys.contains("Collapse/expand thinking blocks"));
+            assert!(ftui_hotkeys.contains("Open in external editor"));
+            assert!(ftui_hotkeys.contains("Clear editor"));
+
+            assert!(ftui_hotkeys.contains("Open settings"));
+            // Inert actions on FTUI are omitted:
+            assert!(!ftui_hotkeys.contains("Copy selection"));
+            // Routed: the pasted image becomes an `@file` attachment.
+            assert!(ftui_hotkeys.contains("Paste image from clipboard"));
         }
     }
 }

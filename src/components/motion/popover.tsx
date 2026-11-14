@@ -31,14 +31,17 @@ import {
   useContext,
   useEffect,
   useId,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import {
+  buildGooGeometry,
+  GooSurface,
+} from "@/components/motion/goo-layer";
 import { usePopoverPortalPosition } from "@/components/motion/popover-position";
-import { POPOVER_GOO_CLOSE, POPOVER_GOO_OPEN } from "@/lib/ease";
+import { POPOVER_GOO, POPOVER_GOO_CLOSE, POPOVER_GOO_OPEN } from "@/lib/ease";
 import { useDismiss } from "@/lib/hooks/use-dismiss";
 import {
   type HoverGesture,
@@ -58,7 +61,10 @@ type TriggerMode = "click" | "hover";
 const GOO_OPEN_SPRING = POPOVER_GOO_OPEN;
 const GOO_CLOSE_SPRING = POPOVER_GOO_CLOSE;
 const HOVER_CLOSE_DELAY = 120;
-const CIRCLE_KAPPA = 0.5523;
+
+// 几何 / clip / goo 渲染已整体抽到 `goo-layer.tsx`（2026-10-26 归拢为一个
+// 动效实现——右键菜单与侧栏菜单同源）。本文件只保留"锚点式"独有的部分：
+// 触发钮测量、side/align 反推面板偏移、视口翻转与水平钳位。
 
 // `onPointerEnter`/`onPointerLeave` rather than the mouse pair: a tap fires
 // compatibility mouseenter/mouseleave that carry no pointerType at all, and
@@ -80,136 +86,6 @@ function makeHoverHandlers(
   };
 }
 
-const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-
-interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  r: number;
-}
-interface Geo {
-  layerW: number;
-  layerH: number;
-  left: number;
-  top: number;
-  trigger: Rect;
-  panel: Rect;
-}
-
-// Trigger rect and panel rect in a shared local coordinate box.
-function buildGeo(
-  tW: number,
-  tH: number,
-  cW: number,
-  cH: number,
-  side: Side,
-  align: Align,
-  gap: number,
-  panelRadius: number,
-): Geo {
-  const py = side === "bottom" ? tH + gap : -(gap + cH);
-  const px = align === "start" ? 0 : align === "end" ? tW - cW : (tW - cW) / 2;
-
-  const left = Math.min(0, px);
-  const top = Math.min(0, py);
-  const layerW = Math.max(tW, px + cW) - left;
-  const layerH = Math.max(tH, py + cH) - top;
-
-  const triggerRadius = Math.min(tH / 2, panelRadius);
-
-  return {
-    layerW,
-    layerH,
-    left,
-    top,
-    trigger: { x: -left, y: -top, w: tW, h: tH, r: triggerRadius },
-    panel: { x: px - left, y: py - top, w: cW, h: cH, r: panelRadius },
-  };
-}
-
-function rectAtProgress(geo: Geo, progress: number): Rect {
-  const trigger = geo.trigger;
-  const panel = geo.panel;
-
-  return {
-    x: lerp(trigger.x, panel.x, progress),
-    y: lerp(trigger.y, panel.y, progress),
-    w: lerp(trigger.w, panel.w, progress),
-    h: lerp(trigger.h, panel.h, progress),
-    r: lerp(trigger.r, panel.r, progress),
-  };
-}
-
-function insetFor(rect: Rect, layerW: number, layerH: number) {
-  const top = rect.y;
-  const right = layerW - (rect.x + rect.w);
-  const bottom = layerH - (rect.y + rect.h);
-  const left = rect.x;
-  return `inset(${top}px ${right}px ${bottom}px ${left}px round ${rect.r}px)`;
-}
-
-function roundedRectShape(rect: Rect) {
-  const radius = Math.max(0, Math.min(rect.r, rect.w / 2, rect.h / 2));
-  const control = radius * CIRCLE_KAPPA;
-  const x1 = rect.x;
-  const y1 = rect.y;
-  const x2 = rect.x + rect.w;
-  const y2 = rect.y + rect.h;
-  const px = (value: number) => `${value.toFixed(3)}px`;
-
-  return (
-    `shape(from ${px(x1 + radius)} ${px(y1)}, ` +
-    `line to ${px(x2 - radius)} ${px(y1)}, ` +
-    `curve to ${px(x2)} ${px(y1 + radius)} with ${px(x2 - radius + control)} ${px(y1)} / ${px(x2)} ${px(y1 + radius - control)}, ` +
-    `line to ${px(x2)} ${px(y2 - radius)}, ` +
-    `curve to ${px(x2 - radius)} ${px(y2)} with ${px(x2)} ${px(y2 - radius + control)} / ${px(x2 - radius + control)} ${px(y2)}, ` +
-    `line to ${px(x1 + radius)} ${px(y2)}, ` +
-    `curve to ${px(x1)} ${px(y2 - radius)} with ${px(x1 + radius - control)} ${px(y2)} / ${px(x1)} ${px(y2 - radius + control)}, ` +
-    `line to ${px(x1)} ${px(y1 + radius)}, ` +
-    `curve to ${px(x1 + radius)} ${px(y1)} with ${px(x1)} ${px(y1 + radius - control)} / ${px(x1 + radius - control)} ${px(y1)}, ` +
-    "close)"
-  );
-}
-
-function clipForProgress(geo: Geo, progress: number, supportsShape: boolean) {
-  const rect = rectAtProgress(geo, progress);
-  return supportsShape
-    ? roundedRectShape(rect)
-    : insetFor(rect, geo.layerW, geo.layerH);
-}
-
-function roundedRectPath(rect: Rect) {
-  const radius = Math.max(0, Math.min(rect.r, rect.w / 2, rect.h / 2));
-  const n = (value: number) => value.toFixed(3);
-  const x1 = rect.x;
-  const y1 = rect.y;
-  const x2 = rect.x + rect.w;
-  const y2 = rect.y + rect.h;
-  const arc = `A${n(radius)} ${n(radius)} 0 0 1`;
-
-  // A zero radius makes every arc degenerate to a line, so this also draws
-  // plain rectangles.
-  return (
-    `M${n(x1 + radius)} ${n(y1)}` +
-    `H${n(x2 - radius)}${arc} ${n(x2)} ${n(y1 + radius)}` +
-    `V${n(y2 - radius)}${arc} ${n(x2 - radius)} ${n(y2)}` +
-    `H${n(x1 + radius)}${arc} ${n(x1)} ${n(y2 - radius)}` +
-    `V${n(y1 + radius)}${arc} ${n(x1 + radius)} ${n(y1)}Z`
-  );
-}
-
-// The goo layer is portalled above the page, so its copy of the trigger pill
-// would cover the real trigger's label and focus ring. Punching the trigger
-// back out keeps the real one visible and clips the blur to the layer box.
-// This is a clip path rather than a CSS mask on purpose: WebKit silently
-// ignores `mask: url(#id)` pointing at an SVG <mask> element, which left the
-// label hidden behind the goo in Safari.
-function triggerCutout(geo: Geo) {
-  const layer = { x: 0, y: 0, w: geo.layerW, h: geo.layerH, r: 0 };
-  return `path(evenodd, "${roundedRectPath(layer)} ${roundedRectPath(geo.trigger)}")`;
-}
 
 interface PopoverContextValue {
   open: boolean;
@@ -223,6 +99,7 @@ interface PopoverContextValue {
   gap: number;
   panelRadius: number;
   gooStrength: number;
+  goo: boolean;
   reduce: boolean;
   gooId: string;
   contentId: string;
@@ -258,6 +135,18 @@ export interface PopoverProps {
   panelRadius?: number;
   /** Blur radius feeding the goo filter — higher melts more. Default 8. */
   gooStrength?: number;
+  /**
+   * 是否做液滴粘性合并。
+   *
+   * **默认值 = 令牌 `--beui-popover-goo`（ease.ts 的 POPOVER_GOO）**，调用点
+   * 不该传这个 prop（2026-11-01 用户："调用点没传，直接在令牌中统一开关
+   * 不行吗"）。理由：散在 15 个调用点的布尔参数就是"有的有脖子有的没有"
+   * 的成因——一个令牌管全部，改观感只改 tokens.css。
+   *
+   * 关掉时面板是独立的圆角矩形 + 投影，触发钮与面板之间没有脖子，按钮
+   * 也不会被投影。
+   */
+  goo?: boolean;
   className?: string;
 }
 
@@ -272,6 +161,7 @@ export function Popover({
   sideOffset = 14,
   panelRadius = 16,
   gooStrength = 8,
+  goo = POPOVER_GOO,
   className,
 }: PopoverProps) {
   const reduce = useReducedMotion() ?? false;
@@ -366,6 +256,7 @@ export function Popover({
       gap: sideOffset,
       panelRadius,
       gooStrength,
+      goo,
       reduce,
       gooId,
       contentId,
@@ -385,6 +276,7 @@ export function Popover({
       sideOffset,
       panelRadius,
       gooStrength,
+      goo,
       reduce,
       gooId,
       contentId,
@@ -561,6 +453,7 @@ export function PopoverContent({
     gap,
     panelRadius,
     gooStrength,
+    goo,
     reduce,
     gooId,
     contentId,
@@ -575,10 +468,6 @@ export function PopoverContent({
 
   const measureRef = contentRef;
   const panelHover = useHoverGesture();
-  const blobRef = useRef<HTMLDivElement>(null);
-  const clipRef = useRef<HTMLDivElement>(null);
-  const geoRef = useRef<Geo | null>(null);
-  const supportsShapeRef = useRef(false);
   const layout = usePopoverPortalPosition(
     triggerRef,
     measureRef,
@@ -620,43 +509,32 @@ export function PopoverContent({
     return side;
   })();
 
+  // 面板偏移（锚点坐标系）：side/align/gap 反推 —— 这部分是"锚点式"
+  // 独有的，落点式菜单由 context-menu.tsx 直接给偏移。
+  const panelOffsetX =
+    align === "start"
+      ? 0
+      : align === "end"
+        ? (layout?.trigger.width ?? 0) - (layout?.content.width ?? 0)
+        : ((layout?.trigger.width ?? 0) - (layout?.content.width ?? 0)) / 2;
+  const panelOffsetY =
+    resolvedSide === "bottom"
+      ? (layout?.trigger.height ?? 0) + gap
+      : -(gap + (layout?.content.height ?? 0));
+
   const geo = useMemo(
     () =>
-      buildGeo(
+      buildGooGeometry(
         layout?.trigger.width ?? 0,
         layout?.trigger.height ?? 0,
+        panelOffsetX,
+        panelOffsetY,
         layout?.content.width ?? 0,
         layout?.content.height ?? 0,
-        resolvedSide,
-        align,
-        gap,
         panelRadius,
       ),
-    [layout, resolvedSide, align, gap, panelRadius],
+    [layout, panelOffsetX, panelOffsetY, panelRadius],
   );
-
-  // Morph the same clip on the goo body and the content, so the whole popover
-  // oozes as one and the text reveals with it.
-  const render = useCallback((g: Geo | null, p: number) => {
-    if (!g || g.layerW === 0) return;
-    const clip = clipForProgress(g, p, supportsShapeRef.current);
-    if (blobRef.current) blobRef.current.style.clipPath = clip;
-    if (clipRef.current) clipRef.current.style.clipPath = clip;
-  }, []);
-
-  useLayoutEffect(() => {
-    supportsShapeRef.current =
-      typeof CSS !== "undefined" &&
-      typeof CSS.supports === "function" &&
-      CSS.supports(
-        "clip-path",
-        "shape(from 0px 0px, line to 1px 1px, close)",
-      );
-    geoRef.current = geo;
-    render(geo, progress.get());
-  }, [geo, progress, render]);
-
-  useMotionValueEvent(progress, "change", (p) => render(geoRef.current, p));
 
   // While closed, the layer still paints its copy of the trigger pill, and the
   // cutout's antialiased edge leaves a faint rim around the real trigger. It
@@ -680,7 +558,7 @@ export function PopoverContent({
   // harness 扩展：水平钳位——面板超出视口左右缘时整体平移补偿
   // （beUI 原版无碰撞处理；对位 Radix 的 shift 行为）。
   // 坐标：wrapper translate 到 trigger.left+clampX；面板相对 wrapper 的
-  // 左偏移 = geo.left + geo.panel.x（buildGeo 里 left=min(0,px)、
+  // 左偏移 = geo.left + geo.panel.x（buildGooGeometry 里 left=min(0,px)、
   // panel.x=px-left，两项之和恒 = px——分 px≥0/px<0 两种情形均在案）。
   const clampX = (() => {
     if (!layout) return 0;
@@ -693,111 +571,34 @@ export function PopoverContent({
   // hydration. This preserves SSR without regenerating the page on the client.
   if (!portalReady) return null;
 
-  return createPortal(
-    <div
-      data-popover-portal=""
-      className="pointer-events-none fixed left-0 top-0 z-[9999] isolate size-0"
-      style={{
-        visibility: layout && !closedAtRest ? "visible" : "hidden",
-        transform: `translate3d(${(layout?.trigger.left ?? 0) + clampX}px, ${layout?.trigger.top ?? 0}px, 0)`,
+  // goo 表面（SVG 粘性滤镜 + 形变）已抽到 goo-layer.tsx —— 与右键菜单
+  // 共用同一份实现（2026-10-26 用户："所有的弹窗效果归拢成一个"）。
+  return (
+    <GooSurface
+      clampX={clampX}
+      contentClassName={cn(
+        "w-max max-w-[min(92vw,20rem)] p-4 text-popover-foreground outline-none",
+        className,
+      )}
+      contentId={contentId}
+      contentProps={{
+        role: "dialog",
+        ...hoverHandlers,
+        ...rest,
       }}
+      contentRef={contentRef}
+      filterId={gooId}
+      geo={geo}
+      goo={goo}
+      gooStrength={gooStrength}
+      interactive={open}
+      origin={{ left: layout?.trigger.left ?? 0, top: layout?.trigger.top ?? 0 }}
+      progress={progress}
+      reduce={reduce}
+      transformOrigin={`${ALIGN_ORIGIN[align]} ${side === "bottom" ? "top" : "bottom"}`}
+      visible={Boolean(layout) && !closedAtRest}
     >
-      {/* Goo filter: blur, sharpen the alpha back into solid shapes, then lay
-          the crisp original on top so blobs merge with liquid edges. */}
-      <svg aria-hidden width="0" height="0" className="absolute">
-        <title>Popover visual effects</title>
-        <defs>
-          <filter id={gooId} x="-50%" y="-50%" width="200%" height="200%">
-            <feGaussianBlur
-              in="SourceGraphic"
-              stdDeviation={gooStrength}
-              result="blur"
-            />
-            <feColorMatrix
-              in="blur"
-              mode="matrix"
-              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -10"
-              result="goo"
-            />
-            <feComposite in="SourceGraphic" in2="goo" operator="atop" />
-          </filter>
-        </defs>
-      </svg>
-
-      {/* Goo body: static trigger pill + morphing blob. */}
-      <div
-        aria-hidden
-        className="pointer-events-none absolute z-[-1]"
-        style={{
-          left: geo.left,
-          top: geo.top,
-          width: geo.layerW,
-          height: geo.layerH,
-          filter: reduce ? undefined : `url(#${gooId})`,
-          clipPath: triggerCutout(geo),
-        }}
-      >
-        <div
-          className="absolute bg-popover"
-          style={{
-            left: geo.trigger.x,
-            top: geo.trigger.y,
-            width: geo.trigger.w,
-            height: geo.trigger.h,
-            borderRadius: geo.trigger.r,
-          }}
-        />
-        <div
-          ref={blobRef}
-          className="absolute inset-0 bg-popover"
-          style={{
-            clipPath: clipForProgress(geo, progress.get(), false),
-          }}
-        />
-      </div>
-
-      {/* Content is clipped by the same morph. The portal wrapper stays
-          pointer-transparent; only the fully open panel accepts interaction. */}
-      <div
-        className="pointer-events-none absolute z-10"
-        style={{
-          left: geo.left,
-          top: geo.top,
-          width: geo.layerW,
-          height: geo.layerH,
-        }}
-      >
-        <div
-          ref={clipRef}
-          inert={!open}
-          className="absolute inset-0"
-          style={{
-            clipPath: clipForProgress(geo, progress.get(), false),
-            pointerEvents: open ? "auto" : "none",
-          }}
-        >
-          <div
-            ref={measureRef}
-            id={contentId}
-            role="dialog"
-            {...hoverHandlers}
-            {...rest}
-            style={{
-              position: "absolute",
-              left: geo.panel.x,
-              top: geo.panel.y,
-              transformOrigin: `${ALIGN_ORIGIN[align]} ${side === "bottom" ? "top" : "bottom"}`,
-            }}
-            className={cn(
-              "w-max max-w-[min(92vw,20rem)] p-4 text-popover-foreground outline-none",
-              className,
-            )}
-          >
-            {children}
-          </div>
-        </div>
-      </div>
-    </div>,
-    document.body,
+      {children}
+    </GooSurface>
   );
 }

@@ -16,7 +16,7 @@
  * - 组移动 = groupApi.moveTo（零组件卸载）；整列摘除/拼回 = toJSON 手术
  *   + fromJSON（panel 重挂，hide/show 专属）。
  *
- * 持久化：布局 JSON `mirach.harness.layout.v9`（v8 及更早 flexlayout 存档
+ * 持久化：布局 JSON `mirach.harness.layout.v10`（v8 及更早 flexlayout 存档
  * 作废不迁移）；栏旗标/快照沿用 colflags.v1/colstash.v1（语义不变）。
  */
 import {
@@ -30,16 +30,18 @@ import {
 import { useCallback, useEffect, useRef } from 'react'
 
 import { Titlebar } from '@/app/shell/titlebar'
-import { StatusBar } from '@/app/shell/statusbar'
 import { ResizeHandles } from './resize-handles'
+import { GlobalKeybinds } from './global-keybinds'
 import { inTauri, appWindow } from '@/lib/tauri-window'
-import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
 import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { LeftRailPane } from '@/components/panes/left-rail-pane'
+import { BotsPane } from '@/components/panes/bots-pane'
+import { BOTS_PANEL_ID, botsPanelStore } from '@/components/panes/hub/bots-panel-actions'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
-import { ReviewPane } from '@/components/panes/review-pane'
+import { ReviewPanelHost } from '@/components/panes/review-pane'
+import { MainWorkspacePane } from '@/components/panes/main-workspace-pane'
 import { TerminalPane } from '@/components/panes/terminal-pane'
 import { OpenPage, type OpenPageKind } from '@/components/panes/open-page'
 import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
@@ -47,29 +49,37 @@ import {
   setSessionTabOpener,
   type SessionTabDropPosition,
 } from '@/components/panes/session-manage/session-tab-bridge'
-import { TabStripLeftArrow, TabStripRightSide } from './tab-strip-arrows'
-import { TabStripNewButton } from './tab-strip-new'
+import { TabStripLeading, TabStripRightSide, TabStripTrailing } from './tab-strip-arrows'
 import { AssistantRuntime } from '@/components/assistant-ui/runtime'
 import {
   alignVisibleToOrder,
   columnFlagsOf,
-  FACTORY_LAYOUT,
+  factoryLayout,
   LAYOUT_KEY,
   layoutResetInProgress,
   normalizeColumns,
   persistFlagsColOrder,
-  RAIL_W,
-  refreshChatEdgeMarkers,
+  repinRailWidths,
   rootPanelsGroup,
+  setPanelsHidden,
+  setRailTargetWidth,
   withoutColumnMorph,
 } from './dockview-column-ops'
+import {
+  CHAT_MIN_WIDTH,
+  leftRailDefaultWidth,
+  panelsRailDefaultWidth,
+  RAIL_DEFAULT_WIDTH,
+  RAIL_MAX_WIDTH,
+  RAIL_MIN_WIDTH,
+} from './rail-metrics'
 import { radialDropResolver } from './drop-geometry'
-import { openPagePanel, panelsDropPosition } from './open-page-actions'
+import { openPagePanel, panelsDropPosition, splitPanelOut } from './open-page-actions'
 
-// ── 出厂布局（三栏）：[左栏 350 | 主栏 | 面板栏 350] ────────────────────────
-// FACTORY_LAYOUT / RAIL_W / LAYOUT_KEY 已迁至 dockview-column-ops.ts
-// （2026-10-16：「默认布局」复位动词 = 第二消费方，单源防漂移）——本文件
-// 只消费：boot 灌布局 + 出厂双轨钉宽 + 持久化读写。
+// ── 出厂布局（三栏）：[左栏 | 主栏 | 面板栏] ─────────────────────────────────
+// factoryLayout / LAYOUT_KEY 在 dockview-column-ops.ts（2026-10-16：「默认
+// 布局」复位动词 = 第二消费方，单源防漂移）——本文件只消费：boot 灌布局 +
+// 出厂双轨钉宽 300 + 持久化读写。栏宽口径见 rail-metrics.ts。
 const loadLayout = (): SerializedDockview | null => {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY)
@@ -107,10 +117,21 @@ const saveLayout = (json: SerializedDockview): void => {
 // OPEN_KIND_PANEL / panelsDropPosition 已抽至 open-page-actions.ts（面板栏
 // 标签条 + 号同源消费，2026-10-15）。
 
-/** open 页签头（根面板不可关：无 ✕ 的自定义 tab）。 */
+/**
+ * 「打开页」面板的标签名（单一定义源）。
+ *
+ * 用户 2026-10-31："打开页的标题把打开换个说明文字"——原 '打开' 是动词，
+ * 读起来像按钮。改成 '面板'：这一页**是什么**（面板栏的锚页）。
+ *
+ * **三处必须同源**：`addPanel` 的 `title`、`fromJSON` 后的 `setTitle`
+ * （存档里存着旧值，见 hydrate 注释）、`OpenTabHeader` 的兜底。
+ */
+const OPEN_PANEL_TITLE = '面板'
+
+/** 打开页签头（根面板不可关：无 ✕ 的自定义 tab）。 */
 const OpenTabHeader = (props: IDockviewPanelHeaderProps) => (
   <div className="dv-open-tab">
-    <span className="dv-open-tab-title">{props.api.title ?? '打开'}</span>
+    <span className="dv-open-tab-title">{props.api.title ?? OPEN_PANEL_TITLE}</span>
   </div>
 )
 
@@ -120,24 +141,24 @@ export function DockviewShell() {
   const hydratingRef = useRef(false)
   /** 打开页生命周期重入护栏。 */
   const anchorBusyRef = useRef(false)
-  /** 栏宽快照（onWillMutateLayout kind=remove 时记，末签关组重建后钉回）。
-   *  背景（2026-10-15 实锤）：面板栏最后一签关闭 → dockview 把组收走 →
-   *  restoreOpenAnchor 回退分支新建组（referencePanel workspace 右侧），
-   *  网格三维重摊 350/1100/350 → 420/600/780（左栏顶到 max 420）。钉回 =
-   *  快照值 setSize 三连（同 boot 出厂钉法，两轮互挤后收敛）。 */
-  const colWidthSnapshotRef = useRef<{ left?: number; panels?: number } | null>(null)
+  /** 拖出分栏进行中（dockview 重摊期间不能把列宽记成目标宽）。 */
+  const splitBusyRef = useRef(false)
 
-  // ── 打开页生命周期（ZCode 空态逻辑，v7.3.1 语义 dockview 版） ─────────────
-  // 实签抵达面板组 → 撤 open；最后一个实签关闭 → open 回来（根面板列打开
-  // 期间永不空——v8.0 docs："面板栏缺席仅『隐藏面板栏』一条路径"）。
+  // ── 打开页生命周期（ZCode 语义，2026-11-01 用户定稿） ──────────────────
+  // "zcode打开页是没有标签的，只有一个标签的时候是关闭是会关闭面板栏的"：
+  // - 实签抵达面板组 → 撤 open（本函数 boot 路径仍兜底：布局存档里
+  //   panelsHidden=false 且面板列空置时重建锚——launcher 无标签条由 CSS
+  //   `:has(.dv-open-tab-title)` 承担，见 flexlayout.css）；
+  // - 最后一个实签关闭 → **关闭面板栏**（handlePanelRemoved →
+  //   setPanelsHidden(true)），锚不复活；重新在场 = 右键「打开面板栏」或
+  //   任一实签动作（openPagePanel/preview 均清 panelsHidden）。
   const restoreOpenAnchor = useCallback((a: DockviewApi) => {
     if (a.getPanel('open')) return
     const flags = columnFlagsOf()
     if (flags.panelsHidden) return
     // 实签在场 → 锚不该回来（2026-10-15 实锤：组内 [文件树|终端] 只关
-    // 文件树时 didRemovePanel 路径把 open 误复活成 [打开|终端]，违背生命
-    // 周期"最后一个实签关闭 → open 回来"）。有实签 = 面板列有宿主，锚缺席
-    // 即正确态；锚只在面板列空置（末签收走组）或 boot 空列时兜底重建。
+    // 文件树时 didRemovePanel 路径把 open 误复活成 [打开|终端]）。有实签 =
+    // 面板列有宿主，锚缺席即正确态；锚只在面板列空置或 boot 空列时兜底重建。
     const hasRealPanels = a.panels.some(
       (p) => p.id !== 'open' && p.params?.region === 'panels',
     )
@@ -147,20 +168,23 @@ export function DockviewShell() {
       a.addPanel({
         id: 'open',
         component: 'open',
-        title: '打开',
+        title: OPEN_PANEL_TITLE,
         tabComponent: 'openTab',
-        minimumWidth: 240,
+        minimumWidth: RAIL_MIN_WIDTH,
+        // 与出厂面板同形（min+max）——漏 max 会吃到比例摊分宽（2026-11-01 实锤）
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels' },
         position: { referenceGroup: host.id, index: 0 },
       })
     } else {
-      // 组随末签关闭被 dockview 收走 → 重建（colOrder 语义位对齐）
+      // 组不在树里（存档异常/收走未收干净）→ 重建（colOrder 语义位对齐）
       a.addPanel({
         id: 'open',
         component: 'open',
-        title: '打开',
+        title: OPEN_PANEL_TITLE,
         tabComponent: 'openTab',
-        minimumWidth: 240,
+        minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels' },
         position: { referencePanel: 'workspace', direction: 'right' },
       })
@@ -199,31 +223,23 @@ export function DockviewShell() {
       if (layoutResetInProgress()) return
       const removed = /* 移除前 region 已不可考——用 id 判面板栏域 */ panelId === 'open' || panelId === 'files' || panelId === 'terminal' || panelId.startsWith('preview')
       if (!removed) return
-      if (panelId === 'open') return
+      // **ZCode 语义**（2026-11-01 用户："只有一个标签的时候是关闭是会关闭
+      // 面板栏的"）：面板列不再有实签 = 关闭面板栏，锚不复活。'open' 自身
+      // 被关（标签总览的 ✕）同样走这条——2026-11-01 实锤：早退分支漏记账，
+      // 组被收走而 panelsHidden 仍是 false（重启后 normalize 误报）。
+      // 锚只在「打开面板栏」（setPanelsHidden(false) → ensurePanelsAnchor）
+      // 与出厂布局里出现。
       anchorBusyRef.current = true
       try {
-        restoreOpenAnchor(a)
-        // 栏宽钉回（2026-10-15）：组被收走重建后的重摊把 350/1100/350 打乱
-        // （实锤 420/600/780）——用 willMutate 快照把双轨钉回。rAF + 150ms
-        // 双拍（重建当帧树未稳，单次 setSize 会被后续布局步覆盖，CDP 实测）。
-        const snap = colWidthSnapshotRef.current
-        if (snap && (snap.left || snap.panels)) {
-          const pin = () => {
-            const lg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'left'))
-            const pg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'panels'))
-            for (let i = 0; i < 3; i++) {
-              if (pg && snap.panels) pg.api.setSize({ width: snap.panels })
-              if (lg && snap.left) lg.api.setSize({ width: snap.left })
-            }
-          }
-          requestAnimationFrame(pin)
-          setTimeout(pin, 150)
-        }
+        const hasRealPanels = a.panels.some(
+          (p) => p.id !== 'open' && p.params?.region === 'panels',
+        )
+        if (!hasRealPanels) setPanelsHidden(true)
       } finally {
         anchorBusyRef.current = false
       }
     },
-    [restoreOpenAnchor],
+    [],
   )
 
   // ── 会话分栏（v7.4 完整聊天 dockview 版；2026-10-15 落点感知）：
@@ -255,7 +271,7 @@ export function DockviewShell() {
         id,
         component: 'session',
         title: tabName,
-        minimumWidth: 395,
+        minimumWidth: CHAT_MIN_WIDTH,
         params: { region: 'chat', threadId, tabName },
         position:
           drop && referenceGroup
@@ -284,10 +300,12 @@ export function DockviewShell() {
         id: 'preview',
         component: 'preview',
         title: fileName || '预览',
-        minimumWidth: 240,
+        minimumWidth: RAIL_MIN_WIDTH,
         params: { region: 'panels', filePath },
         position: panelsDropPosition(a),
       })
+      // 栏若处于「末签关闭已关栏」态，实签抵达即重新在场（ZCode 生命周期）
+      if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
     })
     return () => setPreviewOpener(null)
   }, [])
@@ -301,13 +319,18 @@ export function DockviewShell() {
 
   const components = {
     leftrail: () => <LeftRailPane />,
-    workspace: () => <AssistantThreadPane />,
+    // 机器人弹出栏（2026-11-07 完整移植 hermes 机器人页）：Mirach 点击开合，
+    // dock 在左栏右侧（bots-panel-actions 的 region 'bots'——面板栏语义外）
+    bots: () => <BotsPane />,
+    // 主区工作台（2026-10-26）：聊天 / 技能与工具 视图开关（hermes 的
+    // `/skills` 顶级路由语义——SkillsPage 替换对话区，`App.tsx:166`）。
+    workspace: () => <MainWorkspacePane />,
     session: (props: IDockviewPanelProps) => (
       <SessionThreadPane threadId={props.params.threadId} tabName={props.params.tabName} />
     ),
     files: () => <HermesFileTreePane />,
     terminal: () => <TerminalPane />,
-    review: () => <ReviewPane />,
+    review: (props: IDockviewPanelProps) => <ReviewPanelHost {...props} />,
     preview: (props: IDockviewPanelProps) => <HermesPreviewPane filePath={props.params.filePath ?? ''} />,
   }
 
@@ -336,35 +359,142 @@ export function DockviewShell() {
         const g = group as { model?: { header?: { hidden?: boolean } } } | undefined
         return g?.model?.header?.hidden === true
       }
+      // **左栏不是拖拽目标**（用户 2026-10-22 定稿："左栏不能分栏和被拖进
+      // 标签，我说的是面板栏"）：左栏是会话列表，语义上是固定的一栏，
+      // 任何标签拖进去/在它周围分栏都会破坏"左栏恒占端位"的布局定式。
+      // 判据 = 组内有 left 域面板（`params.region === 'left'`）。
+      const isLeftRailGroup = (group: unknown): boolean => {
+        const g = group as { panels?: { params?: { region?: string } }[] } | undefined
+        return g?.panels?.some((p) => p.params?.region === 'left') ?? false
+      }
+      // **必须 accept 未处理的 drag-over**（2026-10-22 实锤，拖不出分栏的根因）：
+      // dockview 的 `canDisplayContentOverlay` 最后一步是 `canDisplayOverlay`，
+      // 后者触发 `onUnhandledDragOver` 并**只看 `event.isAccepted`**——
+      // `AcceptableEvent` 默认 `_isAccepted = false`。没有监听者调用 `accept()`
+      // 时，**所有**内容区落点（含四个分栏方向）都被判定为"不允许"：overlay
+      // 不显示、drop 不生效，标签只能拖回原组（表现为"拖不出来"）。
+      // 所以这里要显式接受——除了上面那两条例外。
+      a.onUnhandledDragOver((e) => {
+        if (denyStackIntoHeaderless(e.target, e.position, e.group)) return
+        if (isLeftRailGroup(e.group)) return
+        e.accept()
+      })
       a.onWillShowOverlay((e) => {
         if (denyStackIntoHeaderless(e.kind, e.position, e.group)) e.preventDefault()
+        if (isLeftRailGroup(e.group)) e.preventDefault()
       })
+      // **单面板组的拖出分栏必须自己接管**（2026-10-22 实锤）：
+      // dockview 的 `_doMoveGroupOrPanel` 在 `sourceGroup.size < 2` 时走
+      // 「整组移动」分支——同一层里 `moveView` 换位，**不拆新组**。面板栏
+      // 常态只有一个标签，于是"把面板栏的标签拖出来分栏"永远只是换位，
+      // 用户看到的就是"拖不出来"。
+      // 这里在分栏位（top/bottom/left/right）且源组只有这一个面板时，
+      // 阻止 dockview 的默认处理，自己 addPanel 到目标组的分栏位——语义
+      // 与「源组有 2+ 面板」时 dockview 自己的行为一致。
       a.onWillDrop((e) => {
-        if (denyStackIntoHeaderless(e.kind, e.position, e.group)) e.preventDefault()
+        if (denyStackIntoHeaderless(e.kind, e.position, e.group)) {
+          e.preventDefault()
+          return
+        }
+        // 左栏既不接收标签也不参与分栏
+        if (isLeftRailGroup(e.group)) {
+          e.preventDefault()
+          return
+        }
+        if (e.kind !== 'content') return
+        const position = e.position
+        if (position === 'center') return
+        const data = e.getData()
+        const target = e.group
+        const panelId = data?.panelId
+        if (!panelId || !target) return
+        const source = a.getPanel(panelId)
+        if (!source) return
+        // 只有**面板栏**的标签能拖出分栏（左栏无标签；对话栏标签是会话，
+        // 拖出去由 dockview 原生分栏处理）
+        if (source.params?.region !== 'panels') return
+        // 源组 > 1 个面板：dockview 自己就能正确拆组，不接管
+        if (source.group.panels.length > 1) return
+        // 同组内换位由 dockview 处理（拖到自身组的边缘 = 无操作）
+        if (source.group.id === target.id) return
+        // 接管：阻止 dockview 的"单面板组 = 整组移动"默认行为
+        e.preventDefault()
+        // 分栏期间的重摊是 dockview 的几何让位，不是用户意图——期间不记
+        // 目标宽（否则左栏被顶到 400 就会被当成新目标，钉不回来）。
+        splitBusyRef.current = true
+        // **分栏前的宽度只作参考，不作目标**：dockview 的重摊会把左栏顶到
+        // max（400），如果直接把它当目标就等于接受了污染值。这里只在当前宽
+        // 落在许可区间内、且**不等于 max**时才沿用，否则回落到默认宽 300
+        // ——与"默认尺寸 300"的用户语义一致。
+        for (const g of a.groups) {
+          const region = g.panels[0]?.params?.region
+          if (region !== 'left' && region !== 'panels') continue
+          const w = Math.round(g.width)
+          if (w <= 0) continue
+          const atMax = Math.abs(w - RAIL_MAX_WIDTH) <= 1
+          setRailTargetWidth(region, atMax ? RAIL_DEFAULT_WIDTH : w)
+        }
+        try {
+          splitPanelOut(a, panelId, target.id, position)
+        } finally {
+          // **定时轮询钉宽**（2026-10-22 实测）：分栏触发的 relayout 分几步
+          // 完成（addPanel → moveTo → 关占位 → 父 branch 重算），固定 150ms
+          // 常常还停在中间态（左栏被顶到 max）。这里每 150ms 钉一次、连钉
+          // 8 次（~1.2s）后解锁。
+          //
+          // **必须是定时器、不能挂在 onDidLayoutChange 里**：setSize 会同步
+          // 再触发那个回调，在回调里再 setSize 就是无界循环——实测把主线程
+          // 冻死（"软件卡死动不了"）。定时器在事件循环的下一轮执行，安全。
+          // `repinRailWidths` 自身幂等（宽度已对就跳过），所以连钉不会抖动。
+          let ticks = 0
+          const tick = () => {
+            repinRailWidths()
+            ticks += 1
+            if (ticks < 8) {
+              setTimeout(tick, 150)
+            } else {
+              splitBusyRef.current = false
+            }
+          }
+          requestAnimationFrame(tick)
+        }
       })
       // 打开页生命周期 + 持久化（先订阅再灌布局——boot 布局事件也要记账）
       a.onDidAddPanel((p) => handlePanelAdded(a, p.id))
       a.onDidRemovePanel((p) => handlePanelRemoved(a, p.id))
-      // 栏宽快照（2026-10-15）：remove 突变前记左/面板双轨当前宽——末签
-      // 关组重建的几何重摊之后用来钉回（handlePanelRemoved 消费）。任何
-      // 时刻实时读 g.width，用户拖过 sash 也是最新值（非陈旧缓存）。
-      a.onWillMutateLayout((e) => {
-        if (e.kind !== 'remove') return
-        for (const g of a.groups) {
-          const region = g.panels[0]?.params?.region
-          if (region === 'left') {
-            colWidthSnapshotRef.current = { ...colWidthSnapshotRef.current, left: g.width }
-          } else if (region === 'panels') {
-            colWidthSnapshotRef.current = { ...colWidthSnapshotRef.current, panels: g.width }
-          }
-        }
+      // 机器人弹出栏开合同步（✕ 关闭 / 存档恢复都走这条——store 是
+      // Mirach 按钮态的唯一直观源）
+      a.onDidAddPanel((p) => {
+        if (p.id === BOTS_PANEL_ID) botsPanelStore.getState().setOpen(true)
+      })
+      a.onDidRemovePanel((p) => {
+        if (p.id === BOTS_PANEL_ID) botsPanelStore.getState().setOpen(false)
       })
       let persistTimer: ReturnType<typeof setTimeout> | null = null
       a.onDidLayoutChange(() => {
         if (hydratingRef.current) return
-        // 贴边标记要跟手（拖 sash 把某列拖到 0 时 chat 就该立刻内缩，不等
-        // 250ms 防抖）。收放补间期间本函数内部会让位（见其注释）。
-        refreshChatEdgeMarkers()
+        // **绝不能在布局回调里 setSize**（2026-10-22 实锤：把应用冻死）。
+        // `setSize` 会同步再触发本回调，形成无界递归/循环，主线程再也回不到
+        // 事件循环——表现就是"软件卡死动不了"，只能强杀进程。
+        // 分栏后的栏宽收敛一律走 `splitPanelOut` 之后那串**有上限的定时轮询**
+        // （见 onWillDrop 里 tick 的实现），那里不在布局回调栈里。
+        if (splitBusyRef.current) return
+        // 两轨目标宽跟随用户拖拽（sash）：dockview 按比例存宽，所以目标宽
+        // 必须自己记绝对值，窗口缩放后才能钉回同一个数（repinRailWidths）。
+        // **只在主栏没被挤到 min 时记**（2026-10-22 实锤）：窗口窄到主栏
+        // 撞 CHAT_MIN_WIDTH 时，dockview 会强行压窄某一轨（1000 宽窗口下
+        // 左栏从 300 变 293）——那是几何让位，不是用户意图。把它记成新
+        // 目标宽会导致窗口恢复后栏宽永久停在 293。
+        const chatGroups = a.groups.filter((g) => g.panels[0]?.params?.region === 'chat')
+        const chatAtMin = chatGroups.some((g) => Math.round(g.width) <= CHAT_MIN_WIDTH + 1)
+        if (!chatAtMin) {
+          for (const g of a.groups) {
+            const region = g.panels[0]?.params?.region
+            if (region !== 'left' && region !== 'panels') continue
+            const w = Math.round(g.width)
+            if (w > 0) setRailTargetWidth(region, w)
+          }
+        }
         if (persistTimer) clearTimeout(persistTimer)
         persistTimer = setTimeout(() => {
           persistTimer = null
@@ -379,17 +509,29 @@ export function DockviewShell() {
       hydratingRef.current = true
       try {
         const saved = loadLayout()
-        a.fromJSON(saved ?? FACTORY_LAYOUT)
-        if (!saved) {
-          // 出厂态钉双轨 350（fromJSON 的 size 按比例归一，不是 px；setSize
-          // 逐个调用会把差额摊给先设的轨——两轮互挤后收敛；存档 boot 不钉，
-          // 用户列宽记忆在 v9 size 里）
-          const lg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'left'))
-          const pg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'panels'))
-          for (let i = 0; i < 3; i++) {
-            pg?.api.setSize({ width: RAIL_W })
-            lg?.api.setSize({ width: RAIL_W })
-          }
+        a.fromJSON(saved ?? factoryLayout(a.width, a.height))
+        // **打开页标签名以代码为准，不认存档**（2026-10-31）。
+        //
+        // 用户："打开页的标题把打开换个说明文字"。改 `addPanel` 的 title 只
+        // 影响**新建**的锚；`fromJSON(saved)` 会用存档里持久化的旧 title，
+        // 所以老用户升级后仍看到「打开」（实测：清 localStorage 后重启，
+        // 首帧又写回了旧值——因为 fromJSON 读的是上一轮存档）。
+        //
+        // 修法 = 恢复后无条件覆写。这样 title 是**代码的常量**，与存档解耦；
+        // 下次持久化自然写回新值。
+        a.getPanel('open')?.api.setTitle(OPEN_PANEL_TITLE)
+        // 两轨宽度**按绝对值**钉回（2026-10-22）：dockview 存档按比例记宽，
+        // 恢复时如果窗口尺寸和存的时候不同（用户拖过窗口 / 换屏），300 会
+        // 按比例缩成 270 之类——与"默认 300"冲突。所以无论出厂还是存档，
+        // 都把两轨钉回目标宽（默认 300；用户拖过的宽由 onDidLayoutChange
+        // 记在 railTargetWidth 里，本函数之后照常消费）。收起态（宽 0）不钉。
+        const lg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'left'))
+        const pg = a.groups.find((g) => g.panels.some((p) => p.params?.region === 'panels'))
+        const left = leftRailDefaultWidth()
+        const panels = panelsRailDefaultWidth()
+        for (let i = 0; i < 3; i++) {
+          if (pg && Math.round(pg.width) > 0) pg.api.setSize({ width: panels })
+          if (lg && Math.round(lg.width) > 0) lg.api.setSize({ width: left })
         }
       } finally {
         hydratingRef.current = false
@@ -407,10 +549,42 @@ export function DockviewShell() {
     [handlePanelAdded, handlePanelRemoved, restoreOpenAnchor],
   )
 
+  // ── 栏宽在窗口缩放时保持绝对值（2026-10-22）────────────────────────────────
+  // dockview 按比例分配列宽：窗口从 1760 缩到 1400，300 的栏会自己缩成 240
+  // 左右。用户定稿的语义是"栏宽 = 300 定值，min 270 / max 400"——与窗口大小
+  // 无关。所以窗口尺寸稳定后把两轨钉回目标宽（主栏吃剩余）。
+  //
+  // 防抖 200ms：拖窗口边框时每秒几十次 resize，逐次 relayout 会抖。
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const onResize = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        repinRailWidths()
+      }, 200)
+    }
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
+
   // ── 窗口拖动（M1 漏迁后从 flex-layout 原样回迁，2026-10-14）──────────────
-  // window 捕获段按命中面分派：顶带（--logo-strip-h=85）内非交互面拖窗口、
+  // window 捕获段按命中面分派：顶带（--logo-strip-h=75）内非交互面拖窗口、
   // 双击最大化；绝不改用绝对定位盖层——盖层会截胡顶带内页签 pointerdown
   //（2026-09-29 定稿）。
+  // 75 必须与 tokens.css 的 --logo-strip-h 同值（2026-10-19：85 → 75）；
+  // 卡片化后顶带整体下移 --pane-edge(10)——窗边 7.5（.app-main）+
+  // 卡片内 2.5（.dv-view），可拖区的下界 = 10 + 75。改间距令牌必须同步这里。
+  //
+  // **再叠加透明边距**（2026-10-23）：窗口投影改 CSS 画之后壳从
+  // `--shell-shadow-margin`(40) 处开始，clientY 是相对**窗口矩形**的，
+  // 所以要加这条边距。最大化态令牌被覆盖成 0，判定自动回到贴屏边。
+  // 令牌读不到时按 0 处理（不是兜底——`--shell-shadow-margin` 是
+  // tokens.css 的常量，读不到说明样式没注入，那时整个界面都是坏的）。
+  const TOP_BAND_PX = 85
   useEffect(() => {
     if (!inTauri || !appWindow) return
     const win = appWindow
@@ -422,10 +596,13 @@ export function DockviewShell() {
       if (t.closest('button, input, textarea, select, a, .dv-sash, .win-resize-handle')) return
       // 页签整钮归 dockview（拖页签不是拖窗）
       if (t.closest('.dv-tab')) return
-      // 顶带（窗口顶部 85px）的面空白才拖窗
-      if (e.clientY > 85) return
+      // 顶带内的面空白才拖窗（下界随透明边距下移）
+      const margin =
+        parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--shell-shadow-margin')) || 0
+      if (e.clientY > margin + TOP_BAND_PX) return
+      // .app-main：卡片化后顶带里 10px 的栏间留白是主区，不是壳
       const onBandSurface =
-        t.closest('.app-shell, .rail-logo-leading, .left-rail-logo-row, .app-titlebar') !== null
+        t.closest('.app-shell, .app-main, .rail-logo-leading, .left-rail-logo-row, .app-titlebar') !== null
       if (!onBandSurface) return
       e.preventDefault()
       e.stopPropagation()
@@ -441,13 +618,18 @@ export function DockviewShell() {
 
   // ── 渲染 ────────────────────────────────────────────────────────────────────
   // 壳层结构（flex-layout 原版恢复——M1 换壳时漏迁了窗口框架，
-  // .app-shell/Titlebar/StatusBar/ResizeHandles 全丢，2026-10-14 实锤补回）：
+  // .app-shell/Titlebar/ResizeHandles 全丢，2026-10-14 实锤补回）：
   // AssistantRuntime 包壳（左栏 useAui / AuiIf 依赖壳级 runtime provider）→
   // .app-shell（白底圆角窗）→ ResizeHandles + Titlebar（圆点浮层）+
-  // .app-main（dockview 主区）+ StatusBar（底栏）。
+  // .app-main（dockview 主区）。
+  // 2026-10-19 用户："底栏不要了" —— StatusBar 整条撤除（占位 pill 从未接
+  // 真数据；三栏卡片化后底栏还会切断卡片的下边距）。
   return (
     <AssistantRuntime>
       <div className="app-shell">
+        {/* 全局快捷键派发器（2026-10-24 设置页「键盘快捷键」移植）：
+            必须挂在 AssistantRuntime 内——session.new 要 aui 上下文。 */}
+        <GlobalKeybinds />
         <ResizeHandles />
         <Titlebar />
         <div className="app-main dockview-host" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
@@ -461,12 +643,24 @@ export function DockviewShell() {
             // 原生 ⋮N 下拉关闭（disableTabsOverflowList）→ beUI TabsList
             // 语义 = 横滚 + 两端渐隐 + 左右箭头（tab-strip-arrows.tsx，左挂
             // prefix、右与总览钮并排挂 right）；标签总览下拉（cmdk 检索 +
-            // 关闭）保留为检索通道（>2 签出现）。
+            // 关闭）保留为检索通道。
             disableTabsOverflowList
-            // 左动作位 = 标签条「+」（最后一个标签之后——DOM 序实测：
-            // pre-actions | tabs | left-actions | …；仅面板域组渲染）。
-            leftHeaderActionsComponent={TabStripNewButton}
-            prefixHeaderActionsComponent={TabStripLeftArrow}
+            // **标签条左右分工**（2026-11-01 用户纠正，前一版我放反了）：
+            //
+            //   [标签总览 ▾] [标签1 标签2 …] [+] [右箭头]
+            //     ↑ 左：点开选标签            ↑ 右：新建面板
+            //
+            // 用户原话："标签的前面应该有个按钮，点击能打开，选择标签，这个
+            // 组件不是已经做过了吗？加号应该在标签的右面啊"。
+            //
+            // dockview 的槽位语义（core `headerActionsService.ts` 的
+            // SLOT_OPTION_KEY，DOM 序实测 pre-actions | tabs | left-actions
+            // | void | right-actions）：
+            //   prefix → dv-pre-actions-container  = tabs **之前** → 总览钮
+            //   left   → dv-left-actions-container = tabs **之后** → 加号
+            //   right  → dv-right-actions-container = 条最右 → 溢出箭头
+            prefixHeaderActionsComponent={TabStripLeading}
+            leftHeaderActionsComponent={TabStripTrailing}
             rightHeaderActionsComponent={TabStripRightSide}
             // 落点方位判定 = hermes radial 几何（drop-geometry.ts）：dockview
             // 内置 quadrant 是固定 20% 带 + 先横后纵（左下角 (15%,90%) 判
@@ -475,22 +669,22 @@ export function DockviewShell() {
             // 最近边）。组内容目标与整布局边缘目标同源消费（源码实证：
             // 两者都读 host.options.dropPositionResolver）。
             dropPositionResolver={radialDropResolver}
-            // DnD 后端 = pointer（2026-10-16 实锤：面板标签拖出分栏失效的根因）
-            // ——CEF 152 窗口模式下 **HTML5 DnD 的 drop 事件根本不派发**：最小
-            // 对照（页面内裸 <div draggable> + 落区 preventDefault）实测
-            // dragstart=1/dragover=38/drop=0/dragend=1——与 dockview、本仓库代码
-            // 全无关，是 CEF windowed 模式的平台缺口。dockview 的 dndStrategy
-            // 文档正为此设 'pointer'（"useful in environments where HTML5
-            // drag-and-drop is unreliable … embedded webviews"）：改走
-            // pointerdown/move/up 自绘拖拽，绕开缺失的 drop。
-            // 代价：跨窗（popout）HTML5 拖拽与原生 drag image 不可用——本应用
-            // 无 popout 分栏需求（三栏定式），可接受。
+            // DnD 后端 = pointer（保留既有已验证行为；理由已随运行时换代更新）
+            //
+            // 历史：CEF 152 窗口模式下 HTML5 DnD 的 drop 事件根本不派发
+            // （裸 <div draggable> 最小对照实测 dragstart=1/dragover=38/
+            // drop=0），故当年切 pointer 自绘拖拽。
+            // **2026-10-22 换回 wry/WebView2 后同一对照实测 drop=1** ——
+            // 那个平台缺口不存在了。这里仍留 pointer，是为了**不改动已验收
+            // 的拖拽行为**（pointer 全输入类型统一路径，与当年 E2E 一致）。
+            // 若要恢复 dockview 默认（`'auto'`：鼠标走 HTML5、触摸/笔走
+            // pointer，且 popout 跨窗拖拽与原生 drag image 可用），删掉本行
+            // 即可——WebView2 下已验证可行。
             dndStrategy="pointer"
             onReady={onReady}
             className="dockview-theme-light"
           />
         </div>
-        <StatusBar />
       </div>
     </AssistantRuntime>
   )

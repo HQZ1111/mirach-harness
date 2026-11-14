@@ -128,6 +128,40 @@ export const SPRING_TOAST_STACK = springOf('toast', { stiffness: 420, damping: 3
 export const POPOVER_GOO_OPEN = visualSpringOf('goo-open', { dur: 0.3, bounce: 0.15 })
 export const POPOVER_GOO_CLOSE = visualSpringOf('goo-close', { dur: 0.21, bounce: 0.15 })
 
+/**
+ * 弹层液滴粘性合并（goo）**总开关**——`Popover` / `ContextMenu` / `GooSurface`
+ * 的 `goo` 默认值全部取它，调用点不许传（用户 2026-11-01："调用点没传，
+ * 直接在令牌中统一开关不行吗"）。
+ *
+ * 读 `--beui-popover-goo`（tokens.css，唯一源头）：0 = 关（默认，无脖子、
+ * 按钮不被投影），1 = 开（beui 原设计）。无 DOM（node 测试）回退 `false`
+ * ——与令牌默认值一致，不是静默降级。
+ */
+const readGooSwitch = (): boolean => {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return false
+  try {
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue('--beui-popover-goo')
+      .trim()
+    if (!raw) {
+      console.error(
+        '[ease] 令牌 --beui-popover-goo 未定义——回退 false（tokens.css 是否先于本模块求值？）',
+      )
+      return false
+    }
+    const n = Number.parseFloat(raw)
+    if (!Number.isFinite(n)) {
+      console.error('[ease] 令牌 --beui-popover-goo 不是数值——回退 false', raw)
+      return false
+    }
+    return n !== 0
+  } catch {
+    return false
+  }
+}
+
+export const POPOVER_GOO = readGooSwitch()
+
 /** Select 展开（visualDuration 式） */
 export const SELECT_OPEN = visualSpringOf('unfold', { dur: 0.2, bounce: 0.12 })
 

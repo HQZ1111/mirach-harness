@@ -49,7 +49,7 @@ export function TerminalBlock({
         </span>
         {done ? (
           <div className="flex items-center gap-1">
-            <CheckIcon className="size-3 text-emerald-500" />
+            <CheckIcon className="size-[var(--size-icon-sm)] text-emerald-500" />
             <span
               className={cn(
                 mono,

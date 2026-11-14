@@ -44,6 +44,7 @@ import {
   toModelOptions,
 } from '@/components/assistant-ui/model-catalog-store'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
+import { ModeSwitch } from '@/components/assistant-ui/mode-switch'
 
 const COMMANDS = [
   { name: 'image', description: '生成一张图片', icon: ImageIcon },
@@ -188,24 +189,54 @@ export function ComposerWired() {
       })
       .catch((e) => {
         // 首条消息前必然发生（无会话=预期域状态）；其余失败照常可见
-        if (!String(e).includes('no active session')) console.error('[pi] 会话状态获取失败', e)
+        if (!String(e).includes('no active session')) {
+          console.error('[pi] 会话状态获取失败', e)
+          return
+        }
+        // **无会话时读 settings.json 的默认模型**（2026-10-26）：新建会话
+        // 就是按这两个字段起跑的，所以它才是"下一条消息会用哪个模型"的
+        // 真相。不读的话选择器会退回 models[0]（目录第一项）——用户看到的
+        // 名字与实际将用的模型不是同一个，正是"模型选择是假的"的观感来源。
+        void invoke<{ default_provider?: string; default_model?: string } | null>(
+          'pi_get_settings',
+        )
+          .then((settings) => {
+            if (cancelled) return
+            const p = settings?.default_provider
+            const m = settings?.default_model
+            if (p && m) modelCatalogStore.getState().setCurrentModel(`${p}/${m}`)
+          })
+          .catch((e2) => {
+            console.error('[pi] 读取默认模型失败', e2)
+          })
       })
     return () => {
       cancelled = true
     }
   }, [isRunning])
+  const [modelError, setModelError] = useState<string | null>(null)
   const onModelChange = useCallback((id: string) => {
     // provider 不含 '/'，model id 可能含（HF 风格 meta-llama/Llama-3）——
     // 必须按第一个 '/' 切分；split('/') 会截断 modelId（审查 #1 实锤）。
     const idx = id.indexOf('/')
-    if (idx <= 0) return
+    if (idx <= 0) {
+      setModelError(`模型标识无效：${id}`)
+      return
+    }
     const provider = id.slice(0, idx)
     const modelId = id.slice(idx + 1)
     // 错误即错误：set_model 成功才更新选中态，失败保持原值且错误可见
     // ——不乐观更新（UI 假装切换成功 = 兜底）。
+    //
+    // 2026-10-26：失败此前只 console.error，用户界面上完全看不到（"选了
+    // 没反应"）。现在错误上到工具栏的 modelError，选择器旁边可见。
+    setModelError(null)
     void invoke('pi_set_model', { provider, modelId })
       .then(() => modelCatalogStore.getState().setCurrentModel(id))
-      .catch((e) => console.error(`[pi] set_model ${id} 失败（保持原选择）`, e))
+      .catch((e) => {
+        console.error(`[pi] set_model ${id} 失败（保持原选择）`, e)
+        setModelError(`切换模型失败：${String(e)}`)
+      })
   }, [])
   const onEffortChange = useCallback((level: string) => {
     // 思考档位（§4.5 控制面，pi_set_thinking_level 参数 level）：成功才写
@@ -347,10 +378,38 @@ export function ComposerWired() {
             {/* 官方工具行：左附件钮 / 右动作组（模型触发器 → 语音钮 →
                 上下文环 → 发送/停止），顺序照 /elements/composer */}
             <ComposerToolbar>
-              <ComposerPrimitive.AddAttachment asChild>
-                <ComposerAttachButton aria-label="添加附件" />
-              </ComposerPrimitive.AddAttachment>
+              {/* 左组（2026-11-01 用户："不在加号后面在中间了"）：ComposerToolbar
+                  是 justify-between——附件钮与模式钮必须包成一个组才贴左，
+                  否则第二个子元素被推到行中 */}
+              <div className="flex items-center gap-1">
+                <ComposerPrimitive.AddAttachment asChild>
+                  <ComposerAttachButton aria-label="添加附件" />
+                </ComposerPrimitive.AddAttachment>
+                {/* 模式切换（ZCode V4ComposerModeSwitch 同位："+" 右侧）：
+                    计划模式 / 文件内修改 / 完全访问（mode-store 全链路） */}
+                <ModeSwitch />
+              </div>
               <ComposerActions>
+                {/* 上下文明细按钮（ZCode 同位：模型选择器左侧；2026-11-01
+                    用户："模型选择的左边加个上下文的按钮"）。点击弹明细卡
+                    （Input/Cached/Output/Reasoning 分解）。**常驻**：无用量
+                    显示空态（– / 窗口），不隐藏——用户追问"上下文按钮呢"。
+                    窗口缺失（无模型目录条目）仍不渲染。 */}
+                {currentContextWindow !== undefined && currentContextWindow > 0 && (
+                  <ContextDisplay.Button
+                    modelContextWindow={currentContextWindow}
+                    usage={
+                      usage
+                        ? {
+                            totalTokens: usage.totalTokens,
+                            inputTokens: usage.inputTokens,
+                            cachedInputTokens: usage.cachedInputTokens,
+                            outputTokens: usage.outputTokens,
+                          }
+                        : undefined
+                    }
+                  />
+                )}
                 <ModelSelector
                   align="end"
                   className="rounded-full"
@@ -362,6 +421,17 @@ export function ComposerWired() {
                   size="sm"
                   variant="ghost"
                 />
+                {/* 模型切换失败必须可见（规矩 12：错误就是错误）——此前
+                    只进 console，用户看到的只是"选了没反应"。 */}
+                {modelError && (
+                  <span
+                    className="text-destructive max-w-48 truncate text-[11px]"
+                    role="alert"
+                    title={modelError}
+                  >
+                    {modelError}
+                  </span>
+                )}
                 {dictation.supported && (
                   <ComposerVoiceButton
                     active={dictation.recording}
@@ -370,24 +440,8 @@ export function ComposerWired() {
                     onClick={() => (dictation.recording ? dictation.stop() : dictation.start())}
                   />
                 )}
-                {/* 用量环（官方 compact 形态：环+百分比嵌动作组，悬停出
-                    明细浮层）：usage 与模型上下文窗口任一缺失即不渲染；
-                    窗口 <=0 同样不渲染（除零 → clamp 100 红环误报，审查
-                    #7） */}
-                {usage &&
-                  currentModel &&
-                  currentContextWindow !== undefined &&
-                  currentContextWindow > 0 && (
-                  <ContextDisplay.Ring
-                    modelContextWindow={currentContextWindow}
-                    usage={{
-                      inputTokens: usage.inputTokens,
-                      outputTokens: usage.outputTokens,
-                      cachedInputTokens: usage.cachedInputTokens,
-                      totalTokens: usage.totalTokens,
-                    }}
-                  />
-                )}
+                {/* 右侧原 Ring 已撤（2026-11-01）：上下文入口统一到模型选择器
+                    左侧的明细按钮（同一信息的第二个入口是噪声）。 */}
                 {isRunning ? (
                   <ComposerPrimitive.Cancel asChild>
                     <ComposerSend aria-label="停止生成" idle={false} streaming />

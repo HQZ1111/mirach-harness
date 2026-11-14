@@ -55,7 +55,7 @@ export function ElicitationForm({
     >
       <div className="flex items-center gap-2.5">
         <span className="bg-foreground/[0.05] text-foreground/45 flex size-7 shrink-0 items-center justify-center rounded-lg">
-          <PlugIcon className="size-3.5" />
+          <PlugIcon className="size-[var(--size-icon-md)]" />
         </span>
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">
           {server}
@@ -154,12 +154,12 @@ export function ElicitationForm({
           >
             {state === "accepted" ? (
               <>
-                <CheckIcon className="size-3.5 text-emerald-500" />
+                <CheckIcon className="size-[var(--size-icon-md)] text-emerald-500" />
                 Sent to {server}
               </>
             ) : (
               <>
-                <XIcon className="text-foreground/45 size-3.5" />
+                <XIcon className="text-foreground/45 size-[var(--size-icon-md)]" />
                 Declined
               </>
             )}

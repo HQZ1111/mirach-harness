@@ -86,7 +86,7 @@ export function MobileComposer({
             "size-9 shrink-0 disabled:pointer-events-none disabled:opacity-30",
           )}
         >
-          <PlusIcon className="size-4" />
+          <PlusIcon className="size-[var(--size-icon-lg)]" />
         </button>
 
         <div
@@ -110,7 +110,7 @@ export function MobileComposer({
             className="text-foreground/85 placeholder:text-foreground/30 min-w-0 flex-1 bg-transparent text-[16px] outline-none"
           />
           {value === "" && (
-            <MicIcon className="text-foreground/35 size-4 shrink-0" />
+            <MicIcon className="text-foreground/35 size-[var(--size-icon-lg)] shrink-0" />
           )}
         </div>
 
@@ -126,9 +126,9 @@ export function MobileComposer({
             )}
           >
             {running ? (
-              <SquareIcon className="size-3 fill-current" />
+              <SquareIcon className="size-[var(--size-icon-sm)] fill-current" />
             ) : (
-              <ArrowUpIcon className="size-4" />
+              <ArrowUpIcon className="size-[var(--size-icon-lg)]" />
             )}
           </button>
         )}

@@ -3,9 +3,11 @@ use crate::session::{SessionEntry, SessionHeader};
 use crate::session_metrics;
 use fsqlite::{FrankenError as SqliteError, Row as SqliteRow, SqliteValue};
 use sha2::{Digest as _, Sha256};
-use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+
+mod attachments;
+mod entry_io;
 
 /// Suffixes of every auxiliary file the fsqlite engine may create or read
 /// beside a database file. `-journal` covers legacy rollback-journal
@@ -129,6 +131,8 @@ const MAX_SQLITE_JSON_BYTES: usize = 100 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct SqliteSessionMeta {
     pub header: SessionHeader,
+    /// Effective saved binding used for discovery; `header.cwd` is provenance.
+    pub cwd: String,
     pub message_count: u64,
     pub name: Option<String>,
 }
@@ -220,15 +224,6 @@ fn row_get_string(row: &SqliteRow, index: usize, column: &str) -> Result<String>
     }
 }
 
-fn row_get_i64(row: &SqliteRow, index: usize, column: &str) -> Result<i64> {
-    match row.get(index) {
-        Some(SqliteValue::Integer(value)) => Ok(*value),
-        other => Err(Error::session(format!(
-            "SQLite row read failed: expected INTEGER for column {column}, got {other:?}"
-        ))),
-    }
-}
-
 fn malformed_json_error(kind: &str, json: &str, error: &serde_json::Error) -> Error {
     let digest = crate::package_manager::hex_encode(&Sha256::digest(json.as_bytes()));
     Error::session(format!(
@@ -264,9 +259,11 @@ fn parse_sqlite_json<T: serde::de::DeserializeOwned>(kind: &str, json: &str) -> 
 }
 
 fn read_stored_header(conn: &SqliteConnection) -> Result<Option<SessionHeader>> {
-    let mut rows = map_sqlite_result(
-        conn.query_sync("SELECT id,json FROM pi_session_header ORDER BY id", &[]),
-    )?;
+    entry_io::preflight_header(conn)?;
+    let mut rows = map_sqlite_result(conn.query_sync(
+        "SELECT id,json FROM pi_session_header ORDER BY id LIMIT 2",
+        &[],
+    ))?;
     if rows.len() > 1 {
         return Err(Error::session(
             "SQLite session contains multiple header rows",
@@ -371,46 +368,12 @@ fn ensure_private_sqlite_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-struct StoredEntry {
-    entry: SessionEntry,
-    canonical_json: String,
-}
-
-fn read_stored_entries(conn: &SqliteConnection) -> Result<Vec<StoredEntry>> {
-    let entry_rows = map_sqlite_result(conn.query_sync(
-        "SELECT seq,json FROM pi_session_entries ORDER BY seq ASC",
-        &[],
-    ))?;
-
-    let mut entries = Vec::with_capacity(entry_rows.len());
-    for (index, row) in entry_rows.into_iter().enumerate() {
-        let seq = row_get_i64(&row, 0, "seq")?;
-        let expected_seq = i64::try_from(index)
-            .map_err(|_| Error::session("SQLite session entry count exceeds i64"))?
-            .checked_add(1)
-            .ok_or_else(|| Error::session("SQLite session sequence overflow"))?;
-        if seq != expected_seq {
-            return Err(Error::session(format!(
-                "SQLite session entry sequence is not contiguous: expected={expected_seq} actual={seq}"
-            )));
-        }
-        let json = row_get_string(&row, 1, "json")?;
-        let entry: SessionEntry = parse_sqlite_json("session entry", &json)?;
-        let canonical_json = serde_json::to_string(&entry)?;
-        entries.push(StoredEntry {
-            entry,
-            canonical_json,
-        });
-    }
-    Ok(entries)
+fn read_stored_entries(conn: &SqliteConnection) -> Result<Vec<SessionEntry>> {
+    entry_io::read_entries(conn)
 }
 
 fn read_all_entries(conn: &SqliteConnection) -> Result<Vec<SessionEntry>> {
-    Ok(read_stored_entries(conn)?
-        .into_iter()
-        .map(|stored| stored.entry)
-        .collect())
+    read_stored_entries(conn)
 }
 
 fn is_missing_meta_table_error(err: &SqliteError) -> bool {
@@ -419,7 +382,8 @@ fn is_missing_meta_table_error(err: &SqliteError) -> bool {
 
 fn query_session_meta_rows(conn: &SqliteConnection) -> Result<Vec<SqliteRow>> {
     match conn.query_sync(
-        "SELECT key,value FROM pi_session_meta WHERE key IN ('message_count','name')",
+        "SELECT key,value FROM pi_session_meta \
+         WHERE key IN ('message_count','name','name_json','workdir_binding_json')",
         &[],
     ) {
         Ok(rows) => Ok(rows),
@@ -447,10 +411,43 @@ fn compute_message_count_and_name(entries: &[SessionEntry]) -> (u64, Option<Stri
     (message_count, name)
 }
 
+fn read_latest_workdir_binding(conn: &SqliteConnection) -> Result<Option<SessionEntry>> {
+    #[derive(serde::Deserialize)]
+    struct EntryKind {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default, rename = "customType")]
+        custom_type: Option<String>,
+    }
+
+    let mut binding = None;
+    entry_io::visit_entry_json(conn, |json| {
+        let kind: EntryKind = parse_sqlite_json("session entry metadata", json)?;
+        if kind.kind == "custom" && kind.custom_type.is_none() {
+            return Err(Error::session(
+                "PI_SESSION_WORKDIR_SOURCE_INVALID: custom entry is missing its type",
+            ));
+        }
+        if kind
+            .custom_type
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with(crate::session_workdir::WORKDIR_BINDING_PREFIX))
+        {
+            if kind.kind != "custom" {
+                return Err(Error::session(
+                    "PI_SESSION_WORKDIR_BINDING_INVALID: workdir metadata is not a custom entry",
+                ));
+            }
+            binding = Some(parse_sqlite_json("session workdir metadata", json)?);
+        }
+        Ok(())
+    })?;
+    Ok(binding)
+}
+
 struct ReconciledEntries {
     entries: Vec<SessionEntry>,
-    json: Vec<String>,
-    appended_json: Vec<String>,
+    appended_start: usize,
 }
 
 fn validate_unique_incoming_entry_ids(entries: &[SessionEntry], context: &str) -> Result<()> {
@@ -469,55 +466,45 @@ fn validate_unique_incoming_entry_ids(entries: &[SessionEntry], context: &str) -
 }
 
 fn reconcile_entries(
-    stored_entries: Vec<StoredEntry>,
+    stored_entries: Vec<SessionEntry>,
     incoming_entries: &[SessionEntry],
 ) -> Result<ReconciledEntries> {
-    let mut entries = Vec::with_capacity(stored_entries.len() + incoming_entries.len());
-    let mut json = Vec::with_capacity(stored_entries.len() + incoming_entries.len());
-    let mut by_id =
-        std::collections::HashMap::with_capacity(stored_entries.len() + incoming_entries.len());
+    let mut entries = stored_entries;
+    let appended_start = entries.len();
+    let mut by_id = std::collections::HashMap::with_capacity(entries.len());
 
-    for stored in stored_entries {
+    for (index, stored) in entries.iter().enumerate() {
         let id = stored
-            .entry
             .base_id()
             .ok_or_else(|| Error::session("persisted SQLite session entry is missing its ID"))?;
-        if by_id
-            .insert(id.clone(), stored.canonical_json.clone())
-            .is_some()
-        {
+        if by_id.insert(id.clone(), index).is_some() {
             return Err(Error::session(format!(
                 "persisted SQLite session contains duplicate entry ID {id}"
             )));
         }
-        entries.push(stored.entry);
-        json.push(stored.canonical_json);
     }
 
-    let mut appended_json = Vec::new();
     for incoming in incoming_entries {
         let id = incoming
             .base_id()
             .ok_or_else(|| Error::session("SQLite session entry is missing its ID"))?;
-        let encoded = serde_json::to_string(incoming)?;
-        if let Some(persisted) = by_id.get(id) {
-            if persisted != &encoded {
+        if let Some(&index) = by_id.get(id) {
+            // Compare exact canonical bytes for this ID only. Do not keep a
+            // second serialized copy of every hydrated media entry alive.
+            if !entry_io::canonical_matches(&entries[index], incoming)? {
                 return Err(Error::session(format!(
                     "SQLite session entry ID {id} has conflicting persisted content"
                 )));
             }
             continue;
         }
-        by_id.insert(id.clone(), encoded.clone());
+        by_id.insert(id.clone(), entries.len());
         entries.push(incoming.clone());
-        json.push(encoded.clone());
-        appended_json.push(encoded);
     }
 
     Ok(ReconciledEntries {
         entries,
-        json,
-        appended_json,
+        appended_start,
     })
 }
 
@@ -534,43 +521,41 @@ fn validate_sqlite_sequence_range(start_seq: usize, entry_count: usize) -> Resul
 
 fn insert_entry_jsons(
     conn: &SqliteConnection,
-    json: &[String],
+    json: impl ExactSizeIterator<Item = Result<String>>,
     existing_entry_count: usize,
 ) -> Result<()> {
     validate_sqlite_sequence_range(existing_entry_count, json.len())?;
-    if json.is_empty() {
+    if json.len() == 0 {
         return Ok(());
     }
     let mut seq = i64::try_from(existing_entry_count)
         .map_err(|_| Error::session("SQLite existing entry count exceeds i64"))?
         .checked_add(1)
         .ok_or_else(|| Error::session("SQLite session sequence overflow"))?;
-    let mut remaining = json.len();
-    for chunk in json.chunks(200) {
-        let mut sql = String::with_capacity(64 + chunk.len() * 16);
-        sql.push_str("INSERT INTO pi_session_entries (seq,json) VALUES ");
-        let mut params = Vec::with_capacity(chunk.len() * 2);
-        for (index, entry_json) in chunk.iter().enumerate() {
-            if index > 0 {
-                sql.push(',');
-            }
-            let _ = write!(sql, "(?{},?{})", index * 2 + 1, index * 2 + 2);
-            params.push(SqliteValue::from(seq));
-            params.push(SqliteValue::from(entry_json.clone()));
-            remaining -= 1;
-            if remaining > 0 {
-                seq = seq
-                    .checked_add(1)
-                    .ok_or_else(|| Error::session("SQLite session sequence overflow"))?;
-            }
+    let entry_count = json.len();
+    // The caller owns the transaction: blobs and the entries referencing them
+    // must commit or roll back together, on full saves and incremental appends.
+    let mut encoder = attachments::EntryEncoder::new(conn);
+    let mut batch = entry_io::InsertBatch::new(conn);
+    for (index, entry_json) in json.enumerate() {
+        let stored = encoder.encode(&entry_json?)?;
+        batch.push(seq, stored)?;
+        if index + 1 < entry_count {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| Error::session("SQLite session sequence overflow"))?;
         }
-        map_sqlite_result(conn.execute_sync(&sql, &params))?;
     }
-    Ok(())
+    batch.finish()
 }
 
 fn write_session_meta(conn: &SqliteConnection, entries: &[SessionEntry]) -> Result<()> {
     let (message_count, name) = compute_message_count_and_name(entries);
+    // Keep an explicit cached absence distinct from a missing cache row, and
+    // preserve Some("") separately from None. The old plain-text name row
+    // cannot represent that distinction; it remains available to older readers.
+    let name_json = serde_json::to_string(&name)?;
+    validate_sqlite_json_for_write("session name metadata", &name_json)?;
     map_sqlite_result(conn.execute_sync(
         "INSERT OR REPLACE INTO pi_session_meta (key,value) VALUES (?1,?2)",
         &[
@@ -583,6 +568,23 @@ fn write_session_meta(conn: &SqliteConnection, entries: &[SessionEntry]) -> Resu
         &[
             SqliteValue::from("name"),
             SqliteValue::from(name.unwrap_or_default()),
+        ],
+    ))?;
+    map_sqlite_result(conn.execute_sync(
+        "INSERT OR REPLACE INTO pi_session_meta (key,value) VALUES (?1,?2)",
+        &[SqliteValue::from("name_json"), SqliteValue::from(name_json)],
+    ))?;
+    // Persist the latest session-wide record, including explicit absence, in
+    // the same transaction as the entries. Preserve unsupported or malformed
+    // binding data so discovery rejects it instead of reviving an older cwd.
+    let binding_json =
+        serde_json::to_string(&crate::session_workdir::latest_workdir_binding(entries))?;
+    validate_sqlite_json_for_write("session workdir metadata", &binding_json)?;
+    map_sqlite_result(conn.execute_sync(
+        "INSERT OR REPLACE INTO pi_session_meta (key,value) VALUES (?1,?2)",
+        &[
+            SqliteValue::from("workdir_binding_json"),
+            SqliteValue::from(binding_json),
         ],
     ))?;
     Ok(())
@@ -604,11 +606,13 @@ pub async fn load_session(path: &Path) -> Result<(SessionHeader, Vec<SessionEntr
 
     run_on_sqlite_thread(|| {
         let conn = open_sqlite_connection_read_only(path)?;
+        let snapshot = entry_io::ReadSnapshot::begin(&conn)?;
 
         let header = read_stored_header(&conn)?
             .ok_or_else(|| Error::session("SQLite session missing header row"))?;
 
         let entries = read_all_entries(&conn)?;
+        snapshot.finish()?;
 
         Ok((header, entries))
     })
@@ -630,6 +634,7 @@ pub async fn load_session_meta(path: &Path) -> Result<SqliteSessionMeta> {
 
     run_on_sqlite_thread(|| {
         let conn = open_sqlite_connection_read_only(path)?;
+        let snapshot = entry_io::ReadSnapshot::begin(&conn)?;
 
         let header = read_stored_header(&conn)?
             .ok_or_else(|| Error::session("SQLite session missing header row"))?;
@@ -638,31 +643,67 @@ pub async fn load_session_meta(path: &Path) -> Result<SqliteSessionMeta> {
 
         let mut message_count: Option<u64> = None;
         let mut name: Option<String> = None;
+        let mut name_cached = false;
+        let mut legacy_name: Option<String> = None;
+        let mut binding: Option<Option<SessionEntry>> = None;
         for row in meta_rows {
             let key = row_get_string(&row, 0, "key")?;
             let value = row_get_string(&row, 1, "value")?;
             match key.as_str() {
                 "message_count" => message_count = value.parse::<u64>().ok(),
+                "name_json" => {
+                    name = parse_sqlite_json("session name metadata", &value)?;
+                    name_cached = true;
+                }
                 "name" if !value.is_empty() => {
-                    name = Some(value);
+                    legacy_name = Some(value);
+                }
+                "workdir_binding_json" => {
+                    binding = Some(parse_sqlite_json("session workdir metadata", &value)?);
                 }
                 _ => {}
             }
         }
 
-        if message_count.is_none() || name.is_none() {
+        // Old databases without a typed cache can still use a nonempty name
+        // row. An empty old row is ambiguous, so only that legacy case needs
+        // the historical scan. New unnamed sessions take the metadata-only path.
+        if !name_cached && legacy_name.is_some() {
+            name = legacy_name;
+            name_cached = true;
+        }
+        if message_count.is_none() || !name_cached {
             let entries = read_all_entries(&conn)?;
             let (fallback_message_count, fallback_name) = compute_message_count_and_name(&entries);
             if message_count.is_none() {
                 message_count = Some(fallback_message_count);
             }
-            if name.is_none() {
+            if !name_cached {
                 name = fallback_name;
             }
+            if binding.is_none() {
+                binding = Some(crate::session_workdir::latest_workdir_binding(&entries).cloned());
+            }
+        }
+        if binding.is_none() {
+            binding = Some(read_latest_workdir_binding(&conn)?);
         }
 
+        let binding = binding.flatten().into_iter().collect::<Vec<_>>();
+        if !binding.is_empty() && crate::session_workdir::latest_workdir_binding(&binding).is_none()
+        {
+            return Err(Error::session(
+                "PI_SESSION_WORKDIR_BINDING_INVALID: invalid cached workdir record",
+            ));
+        }
+        let cwd = crate::session_workdir::binding_path_from_entries(&header, &binding)?
+            .display()
+            .to_string();
+
+        snapshot.finish()?;
         Ok(SqliteSessionMeta {
             header,
+            cwd,
             message_count: message_count.unwrap_or(0),
             name,
         })
@@ -784,6 +825,52 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_keeps_concurrent_entries_and_only_appends_new_ids() {
+        let original = message_entry_with_id("original", "one");
+        let concurrent = message_entry_with_id("concurrent", "two");
+        let incoming = message_entry_with_id("incoming", "three");
+        let reconciled =
+            reconcile_entries(vec![original.clone(), concurrent], &[original, incoming])
+                .expect("merge stale snapshot");
+        assert_eq!(reconciled.appended_start, 2);
+        let ids: Vec<_> = reconciled
+            .entries
+            .iter()
+            .map(|entry| entry.base_id().expect("ID").as_str())
+            .collect();
+        assert_eq!(ids, ["original", "concurrent", "incoming"]);
+    }
+
+    #[test]
+    fn reconciliation_does_not_treat_equal_length_payloads_as_equal() {
+        let original = message_entry_with_id("same", "one");
+        let conflicting = message_entry_with_id("same", "two");
+        let error = reconcile_entries(vec![original], &[conflicting])
+            .err()
+            .expect("conflicting ID");
+        assert!(error.to_string().contains("conflicting persisted content"));
+    }
+
+    #[test]
+    fn reconciliation_checks_persisted_ids_even_without_incoming_entries() {
+        let original = message_entry_with_id("duplicate", "content");
+        let error = reconcile_entries(vec![original.clone(), original], &[])
+            .err()
+            .expect("persisted duplicate ID");
+        assert!(error.to_string().contains("duplicate entry ID"));
+    }
+
+    #[test]
+    fn idempotent_reconciliation_has_an_empty_append_range() {
+        let original = message_entry_with_id("unchanged", "quotes: \"\\\n🙂");
+        let reconciled =
+            reconcile_entries(vec![original.clone()], &[original]).expect("idempotent replay");
+        assert_eq!(reconciled.entries.len(), 1);
+        assert_eq!(reconciled.appended_start, 1);
+        assert!(reconciled.entries[reconciled.appended_start..].is_empty());
+    }
+
+    #[test]
     fn compute_counts_empty() {
         let (count, name) = compute_message_count_and_name(&[]);
         assert_eq!(count, 0);
@@ -854,6 +941,7 @@ mod tests {
                 provider: "anthropic".to_string(),
                 model_id: "claude-sonnet-4-5".to_string(),
                 role: None,
+                failover: None,
             }),
             message_entry(),
         ];
@@ -925,6 +1013,7 @@ mod tests {
                 provider: "openai".to_string(),
                 model_id: "gpt-4".to_string(),
                 role: None,
+                failover: None,
             }),
             session_info_entry(Some("Named".to_string())),
             SessionEntry::Label(LabelEntry {
@@ -984,6 +1073,7 @@ mod tests {
                 id: "test-session".to_string(),
                 ..SessionHeader::default()
             },
+            cwd: "/workspace".to_string(),
             message_count: 42,
             name: Some("My Session".to_string()),
         };
@@ -996,6 +1086,7 @@ mod tests {
     fn sqlite_session_meta_no_name() {
         let meta = SqliteSessionMeta {
             header: SessionHeader::default(),
+            cwd: "/workspace".to_string(),
             message_count: 0,
             name: None,
         };
@@ -1138,16 +1229,228 @@ mod tests {
 
         with_write_connection(&path, |conn| {
             map_sqlite_result(conn.execute_sync(
-                "DELETE FROM pi_session_meta WHERE key = ?1",
-                &[SqliteValue::from("name")],
+                "DELETE FROM pi_session_meta WHERE key IN (?1,?2)",
+                &[SqliteValue::from("name"), SqliteValue::from("name_json")],
             ))
         })
-        .expect("delete name meta row");
+        .expect("remove both cached name representations");
 
         let meta = futures::executor::block_on(async { load_session_meta(&path).await })
             .expect("load sqlite meta");
         assert_eq!(meta.message_count, 2);
         assert_eq!(meta.name.as_deref(), Some("Recovered Name"));
+    }
+
+    #[test]
+    fn typed_name_cache_preserves_absence_empty_and_unicode_names() {
+        for name in [None, Some(String::new()), Some("音声 review".to_string())] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("typed-name.sqlite");
+            let header = SessionHeader {
+                id: "typed-name-cache".to_string(),
+                ..SessionHeader::default()
+            };
+            let entries = vec![message_entry(), session_info_entry(name.clone())];
+            futures::executor::block_on(save_session(&path, &header, &entries, true))
+                .expect("save name cache");
+            with_write_connection(&path, |conn| {
+                let rows = map_sqlite_result(conn.query_sync(
+                    "SELECT value FROM pi_session_meta WHERE key = 'name_json'",
+                    &[],
+                ))?;
+                assert_eq!(rows.len(), 1);
+                assert_eq!(
+                    row_get_string(&rows[0], 0, "value")?,
+                    serde_json::to_string(&name)?
+                );
+                // A metadata lookup is not an integrity audit. Corrupt entry
+                // bytes prove that it does not read/hydrate the conversation.
+                map_sqlite_result(conn.execute_sync(
+                    "UPDATE pi_session_entries SET json = ?1 WHERE seq = 1",
+                    &[SqliteValue::from("{")],
+                ))?;
+                Ok(())
+            })
+            .expect("inspect cache and poison history");
+            let meta =
+                futures::executor::block_on(load_session_meta(&path)).expect("metadata-only read");
+            assert_eq!(meta.name, name);
+            assert_eq!(meta.message_count, 1);
+            futures::executor::block_on(load_session(&path))
+                .expect_err("full load must still detect corrupt history");
+        }
+    }
+
+    #[test]
+    fn unnamed_session_listing_does_not_read_attachment_blobs() {
+        use crate::model::{ContentBlock, ImageContent};
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("media-listing.sqlite");
+        let header = SessionHeader {
+            id: "media-listing".to_string(),
+            ..SessionHeader::default()
+        };
+        let entry = SessionEntry::Message(MessageEntry {
+            base: dummy_base(),
+            message: SessionMessage::User {
+                content: UserContent::Blocks(vec![ContentBlock::Image(ImageContent {
+                    data: base64::engine::general_purpose::STANDARD.encode(vec![1u8; 65 * 1024]),
+                    mime_type: "image/png".to_string(),
+                })]),
+                timestamp: None,
+            },
+        });
+        let mut source = crate::session::Session::in_memory();
+        source.header = header.clone();
+        source.entries.push(entry);
+        crate::session_workdir::attach_session_workdir(&mut source, dir.path())
+            .expect("attach metadata fixture");
+        futures::executor::block_on(save_session(&path, &header, &source.entries, true))
+            .expect("save large attachment");
+        with_write_connection(&path, |conn| {
+            // Keep the same byte count so only payload verification, not a
+            // superficial length check, can catch this corruption.
+            map_sqlite_result(conn.execute_sync(
+                "UPDATE pi_session_blobs SET data = ?1",
+                &[SqliteValue::from(vec![2u8; 65 * 1024])],
+            ))
+        })
+        .expect("poison blob payload");
+        let meta = futures::executor::block_on(load_session_meta(&path))
+            .expect("listing must not hydrate attachments");
+        assert_eq!(meta.message_count, 1);
+        assert!(meta.name.is_none());
+        with_write_connection(&path, |conn| {
+            map_sqlite_result(
+                conn.execute_raw("DELETE FROM pi_session_meta WHERE key='workdir_binding_json'"),
+            )
+        })
+        .expect("emulate metadata written before workspace bindings were cached");
+        let legacy_meta = futures::executor::block_on(load_session_meta(&path))
+            .expect("legacy workspace scan must not hydrate attachment blobs");
+        assert_eq!(
+            legacy_meta.cwd,
+            dir.path()
+                .canonicalize()
+                .expect("canonical")
+                .display()
+                .to_string()
+        );
+        assert_eq!(legacy_meta.header.cwd, header.cwd);
+        assert_eq!(legacy_meta.message_count, 1);
+        let error = futures::executor::block_on(load_session(&path))
+            .expect_err("opening the session verifies the attachment");
+        assert!(error.to_string().contains("PI_SESSION_ATTACHMENT_INVALID"));
+    }
+
+    #[test]
+    fn legacy_plain_name_rows_are_never_interpreted_as_json() {
+        for name in ["null", "\"literal quotes\"", "{not JSON}", ""] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("legacy-name.sqlite");
+            let header = SessionHeader {
+                id: "legacy-name".to_string(),
+                ..SessionHeader::default()
+            };
+            let entries = vec![message_entry(), session_info_entry(Some(name.to_string()))];
+            futures::executor::block_on(save_session(&path, &header, &entries, true))
+                .expect("seed legacy name fixture");
+            with_write_connection(&path, |conn| {
+                map_sqlite_result(
+                    conn.execute_raw("DELETE FROM pi_session_meta WHERE key = 'name_json'"),
+                )
+            })
+            .expect("leave the legacy plain-text name row");
+            let meta =
+                futures::executor::block_on(load_session_meta(&path)).expect("legacy metadata");
+            assert_eq!(meta.name.as_deref(), Some(name));
+            assert_eq!(meta.message_count, 1);
+        }
+    }
+
+    #[test]
+    fn append_refreshes_the_typed_name_cache_in_the_same_transaction() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rename-cache.sqlite");
+        let header = SessionHeader {
+            id: "rename-cache".to_string(),
+            ..SessionHeader::default()
+        };
+        futures::executor::block_on(async {
+            save_session(&path, &header, &[message_entry()], true).await?;
+            for (index, name) in ["named", "", "latest"].into_iter().enumerate() {
+                append_entries(
+                    &path,
+                    &header.id,
+                    &[session_info_entry(Some(name.to_string()))],
+                    index + 1,
+                )
+                .await?;
+                let meta = load_session_meta(&path).await?;
+                assert_eq!(meta.name.as_deref(), Some(name));
+                assert_eq!(meta.message_count, 1);
+            }
+            Ok::<_, Error>(())
+        })
+        .expect("renaming through incremental persistence");
+    }
+
+    #[test]
+    fn invalid_count_cache_still_falls_back_without_losing_an_empty_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("count-fallback.sqlite");
+        let header = SessionHeader {
+            id: "count-fallback".to_string(),
+            ..SessionHeader::default()
+        };
+        let entries = vec![message_entry(), session_info_entry(Some(String::new()))];
+        futures::executor::block_on(save_session(&path, &header, &entries, true))
+            .expect("seed count fallback");
+        with_write_connection(&path, |conn| {
+            map_sqlite_result(conn.execute_raw(
+                "UPDATE pi_session_meta SET value = 'not-a-count' WHERE key = 'message_count'",
+            ))
+        })
+        .expect("invalidate count cache");
+        let meta = futures::executor::block_on(load_session_meta(&path))
+            .expect("recompute count from history");
+        assert_eq!(meta.message_count, 1);
+        assert_eq!(meta.name.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn malformed_typed_name_cache_fails_with_redacted_diagnostics() {
+        const SECRET: &str = "PRIVATE_NAME_METADATA_DO_NOT_ECHO";
+        for value in [
+            format!("{{\"secret\":\"{SECRET}\","),
+            format!("{{\"secret\":\"{SECRET}\"}}"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("invalid-name-cache.sqlite");
+            let header = SessionHeader {
+                id: "invalid-name-cache".to_string(),
+                ..SessionHeader::default()
+            };
+            futures::executor::block_on(save_session(&path, &header, &[], true))
+                .expect("seed metadata");
+            with_write_connection(&path, |conn| {
+                map_sqlite_result(conn.execute_sync(
+                    "UPDATE pi_session_meta SET value = ?1 WHERE key = 'name_json'",
+                    &[SqliteValue::from(value.clone())],
+                ))
+            })
+            .expect("poison name metadata");
+            let error = futures::executor::block_on(load_session_meta(&path))
+                .expect_err("invalid typed name is not an unnamed session");
+            let diagnostic = error.to_string();
+            assert!(diagnostic.contains("session name metadata"));
+            assert!(diagnostic.contains("sha256="));
+            assert!(!diagnostic.contains(SECRET));
+            futures::executor::block_on(load_session(&path))
+                .expect("metadata corruption does not alter the actual conversation");
+        }
     }
 
     #[test]
@@ -2098,16 +2401,13 @@ pub async fn save_session(
             let reconciled = reconcile_entries(read_stored_entries(&conn)?, entries)?;
             crate::session::validate_session_entry_graph(&reconciled.entries)?;
             validate_sqlite_json_for_write("session header", &header_json)?;
-            for entry_json in &reconciled.json {
-                validate_sqlite_json_for_write("session entry", entry_json)?;
-            }
-            validate_sqlite_sequence_range(0, reconciled.json.len())?;
+            validate_sqlite_sequence_range(0, reconciled.entries.len())?;
             let mut total_json_bytes = u64::try_from(header_json.len())
                 .map_err(|_| Error::session("SQLite header JSON length exceeds u64"))?;
-            for entry_json in &reconciled.json {
+            for entry in &reconciled.entries {
                 total_json_bytes = total_json_bytes
                     .checked_add(
-                        u64::try_from(entry_json.len())
+                        u64::try_from(entry_io::serialized_len(entry)?)
                             .map_err(|_| Error::session("SQLite entry JSON length exceeds u64"))?,
                     )
                     .ok_or_else(|| Error::session("SQLite serialized byte count overflow"))?;
@@ -2126,8 +2426,17 @@ pub async fn save_session(
                     SqliteValue::from(header_json),
                 ],
             ))?;
-            insert_entry_jsons(&conn, &reconciled.json, 0)?;
+            insert_entry_jsons(
+                &conn,
+                reconciled.entries.iter().map(entry_io::encode_entry),
+                0,
+            )?;
             write_session_meta(&conn, &reconciled.entries)?;
+            #[cfg(feature = "internal-persistence-fault-injection")]
+            crate::session::persistence_test_failpoint(
+                "sqlite_rewrite_after_mutation_before_commit",
+                Some(&format!("entries_after={}", reconciled.entries.len())),
+            )?;
 
             Ok((header_to_write, reconciled.entries))
         })();
@@ -2135,6 +2444,10 @@ pub async fn save_session(
         match save_result {
             Ok((saved_header, saved_entries)) => {
                 map_sqlite_result(conn.execute_raw("COMMIT"))?;
+                crate::session::persistence_test_failpoint(
+                    "sqlite_rewrite_after_commit",
+                    Some("commit_completed=true"),
+                )?;
                 map_sqlite_result(conn.close())?;
                 ensure_private_sqlite_permissions(path)?;
                 Ok((saved_header, saved_entries))
@@ -2198,23 +2511,26 @@ pub async fn append_entries(
             }
             let reconciled = reconcile_entries(stored_entries, new_entries)?;
             crate::session::validate_session_entry_graph(&reconciled.entries)?;
-            for entry_json in &reconciled.json {
-                validate_sqlite_json_for_write("session entry", entry_json)?;
-            }
-            validate_sqlite_sequence_range(existing_entry_count, reconciled.appended_json.len())?;
+            let appended = &reconciled.entries[reconciled.appended_start..];
+            validate_sqlite_sequence_range(existing_entry_count, appended.len())?;
             let mut total_json_bytes = 0u64;
-            for entry_json in &reconciled.appended_json {
-                total_json_bytes = total_json_bytes
-                    .checked_add(
-                        u64::try_from(entry_json.len())
-                            .map_err(|_| Error::session("SQLite entry JSON length exceeds u64"))?,
-                    )
-                    .ok_or_else(|| Error::session("SQLite serialized byte count overflow"))?;
+            for (index, entry) in reconciled.entries.iter().enumerate() {
+                let bytes = u64::try_from(entry_io::serialized_len(entry)?)
+                    .map_err(|_| Error::session("SQLite entry JSON length exceeds u64"))?;
+                if index >= reconciled.appended_start {
+                    total_json_bytes = total_json_bytes
+                        .checked_add(bytes)
+                        .ok_or_else(|| Error::session("SQLite serialized byte count overflow"))?;
+                }
             }
             serialize_timer.finish();
             metrics.record_bytes(&metrics.sqlite_bytes, total_json_bytes);
 
-            insert_entry_jsons(&conn, &reconciled.appended_json, existing_entry_count)?;
+            insert_entry_jsons(
+                &conn,
+                appended.iter().map(entry_io::encode_entry),
+                existing_entry_count,
+            )?;
             write_session_meta(&conn, &reconciled.entries)?;
             #[cfg(feature = "internal-persistence-fault-injection")]
             {

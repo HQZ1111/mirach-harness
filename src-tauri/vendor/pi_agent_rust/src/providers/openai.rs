@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::pin::Pin;
 
@@ -397,6 +397,10 @@ impl OpenAIProvider {
             reasoning_effort,
             reasoning,
             prompt_cache_key: options.prompt_cache_key.clone(),
+            service_tier: crate::provider::openai_service_tier(
+                &self.provider,
+                options.service_tier.as_deref(),
+            ),
         }
     }
 
@@ -507,10 +511,17 @@ impl OpenAIProvider {
             });
         }
 
-        // Convert conversation messages
+        // Every tool call in an assistant turn must be answered before a new
+        // user message. Collect images across the consecutive tool-result run
+        // and attach them only after all of its tool replies (GH #248).
+        let mut tool_images = Vec::new();
         for message in context.messages.iter() {
-            messages.extend(convert_message_to_openai(message));
+            if !matches!(message, Message::ToolResult(_)) {
+                append_tool_result_images(&mut messages, &mut tool_images);
+            }
+            messages.push(convert_message_to_openai(message, &mut tool_images));
         }
+        append_tool_result_images(&mut messages, &mut tool_images);
 
         messages
     }
@@ -776,12 +787,14 @@ impl Provider for OpenAIProvider {
         let stream = stream::unfold(
             StreamState::new(event_source, model, api, provider),
             |mut state| async move {
-                if state.done {
-                    return None;
-                }
                 loop {
                     if let Some(event) = state.pending_events.pop_front() {
                         return Some((Ok(event), state));
+                    }
+                    // A terminal frame can enqueue block-end events before Done.
+                    // Drain that queue even after the transport is finished.
+                    if state.done {
+                        return None;
                     }
 
                     match state.event_source.next().await {
@@ -789,11 +802,9 @@ impl Provider for OpenAIProvider {
                             // A successful chunk resets the consecutive error counter.
                             state.transient_error_count = 0;
                             // OpenAI sends "[DONE]" as final message
-                            if msg.data == "[DONE]" {
-                                state.done = true;
-                                let reason = state.partial.stop_reason;
-                                let message = std::mem::take(&mut state.partial);
-                                return Some((Ok(StreamEvent::Done { reason, message }), state));
+                            if msg.data.trim() == "[DONE]" {
+                                state.finish_response();
+                                continue;
                             }
 
                             if let Err(e) = state.process_event(&msg.data) {
@@ -864,6 +875,8 @@ where
     pending_events: VecDeque<StreamEvent>,
     started: bool,
     done: bool,
+    /// Block-end events and strict tool arguments have been finalized once.
+    finalized: bool,
     /// Consecutive WriteZero errors seen without a successful event in between.
     transient_error_count: usize,
 }
@@ -1050,6 +1063,7 @@ where
             pending_events: VecDeque::new(),
             started: false,
             done: false,
+            finalized: false,
             transient_error_count: 0,
         }
     }
@@ -1096,17 +1110,18 @@ where
         }
 
         if let Some(error) = chunk.error {
-            self.partial.stop_reason = StopReason::Error;
-            if let Some(message) = error.message {
-                let message = message.trim();
-                if !message.is_empty() {
-                    self.partial.error_message = Some(message.to_string());
-                }
-            }
+            let message = error
+                .message
+                .as_deref()
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+                .unwrap_or("OpenAI returned an error while streaming");
+            self.record_error(message.to_string());
         }
 
         // Process choices
-        if let Some(choice) = chunk.choices.into_iter().next() {
+        if let Some(mut choice) = chunk.choices.into_iter().next() {
+            choice.delta.normalize_reasoning();
             if !self.started
                 && choice.finish_reason.is_none()
                 && choice.delta.content.is_none()
@@ -1123,31 +1138,137 @@ where
         Ok(())
     }
 
-    fn finalize_tool_call_arguments(&mut self) {
-        for tc in &self.tool_calls {
-            let arguments: serde_json::Value = match serde_json::from_str(&tc.arguments) {
-                Ok(args) => args,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        raw = %tc.arguments,
-                        "Failed to parse tool arguments as JSON"
-                    );
-                    serde_json::Value::Null
-                }
-            };
+    fn record_error(&mut self, message: String) {
+        self.partial.stop_reason = StopReason::Error;
+        // A trailing finish reason or secondary parse error must not conceal
+        // the provider's original failure.
+        if self.partial.error_message.is_none() {
+            self.partial.error_message = Some(message);
+        }
+    }
 
+    fn finalize_tool_call_arguments(&mut self) -> Result<()> {
+        // Validate the whole batch before exposing any completed tool call.
+        // Best-effort streaming snapshots are for display, never execution.
+        let mut ids = HashSet::new();
+        let arguments = self
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                validate_final_tool_identity(&mut ids, &tc.id, &tc.name)
+                    .and_then(|()| parse_final_tool_arguments(&tc.arguments))
+                    .map_err(|message| {
+                        Error::api(format!(
+                            "Invalid OpenAI tool call at index {}: {message}",
+                            tc.index
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        for (tc, arguments) in self.tool_calls.iter().zip(arguments) {
             if let Some(ContentBlock::ToolCall(block)) =
                 self.partial.content.get_mut(tc.content_index)
             {
                 block.arguments = arguments;
             }
         }
+        Ok(())
+    }
+
+    fn finalize_content(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.finalized = true;
+
+        if let Err(error) = self.finalize_tool_call_arguments() {
+            self.record_error(error.to_string());
+            // Do not persist a synthetically completed argument snapshot as
+            // the final arguments of an invalid response.
+            for tc in &self.tool_calls {
+                if let Some(ContentBlock::ToolCall(block)) =
+                    self.partial.content.get_mut(tc.content_index)
+                {
+                    block.arguments = serde_json::Value::Null;
+                }
+            }
+        }
+
+        for (content_index, block) in self.partial.content.iter().enumerate() {
+            match block {
+                ContentBlock::Text(text) => {
+                    self.pending_events.push_back(StreamEvent::TextEnd {
+                        content_index,
+                        content: text.text.clone(),
+                    });
+                }
+                ContentBlock::Thinking(thinking) => {
+                    self.pending_events.push_back(StreamEvent::ThinkingEnd {
+                        content_index,
+                        content: thinking.thinking.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if self.partial.stop_reason != StopReason::Error {
+            for tc in &self.tool_calls {
+                if let Some(ContentBlock::ToolCall(tool_call)) =
+                    self.partial.content.get(tc.content_index)
+                {
+                    self.pending_events.push_back(StreamEvent::ToolCallEnd {
+                        content_index: tc.content_index,
+                        tool_call: tool_call.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn finish_response(&mut self) {
+        if self.done {
+            return;
+        }
+        self.ensure_started();
+        self.finalize_content();
+        self.done = true;
+        let reason = self.partial.stop_reason;
+        let message = std::mem::take(&mut self.partial);
+        self.pending_events
+            .push_back(StreamEvent::Done { reason, message });
     }
 
     #[allow(clippy::too_many_lines)]
     fn process_choice(&mut self, choice: OpenAIChoice) {
         let delta = choice.delta;
+        if self.finalized {
+            if matches!(
+                choice.finish_reason.as_deref(),
+                Some("content_filter" | "error")
+            ) {
+                self.record_error("OpenAI reported a terminal stream failure".to_string());
+            }
+            let has_content = delta
+                .content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty())
+                || delta
+                    .reasoning_content
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())
+                || delta
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+            if has_content {
+                self.record_error("OpenAI sent content after a terminal finish reason".to_string());
+            }
+            // Empty duplicate terminal frames are harmless, but must not
+            // overwrite a failure or emit duplicate block-end events.
+            return;
+        }
         if delta.content.is_some()
             || delta.tool_calls.is_some()
             || delta.reasoning_content.is_some()
@@ -1347,53 +1468,61 @@ where
         // Handle finish reason (MUST happen after delta processing to capture final chunks)
 
         if let Some(reason) = choice.finish_reason {
-            self.partial.stop_reason = match reason.as_str() {
-                "length" => StopReason::Length,
-
-                "tool_calls" => StopReason::ToolUse,
-
-                "content_filter" | "error" => StopReason::Error,
-
-                _ => StopReason::Stop,
-            };
-
-            // Emit TextEnd/ThinkingEnd for all open text/thinking blocks (not just the last one,
-            // since text/thinking may precede tool calls).
-
-            for (content_index, block) in self.partial.content.iter().enumerate() {
-                if let ContentBlock::Text(t) = block {
-                    self.pending_events.push_back(StreamEvent::TextEnd {
-                        content_index,
-                        content: t.text.clone(),
-                    });
-                } else if let ContentBlock::Thinking(t) = block {
-                    self.pending_events.push_back(StreamEvent::ThinkingEnd {
-                        content_index,
-                        content: t.thinking.clone(),
-                    });
-                }
+            if self.partial.stop_reason != StopReason::Error {
+                self.partial.stop_reason = match reason.as_str() {
+                    "length" => StopReason::Length,
+                    "tool_calls" => StopReason::ToolUse,
+                    "content_filter" | "error" => StopReason::Error,
+                    _ => StopReason::Stop,
+                };
             }
-
-            // Finalize tool call arguments
-
-            self.finalize_tool_call_arguments();
-
-            // Emit ToolCallEnd for each accumulated tool call
-
-            for tc in &self.tool_calls {
-                if let Some(ContentBlock::ToolCall(tool_call)) =
-                    self.partial.content.get(tc.content_index)
-                {
-                    self.pending_events.push_back(StreamEvent::ToolCallEnd {
-                        content_index: tc.content_index,
-
-                        tool_call: tool_call.clone(),
-                    });
-                }
-            }
+            self.finalize_content();
         }
     }
 }
+
+/// Each completed call needs an unambiguous result identity and a function
+/// name. Validate the accumulated wire values without repairing them: changing
+/// an ID here would no longer answer the call the provider actually emitted.
+/// Diagnostics exclude the values, which can contain sensitive provider data.
+pub(super) fn validate_final_tool_identity<'a>(
+    ids: &mut HashSet<&'a str>,
+    id: &'a str,
+    name: &str,
+) -> std::result::Result<(), &'static str> {
+    if id.trim().is_empty() {
+        return Err("tool call ID is empty");
+    }
+    if name.trim().is_empty() {
+        return Err("tool function name is empty");
+    }
+    if !ids.insert(id) {
+        return Err("tool call ID is duplicated");
+    }
+    Ok(())
+}
+
+/// Parse final tool arguments without the repairs used for streaming previews.
+/// Empty arguments remain compatible with providers that omit an empty object
+/// for a no-argument tool. Every nonempty payload must be a complete JSON object.
+/// Error text deliberately excludes the payload, which may contain secrets.
+pub(super) fn parse_final_tool_arguments(
+    raw: &str,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    if raw.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let arguments: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| "arguments are not complete JSON")?;
+    if !arguments.is_object() {
+        return Err("arguments must be a JSON object");
+    }
+    Ok(arguments)
+}
+
+#[cfg(test)]
+#[path = "openai_terminal_safety_tests.rs"]
+mod terminal_safety_tests;
 
 // ============================================================================
 // OpenAI API Types
@@ -1441,6 +1570,10 @@ pub struct OpenAIRequest<'a> {
     /// `StreamOptions::prompt_cache_key`.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
+    /// Processing tier (`/fast` → `priority`). Set only for backends that
+    /// honor it; see `provider::openai_service_tier`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1576,8 +1709,40 @@ struct OpenAIDelta {
     content: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Gateways disagree on the name of the streamed reasoning field:
+    /// `reasoning_content` (DeepSeek), `reasoning` (OpenRouter) and
+    /// `reasoning_text`. The two alternatives are read as raw JSON so that a
+    /// gateway sending a non-string there cannot fail the whole chunk.
+    #[serde(default)]
+    reasoning: Option<serde_json::Value>,
+    #[serde(default)]
+    reasoning_text: Option<serde_json::Value>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAIToolCallDelta>>,
+}
+
+impl OpenAIDelta {
+    /// Fold a non-empty `reasoning` or `reasoning_text` string into
+    /// `reasoning_content` when that field carries no text itself.
+    fn normalize_reasoning(&mut self) {
+        if self
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|text| !text.is_empty())
+        {
+            return;
+        }
+        let alternative = [self.reasoning.take(), self.reasoning_text.take()]
+            .into_iter()
+            .flatten()
+            .find_map(|value| match value {
+                serde_json::Value::String(text) if !text.is_empty() => Some(text),
+                _ => None,
+            });
+        if alternative.is_some() {
+            self.reasoning_content = alternative;
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1633,23 +1798,24 @@ struct OpenAIChunkError {
 // ============================================================================
 
 #[allow(clippy::too_many_lines)]
-fn convert_message_to_openai(message: &Message) -> Vec<OpenAIMessage<'_>> {
+fn convert_message_to_openai<'a>(
+    message: &'a Message,
+    tool_images: &mut Vec<OpenAIContentPart<'a>>,
+) -> OpenAIMessage<'a> {
     match message {
-        Message::User(user) => vec![OpenAIMessage {
+        Message::User(user) => OpenAIMessage {
             role: Cow::Borrowed("user"),
             content: Some(convert_user_content(&user.content)),
             tool_calls: None,
             tool_call_id: None,
-        }],
-        Message::Custom(custom) => vec![OpenAIMessage {
+        },
+        Message::Custom(custom) => OpenAIMessage {
             role: Cow::Borrowed("user"),
             content: Some(OpenAIContent::Text(Cow::Borrowed(&custom.content))),
             tool_calls: None,
             tool_call_id: None,
-        }],
+        },
         Message::Assistant(assistant) => {
-            let mut messages = Vec::new();
-
             // Collect text content
             let text: String = assistant
                 .content
@@ -1695,14 +1861,12 @@ fn convert_message_to_openai(message: &Message) -> Vec<OpenAIMessage<'_>> {
                 Some(tool_calls)
             };
 
-            messages.push(OpenAIMessage {
+            OpenAIMessage {
                 role: Cow::Borrowed("assistant"),
                 content,
                 tool_calls,
                 tool_call_id: None,
-            });
-
-            messages
+            }
         }
         Message::ToolResult(result) => {
             let mut text_parts: Vec<Cow<'_, str>> = Vec::new();
@@ -1737,29 +1901,43 @@ fn convert_message_to_openai(message: &Message) -> Vec<OpenAIMessage<'_>> {
                 Some(OpenAIContent::Text(Cow::Owned(text_parts.join("\n"))))
             };
 
-            let mut messages = vec![OpenAIMessage {
+            if !image_parts.is_empty() {
+                tool_images.push(OpenAIContentPart::Text {
+                    text: Cow::Owned(format!(
+                        "Images from {} (tool call {}):",
+                        result.tool_name, result.tool_call_id
+                    )),
+                });
+                tool_images.extend(image_parts);
+            }
+            OpenAIMessage {
                 role: Cow::Borrowed("tool"),
                 content: text_content,
                 tool_calls: None,
                 tool_call_id: Some(&result.tool_call_id),
-            }];
-
-            if !image_parts.is_empty() {
-                let mut parts = vec![OpenAIContentPart::Text {
-                    text: Cow::Borrowed("Attached image(s) from tool result:"),
-                }];
-                parts.extend(image_parts);
-                messages.push(OpenAIMessage {
-                    role: Cow::Borrowed("user"),
-                    content: Some(OpenAIContent::Parts(parts)),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
             }
-
-            messages
         }
     }
+}
+
+fn append_tool_result_images<'a>(
+    messages: &mut Vec<OpenAIMessage<'a>>,
+    images: &mut Vec<OpenAIContentPart<'a>>,
+) {
+    if images.is_empty() {
+        return;
+    }
+    let mut parts = Vec::with_capacity(images.len() + 1);
+    parts.push(OpenAIContentPart::Text {
+        text: Cow::Borrowed("Attached image(s) from tool results:"),
+    });
+    parts.append(images);
+    messages.push(OpenAIMessage {
+        role: Cow::Borrowed("user"),
+        content: Some(OpenAIContent::Parts(parts)),
+        tool_calls: None,
+        tool_call_id: None,
+    });
 }
 
 fn convert_user_content(content: &UserContent) -> OpenAIContent<'_> {
@@ -1929,9 +2107,10 @@ mod tests {
             is_error: false,
             timestamp: 0,
         });
-        let messages = convert_message_to_openai(&result);
-        assert_eq!(messages.len(), 1, "no trailing image turn for media");
-        let wire = serde_json::to_value(&messages[0]).expect("serialize");
+        let mut tool_images = Vec::new();
+        let message = convert_message_to_openai(&result, &mut tool_images);
+        assert!(tool_images.is_empty(), "no trailing image turn for media");
+        let wire = serde_json::to_value(&message).expect("serialize");
         assert_eq!(wire["role"], "tool");
         assert_eq!(
             wire["content"],
@@ -1946,9 +2125,200 @@ mod tests {
             timestamp: 0,
         });
 
-        let converted = convert_message_to_openai(&message);
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].role, "user");
+        let mut tool_images = Vec::new();
+        let converted = convert_message_to_openai(&message, &mut tool_images);
+        assert_eq!(converted.role, "user");
+        assert!(tool_images.is_empty());
+    }
+
+    fn tool_call_message(ids: &[&str]) -> Message {
+        Message::assistant(AssistantMessage {
+            content: ids
+                .iter()
+                .map(|id| {
+                    ContentBlock::ToolCall(ToolCall {
+                        id: (*id).to_string(),
+                        name: "read".to_string(),
+                        arguments: json!({"path": id}),
+                        thought_signature: None,
+                    })
+                })
+                .collect(),
+            stop_reason: StopReason::ToolUse,
+            ..AssistantMessage::default()
+        })
+    }
+
+    fn image_block(data: &str, mime_type: &str) -> ContentBlock {
+        ContentBlock::Image(crate::model::ImageContent {
+            data: data.to_string(),
+            mime_type: mime_type.to_string(),
+        })
+    }
+
+    fn tool_result_message(id: &str, content: Vec<ContentBlock>) -> Message {
+        Message::tool_result(crate::model::ToolResultMessage {
+            tool_call_id: id.to_string(),
+            tool_name: "read".to_string(),
+            content,
+            details: None,
+            is_error: false,
+            timestamp: 0,
+        })
+    }
+
+    fn request_messages(messages: Vec<Message>) -> Value {
+        let provider = OpenAIProvider::new("gpt-4o");
+        let context = Context {
+            system_prompt: None,
+            messages: messages.into(),
+            tools: Vec::new().into(),
+        };
+        let options = StreamOptions::default();
+        let request = provider.build_request(&context, &options);
+        serde_json::to_value(request).expect("serialize request")["messages"].clone()
+    }
+
+    #[test]
+    fn parallel_tool_results_precede_one_ordered_image_bundle() {
+        let wire = request_messages(vec![
+            tool_call_message(&["call_a", "call_b", "call_c", "call_empty"]),
+            tool_result_message(
+                "call_a",
+                vec![
+                    ContentBlock::Text(TextContent::new("first result")),
+                    image_block("AQ==", "image/png"),
+                    image_block("Ag==", "image/jpeg"),
+                ],
+            ),
+            tool_result_message(
+                "call_b",
+                vec![ContentBlock::Text(TextContent::new("text-only result"))],
+            ),
+            tool_result_message("call_c", vec![image_block("Aw==", "image/webp")]),
+            tool_result_message("call_empty", Vec::new()),
+        ]);
+        let messages = wire.as_array().expect("messages");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["assistant", "tool", "tool", "tool", "tool", "user"]
+        );
+        for (index, id) in ["call_a", "call_b", "call_c", "call_empty"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(messages[0]["tool_calls"][index]["id"], *id);
+            assert_eq!(messages[index + 1]["tool_call_id"], *id);
+        }
+        assert_eq!(messages[1]["content"], "first result");
+        assert_eq!(messages[2]["content"], "text-only result");
+        assert_eq!(messages[3]["content"], "(see attached image)");
+        assert_eq!(messages[4]["content"], "");
+        assert_eq!(
+            messages[5]["content"],
+            json!([
+                {"type": "text", "text": "Attached image(s) from tool results:"},
+                {"type": "text", "text": "Images from read (tool call call_a):"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AQ=="}},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,Ag=="}},
+                {"type": "text", "text": "Images from read (tool call call_c):"},
+                {"type": "image_url", "image_url": {"url": "data:image/webp;base64,Aw=="}}
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_image_bundles_stay_with_their_run_and_preserve_user_images() {
+        let wire = request_messages(vec![
+            Message::User(crate::model::UserMessage {
+                content: UserContent::Blocks(vec![image_block("AQ==", "image/png")]),
+                timestamp: 0,
+            }),
+            tool_call_message(&["call_a"]),
+            tool_result_message("call_a", vec![image_block("Ag==", "image/jpeg")]),
+            tool_call_message(&["call_b"]),
+            tool_result_message("call_b", vec![image_block("Aw==", "image/webp")]),
+            Message::User(crate::model::UserMessage {
+                content: UserContent::Blocks(vec![image_block("BA==", "image/png")]),
+                timestamp: 0,
+            }),
+        ]);
+        let messages = wire.as_array().expect("messages");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "user",
+                "assistant",
+                "tool",
+                "user",
+                "assistant",
+                "tool",
+                "user",
+                "user"
+            ]
+        );
+        for (message_index, part_index, expected) in [
+            (0, 0, "data:image/png;base64,AQ=="),
+            (3, 2, "data:image/jpeg;base64,Ag=="),
+            (6, 2, "data:image/webp;base64,Aw=="),
+            (7, 0, "data:image/png;base64,BA=="),
+        ] {
+            assert_eq!(
+                messages[message_index]["content"][part_index]["image_url"]["url"],
+                expected
+            );
+        }
+        assert_eq!(messages[3]["content"].as_array().unwrap().len(), 3);
+        assert_eq!(messages[6]["content"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            messages[3]["content"][1]["text"],
+            "Images from read (tool call call_a):"
+        );
+        assert_eq!(
+            messages[6]["content"][1]["text"],
+            "Images from read (tool call call_b):"
+        );
+    }
+
+    #[test]
+    fn text_and_media_tool_results_do_not_add_an_image_turn() {
+        let wire = request_messages(vec![
+            tool_call_message(&["call_text", "call_media", "call_empty"]),
+            tool_result_message(
+                "call_text",
+                vec![ContentBlock::Text(TextContent::new("plain result"))],
+            ),
+            tool_result_message(
+                "call_media",
+                vec![ContentBlock::Media(crate::model::MediaContent {
+                    data: "AAAA".to_string(),
+                    mime_type: "video/mp4".to_string(),
+                    name: Some("clip.mp4".to_string()),
+                })],
+            ),
+            tool_result_message("call_empty", Vec::new()),
+        ]);
+        let messages = wire.as_array().expect("messages");
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m["role"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["assistant", "tool", "tool", "tool"]
+        );
+        assert_eq!(messages[1]["content"], "plain result");
+        assert_eq!(
+            messages[2]["content"],
+            "[media omitted: clip.mp4, video/mp4, 3 B]"
+        );
+        assert_eq!(messages[3]["content"], "");
+        assert!(!wire.to_string().contains("AAAA"));
     }
 
     #[test]
@@ -2013,6 +2383,68 @@ mod tests {
             serde_json::to_value(provider.build_request(&context, &StreamOptions::default()))
                 .expect("serialize request");
         assert!(value.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn test_build_request_service_tier_only_for_backends_that_honor_it() {
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(crate::model::UserMessage {
+                content: UserContent::Text("Ping".to_string()),
+                timestamp: 0,
+            })]
+            .into(),
+            tools: Vec::new().into(),
+        };
+        let fast = StreamOptions {
+            service_tier: Some("priority".to_string()),
+            ..Default::default()
+        };
+        let tier_for = |provider: OpenAIProvider, options: &StreamOptions| {
+            serde_json::to_value(provider.build_request(&context, options))
+                .expect("serialize request")
+                .get("service_tier")
+                .cloned()
+        };
+
+        assert_eq!(
+            tier_for(OpenAIProvider::new("gpt-5"), &fast),
+            Some(json!("priority"))
+        );
+        assert_eq!(
+            tier_for(
+                OpenAIProvider::new("x").with_provider_name("openrouter"),
+                &fast
+            ),
+            Some(json!("priority"))
+        );
+        // OpenAI-compatible backends that never documented the field don't
+        // get it: many reject unknown parameters with a 400.
+        assert_eq!(
+            tier_for(OpenAIProvider::new("x").with_provider_name("groq"), &fast),
+            None
+        );
+        // `auto` is OpenAI's default, and OpenRouter forwards no `default`.
+        let auto = StreamOptions {
+            service_tier: Some("auto".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(tier_for(OpenAIProvider::new("gpt-5"), &auto), None);
+        let default = StreamOptions {
+            service_tier: Some("default".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            tier_for(
+                OpenAIProvider::new("x").with_provider_name("openrouter"),
+                &default
+            ),
+            None
+        );
+        assert_eq!(
+            tier_for(OpenAIProvider::new("gpt-5"), &StreamOptions::default()),
+            None
+        );
     }
 
     #[test]
@@ -3416,6 +3848,31 @@ mod tests {
         assert!(crate::error::is_retryable_error(&error, None, None));
     }
 
+    #[test]
+    fn stream_emits_exactly_one_done_when_transport_ends_after_done_sentinel() {
+        let body = [
+            r#"data: {"choices":[{"delta":{"content":"whole"}}]}"#,
+            "",
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+            "",
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+
+        let out = collect_stream_items_from_body(&body);
+        assert!(out.iter().all(Result::is_ok), "complete stream: {out:?}");
+        let done = out
+            .iter()
+            .filter(|item| matches!(item, Ok(StreamEvent::Done { .. })))
+            .count();
+        assert_eq!(done, 1, "a complete stream finishes exactly once: {out:?}");
+        assert!(
+            matches!(out.last(), Some(Ok(StreamEvent::Done { .. }))),
+            "Done must be the terminal item: {out:?}"
+        );
+    }
+
     fn collect_stream_items_from_body(body: &str) -> Vec<Result<StreamEvent>> {
         let (base_url, _rx) = spawn_test_server(200, "text/event-stream", body);
         let provider = OpenAIProvider::new("gpt-test").with_base_url(base_url);
@@ -3459,9 +3916,14 @@ mod tests {
 
         std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("accept");
+            // 250ms is the POLLING interval; the deadline below is the budget.
+            // Treating a timed-out read as end-of-request truncated the buffer
+            // and the header scan then failed as a malformed request rather
+            // than a slow one (bd-eg6ng).
             socket
-                .set_read_timeout(Some(Duration::from_secs(2)))
+                .set_read_timeout(Some(Duration::from_millis(250)))
                 .expect("set read timeout");
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
 
             let mut bytes = Vec::new();
             let mut chunk = [0_u8; 4096];
@@ -3478,7 +3940,10 @@ mod tests {
                         if err.kind() == std::io::ErrorKind::WouldBlock
                             || err.kind() == std::io::ErrorKind::TimedOut =>
                     {
-                        break;
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "fixture timed out waiting for the request"
+                        );
                     }
                     Err(err) => panic!("read error: {err}"),
                 }
@@ -3504,7 +3969,10 @@ mod tests {
                         if err.kind() == std::io::ErrorKind::WouldBlock
                             || err.kind() == std::io::ErrorKind::TimedOut =>
                     {
-                        break;
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "fixture timed out waiting for the request"
+                        );
                     }
                     Err(err) => panic!("read error: {err}"),
                 }
@@ -3968,6 +4436,51 @@ mod tests {
             "expected ThinkingEnd after finish_reason"
         );
         assert_eq!(collect_thinking_text(&out), "plan");
+    }
+
+    #[test]
+    fn reasoning_field_aliases_emit_thinking_and_non_strings_are_ignored() {
+        for (delta, expected) in [
+            (json!({"reasoning": "plan"}), "plan"),
+            (json!({"reasoning_text": "plan"}), "plan"),
+            // `reasoning_content` wins when a gateway sends more than one.
+            (
+                json!({"reasoning_content": "kept", "reasoning": "dropped"}),
+                "kept",
+            ),
+            // An empty `reasoning_content` does not hide the alternative.
+            (
+                json!({"reasoning_content": "", "reasoning": "plan"}),
+                "plan",
+            ),
+        ] {
+            let events = vec![
+                json!({"choices": [{"delta": delta, "finish_reason": null}]}),
+                json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+                Value::String("[DONE]".to_string()),
+            ];
+            let out = collect_events(&events);
+            assert_eq!(collect_thinking_text(&out), expected, "{events:?}");
+        }
+
+        // A non-string `reasoning` (some gateways echo an object) is not
+        // thinking text and must not fail the chunk that carries the answer.
+        let events = vec![
+            json!({"choices": [{
+                "delta": {"content": "answer", "reasoning": {"effort": "high"}},
+                "finish_reason": null
+            }]}),
+            json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            Value::String("[DONE]".to_string()),
+        ];
+        let out = collect_events(&events);
+        assert_eq!(collect_thinking_text(&out), "");
+        assert!(
+            out.iter().any(
+                |event| matches!(event, StreamEvent::TextDelta { delta, .. } if delta == "answer")
+            ),
+            "the answer text still streams: {out:?}"
+        );
     }
 
     #[test]

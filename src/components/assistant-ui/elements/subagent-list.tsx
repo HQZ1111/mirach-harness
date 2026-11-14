@@ -59,9 +59,9 @@ export function SubagentList({
           >
             <div className="flex items-center gap-2">
               {done ? (
-                <CheckIcon className="fade-in zoom-in-90 animate-in size-3.5 shrink-0 text-emerald-500 duration-200" />
+                <CheckIcon className="fade-in zoom-in-90 animate-in size-[var(--size-icon-md)] shrink-0 text-emerald-500 duration-200" />
               ) : (
-                <Loader2Icon className="text-foreground/35 size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+                <Loader2Icon className="text-foreground/35 size-[var(--size-icon-md)] shrink-0 animate-spin motion-reduce:animate-none" />
               )}
               <span className="flex-1 truncate text-[13.5px]">
                 {agent.name}
@@ -97,7 +97,7 @@ export function SubagentList({
           )}
         >
           <div className="flex items-center gap-2">
-            <Loader2Icon className="text-foreground/35 size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+            <Loader2Icon className="text-foreground/35 size-[var(--size-icon-md)] shrink-0 animate-spin motion-reduce:animate-none" />
             <span className="flex-1 truncate text-[13.5px]">
               {summaryAgent.name}
             </span>

@@ -158,10 +158,10 @@ pub fn builtin_one_liner(name: &str) -> Option<&'static str> {
             "Staged structural code rewrite using tree-sitter AST patterns (ast-grep syntax)"
         }
         "lsp" => {
-            "IDE-grade code intelligence (definition, references, rename) via language servers"
+            "IDE-grade code intelligence via language servers: diagnostics, definition, references, ho…"
         }
         "debug" => {
-            "Drive a real debugger (DAP): launch/attach, breakpoints, step, evaluate, stack/memory rea…"
+            "Drive a real native/Python/Go debugger: launch/attach, retained breakpoints, thread-aware…"
         }
         "jobs" => "Manage background bash jobs started with `bash {background: true}`",
         "hub" => "Supervise long-running processes and manage background jobs",
@@ -385,6 +385,33 @@ impl Tool for XdevTool {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn every_tiered_name_is_a_name_the_tools_flag_knows_about() {
+        // AGENTS.md already requires the README inventory and these two
+        // constants to stay in step. This makes the `--tools` vocabulary the
+        // third: a name tiered here but absent from both lists in tools.rs is
+        // a tool the flag reports as nonexistent, which is what
+        // bd-tools-known-names-missing-seven-mbo3g was about. `xdev` itself
+        // was in exactly that state while sitting in ESSENTIAL_DEFAULTS.
+        use crate::tools::ToolRegistry;
+        let mut missing = Vec::new();
+        for name in ESSENTIAL_DEFAULTS.iter().chain(OPT_IN_ONLY) {
+            let known = ToolRegistry::KNOWN_TOOL_NAMES.contains(name);
+            let unselectable = ToolRegistry::TOOLS_NOT_SELECTED_BY_FLAG
+                .iter()
+                .any(|(listed, _)| listed == name);
+            if !known && !unselectable {
+                missing.push(*name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "tiered here but unknown to --tools: {missing:?}; add each to \
+             ToolRegistry::KNOWN_TOOL_NAMES, or to TOOLS_NOT_SELECTED_BY_FLAG \
+             with a line saying what does turn it on"
+        );
+    }
 
     #[test]
     fn default_tiers_cover_core_and_opt_in() {

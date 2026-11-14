@@ -46,7 +46,7 @@ export function DocumentReference({
     >
       <div className="flex items-center gap-2.5">
         <span className="bg-foreground/[0.05] text-foreground/45 flex size-8 shrink-0 items-center justify-center rounded-lg">
-          <FileTextIcon className="size-3.5" />
+          <FileTextIcon className="size-[var(--size-icon-md)]" />
         </span>
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-[13.5px] font-medium">{title}</span>

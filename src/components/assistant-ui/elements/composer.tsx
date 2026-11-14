@@ -290,7 +290,7 @@ export function ComposerAttachmentChip({
       </span>
       <span className="ms-1 flex w-5 items-center justify-end">
         {attachment.state === "uploading" ? (
-          <Loader2Icon className="text-foreground/35 size-3.5 animate-spin motion-reduce:animate-none" />
+          <Loader2Icon className="text-foreground/35 size-[var(--size-icon-md)] animate-spin motion-reduce:animate-none" />
         ) : attachment.state === "done" && onRemove ? (
           <button
             type="button"
@@ -301,7 +301,7 @@ export function ComposerAttachmentChip({
             <XIcon />
           </button>
         ) : attachment.state === "done" ? (
-          <CheckIcon className="size-3.5 text-emerald-500" />
+          <CheckIcon className="size-[var(--size-icon-md)] text-emerald-500" />
         ) : null}
       </span>
       {attachment.state === "uploading" && (
@@ -429,7 +429,7 @@ export function ComposerAttachButton({
       )}
       {...props}
     >
-      <PlusIcon className="size-4" />
+      <PlusIcon className="size-[var(--size-icon-lg)]" />
     </button>
   );
 }
@@ -455,7 +455,7 @@ export function ComposerModelTrigger({
       {...props}
     >
       {model}
-      <ChevronDownIcon className="size-3 opacity-60" />
+      <ChevronDownIcon className="size-[var(--size-icon-sm)] opacity-60" />
     </button>
   );
 }
@@ -476,7 +476,7 @@ export function ComposerModelItem({
       </span>
       <span className="flex w-4 justify-end">
         {selected && (
-          <CheckIcon className="fade-in zoom-in-90 animate-in size-3.5 duration-200" />
+          <CheckIcon className="fade-in zoom-in-90 animate-in size-[var(--size-icon-md)] duration-200" />
         )}
       </span>
     </ComposerMenuItem>
@@ -573,7 +573,7 @@ export function ComposerContext({
           warn && "text-red-500 dark:text-red-400",
         )}
       >
-        <svg viewBox="0 0 16 16" className="size-4 -rotate-90" aria-hidden>
+        <svg viewBox="0 0 16 16" className="size-[var(--size-icon-lg)] -rotate-90" aria-hidden>
           <circle
             cx="8"
             cy="8"
@@ -621,9 +621,9 @@ export function ComposerVoiceButton({
       {...props}
     >
       {active ? (
-        <SquareIcon className="size-3 fill-current" />
+        <SquareIcon className="size-[var(--size-icon-sm)] fill-current" />
       ) : (
-        <MicIcon className="size-4" />
+        <MicIcon className="size-[var(--size-icon-lg)]" />
       )}
     </button>
   );

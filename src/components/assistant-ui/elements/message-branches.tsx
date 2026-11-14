@@ -54,7 +54,7 @@ export function MessageBranches({
           onClick={goPrevious}
           className={cn(ghostButton, "size-6")}
         >
-          <ChevronLeftIcon className="size-3.5" />
+          <ChevronLeftIcon className="size-[var(--size-icon-md)]" />
         </button>
         <span className={cn(mono, "text-foreground/35 tabular-nums")}>
           {variants.length === 0
@@ -68,7 +68,7 @@ export function MessageBranches({
           onClick={goNext}
           className={cn(ghostButton, "size-6")}
         >
-          <ChevronRightIcon className="size-3.5" />
+          <ChevronRightIcon className="size-[var(--size-icon-md)]" />
         </button>
       </div>
     </div>

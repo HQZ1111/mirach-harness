@@ -57,7 +57,7 @@ export function Diagram({
           onClick={onZoomOut}
           className={cn(ghostButton, "size-7 shrink-0")}
         >
-          <MinusIcon className="size-3.5" />
+          <MinusIcon className="size-[var(--size-icon-md)]" />
         </button>
         <button
           type="button"
@@ -65,7 +65,7 @@ export function Diagram({
           onClick={onZoomIn}
           className={cn(ghostButton, "size-7 shrink-0")}
         >
-          <PlusIcon className="size-3.5" />
+          <PlusIcon className="size-[var(--size-icon-md)]" />
         </button>
         <button
           type="button"
@@ -73,7 +73,7 @@ export function Diagram({
           onClick={onReset}
           className={cn(ghostButton, "size-7 shrink-0")}
         >
-          <RotateCcwIcon className="size-3.5" />
+          <RotateCcwIcon className="size-[var(--size-icon-md)]" />
         </button>
         <button
           type="button"
@@ -85,7 +85,7 @@ export function Diagram({
             "size-7 shrink-0 disabled:pointer-events-none disabled:opacity-30",
           )}
         >
-          <MaximizeIcon className="size-3.5" />
+          <MaximizeIcon className="size-[var(--size-icon-md)]" />
         </button>
       </div>
 

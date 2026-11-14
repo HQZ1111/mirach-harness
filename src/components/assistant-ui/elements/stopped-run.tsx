@@ -44,7 +44,7 @@ export function StoppedRun({
             "text-foreground/45 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1",
           )}
         >
-          <SquareIcon className="size-2.5 fill-current" />
+          <SquareIcon className="size-[var(--size-icon-xs)] fill-current" />
           {reason}
         </span>
 
@@ -54,7 +54,7 @@ export function StoppedRun({
           className="text-foreground/70 hover:bg-foreground/[0.06] hover:text-foreground/95 ms-auto flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-[background-color,color,scale] duration-150 active:scale-[0.96]"
         >
           Continue
-          <ArrowRightIcon className="size-3" />
+          <ArrowRightIcon className="size-[var(--size-icon-sm)]" />
         </button>
         <button
           type="button"

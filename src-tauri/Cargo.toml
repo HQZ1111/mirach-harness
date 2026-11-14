@@ -12,17 +12,19 @@ tauri-plugin-dialog = "3.0.0-alpha.3"
 # features 与主工程一致（unstable），最大化复用 cargo 缓存
 tauri = { version = "3.0.0-alpha.4", features = ["unstable", "tray-icon"] }
 # v3 alpha：webview 后端外置成 runtime crate——Builder 必须显式选运行时
-# （默认 DynRuntime 无属性即 RuntimeNotConfigured）。
-# CEF 后端（用户定稿的目标运行时）：官方 crate，API 与 wry 对称——
-# 换这一行 + main.rs 的 .runtime(...) 参数即可回退/切换
-tauri-runtime-cef = "3.0.0-alpha.5"
+# （默认 DynRuntime 无属性即 RuntimeNotConfigured）。后端 = 官方 wry
+# （Windows 上即 WebView2）。
+tauri-runtime-wry = "3.0.0-alpha.4"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 
 # pi SDK 集成（docs/pi-integration.md §7-1）：vendored 副本（src-tauri/vendor/，
 # 白名单拷贝自上游 zip 解包目录：src/examples/benches/themes + build.rs 嵌入资源，
-# 255MB→22MB；上游 session_index.rs 的 .read(true) 补丁（gh #239 同款）已随迁）。
-# 上游真源在 G:\pi_agent_rust-main（未进 git），同步上游时重拷并核对该补丁。
+# 上游 265MB→vendor ~48MB）。上游真源在 G:\pi_agent_rust-main（未进 git，已镜像
+# v0.8.0），同步上游时重拷白名单并**重打 2 个脱敏补丁**（GitHub push protection；
+# 见 AGENTS.md「pi 升级」段：src/auth.rs OAuth 元数据 4 处 + src/secrets.rs
+# 测试假密钥 2 处 → MIRACH-VENDOR-REDACTED）。旧 session_index.rs .read(true)
+# 补丁已退休（v0.6.0 上游修复，gh #239）。
 # default-features=false 去 TUI 栈；nightly 钉版见 rust-toolchain.toml
 pi = { package = "pi_agent_rust", path = "vendor/pi_agent_rust", default-features = false, features = ["sqlite-sessions"] }
 asupersync = "0.5"
@@ -31,6 +33,8 @@ tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["sync", "time", "net", "macros"] }
 serde_json = "1"
 tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # ExtensionUiHandler 是 #[async_trait] trait（pi extension_dispatcher），
 # impl 侧必须同宏展开签名（E0195 实证）
 async-trait = "0.1"
@@ -38,3 +42,16 @@ async-trait = "0.1"
 portable-pty = "0.8"
 # 终端 http 链接投放（terminal_open_url）：系统默认浏览器
 open = "5"
+# 设置页「通知」的 OS 通道（notify_test 命令；Windows = winrt toast）
+notify-rust = "4"
+# 设置页「密码与登录」的本机加密存储（hermes vault local source 同语义：
+# 条目密码进 OS 凭据管理器——Windows = Credential Manager）
+keyring = "3"
+# 定时任务（pi_cron.rs）：调度时刻计算（cron 表达式逐分钟匹配、间隔锚定、
+# 一次性时间戳）。chrono 本来就在依赖树里（via notify-rust/iana-time-zone），
+# 这里显式声明才能直接 use——**不引新 crate**，lock 不变。
+# clock 是 chrono 的默认 feature（Local::now），显式写出来是因为我们真的依赖它。
+chrono = { version = "0.4", features = ["clock", "serde"] }
+# 定时任务的作业 id / 执行 id（pi_cron.rs）。uuid 也在 pi 的依赖树里
+# （vendor Cargo.toml:334，features= ["v4"]），lock 不变。
+uuid = { version = "1", features = ["v4"] }

@@ -77,9 +77,9 @@ export function ReadAloud({
           className={cn(ghostButton, "bg-foreground/[0.06] size-8 shrink-0")}
         >
           {playing ? (
-            <PauseIcon className="size-3.5" />
+            <PauseIcon className="size-[var(--size-icon-md)]" />
           ) : (
-            <PlayIcon className="size-3.5 translate-x-px" />
+            <PlayIcon className="size-[var(--size-icon-md)] translate-x-px" />
           )}
         </button>
 
@@ -115,7 +115,7 @@ export function ReadAloud({
           {rate}×
         </button>
 
-        <Volume2Icon className="text-foreground/25 size-3.5 shrink-0" />
+        <Volume2Icon className="text-foreground/25 size-[var(--size-icon-md)] shrink-0" />
       </div>
     </div>
   );

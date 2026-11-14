@@ -114,7 +114,7 @@ function SelectionToolbarQuote({
     >
       {children ?? (
         <>
-          <QuoteIcon className="size-3.5" />
+          <QuoteIcon className="size-[var(--size-icon-md)]" />
           Quote
         </>
       )}
@@ -226,7 +226,7 @@ function ComposerQuotePreviewDismiss({
           aria-label="Dismiss quote"
           className={cn(defaultClassName, className)}
         >
-          <XIcon className="size-3.5" />
+          <XIcon className="size-[var(--size-icon-md)]" />
         </button>
       )}
     </ComposerPrimitive.QuoteDismiss>

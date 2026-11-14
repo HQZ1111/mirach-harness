@@ -62,7 +62,7 @@ export function ModelPicker({
                 <>
                   <span className="flex size-3.5 shrink-0 items-center justify-center">
                     {selected && (
-                      <CheckIcon className="fade-in zoom-in-90 animate-in text-foreground/70 size-3.5 duration-200" />
+                      <CheckIcon className="fade-in zoom-in-90 animate-in text-foreground/70 size-[var(--size-icon-md)] duration-200" />
                     )}
                   </span>
 

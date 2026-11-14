@@ -87,6 +87,15 @@ use tracing_subscriber::EnvFilter;
 
 const EXIT_CODE_FAILURE: i32 = 1;
 const EXIT_CODE_USAGE: i32 = 2;
+
+/// A print-mode run whose stdout reader closed the pipe first, e.g.
+/// `pi --print --mode json ... | head -5`.
+///
+/// Zero, because this is not a failure: `head` asked for five lines, got five
+/// lines, and left. The exit status a shell reports for that pipeline is the
+/// reader's anyway. What matters is that the run STOPS here rather than
+/// panicking on every subsequent write (bd-print-json-panics-on-closed-stdout).
+const EXIT_CODE_STDOUT_CLOSED: i32 = 0;
 /// A non-interactive run in which every gated tool call was denied for lack of
 /// an approval surface (gh #224). Distinct from a provider or usage failure so
 /// a script can tell "the model could not use tools" from "the request broke".
@@ -116,6 +125,41 @@ impl std::fmt::Display for ApprovalSurfaceUnavailable {
 }
 
 impl std::error::Error for ApprovalSurfaceUnavailable {}
+
+/// Startup failure due to configured skills/prompts/themes/extensions being
+/// unreadable, invalid, or referencing unreachable packages (gh #223).
+/// Distinct from general runtime failure so callers can identify configuration
+/// and resource loading issues without parsing stderr.
+const EXIT_CODE_RESOURCE_LOAD_FAILED: i32 = 4;
+
+/// Stack size of the main runtime's worker threads.
+///
+/// asupersync gives each worker an explicit 2 MiB stack, so `RUST_MIN_STACK`
+/// does not apply to them. Tasks the runtime spawns are polled on these
+/// workers, and an RPC agent turn's future chain no longer fits 2 MiB in an
+/// unoptimised build: `pi --mode rpc` aborted with "thread
+/// 'asupersync-worker-N' has overflowed its stack" as soon as it accepted a
+/// prompt. This is the headroom the FTUI driver thread already has
+/// (`DRIVER_STACK_BYTES`). The reservation is virtual; pages are committed
+/// only when touched.
+const RUNTIME_WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// Raised when configured skills, prompts, themes, or extensions fail to load (gh #223).
+#[derive(Debug)]
+struct ConfiguredResourceLoadFailed(String);
+
+impl std::fmt::Display for ConfiguredResourceLoadFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "failed to load configured skills/prompts/themes/extensions: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ConfiguredResourceLoadFailed {}
+
 const USAGE_ERROR_PATTERNS: &[&str] = &[
     "@file arguments are not supported in rpc mode",
     "--api-key requires a model to be specified via --provider/--model or --models",
@@ -265,6 +309,13 @@ fn machine_output_mode_from_args(args: &[String]) -> Option<&'static str> {
 /// error) in the chain classifies it; a clap error is `usage`; anything else
 /// is `internal`.
 fn fatal_error_code(err: &anyhow::Error) -> &'static str {
+    if err.chain().any(|cause| {
+        cause
+            .downcast_ref::<ConfiguredResourceLoadFailed>()
+            .is_some()
+    }) {
+        return "resource.load_failed";
+    }
     if let Some(pi_error) = err
         .chain()
         .find_map(|cause| cause.downcast_ref::<pi::error::Error>())
@@ -524,6 +575,7 @@ async fn resolve_selection_with_auth(
     cli: &mut cli::Cli,
     config: &Config,
     session: &Session,
+    cwd: &Path,
     model_registry: &mut ModelRegistry,
     scoped_patterns: &[String],
     auth: &mut AuthStorage,
@@ -533,15 +585,14 @@ async fn resolve_selection_with_auth(
     extra_entries: &[ModelEntry],
 ) -> Result<Option<(pi::app::ModelSelection, Option<String>)>> {
     loop {
-        let scoped_models = if scoped_patterns.is_empty() {
-            Vec::new()
-        } else {
-            pi::app::resolve_model_scope(
-                scoped_patterns,
-                model_registry,
-                has_cli_api_key_override(cli.api_key.as_deref()),
-            )
-        };
+        let scoped_models = pi::app::resolve_startup_model_scope(
+            cli,
+            session,
+            scoped_patterns,
+            model_registry,
+            config,
+            cwd,
+        )?;
 
         let selection = match pi::app::select_model_and_thinking(
             cli,
@@ -603,11 +654,20 @@ fn should_retry_selection_after_extensions(
     err: &anyhow::Error,
     has_extensions: bool,
 ) -> bool {
-    if !has_extensions || (cli.provider.is_none() && cli.model.is_none()) {
+    if !has_extensions {
         return false;
     }
 
     let message = err.to_string().to_ascii_lowercase();
+    // The complete scope may contain an allowed extension model that has
+    // not been registered yet. Defer this decision once; final selection
+    // after extension loading must pass the same provider policy.
+    if message.contains("[model_scope_disabled]") {
+        return true;
+    }
+    if cli.provider.is_none() && cli.model.is_none() {
+        return false;
+    }
     message.contains(" not found") || message.contains("no models available for provider")
 }
 
@@ -641,6 +701,38 @@ fn context_window_tokens_for_entry(entry: &ModelEntry) -> u32 {
     pi::agent::context_window_tokens_for_entry(entry)
 }
 
+/// The tracing filter to install when the user has not asked for one.
+///
+/// `EnvFilter::from_default_env()` with `RUST_LOG` unset enables nothing above
+/// `ERROR`, which meant every diagnostic telling a user their own config was
+/// wrong — an unrecognised settings key, an unparseable queue mode, a
+/// `session_store` nobody recognises, a `keybindings.json` naming an action
+/// that does not exist — was emitted and then dropped on the floor. Nobody
+/// sets `RUST_LOG` to discover that their settings file has a typo in it, so
+/// the default turns on [`pi::config::USER_DIAGNOSTIC_TARGET`], which those
+/// messages share, and leaves every module exactly as quiet as it was.
+///
+/// Setting `RUST_LOG` still replaces this wholesale, including to silence it.
+fn default_log_filter() -> EnvFilter {
+    default_log_filter_for(std::env::var("RUST_LOG").ok().as_deref())
+}
+
+/// [`default_log_filter`] with `RUST_LOG` supplied, so it can be tested without
+/// mutating the environment of a parallel test binary. `None` means unset;
+/// `Some("")` is `RUST_LOG=`, which has always meant "no directives".
+fn default_log_filter_for(rust_log: Option<&str>) -> EnvFilter {
+    let filter = EnvFilter::new(rust_log.unwrap_or_default());
+    if rust_log.is_some() {
+        return filter;
+    }
+    match format!("{}=warn", pi::config::USER_DIAGNOSTIC_TARGET).parse() {
+        Ok(directive) => filter.add_directive(directive),
+        // A module path and a level always parse. If that ever stops being
+        // true, losing the settings warnings beats refusing to start.
+        Err(_) => filter,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn main_impl() -> Result<()> {
     // Parse CLI arguments
@@ -649,16 +741,16 @@ fn main_impl() -> Result<()> {
     };
 
     validate_fetch_models_is_standalone(&cli, &extension_flags, &raw_args)?;
+    if cli.session_workdir.is_some() && cli.command.is_some() {
+        bail!("--session-workdir requires resuming an existing --session");
+    }
 
     if cli.version {
         print_version();
         return Ok(());
     }
 
-    // Validate theme file paths.
-    // Named themes (without .json, /, ~) are validated later after resource loading.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    validate_theme_path_spec(cli.theme.as_deref(), &cwd)?;
 
     // Crash capture (bd-cv653.7.12): bundles land under the agent dir;
     let crash_agent_dir = pi::config::Config::global_dir();
@@ -973,7 +1065,7 @@ fn main_impl() -> Result<()> {
     // terminal, so tracing output (e.g. RUST_LOG=info) can never be painted
     // into the alt-screen transcript (bd-trkef).
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(default_log_filter())
         .with_target(false)
         .with_writer(|| pi::tui::TuiAwareLogWriter)
         .init();
@@ -982,6 +1074,7 @@ fn main_impl() -> Result<()> {
     let reactor = create_reactor()?;
     let runtime = RuntimeBuilder::multi_thread()
         .blocking_threads(1, 2)
+        .thread_stack_size(RUNTIME_WORKER_STACK_BYTES)
         .with_reactor(reactor)
         .build()
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -1026,6 +1119,13 @@ fn exit_code_for_error(err: &anyhow::Error) -> i32 {
         .any(|cause| cause.downcast_ref::<ApprovalSurfaceUnavailable>().is_some())
     {
         return EXIT_CODE_APPROVAL_UNAVAILABLE;
+    }
+    if err.chain().any(|cause| {
+        cause
+            .downcast_ref::<ConfiguredResourceLoadFailed>()
+            .is_some()
+    }) {
+        return EXIT_CODE_RESOURCE_LOAD_FAILED;
     }
     if is_usage_error(err) {
         EXIT_CODE_USAGE
@@ -1309,14 +1409,191 @@ fn print_resolved_repair_policy(resolved: &pi::config::ResolvedRepairPolicy) -> 
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+/// The advisor (bd-cv653.3.3), for either interactive stack: only when the
+/// advisor role resolves a model AND its credentials exist. Otherwise `None`,
+/// and the turn hook never runs (zero-overhead rule).
+fn advisor_options(
+    cli: &cli::Cli,
+    config: &Config,
+    model_registry: &ModelRegistry,
+    auth: &AuthStorage,
+) -> Option<pi::advisor::AdvisorOptions> {
+    if !config.advisor_enabled() {
+        return None;
+    }
+    let entry =
+        pi::app::resolve_role_model(pi::models::ModelRole::Advisor, cli, config, model_registry)?
+            .model_entry;
+    let key = pi::models::resolve_model_key(cli.api_key.as_deref(), auth, &entry);
+    if pi::models::model_requires_configured_credential(&entry) && key.is_none() {
+        tracing::info!(
+            event = "pi.advisor.no_credentials",
+            "advisor role configured but credentials missing; advisor disabled"
+        );
+        return None;
+    }
+    match pi::providers::create_provider_with_auth(&entry, None, Some(auth)) {
+        Ok(provider) => Some(pi::advisor::AdvisorOptions {
+            provider,
+            label: format!("{}/{}", entry.model.provider, entry.model.id),
+            timeout: Duration::from_secs(config.advisor_timeout_secs()),
+            api_key: key,
+        }),
+        Err(err) => {
+            tracing::warn!(
+                event = "pi.advisor.provider_failed",
+                error = %err,
+                "advisor provider construction failed; advisor disabled"
+            );
+            None
+        }
+    }
+}
+
+const fn cli_uses_runtime_session(cli: &cli::Cli) -> bool {
+    cli.command.is_none()
+        && cli.fetch_models.is_none()
+        && cli.export.is_none()
+        && cli.list_models.is_none()
+        && !cli.acp
+}
+
+fn cli_session_path_exists(path: &Path) -> io::Result<bool> {
+    // A dangling symlink is an existing, invalid source, not a new session.
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn invocation_path(path: &Path, invocation_cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        invocation_cwd.join(path)
+    }
+}
+
+#[allow(clippy::unnecessary_debug_formatting)]
+fn cli_path_string(path: &Path) -> Result<String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Session selection requires a UTF-8 path: {path:?}"))
+}
+
+/// Select the original store before project trust, configuration or tools.
+/// Session locators are anchored to the invocation directory; runtime paths
+/// are resolved later, against the saved workspace. No process cwd is changed.
+#[allow(clippy::too_many_lines, clippy::unnecessary_debug_formatting)]
+async fn resolve_cli_session_workdir(
+    cli: &mut cli::Cli,
+    invocation_cwd: &Path,
+) -> Result<Option<pi::session_workdir::SavedSessionWorkdir>> {
+    if !cli_uses_runtime_session(cli) {
+        if cli.session_workdir.is_some() {
+            bail!("--session-workdir requires resuming an existing --session");
+        }
+        return Ok(None);
+    }
+    if cli.no_session {
+        return Ok(None);
+    }
+    if let Some(path) = &cli.session_dir {
+        cli.session_dir = Some(cli_path_string(&invocation_path(
+            Path::new(path),
+            invocation_cwd,
+        ))?);
+    }
+    let selected = if let Some(path) = &cli.session {
+        Some(invocation_path(Path::new(path), invocation_cwd))
+    } else if cli.resume {
+        // The destination's project settings cannot be read until the picker
+        // has selected it. Only global picker preferences are safe here.
+        let picker_config = Config::load_global_only()?;
+        let input = picker_config
+            .session_picker_input
+            .filter(|value| *value > 0)
+            .map(|value| value.to_string());
+        Box::pin(Session::resume_with_picker(
+            cli.session_dir.as_deref().map(Path::new),
+            &picker_config,
+            input,
+        ))
+        .await?
+        .path
+    } else if cli.r#continue {
+        Session::recent_session_path_in_dir(cli.session_dir.as_deref().map(Path::new)).await?
+    } else {
+        None
+    };
+    // Do not scan or open a second picker after project startup. In particular,
+    // FTUI must receive exactly the same selected store as classic/RPC.
+    cli.resume = false;
+    cli.r#continue = false;
+    let Some(path) = selected else {
+        return Ok(None);
+    };
+    let path = invocation_path(&path, invocation_cwd);
+    cli.session = Some(cli_path_string(&path)?);
+    if !cli_session_path_exists(&path)? {
+        if cli.session_workdir.is_some() {
+            bail!("--session-workdir requires an existing --session file: {path:?}");
+        }
+        return Ok(None);
+    }
+
+    let mut saved = pi::session_workdir::inspect_saved_session_workdir(&path).await?;
+    let session_path = cli_path_string(&saved.source_path)?;
+    cli.session = Some(session_path.clone());
+    if let Some(target) = &cli.session_workdir {
+        let target = invocation_path(target, invocation_cwd);
+        let (mut session, diagnostics) = Session::open_with_diagnostics(&session_path).await?;
+        if !diagnostics.skipped_entries.is_empty() || !diagnostics.orphaned_parent_links.is_empty()
+        {
+            bail!(
+                "PI_SESSION_RECOVERY_DIAGNOSTICS: inspect this session with --session-audit before workdir recovery"
+            );
+        }
+        saved.check_loaded_session(&session)?;
+        if pi::session_workdir::attach_session_workdir(&mut session, &target)? {
+            // Explicit consent only becomes effective after its provenance is
+            // durable. A save failure must not launch tools in the new project.
+            session.save().await?;
+        }
+        saved = pi::session_workdir::inspect_saved_session_workdir(&saved.source_path).await?;
+    }
+    Ok(Some(saved))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::future_not_send,
+    clippy::unnecessary_debug_formatting
+)]
 async fn run(
     mut cli: cli::Cli,
     extension_flags: Vec<cli::ExtensionCliFlag>,
     runtime_handle: RuntimeHandle,
     package_subcommand_trust: Option<bool>,
 ) -> Result<()> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let invocation_cwd = std::env::current_dir()?;
+    let requested_session = pi::app::requested_a_session(&cli);
+    if cli_uses_runtime_session(&cli)
+        && !requested_session
+        && (cli.print || matches!(cli.mode.as_deref(), Some("text" | "json")))
+    {
+        cli.no_session = true;
+    }
+    let saved_workdir = resolve_cli_session_workdir(&mut cli, &invocation_cwd).await?;
+    let cwd = match &saved_workdir {
+        Some(saved) => saved.resolve_runtime_cwd(None)?,
+        None => invocation_cwd,
+    };
+    validate_theme_path_spec(cli.theme.as_deref(), &cwd)?;
+    for path in &mut cli.mcp_config {
+        *path = invocation_path(path, &cwd);
+    }
 
     // Multi-root workspace (bd-cv653.3.12): shared handle threaded through
     // @-file processing, the tool registry, and the interactive host so
@@ -1324,15 +1601,15 @@ async fn run(
     // Arc<RwLock> is shared across clones).
     let mut workspace = pi::workspace::WorkspaceHandle::single(&cwd);
 
-    // #210: install the effective proxy configuration before any HTTP client
-    // is constructed, so provider calls, OAuth, update checks, URL reads, and
-    // package fetches all take the same route. Settings-file failures are not
-    // fatal here (the ambient environment still applies) — the config load
-    // below reports them on its own path.
-    for warning in
-        pi::http::proxy::configure(Config::load().ok().and_then(|config| config.http).as_ref())
-    {
-        tracing::warn!("{warning}");
+    // Subcommands can use HTTP before the runtime configuration below. Normal
+    // session startup installs the selected workspace's trusted proxy settings
+    // after discovery instead of reading the invocation project's settings.
+    if cli.command.is_some() || cli.fetch_models.is_some() {
+        for warning in
+            pi::http::proxy::configure(Config::load().ok().and_then(|config| config.http).as_ref())
+        {
+            tracing::warn!("{warning}");
+        }
     }
 
     // Resolve the HTTP request timeout before any provider HTTP client is
@@ -1381,6 +1658,7 @@ async fn run(
         }
     }
 
+    let config_path = Config::config_path_override_from_env(&cwd);
     // Workspace trust (GH #151): before any project settings merge or
     // resource resolution, decide whether this workspace's project-local
     // configuration (.pi/settings.json packages, .pi/extensions/) may load
@@ -1401,10 +1679,15 @@ async fn run(
             && io::stdout().is_terminal();
         // trustAllWorkspaces is honored from the GLOBAL settings only: a
         // project file granting itself trust would defeat the gate.
-        let trust_all = Config::load_global_only()
-            .ok()
-            .and_then(|global| global.trust_all_workspaces)
-            .unwrap_or(false);
+        let trust_all = Config::load_with_roots_and_project_trust(
+            config_path.as_deref(),
+            &Config::global_dir(),
+            &cwd,
+            false,
+        )
+        .ok()
+        .and_then(|global| global.trust_all_workspaces)
+        .unwrap_or(false);
         let inputs = pi::workspace_trust::TrustInputs {
             cli_trust: cli.trust,
             trust_all_workspaces: trust_all,
@@ -1432,7 +1715,15 @@ async fn run(
         state.trusted
     };
 
-    let mut config = Config::load_with_project_trust(workspace_trusted)?;
+    let mut config = Config::load_with_roots_and_project_trust(
+        config_path.as_deref(),
+        &Config::global_dir(),
+        &cwd,
+        workspace_trusted,
+    )?;
+    for warning in pi::http::proxy::configure(config.http.as_ref()) {
+        tracing::warn!("{warning}");
+    }
     if let Some(theme_spec) = cli.theme.as_deref() {
         // Theme already validated above
         config.theme = Some(theme_spec.to_string());
@@ -1451,6 +1742,52 @@ async fn run(
     {
         pi::http::client::set_request_timeout_override(secs);
     }
+
+    // Open and verify the store before resource loading, auth refresh, tool
+    // construction or extension prewarm can act on the selected workspace.
+    let startup_session = if cli_uses_runtime_session(&cli) {
+        let mut session = Box::pin(Session::new(&cli, &config)).await?;
+        if let Some(saved) = &saved_workdir {
+            saved.check_loaded_session(&session)?;
+            saved.check_runtime_cwd(&cwd)?;
+        } else if !cli.no_session {
+            if let Some(path) = cli.session.as_deref()
+                && cli_session_path_exists(Path::new(path))?
+            {
+                bail!(
+                    "PI_SESSION_WORKDIR_SOURCE_CHANGED: session file appeared during startup; retry discovery before resuming"
+                );
+            }
+            session.header.cwd = cli_path_string(&cwd)?;
+        }
+        // All roots must be available to tools and to initial @file scope
+        // checks, including roots restored from the saved session header.
+        for dir in &cli.add_dir {
+            let path = invocation_path(dir, &cwd);
+            let canonical = pi::workspace::validate_new_root(&path)
+                .map_err(|error| anyhow::anyhow!("--add-dir: {error}"))?;
+            workspace.add_root(&canonical);
+        }
+        for root in session.additional_roots() {
+            if !root.is_absolute() {
+                eprintln!("Warning: skipping non-absolute saved workspace root: {root:?}");
+                continue;
+            }
+            if let Err(error) = pi::workspace::validate_new_root(&root) {
+                eprintln!("Warning: skipping restored workspace root: {error}");
+            } else {
+                workspace.add_root(&root);
+            }
+        }
+        let snapshot = workspace.snapshot_or(&cwd);
+        let additional = snapshot.additional();
+        if !additional.is_empty() || !cli.add_dir.is_empty() {
+            session.set_additional_roots(additional);
+        }
+        Some(session)
+    } else {
+        None
+    };
 
     let startup_mode = cli.mode.clone().unwrap_or_else(|| {
         if !cli.print && cli.export.is_none() {
@@ -1488,11 +1825,13 @@ async fn run(
     let mut resources = match resources_result {
         Ok(resources) => resources,
         Err(err) => {
+            eprintln!("Warning: Failed to load skills/prompts/themes/extensions: {err}");
             if resource_cli.has_explicit_paths() {
                 return Err(anyhow::Error::new(err));
             }
-            eprintln!("Warning: Failed to load skills/prompts/themes/extensions: {err}");
-            ResourceLoader::empty(config.enable_skill_commands())
+            return Err(anyhow::Error::new(ConfiguredResourceLoadFailed(
+                err.to_string(),
+            )));
         }
     };
     let _ = write_resource_diagnostics_since(
@@ -1561,8 +1900,13 @@ async fn run(
     // this function (provider/model flags, resources, workspace trust, approval
     // state, enabled tools) is threaded through `SessionOptions`, and the SDK
     // session cannot reach extension-provided providers or models anyway.
+    // `cli.ftui` is redundant with `!cli.classic` while the two are declared
+    // `conflicts_with` each other, and it is named here on purpose: it was the
+    // one Cli field nothing in the crate read, so `--ftui` was a documented
+    // flag that did nothing and three e2e suites passed it believing it chose
+    // the stack. Reading it keeps that honest if the conflict is ever relaxed.
     #[cfg(feature = "ftui")]
-    let ftui_requested = is_interactive && !cli.classic;
+    let ftui_requested = is_interactive && (cli.ftui || !cli.classic);
     #[cfg(not(feature = "ftui"))]
     let ftui_requested = false;
 
@@ -1577,13 +1921,43 @@ async fn run(
     // undo/workspace policy and see tools mounted after boot (extension
     // wrappers, MCP tools, plan tools).
     let shared_enabled_tools = cli.enabled_tools();
-    let shared_tools = pi::tools::SharedToolRegistry::new(ToolRegistry::with_mutation_recorder(
-        &shared_enabled_tools,
-        &cwd,
-        Some(&config),
-        Some(Arc::clone(&session_mutation_recorder)),
-        Some(&workspace),
-    ));
+    // A name the registry does not know is dropped without a word, so
+    // `--tools read,bsah,edit` hands the model two tools and reports three.
+    let unknown_tools = pi::tools::unknown_tool_names(&shared_enabled_tools);
+    if !unknown_tools.is_empty() {
+        for name in &unknown_tools {
+            eprintln!("Warning: --tools: \"{name}\" is not a tool pi provides; it is ignored");
+        }
+        // The constants group registry-built names ahead of host-coupled ones,
+        // which is the right order to read the code in and the wrong one to
+        // scan for a name.
+        let mut provided = ToolRegistry::KNOWN_TOOL_NAMES.to_vec();
+        provided.extend(
+            ToolRegistry::TOOLS_NOT_SELECTED_BY_FLAG
+                .iter()
+                .map(|(name, _)| *name),
+        );
+        provided.sort_unstable();
+        eprintln!("Warning: --tools: pi provides {}", provided.join(", "));
+    }
+    // A real tool the flag has no say over. Saying nothing invites the user to
+    // conclude the tool is missing; saying "not a tool pi provides" — which is
+    // what this printed before — tells them something false about a tool they
+    // can actually have.
+    for (name, how) in pi::tools::unselectable_tool_names(&shared_enabled_tools) {
+        eprintln!("Warning: --tools: \"{name}\" is not selected with --tools; {how}");
+    }
+    let shared_tools = pi::tools::SharedToolRegistry::new(if cli.no_tools {
+        ToolRegistry::without_builtins(Some(&config))
+    } else {
+        ToolRegistry::with_mutation_recorder(
+            &shared_enabled_tools,
+            &cwd,
+            Some(&config),
+            Some(Arc::clone(&session_mutation_recorder)),
+            Some(&workspace),
+        )
+    });
 
     // Pre-warm extension runtime in a background task so startup work can overlap
     // with auth refresh, model selection, and session creation.
@@ -1683,6 +2057,7 @@ async fn run(
         }
         Err(err) => return Err(err.into()),
     };
+    auth.set_command_working_directory(&cwd)?;
 
     // gh #218: refresh stored OAuth credentials without letting an unrelated
     // provider's stale login abort the run. An explicit `--api-key` for an
@@ -1719,7 +2094,7 @@ async fn run(
     }
 
     let global_dir = Config::global_dir();
-    let package_dir = Config::package_dir();
+    let package_dir = invocation_path(&Config::package_dir(), &cwd);
     let models_path = default_models_path(&global_dir);
     let mut model_registry = ModelRegistry::load(&auth, Some(models_path.clone()));
     if let Some(error) = model_registry.error() {
@@ -1734,16 +2109,25 @@ async fn run(
     // for Zed editor integration. Sessions are created on-demand via the protocol
     // so we skip the normal session/model selection pipeline.
     if cli.acp {
-        let available_models = model_registry.get_available();
+        let available_models = rpc_available_models(&model_registry, cli.api_key.as_deref());
         let acp_options = pi::acp::AcpOptions {
             config: config.clone(),
+            launch: pi::acp::AcpLaunchOptions::from_cli(&cli),
             available_models,
             model_registry: model_registry.clone(),
             auth: auth.clone(),
+            oauth_refresh_failures: startup_oauth_refresh
+                .failed_provider_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             runtime_handle: runtime_handle.clone(),
             session_dir: cli.session_dir.as_ref().map(PathBuf::from),
+            // The ACP prompt builder advertises skills only when this launch
+            // enables the read tool, as on the terminal stacks.
+            skills_prompt: Some(resources.format_skills_for_prompt()),
         };
-        return run_acp_mode(acp_options).await;
+        return Box::pin(run_acp_mode(acp_options)).await;
     }
 
     if let Some(export_path) = cli.export.clone() {
@@ -1754,16 +2138,6 @@ async fn run(
     }
 
     pi::app::validate_rpc_args(&cli)?;
-
-    // Explicit --add-dir roots must be live BEFORE @file arguments are
-    // scope-checked below, or `pi --add-dir /extra "@/extra/notes.md"`
-    // fails with "Cannot read outside the working directory". Restored
-    // session roots are layered later (they need the session open).
-    for dir in &cli.add_dir {
-        let canonical =
-            pi::workspace::validate_new_root(dir).map_err(|e| anyhow::anyhow!("--add-dir: {e}"))?;
-        workspace.add_root(&canonical);
-    }
 
     let mut messages: Vec<String> = cli.message_args().iter().map(ToString::to_string).collect();
     let file_args: Vec<String> = cli.file_args().iter().map(ToString::to_string).collect();
@@ -1788,9 +2162,9 @@ async fn run(
         }
     });
     let is_print_mode = mode.eq("text") || mode.eq("json");
-    if is_print_mode {
-        cli.no_session = true;
-    }
+    // Persistence was decided before resolving --continue/--resume into an
+    // exact path, including the no-candidate case that creates a new session.
+    debug_assert!(!is_print_mode || requested_session || cli.no_session);
     if mode.eq("text") && initial.is_none() && messages.is_empty() {
         bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
     }
@@ -1810,6 +2184,8 @@ async fn run(
         config.enabled_models.clone().unwrap_or_default()
     };
     let disabled_providers = config.disabled_providers.clone().unwrap_or_default();
+    // This pre-registration view feeds the initial picker and key check.
+    // resolve_selection_with_auth validates the final scope on every pass.
     let scoped_models = if scoped_patterns.is_empty() {
         Vec::new()
     } else {
@@ -1842,32 +2218,14 @@ async fn run(
 
     let allow_setup_prompt =
         is_interactive && io::stdin().is_terminal() && io::stdout().is_terminal();
-    let mut session = Box::pin(Session::new(&cli, &config)).await?;
-
-    // Multi-root roots (bd-cv653.3.12): restore persisted additional_roots on
-    // resume (explicit --add-dir flags were layered above, before @file
-    // scope checks) and persist the resulting canonical set for future
-    // resumes. A vanished restored root degrades to a warning rather than
-    // blocking resume; `add_root` dedups against the explicit flags.
-    {
-        for root in session.additional_roots() {
-            if let Err(err) = pi::workspace::validate_new_root(&root) {
-                eprintln!("Warning: skipping restored workspace root: {err}");
-            } else {
-                workspace.add_root(&root);
-            }
-        }
-        let snapshot = workspace.snapshot_or(&cwd);
-        let additional = snapshot.additional();
-        if !additional.is_empty() || !cli.add_dir.is_empty() {
-            session.set_additional_roots(additional);
-        }
-    }
+    let session =
+        startup_session.ok_or_else(|| anyhow::anyhow!("Runtime session was not initialized"))?;
 
     let (mut selection, mut resolved_key) = match resolve_selection_with_auth(
         &mut cli,
         &config,
         &session,
+        &cwd,
         &mut model_registry,
         &scoped_patterns,
         &mut auth,
@@ -1891,19 +2249,262 @@ async fn run(
             }
         }
     };
-    // gh #218: now that the model is known, a failed refresh matters only if
-    // this run would actually send that provider's stale OAuth token.
-    if !has_cli_api_key_override(cli.api_key.as_deref())
-        && let Some(failure) =
-            startup_oauth_refresh.failure_for(&selection.model_entry.model.provider)
-    {
-        return Err(anyhow::Error::new(pi::error::Error::auth(format!(
-            "OAuth token refresh failed for: {} ({}) — run `pi auth login {}` to renew it",
-            failure.provider, failure.error, failure.provider
-        ))));
-    }
+    // Extensions can replace this preliminary selection, including the native
+    // bootstrap used while an allowed scoped extension model is unregistered.
+    // The SDK validates its final destination; classic/RPC does so below.
+    validate_startup_oauth_refresh(
+        &cli,
+        &startup_oauth_refresh,
+        &selection.model_entry.model.provider,
+        &[],
+        has_extensions,
+    )?;
 
     let enabled_tools = cli.enabled_tools();
+    // CLI flag wins; fall back to PI_MAX_TOOL_ITERATIONS env, then default.
+    // `clamp_max_tool_iterations` keeps invalid values out of the loop and
+    // emits a warning instead of failing the run.
+    let max_tool_iterations = if cli.max_tool_iterations.is_some() {
+        pi::agent::clamp_max_tool_iterations(cli.max_tool_iterations)
+    } else {
+        pi::agent::resolved_max_tool_iterations_default()
+    };
+    // Approval mode (bd-cv653.3.19): CLI flags override config.
+    let approval_mode = if cli.yolo {
+        pi::approval::ApprovalMode::Yolo
+    } else if let Some(ref m) = cli.approval_mode {
+        pi::approval::ApprovalMode::from_setting(Some(m))
+    } else {
+        config.approval_mode()
+    };
+    let dual_confirm_classes = config.approval_dual_confirm_classes();
+    let approval_state = pi::approval::ApprovalState::new(
+        approval_mode,
+        cli.plan_yolo || config.plan_auto_approve(),
+        dual_confirm_classes,
+    );
+
+    // The default FrankenTUI stack runs one SDK session that builds its own
+    // provider, tools, system prompt and extension runtime (bd-2crrf). Launch
+    // it here, before the classic stack constructs any of those, so a single
+    // launch never initializes a second agent session and then discards it.
+    // Everything above stays shared: the bootstrap Session restores the
+    // persisted workspace roots handed over below, and model selection is
+    // the setup/auth gate.
+    #[cfg(feature = "ftui")]
+    if ftui_requested {
+        // The SDK opens its own session; release this bootstrap one first so
+        // nothing holds its resources while the frontend runs. It was never
+        // written.
+        drop(session);
+        let ftui_enabled_tools = enabled_tools
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        let options = pi::sdk::SessionOptions {
+            provider: cli.provider.clone(),
+            model: cli.model.clone(),
+            model_scope: cli.models.as_deref().map(pi::app::parse_models_arg),
+            api_key: cli.api_key.clone(),
+            working_directory: Some(cwd.clone()),
+            workspace_trusted,
+            // Session persistence honors the same flags as the default
+            // stack: saved by default, --no-session for ephemeral,
+            // --session/--session-dir for explicit paths. The SDK path
+            // creates its own session file; the bootstrap session was
+            // dropped above without writing anything.
+            no_session: cli.no_session,
+            // Startup already resolved --session, --continue and --resume.
+            session_path: cli.session.as_ref().map(PathBuf::from),
+            session_dir: cli.session_dir.as_ref().map(PathBuf::from),
+            workspace: Some(workspace.clone()),
+            // Extensions load with UI prompts bridged (bd-1eoh4): the
+            // ResourceLoader's set, which already folds in explicit -e
+            // paths and honors trust/policy filtering. `--no-extensions`
+            // only turns off discovery there, so `-e` still loads (as on
+            // the classic stack); emptying the list here dropped `-e` too.
+            extension_paths: resources.extensions().to_vec(),
+            extension_policy: cli.extension_policy.clone(),
+            repair_policy: cli.repair_policy.clone(),
+            extension_flags: extension_flags.clone(),
+            // Prompt/tool/thinking flags flow through so deterministic
+            // harnesses (VCR body matching) and users get the same
+            // behavior as the default stack.
+            system_prompt: cli.system_prompt.clone(),
+            append_system_prompt: cli.append_system_prompt.clone(),
+            enabled_tools: Some(ftui_enabled_tools),
+            thinking: cli.thinking.as_deref().and_then(|t| t.parse().ok()),
+            include_cwd_in_prompt: !cli.hide_cwd_in_prompt,
+            // The model learns which skills exist from this block, as on
+            // the classic stack (listed only when it can `read` them). The
+            // SDK loads no resources itself, so without it the default
+            // stack never told the model about any skill.
+            no_context_files: cli.no_context_files,
+            skills_prompt: enabled_tools
+                .contains(&"read")
+                .then(|| resources.format_skills_for_prompt()),
+            max_tool_iterations,
+            max_time: cli.max_time.map(std::time::Duration::from_secs),
+            package_dir: Some(package_dir.clone()),
+            mcp: Some(pi::sdk::McpSessionOptions {
+                config_paths: cli.mcp_config.clone(),
+                global_dir: Some(pi::config::Config::global_dir()),
+            }),
+            // Approval gating (issue #196): the ftui stack previously
+            // dropped the approval mode entirely; thread the same state
+            // the classic stack uses so `ask`/`write` modes gate here
+            // too, prompting through the ask-card bridge.
+            approval_state: Some(approval_state.clone()),
+            // The advisor was built only on the classic stack; the role
+            // the user configured never reviewed a turn on this one.
+            advisor: advisor_options(&cli, &config, &model_registry, &auth),
+            // Provider retry (bd-u2qv4). Until now a 429 or a 529 was a
+            // hard error on this stack while the same request in print
+            // mode or over RPC retried and completed, and this is the
+            // stack most people run. `from_config` returns None when the
+            // user has set `retry.enabled = false`, so turning it off
+            // still means nobody re-enters the provider on their behalf.
+            // The retry events it emits already render here as system
+            // notes.
+            retry: pi::failover::RetryPolicy::from_config(&config),
+            // Cross-model failover (bd-u2qv4). A configured
+            // `retry.fallbackChains` used to be inert on this stack: the
+            // chain the user set up never ran on the surface they set it
+            // up for, while the identical request in print mode or over
+            // RPC walked it. `from_config` yields None when no chain is
+            // configured, which is the same condition under which the
+            // other surfaces decline.
+            failover: pi::sdk::FailoverOptions::from_config(
+                &config,
+                model_registry.get_available(),
+                auth.clone(),
+                cli.api_key.clone(),
+            ),
+            ..Default::default()
+        };
+        let theme = pi::theme::Theme::resolve(&config, &cwd);
+        // Same `disabledProviders` filter the classic stack applies when it
+        // builds its model list: without it the setting was silently
+        // ignored on this frontend and every catalog provider still
+        // appeared in the picker.
+        let ftui_models = model_registry
+            .get_available()
+            .into_iter()
+            .filter(|entry| {
+                !pi::failover::provider_is_disabled(
+                    &disabled_providers,
+                    scope_override,
+                    &entry.model.provider,
+                )
+            })
+            .map(|entry| {
+                (
+                    format!("{}/{}", entry.model.provider, entry.model.id),
+                    entry.model.name,
+                )
+            })
+            .collect::<Vec<_>>();
+        // The picker shows each model's display name beside its identity
+        // (GH #214); switching still uses the identity.
+        let ftui_model_names = ftui_models
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashMap<_, _>>();
+        let ftui_models = ftui_models
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        // /resume picker entries: this cwd's saved sessions, newest first
+        // (same index the session picker uses). Failures degrade to an
+        // empty list — /resume then reports "no saved sessions".
+        // Sessions pinned with /pin come first, marked (OMP). /resume
+        // re-reads the index itself; this is the initial list.
+        let ftui_sessions = pi::interactive_ftui::session_pins::resume_entries(
+            &cwd.display().to_string(),
+            &Config::global_dir(),
+        );
+        return pi::interactive_ftui::run(
+            options,
+            &theme,
+            cli.inline,
+            ftui_models,
+            ftui_sessions,
+            pi::interactive_ftui::FtuiSettings {
+                markdown_spacing: config.markdown_spacing(),
+                // Resolved exactly as the classic stack resolves it; the
+                // `--no-mouse-capture` flag has already been folded into
+                // `config.disable_mouse_capture` above.
+                disable_mouse_capture: config.disable_mouse_capture.unwrap_or_else(|| {
+                    std::env::var("PI_NO_MOUSE_CAPTURE").is_ok_and(|val| val == "1")
+                }),
+                // `/share` on this stack (bd-ydz1t.1) runs the same gh flow
+                // the classic stack does, so it reads the same setting.
+                gh_path: config.gh_path.clone(),
+                hide_thinking_block: config.hide_thinking_block.unwrap_or(false),
+                model_names: ftui_model_names,
+                start_in_plan_mode: cli.plan_mode,
+                initial_content: initial,
+                initial_messages: messages,
+                double_escape_action: pi::interactive_ftui::DoubleEscapeAction::from_setting(
+                    config.double_escape_action.as_deref(),
+                ),
+                // `/tan` (bd-ydz1t.2) resolves its child model exactly as
+                // the classic stack does: the `task` role, falling back to
+                // `smol`.
+                subagent_role_spec: pi::app::subagent_role_spec(&config),
+                title_client: pi::app::titling_model_entry(&cli, &config, &model_registry)
+                    .and_then(|entry| {
+                        pi::session_title::TitleClient::for_model_entry(
+                            &entry,
+                            &selection.model_entry,
+                            cli.api_key.as_deref(),
+                            &auth,
+                            config.secrets.as_ref(),
+                        )
+                    }),
+                // /btw answers with the smol role model, resolved exactly as
+                // the classic stack resolves it; `None` without credentials.
+                btw_client: pi::app::resolve_role_model(
+                    pi::models::ModelRole::Smol,
+                    &cli,
+                    &config,
+                    &model_registry,
+                )
+                .and_then(|resolution| {
+                    pi::btw::BtwClient::for_model_entry(
+                        &resolution.model_entry,
+                        cli.api_key.as_deref(),
+                        &auth,
+                        config.secrets.as_ref(),
+                    )
+                }),
+                // ctrl+p cycles the same resolved scope the classic stack
+                // cycles; empty falls back to every available model.
+                cycle_models: scoped_models
+                    .iter()
+                    .map(|scoped| {
+                        format!("{}/{}", scoped.model.model.provider, scoped.model.model.id)
+                    })
+                    .collect(),
+            },
+            pi::interactive_ftui::AutocompleteLaunch {
+                catalog: pi::autocomplete::AutocompleteCatalog::from_resources(&resources),
+                resources: Some(resources.clone()),
+                resource_source: Some(pi::interactive_ftui::ResourceSource {
+                    package_manager: package_manager.clone(),
+                    config: config.clone(),
+                    cli: resource_cli.clone(),
+                }),
+                cwd: cwd.clone(),
+                max_visible: config
+                    .autocomplete_max_visible
+                    .and_then(|n| usize::try_from(n.clamp(3, 20)).ok())
+                    .unwrap_or(5),
+            },
+        )
+        .map_err(Into::into);
+    }
+
     let skills_prompt = if enabled_tools.contains(&"read") {
         resources.format_skills_for_prompt()
     } else {
@@ -1935,32 +2536,10 @@ async fn run(
         Some(&foreign_rules),
         &config,
     )?;
-    let provider =
-        providers::create_provider(&selection.model_entry, None).map_err(anyhow::Error::new)?;
+    let provider = providers::create_provider_with_auth(&selection.model_entry, None, Some(&auth))
+        .map_err(anyhow::Error::new)?;
     let stream_options =
         pi::app::build_stream_options(&config, resolved_key.clone(), &selection, &session);
-    // CLI flag wins; fall back to PI_MAX_TOOL_ITERATIONS env, then default.
-    // `clamp_max_tool_iterations` keeps invalid values out of the loop and
-    // emits a warning instead of failing the run.
-    let max_tool_iterations = if cli.max_tool_iterations.is_some() {
-        pi::agent::clamp_max_tool_iterations(cli.max_tool_iterations)
-    } else {
-        pi::agent::resolved_max_tool_iterations_default()
-    };
-    // Approval mode (bd-cv653.3.19): CLI flags override config.
-    let approval_mode = if cli.yolo {
-        pi::approval::ApprovalMode::Yolo
-    } else if let Some(ref m) = cli.approval_mode {
-        pi::approval::ApprovalMode::from_setting(Some(m))
-    } else {
-        config.approval_mode()
-    };
-    let dual_confirm_classes = config.approval_dual_confirm_classes();
-    let approval_state = pi::approval::ApprovalState::new(
-        approval_mode,
-        cli.plan_yolo || config.plan_auto_approve(),
-        dual_confirm_classes,
-    );
 
     let agent_config = AgentConfig {
         system_prompt: Some(system_prompt),
@@ -2015,17 +2594,19 @@ async fn run(
         ]);
     }
     // submit_plan shares the agent's plan-mode state (bd-cv653.3.5); it is
-    // always registered — the tool self-errors outside plan mode.
+    // registered when built-ins are enabled, and self-errors outside plan mode.
     {
         let plan_state = agent_session.agent.plan_state();
         let auto_approve = cli.plan_yolo || config.plan_auto_approve();
-        agent_session
-            .agent
-            .extend_tools(vec![Box::new(pi::plan::SubmitPlanTool::new(
-                plan_state.clone(),
-                auto_approve,
-            )) as Box<dyn pi::tools::Tool>]);
-        if cli.plan_mode {
+        if !cli.no_tools {
+            agent_session
+                .agent
+                .extend_tools(vec![Box::new(pi::plan::SubmitPlanTool::new(
+                    plan_state.clone(),
+                    auto_approve,
+                )) as Box<dyn pi::tools::Tool>]);
+        }
+        if cli.plan_mode && !cli.no_tools {
             plan_state.enter_planning();
             let cx = pi::agent_cx::AgentCx::for_request();
             if let Ok(mut inner) = agent_session.session.lock(cx.cx()).await {
@@ -2034,59 +2615,28 @@ async fn run(
                     Some(serde_json::json!({"mode": "planning", "via": "--plan-mode"})),
                 );
             }
+        } else if cli.plan_mode {
+            eprintln!("Warning: --plan-mode is unavailable while --no-tools is enabled");
         }
     }
-    // The advisor (bd-cv653.3.3): build the runtime only when the advisor
-    // role resolves a model AND its credentials exist — otherwise the session
-    // carries None and the hook never runs (zero-overhead rule).
-    if let Some(resolution) = pi::app::resolve_role_model(
-        pi::models::ModelRole::Advisor,
-        &cli,
-        &config,
-        &model_registry,
-    )
-    .filter(|_| config.advisor_enabled())
+    agent_session.advisor = advisor_options(&cli, &config, &model_registry, &auth)
+        .as_ref()
+        .map(|options| {
+            options
+                .runtime()
+                .with_secrets_settings(config.secrets.as_ref())
+        });
+    // Host authorization must not depend on granting the model the ask tool.
+    // The registry picker is always handed to interactive/RPC hosts; only this
+    // conditional extend adds ask to the provider-visible schema.
+    let ask_tool = Some(shared_tools.snapshot().host_ask_tool());
+    if enabled_tools.contains(&"ask")
+        && let Some(ask) = &ask_tool
     {
-        let entry = resolution.model_entry;
-        let key = pi::models::resolve_model_key(cli.api_key.as_deref(), &auth, &entry);
-        let credentialed =
-            !pi::models::model_requires_configured_credential(&entry) || key.is_some();
-        if credentialed {
-            let label = format!("{}/{}", entry.model.provider, entry.model.id);
-            match pi::providers::create_provider(&entry, None) {
-                Ok(advisor_provider) => {
-                    agent_session.advisor = Some(
-                        pi::advisor::AdvisorRuntime::new(advisor_provider, label)
-                            .with_timeout(std::time::Duration::from_secs(
-                                config.advisor_timeout_secs(),
-                            ))
-                            .with_api_key(key),
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        event = "pi.advisor.provider_failed",
-                        error = %err,
-                        "advisor provider construction failed; advisor disabled"
-                    );
-                }
-            }
-        } else {
-            tracing::info!(
-                event = "pi.advisor.no_credentials",
-                "advisor role configured but credentials missing; advisor disabled"
-            );
-        }
-    }
-    let ask_tool = enabled_tools.contains(&"ask").then(|| {
-        let tool = pi::ask::AskTool::new(pi::ask::AskPolicy::from_config(
-            config.ask_policy.as_deref(),
-        ));
         agent_session
             .agent
-            .extend_tools(vec![Box::new(tool.clone()) as Box<dyn pi::tools::Tool>]);
-        tool
-    });
+            .extend_tools(vec![Box::new(ask.clone()) as Box<dyn pi::tools::Tool>]);
+    }
     // Approval prompts (issue #196): route calls the approval mode gates
     // through the ask surface the interactive/RPC hosts install, instead of
     // silently denying because no `tool_approval` handler existed. Surfaces
@@ -2111,16 +2661,25 @@ async fn run(
                     &resolution.model_entry,
                     cli.api_key.as_deref(),
                     &auth,
+                    config.secrets.as_ref(),
                 )
             });
     // Rebinding factory (bd-9jgrt): lets `/model smol <spec>` rebuild the
     // /btw client mid-session against fresh on-disk credentials.
     let btw_api_key = cli.api_key.clone();
+    let btw_secrets_settings = config.secrets.clone();
+    let btw_cwd = cwd.clone();
     let btw_factory: pi::btw::BtwClientFactory = std::sync::Arc::new(move |entry| {
-        let Ok(auth) = pi::auth::AuthStorage::load(pi::config::Config::auth_path()) else {
+        let Ok(mut auth) = pi::auth::AuthStorage::load(pi::config::Config::auth_path()) else {
             return None;
         };
-        pi::btw::BtwClient::for_model_entry(entry, btw_api_key.as_deref(), &auth)
+        auth.set_command_working_directory(&btw_cwd).ok()?;
+        pi::btw::BtwClient::for_model_entry(
+            entry,
+            btw_api_key.as_deref(),
+            &auth,
+            btw_secrets_settings.as_ref(),
+        )
     });
 
     // MCP client (bd-cv653.6.1): discover server configs (CLI > .pi >
@@ -2128,22 +2687,17 @@ async fn run(
     // servers under a bounded global budget, and mount their tools as
     // first-class mcp__<server>__<tool> tools. Pending/denied servers are
     // never spawned; /mcp shows provenance + health for everything. The
-    // default FTUI constructs the manager owned by its actual SDK session,
-    // so do not discover and populate a second manager that will be dropped.
-    let mcp_manager = if ftui_requested {
-        None
-    } else {
-        Some(std::sync::Arc::new(pi::mcp::bootstrap_with_project_trust(
-            &cwd,
-            &pi::config::Config::global_dir(),
-            &cli.mcp_config,
-            workspace_trusted,
-        )?))
-    };
+    // default FTUI launched above owns its manager through its SDK session.
+    let mcp_manager = std::sync::Arc::new(pi::mcp::McpManager::bootstrap(
+        &cwd,
+        &pi::config::Config::global_dir(),
+        &cli.mcp_config,
+        workspace_trusted,
+    )?);
     let mut extension_bindings = Vec::new();
     let mut extension_model_entries = Vec::new();
 
-    if !ftui_requested && !resources.extensions().is_empty() {
+    if !resources.extensions().is_empty() {
         // Await the pre-warmed extension runtime (spawned earlier to overlap with
         // auth refresh, model selection, and session creation).
         let pre_warmed = if let Some((mgr, tools, join_handle)) = extension_prewarm_handle {
@@ -2216,16 +2770,14 @@ async fn run(
             // Bridge extension-registered MCP servers into the unified MCP
             // client registry (bd-cv653.6.1): same spawn path, same trust
             // gate, provenance=extension in /mcp.
-            if let Some(mcp_manager) = &mcp_manager {
-                for spec in region.manager().extension_mcp_servers() {
-                    let name = spec
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if !name.is_empty() {
-                        mcp_manager.register_extension_server(&name, &spec);
-                    }
+            for spec in region.manager().extension_mcp_servers() {
+                let name = spec
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !name.is_empty() {
+                    mcp_manager.register_extension_server(&name, &spec);
                 }
             }
             extension_bindings =
@@ -2304,7 +2856,7 @@ async fn run(
                 }
             }
         }
-    } else if !ftui_requested && !extension_flags.is_empty() {
+    } else if !extension_flags.is_empty() {
         let rendered = extension_flags
             .iter()
             .map(pi::cli::ExtensionCliFlag::display_name)
@@ -2317,23 +2869,13 @@ async fn run(
         );
     }
 
-    // The classic/RPC session owns this manager. FTUI constructs its actual
-    // Agent through the SDK below, so its SDK-owned manager performs the one
-    // connect-and-mount pass after that session's extensions load (bd-vjfol).
-    if let Some(mcp_manager) = &mcp_manager {
-        let mcp_wrappers = pi::mcp::connect_trusted_and_mount_tools(mcp_manager).await;
-        if !mcp_wrappers.is_empty() {
-            agent_session.agent.extend_tools(mcp_wrappers);
-        }
-    }
+    // The classic/RPC session owns this manager; FTUI's SDK-owned manager
+    // performs its own connect-and-mount pass after that session's
+    // extensions load (bd-vjfol).
+    mcp_manager.connect_trusted().await;
+    pi::mcp::reconcile_tools(&mcp_manager, &agent_session.agent.shared_tools());
 
-    #[cfg(feature = "ftui")]
-    let ftui_enabled_tools = enabled_tools
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect::<Vec<_>>();
-
-    if has_extensions && !ftui_requested {
+    if has_extensions {
         let session_snapshot = {
             let cx = pi::agent_cx::AgentCx::for_request();
             let session = agent_session
@@ -2348,6 +2890,7 @@ async fn run(
             &mut cli,
             &config,
             &session_snapshot,
+            &cwd,
             &mut model_registry,
             &scoped_patterns,
             &mut auth,
@@ -2361,15 +2904,23 @@ async fn run(
             return Ok(());
         };
 
+        validate_startup_oauth_refresh(
+            &cli,
+            &startup_oauth_refresh,
+            &updated_selection.model_entry.model.provider,
+            &extension_bindings,
+            false,
+        )?;
         selection = updated_selection;
         resolved_key = updated_key;
 
-        let provider = providers::create_provider(
+        let provider = providers::create_provider_with_auth(
             &selection.model_entry,
             agent_session
                 .extensions
                 .as_ref()
                 .map(ExtensionRegion::manager),
+            Some(&auth),
         )
         .map_err(anyhow::Error::new)?;
         agent_session.agent.set_provider(provider);
@@ -2455,13 +3006,12 @@ async fn run(
         // owns the MCP manager: servers extensions register after startup are
         // synced into the session at the next prompt (bd-1wr1n).
         let mut agent_session = agent_session;
-        if let Some(manager) = mcp_manager.clone() {
-            agent_session.set_mcp_manager(manager);
-        }
+        agent_session.set_mcp_manager(mcp_manager.clone());
         // Boxed: this future is large (clippy::large_futures); boxing keeps the
         // enclosing future small.
         Box::pin(run_rpc_mode(
             agent_session,
+            cwd.clone(),
             resources,
             config.clone(),
             available_models,
@@ -2472,137 +3022,6 @@ async fn run(
             ask_tool,
         ))
         .await
-    } else if ftui_requested {
-        // FrankenTUI preview stack (bd-cv653.9.1): experimental, runs an
-        // ephemeral SDK session on its own driver runtime; the charmed
-        // stack stays the default until parity is proven. Drop the default
-        // stack's session first so nothing holds its resources while the
-        // preview runs.
-        drop(agent_session);
-        #[cfg(feature = "ftui")]
-        {
-            // `--continue` (bd-ydz1t.3). The classic stack resolves it inside
-            // Session::from_cli, which this path does not use; SessionOptions
-            // has no "reopen the latest" concept, so the flag was silently
-            // dropped and the user got a fresh session instead of their last
-            // one. Resolve it to a concrete path here, through the same lookup
-            // the classic stack uses, and hand it over as `session_path`.
-            //
-            // `--session` still wins, and `--no-session` short-circuits below,
-            // which is Session::from_cli's own precedence. `None` means this
-            // directory has nothing continuable, and a new session is exactly
-            // what the classic stack produces there too.
-            let continue_session_path = if cli.r#continue && cli.session.is_none() {
-                pi::session::Session::recent_session_path_in_dir(
-                    cli.session_dir.as_ref().map(Path::new),
-                )
-                .await?
-            } else {
-                None
-            };
-            let options = pi::sdk::SessionOptions {
-                provider: cli.provider.clone(),
-                model: cli.model.clone(),
-                api_key: cli.api_key.clone(),
-                working_directory: Some(cwd.clone()),
-                workspace_trusted,
-                // Session persistence honors the same flags as the default
-                // stack: saved by default, --no-session for ephemeral,
-                // --session/--session-dir for explicit paths. The SDK path
-                // creates its own session file; the default stack's early
-                // session was dropped above without writing anything.
-                no_session: cli.no_session,
-                session_path: cli.session.as_ref().map(PathBuf::from),
-                session_dir: cli.session_dir.as_ref().map(PathBuf::from),
-                // Explicit -e extension files load with UI prompts bridged
-                workspace: Some(workspace.clone()),
-                // (bd-1eoh4). Workspace/package-discovered extensions are a
-                // ResourceLoader integration follow-up.
-                // Extensions load with UI prompts bridged (bd-1eoh4): the
-                // ResourceLoader's discovered set (workspace/package/global)
-                // — which already folds in explicit -e paths and honors
-                // trust/policy filtering — plus nothing else.
-                extension_paths: if cli.no_extensions {
-                    Vec::new()
-                } else {
-                    resources.extensions().to_vec()
-                },
-                extension_policy: cli.extension_policy.clone(),
-                repair_policy: cli.repair_policy.clone(),
-                extension_flags: extension_flags.clone(),
-                // Prompt/tool/thinking flags flow through so deterministic
-                // harnesses (VCR body matching) and users get the same
-                // behavior as the default stack.
-                system_prompt: cli.system_prompt.clone(),
-                append_system_prompt: cli.append_system_prompt.clone(),
-                enabled_tools: Some(ftui_enabled_tools),
-                thinking: cli.thinking.as_deref().and_then(|t| t.parse().ok()),
-                include_cwd_in_prompt: !cli.hide_cwd_in_prompt,
-                max_tool_iterations,
-                package_dir: Some(package_dir.clone()),
-                mcp: Some(pi::sdk::McpSessionOptions {
-                    config_paths: cli.mcp_config.clone(),
-                    global_dir: Some(pi::config::Config::global_dir()),
-                }),
-                // Approval gating (issue #196): the ftui stack previously
-                // dropped the approval mode entirely; thread the same state
-                // the classic stack uses so `ask`/`write` modes gate here
-                // too, prompting through the ask-card bridge.
-                approval_state: Some(approval_state.clone()),
-                // Provider retry (bd-u2qv4). Until now a 429 or a 529 was a
-                // hard error on this stack while the same request in print
-                // mode or over RPC retried and completed, and this is the
-                // stack most people run. `from_config` returns None when the
-                // user has set `retry.enabled = false`, so turning it off
-                // still means nobody re-enters the provider on their behalf.
-                // The retry events it emits already render here as system
-                // notes. A configured fallback CHAIN is still inert: walking
-                // it needs the provider swap, which has not moved out of this
-                // binary yet.
-                retry: pi::failover::RetryPolicy::from_config(&config),
-                ..Default::default()
-            };
-            let theme = pi::theme::Theme::resolve(&config, &cwd);
-            let ftui_models = model_registry
-                .get_available()
-                .into_iter()
-                .map(|entry| format!("{}/{}", entry.model.provider, entry.model.id))
-                .collect::<Vec<_>>();
-            // /resume picker entries: this cwd's saved sessions, newest first
-            // (same index the session picker uses). Failures degrade to an
-            // empty list — /resume then reports "no saved sessions".
-            let ftui_sessions = pi::session_index::SessionIndex::new()
-                .list_sessions(Some(&cwd.display().to_string()))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|meta| {
-                    let label = match &meta.name {
-                        Some(name) => format!("{name} · {} msgs", meta.message_count),
-                        None => format!("{} · {} msgs", meta.id, meta.message_count),
-                    };
-                    (label, meta.path)
-                })
-                .collect::<Vec<_>>();
-            pi::interactive_ftui::run(
-                options,
-                &theme,
-                cli.inline,
-                ftui_models,
-                ftui_sessions,
-                config.markdown_spacing(),
-                pi::interactive_ftui::AutocompleteLaunch {
-                    catalog: pi::autocomplete::AutocompleteCatalog::from_resources(&resources),
-                    cwd: cwd.clone(),
-                    max_visible: config
-                        .autocomplete_max_visible
-                        .and_then(|n| usize::try_from(n.clamp(3, 20)).ok())
-                        .unwrap_or(5),
-                },
-            )
-            .map_err(Into::into)
-        }
-        #[cfg(not(feature = "ftui"))]
-        unreachable!("ftui_requested is false without the ftui feature")
     } else if is_interactive {
         let model_scope = selection
             .scoped_models
@@ -2620,7 +3039,22 @@ async fn run(
                 )
             })
             .collect::<Vec<_>>();
-        let title_model_entry = pi::app::titling_model_entry(&cli, &config, &model_registry);
+        let title_client =
+            pi::app::titling_model_entry(&cli, &config, &model_registry).and_then(|entry| {
+                pi::session_title::TitleClient::for_model_entry(
+                    &entry,
+                    &selection.model_entry,
+                    cli.api_key.as_deref(),
+                    &auth,
+                    config.secrets.as_ref(),
+                )
+            });
+        let failover = pi::sdk::FailoverOptions::from_config(
+            &config,
+            available_models.clone(),
+            auth.clone(),
+            cli.api_key.clone(),
+        );
 
         Box::pin(run_interactive_mode(
             agent_session,
@@ -2630,7 +3064,7 @@ async fn run(
             selection.model_entry.clone(),
             model_scope,
             available_models,
-            title_model_entry,
+            title_client,
             !cli.no_session,
             resources,
             resource_cli,
@@ -2641,7 +3075,8 @@ async fn run(
             ask_tool,
             btw_client,
             Some(btw_factory),
-            mcp_manager,
+            Some(mcp_manager),
+            failover,
         ))
         .await
     } else {
@@ -2703,10 +3138,8 @@ async fn run(
 
     // Best-effort autosave flush on shutdown. OwnedMutexGuard: the guard is
     // held across the flush await, and the borrowed MutexGuard is !Send
-    // (clippy::future_not_send). FTUI owns and flushes a different SDK
-    // session; flushing this throwaway bootstrap session afterward could make
-    // stale state the last writer to the same session path.
-    if !cli.no_session && !ftui_requested {
+    // (clippy::future_not_send).
+    if !cli.no_session {
         let cx = pi::agent_cx::AgentCx::for_request();
         if let Ok(mut guard) = OwnedMutexGuard::lock(Arc::clone(&session_handle), &cx).await
             && let Err(e) = guard.flush_autosave_on_shutdown().await
@@ -7196,11 +7629,21 @@ fn handle_doctor(
     Ok(())
 }
 
+/// How much of the commit sha `--version` shows.
+///
+/// `VERGEN_GIT_SHA` is the full 40 characters because the perf evidence records
+/// that carry provenance are rejected by their own gate without it (build.rs).
+/// Nobody wants to read forty characters in a version banner, so the display
+/// abbreviates to git's own default width; every consumer that cares about
+/// provenance reads the environment variable, not this line.
+const VERSION_SHA_WIDTH: usize = 9;
+
 fn print_version() {
+    let sha = option_env!("VERGEN_GIT_SHA").unwrap_or("unknown");
     println!(
         "pi {} ({} {})",
         env!("CARGO_PKG_VERSION"),
-        option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"),
+        &sha[..sha.len().min(VERSION_SHA_WIDTH)],
         option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or(""),
     );
 }
@@ -8560,6 +9003,33 @@ fn has_cli_api_key_override(api_key: Option<&str>) -> bool {
     api_key.is_some_and(|value| !value.trim().is_empty())
 }
 
+/// Reject stale native OAuth credentials only after the final destination is
+/// known. A pending extension pass may change both the model and its auth flow.
+fn validate_startup_oauth_refresh(
+    cli: &cli::Cli,
+    refresh: &pi::auth::OAuthRefreshReport,
+    selected_provider: &str,
+    extension_bindings: &[ExtensionProviderBinding],
+    extensions_pending: bool,
+) -> Result<()> {
+    if extensions_pending
+        || has_cli_api_key_override(cli.api_key.as_deref())
+        || extension_bindings.iter().any(|binding| {
+            pi::provider_metadata::provider_ids_match(&binding.provider, selected_provider)
+                && binding.oauth_config.is_some()
+        })
+    {
+        return Ok(());
+    }
+    if let Some(failure) = refresh.failure_for(selected_provider) {
+        return Err(anyhow::Error::new(pi::error::Error::auth(format!(
+            "OAuth token refresh failed for: {} ({}) — run `pi auth login {}` to renew it",
+            failure.provider, failure.error, failure.provider
+        ))));
+    }
+    Ok(())
+}
+
 /// Whether startup should touch the stored OAuth credentials at all (gh #218).
 ///
 /// An explicit `--api-key` for an explicit `--provider`/`--model` satisfies
@@ -8584,6 +9054,7 @@ fn rpc_available_models(registry: &ModelRegistry, cli_api_key: Option<&str>) -> 
 #[allow(clippy::too_many_arguments)]
 async fn run_rpc_mode(
     session: AgentSession,
+    cwd: PathBuf,
     resources: ResourceLoader,
     config: Config,
     available_models: Vec<ModelEntry>,
@@ -8608,6 +9079,7 @@ async fn run_rpc_mode(
     let rpc_task = pi::rpc::run_stdio(
         session,
         pi::rpc::RpcOptions {
+            working_directory: Some(cwd),
             config,
             resources,
             available_models,
@@ -8694,12 +9166,12 @@ async fn run_print_mode(
             .lock(cx.cx())
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        println!("{}", serde_json::to_string(&session.header)?);
+        write_print_line(&serde_json::to_string(&session.header)?);
         note_machine_stream_opened();
     }
     if initial.is_none() && messages.is_empty() {
         if mode.eq("json") {
-            io::stdout().flush()?;
+            flush_stdout()?;
             return Ok(());
         }
         bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
@@ -8767,7 +9239,7 @@ async fn run_print_mode(
 
     if initial.is_none() && messages.is_empty() {
         if mode.eq("json") {
-            io::stdout().flush()?;
+            flush_stdout()?;
             return Ok(());
         }
         bail!("No input provided. Use: pi -p \"your message\" or pipe input via stdin");
@@ -8781,7 +9253,22 @@ async fn run_print_mode(
     // started from, what is installed now, when the cooldown began, and where
     // the walk left off. Previously all of this was per-prompt, so a sequence
     // that failed over never came back and restarted the chain each time.
-    let mut failover_state = PrintFailoverState::new(config);
+    let mut failover_state = {
+        let cx = pi::agent_cx::AgentCx::for_request();
+        let inner = session.session.lock(cx.cx()).await.ok();
+        inner.as_deref().map_or_else(
+            || PrintFailoverState::new(config),
+            |s| {
+                PrintFailoverState::reconstruct_from_session(
+                    s,
+                    config.failover_cooldown_secs(),
+                    chrono::Utc::now(),
+                )
+            },
+        )
+    };
+
+    let _ = maybe_restore_print_primary(session, &mut failover_state, failover_ctx, is_json).await;
 
     if let Some(initial) = initial {
         let content = pi::app::build_initial_content(&initial);
@@ -8857,13 +9344,13 @@ async fn run_print_mode(
 
     if sent_prompts.eq(&0) {
         if mode.eq("json") {
-            io::stdout().flush()?;
+            flush_stdout()?;
             return Ok(());
         }
         bail!("No messages were sent");
     }
 
-    io::stdout().flush()?;
+    flush_stdout()?;
     // gh #224: the turn may have "completed" having had every tool call denied
     // for want of a surface that could approve it. Flush the stream first so a
     // JSON host still receives the whole transcript, then fail: the caller gets
@@ -8913,11 +9400,27 @@ const fn streamed_text_delta(event: &AgentEvent) -> Option<&str> {
     }
 }
 
+/// End the run quietly when the failure is only that nobody is reading.
+///
+/// The text half of what [`write_print_line`] does for `--mode json`: a reader
+/// that closed the pipe (`pi -p "..." | head -1`) is not an error, and pi must
+/// not turn it into one. Every other I/O failure is left to the caller.
+fn exit_if_stdout_closed(err: &io::Error) {
+    if err.kind() == io::ErrorKind::BrokenPipe {
+        std::process::exit(EXIT_CODE_STDOUT_CLOSED);
+    }
+}
+
+fn flush_stdout() -> io::Result<()> {
+    io::stdout().flush().inspect_err(exit_if_stdout_closed)
+}
+
 fn emit_text_delta(delta: &str) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    out.write_all(delta.as_bytes())?;
-    out.flush()
+    out.write_all(delta.as_bytes())
+        .and_then(|()| out.flush())
+        .inspect_err(exit_if_stdout_closed)
 }
 
 fn emit_trailing_print_newline(state: PrintTextStreamState) -> io::Result<()> {
@@ -8926,8 +9429,9 @@ fn emit_trailing_print_newline(state: PrintTextStreamState) -> io::Result<()> {
     }
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    out.write_all(b"\n")?;
-    out.flush()
+    out.write_all(b"\n")
+        .and_then(|()| out.flush())
+        .inspect_err(exit_if_stdout_closed)
 }
 
 fn snapshot_print_text_stream_state(
@@ -9022,7 +9526,42 @@ async fn sleep_with_current_timer(duration: Duration) {
 /// Emit a JSON-serialized [`AgentEvent`] to stdout (for JSON print mode).
 fn emit_json_event(event: &AgentEvent) {
     if let Ok(serialized) = print_mode_json_record(event) {
-        println!("{serialized}");
+        write_print_line(&serialized);
+    }
+}
+
+/// Write one print-mode record to stdout, ending the run quietly if the reader
+/// has gone away.
+///
+/// `println!` PANICS when the write fails, so `pi --print --mode json | head`
+/// used to end in
+///
+///     panic: failed printing to stdout: Broken pipe (os error 32)
+///
+/// plus a crash bundle, which then announced itself as "previous run crashed"
+/// on the next invocation. Piping structured output into `head`, `jq`,
+/// `grep -m1` or a pager is the normal way to read a stream and every one of
+/// those closes the pipe on purpose; Rust disables SIGPIPE at startup, so the
+/// closed reader arrives here as EPIPE on every later write instead of ending
+/// the process the way it would for any other CLI.
+///
+/// A broken pipe is therefore not an error: the consumer got what it asked for
+/// and there is nobody left to tell. Any OTHER write failure — a full disk on
+/// `pi -p > out.json`, say — is a real failure and must not be reported as
+/// success, so it is named on stderr and exits non-zero.
+fn write_print_line(line: &str) {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let written = out
+        .write_all(line.as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush());
+    if let Err(err) = written {
+        if err.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(EXIT_CODE_STDOUT_CLOSED);
+        }
+        eprintln!("pi: failed writing to stdout: {err}");
+        std::process::exit(EXIT_CODE_FAILURE);
     }
 }
 
@@ -9127,132 +9666,41 @@ async fn maybe_restore_print_primary(
     let Some(ctx) = failover_ctx else {
         return false;
     };
-    let Some((active_provider, active_model)) = state.active().cloned() else {
+    let Some(active) = state.active().cloned() else {
         return false;
     };
     let Some(primary) = state.primary().cloned() else {
         return false;
     };
-    if !state.should_restore_primary(std::time::Instant::now()) {
-        return false;
-    }
 
-    let runtime_provider = session.agent.provider();
-    if !pi::provider_metadata::provider_ids_match(runtime_provider.name(), &active_provider)
-        || !runtime_provider
-            .model_id()
-            .eq_ignore_ascii_case(&active_model)
-    {
-        return false;
-    }
-
-    let Some(entry) = ctx
-        .available_models
-        .iter()
-        .find(|m| {
-            pi::provider_metadata::provider_ids_match(&m.model.provider, &primary.provider)
-                && m.model.id.eq_ignore_ascii_case(&primary.model_id)
-        })
-        .cloned()
-        .or_else(|| pi::models::ad_hoc_model_entry(&primary.provider, &primary.model_id))
-    else {
-        return false;
+    // The persisted transition is `AgentSession::restore_primary`, shared with
+    // RPC and the SDK (bd-u2qv4, bd-gm481). What stays here is what is actually
+    // print's: no admission gate, so a record that no longer describes the live
+    // session declines and the next prompt runs on the fallback rather than
+    // failing the call, and the `FailoverEnd` is emitted as a json event.
+    let request = pi::agent::PrimaryRestoreRequest {
+        primary: &primary,
+        active: &active,
+        cooldown_elapsed: state.should_restore_primary(std::time::Instant::now()),
+        available_models: ctx.available_models,
+        auth: ctx.auth,
+        cli_api_key: ctx.cli_api_key,
+        strict_invariants: false,
+        // Print discards an in-flight background compaction across primary restoration,
+        // matching RPC and the SDK (bd-uyqkk).
+        invalidate_background_compaction: true,
     };
-    let key = pi::models::resolve_model_key(ctx.cli_api_key, ctx.auth, &entry);
-    if pi::models::model_requires_configured_credential(&entry) && key.is_none() {
-        // Restoring into an auth error would be strictly worse than staying on
-        // a working fallback.
-        return false;
-    }
-    let Ok(provider_impl) = providers::create_provider(
-        &entry,
-        session.extensions.as_ref().map(ExtensionRegion::manager),
-    ) else {
-        return false;
-    };
-
-    let session_store = Arc::clone(&session.session);
     let cx = pi::agent_cx::AgentCx::for_request();
-    let Ok(mut inner) = OwnedMutexGuard::lock(session_store, &cx).await else {
+    let Ok(Some(restored)) = session.restore_primary(&cx, &request).await else {
         return false;
     };
-    let session_matches_active = inner.effective_model_for_current_path().is_some_and(
-        |(session_provider, session_model)| {
-            pi::provider_metadata::provider_ids_match(&session_provider, &active_provider)
-                && session_model.eq_ignore_ascii_case(&active_model)
-        },
-    );
-    if !session_matches_active {
-        return false;
-    }
-
-    // Build the whole transition on a private candidate; the live transcript
-    // and provider stay untouched if persistence fails.
-    let to_provider = entry.model.provider.clone();
-    let to_model = entry.model.id.clone();
-    let target_thinking = entry.clamp_thinking_level(primary.requested_thinking_level);
-    let target_thinking_text = target_thinking.to_string();
-    let mut candidate = inner.clone();
-    let thinking_changed = candidate
-        .effective_thinking_level_for_current_path()
-        .as_deref()
-        != Some(target_thinking_text.as_str());
-    candidate.set_model_header(
-        Some(to_provider.clone()),
-        Some(to_model.clone()),
-        Some(target_thinking_text.clone()),
-    );
-    candidate.append_model_change_with_role(
-        to_provider.clone(),
-        to_model.clone(),
-        Some("primary_restore".to_string()),
-    );
-    if thinking_changed {
-        candidate.append_thinking_level_change(target_thinking_text);
-    }
-    if session.save_enabled()
-        && let Err(_first) = candidate.save().await
-        && let Err(_retry) = candidate.save().await
-    {
-        // Leave the fallback installed. A half-written restoration is worse
-        // than a working session on the wrong model.
-        return false;
-    }
-
-    // No fallible operation remains after installing the candidate.
-    *inner = candidate;
-    session.agent.set_provider(provider_impl);
-    session
-        .agent
-        .set_keyword_max_thinking_level(entry.clamp_thinking_level(ThinkingLevel::Max));
-    session
-        .agent
-        .set_tool_call_dialect(entry.tool_call_dialect());
-    session
-        .agent
-        .set_model_accepts_images(entry.model.input.contains(&InputType::Image));
-    {
-        let stream_options = session.agent.stream_options_mut();
-        stream_options.api_key.clone_from(&key);
-        stream_options.headers.clone_from(&entry.headers);
-        stream_options.max_tokens = Some(entry.model.max_tokens);
-        stream_options.thinking_level = Some(target_thinking);
-    }
-    session.set_compaction_context_window(context_window_tokens_for_entry(&entry));
-    session.refresh_extension_completion_host_state();
-    if let Some(region) = &session.extensions {
-        region
-            .manager()
-            .set_current_model(Some(to_provider.clone()), Some(to_model.clone()));
-    }
-    drop(inner);
     state.clear();
 
     if is_json {
         emit_json_event(&AgentEvent::FailoverEnd {
             success: true,
-            provider: to_provider,
-            model: to_model,
+            provider: restored.provider,
+            model: restored.model,
             restored_primary: true,
         });
     }
@@ -9298,116 +9746,111 @@ async fn try_print_failover(
         current_provider.name().to_string(),
         current_provider.model_id().to_string(),
     );
-    // Captured before any swap installs the fallback's own clamped level, so a
-    // later restoration gives back what the user asked for rather than what the
-    // detour allowed (bd-gm481.1).
-    let requested_thinking_level = session
-        .agent
-        .stream_options()
-        .thinking_level
-        .unwrap_or_default();
-    let Some(chain) = pi::failover::chain_for(chains, "default", &from_provider, &from_model)
+    // The identity the CHAIN started from, which equals the live model only on
+    // the first hop. From the second hop onwards the live model is itself a
+    // fallback, and resolving from it was two bugs at once:
+    //
+    //   * the thinking level clamped against whatever the previous hop allowed,
+    //     so it ratcheted down through the worst model the chain touched and
+    //     never recovered — for the turn and, because the level is written into
+    //     the session header, for the session (bd-jk057); and
+    //   * an exact `provider/model`-keyed chain stopped resolving at all, since
+    //     the key names the primary and the live model is no longer it, so hop
+    //     two never ran.
+    //
+    // RPC has always resolved both from the recorded primary; this is print
+    // adopting that, not a new rule. `primary_for_swap` returns the recorded
+    // primary when a chain is in flight and the live identity otherwise, so the
+    // first hop is unchanged (bd-gm481.1, bd-oqo03.1).
+    let primary = failover_state.primary_for_swap(PrintFailoverPrimary {
+        provider: from_provider.clone(),
+        model_id: from_model.clone(),
+        requested_thinking_level: session
+            .agent
+            .stream_options()
+            .thinking_level
+            .unwrap_or_default(),
+    });
+    let Some(chain) =
+        pi::failover::chain_for(chains, "default", &primary.provider, &primary.model_id)
     else {
         return Ok(None);
     };
-    // The walk is bounded by the chain, not by `max_failovers_per_turn`: the
-    // caller counts successful swaps against that cap (bd-oqo03.1). Bounding
-    // the cursor by the cap let malformed, uncredentialed, unconstructible,
-    // current, or duplicate entries consume the budget and hide a later valid
-    // entry. RPC walks the same chain with the same cursor rules; both now use
-    // the one definition (bd-u2qv4).
-    let mut walk = pi::failover::FailoverWalk::new(
-        &chain,
-        failover_state.chain_position(),
-        &from_provider,
-        &from_model,
+    // The walk, the credential check, the provider construction and the
+    // persisted transition are all `AgentSession::try_failover_swap`, shared
+    // with RPC (bd-u2qv4). What stays here is print mode's own: classification
+    // above, its JSON events below, and its cross-prompt bookkeeping.
+    let cx = pi::agent_cx::AgentCx::for_request();
+    let attempt = pi::agent::FailoverSwapAttempt {
+        chain: &chain,
+        start_position: failover_state.chain_position(),
+        available_models: ctx.available_models,
+        auth: ctx.auth,
+        cli_api_key: ctx.cli_api_key,
+        class,
+        // The level originally requested, not the live one (bd-jk057). A clamp
+        // exists to respect a MODEL's limit, never to make one model's limit
+        // sticky across models.
+        thinking_level_to_clamp: primary.requested_thinking_level,
+        require_incomplete_tail,
+        primary: Some(&primary),
+        cooldown_secs: Some(config.failover_cooldown_secs()),
+        lifecycle_id: failover_state.lifecycle_id(),
+    };
+    let outcome = session.try_failover(&cx, &attempt).await?;
+    let Some(committed) = outcome.committed else {
+        // An exhausted walk records NOTHING (bd-gr6fk). Entries are rejected
+        // for five reasons and they are not alike: a malformed spec, a
+        // duplicate, and the live model itself are permanent, but a missing
+        // credential and a failed provider construction are TRANSIENT — a key
+        // can be added or an OAuth token refreshed mid-session. Recording the
+        // exhausted position made those two permanent for the life of the
+        // process, silently shrinking the chain the user configured. The skip
+        // checks are pure and cheap (a string compare, a registry lookup, a key
+        // lookup), so re-walking next prompt costs nothing measurable.
+        //
+        // RPC and the SDK have always behaved this way; print was the outlier.
+        return Ok(None);
+    };
+    if failover_state.lifecycle_id().is_none() {
+        failover_state.set_lifecycle_id(Some(uuid::Uuid::new_v4().to_string()));
+    }
+    // Only a committed swap advances the cursor, so a later prompt resumes past
+    // the entry it actually installed.
+    failover_state.set_chain_position(outcome.next_position);
+
+    // Cross-prompt record (bd-gm481.1): what to return to, and when the
+    // cooldown on doing so started. The primary is only captured on the first
+    // swap of a chain — a second hop moves away from a fallback, and the
+    // identity to restore is still the model the chain started from.
+    failover_state.record_swap(
+        primary,
+        (committed.to_provider.clone(), committed.to_model.clone()),
+        std::time::Instant::now(),
     );
-    while let Some((entry_index, spec)) = walk.next_spec() {
-        let cursor = walk.position();
-        let Some(entry) = pi::failover::resolve_chain_spec(spec, ctx.available_models) else {
-            continue;
-        };
-        let key = pi::models::resolve_model_key(ctx.cli_api_key, ctx.auth, &entry);
-        if pi::models::model_requires_configured_credential(&entry) && key.is_none() {
-            continue; // never fail over into an auth error
-        }
 
-        let Ok(provider_impl) = providers::create_provider(
-            &entry,
-            session.extensions.as_ref().map(ExtensionRegion::manager),
-        ) else {
-            continue;
-        };
-
-        // The whole persisted transition — revert, transcript record, save,
-        // install — is `AgentSession::commit_failover`, shared with RPC
-        // (bd-u2qv4). The live transcript and provider/options stay untouched
-        // if any of it fails.
-        let to_provider = entry.model.provider.clone();
-        let to_model = entry.model.id.clone();
-        let cx = pi::agent_cx::AgentCx::for_request();
-        let request = pi::agent::FailoverSwapRequest {
-            entry: &entry,
-            api_key: key.clone(),
-            provider: provider_impl,
-            from_provider: &from_provider,
-            from_model: &from_model,
-            class,
-            chain_position: cursor,
-            // The LIVE level, which is what print mode has always clamped
-            // against here. RPC clamps against the level originally requested;
-            // see FailoverSwapRequest::thinking_level_to_clamp.
-            thinking_level_to_clamp: session
-                .agent
-                .stream_options()
-                .thinking_level
-                .unwrap_or_default(),
-            require_incomplete_tail,
-        };
-        session.commit_failover(&cx, &request).await?;
-        failover_state.set_chain_position(cursor);
-        // Cross-prompt record (bd-gm481.1): what to return to, and when the
-        // cooldown on doing so started. The primary is only captured on the
-        // first swap of a chain — a second hop moves away from a fallback, and
-        // the identity to restore is still the model the chain started from.
-        failover_state.record_swap(
-            PrintFailoverPrimary {
-                provider: from_provider.clone(),
-                model_id: from_model.clone(),
-                requested_thinking_level,
-            },
-            (to_provider.clone(), to_model.clone()),
-            std::time::Instant::now(),
-        );
-
-        if is_json {
-            if let Some(attempt) = retry_attempt_to_end {
-                emit_json_event(&AgentEvent::AutoRetryEnd {
-                    success: false,
-                    attempt,
-                    final_error: Some(error_text.to_string()),
-                });
-            }
-            emit_json_event(&AgentEvent::FailoverStart {
-                from_provider: from_provider.clone(),
-                from_model: from_model.clone(),
-                to_provider: to_provider.clone(),
-                to_model: to_model.clone(),
-                class: format!("{class:?}").to_ascii_lowercase(),
-                // Budget position, not chain position: this swap is the
-                // (swaps_so_far + 1)-th of `retry.maxFailoversPerTurn`
-                // (bd-oqo03).
-                attempt: swaps_so_far.saturating_add(1),
-                chain_index: u32::try_from(entry_index).unwrap_or(u32::MAX),
+    if is_json {
+        if let Some(attempt) = retry_attempt_to_end {
+            emit_json_event(&AgentEvent::AutoRetryEnd {
+                success: false,
+                attempt,
+                final_error: Some(error_text.to_string()),
             });
         }
-
-        return Ok(Some((to_provider, to_model)));
+        emit_json_event(&AgentEvent::FailoverStart {
+            from_provider: committed.from_provider.clone(),
+            from_model: committed.from_model.clone(),
+            to_provider: committed.to_provider.clone(),
+            to_model: committed.to_model.clone(),
+            class: format!("{class:?}").to_ascii_lowercase(),
+            // Budget position, not chain position: this swap is the
+            // (swaps_so_far + 1)-th of `retry.maxFailoversPerTurn` (bd-oqo03).
+            attempt: swaps_so_far.saturating_add(1),
+            chain_index: u32::try_from(committed.entry_index).unwrap_or(u32::MAX),
+        });
     }
-    // Chain exhausted: record the end position so a later turn does not re-walk
-    // entries this turn already rejected.
-    failover_state.set_chain_position(walk.position());
-    Ok(None)
+
+    Ok(Some((committed.to_provider, committed.to_model)))
 }
 
 /// Execute a single prompt with automatic retry and `AutoRetryStart`/`AutoRetryEnd`
@@ -9430,6 +9873,10 @@ where
     H: Fn() -> EH + Sync,
     EH: Fn(AgentEvent) + Send + Sync + 'static,
 {
+    // Hooks belong to the logical prompt, not its provider attempts. Capture
+    // their effective base once so a retry or provider swap retains the same
+    // instructions after each attempt restores the session's ordinary prompt.
+    let mut turn_system_prompt = session.agent.system_prompt().map(str::to_string);
     // First attempt.
     let first_result = match &input {
         PromptInput::Text {
@@ -9440,9 +9887,10 @@ where
                 .agent
                 .set_magic_keyword_scan_override(keyword_scan_source.clone());
             session
-                .run_text_with_abort(
+                .run_text_with_abort_capturing_prompt(
                     text.clone(),
                     Some(abort_signal.clone()),
+                    &mut turn_system_prompt,
                     make_event_handler(),
                 )
                 .await
@@ -9455,9 +9903,10 @@ where
                 .agent
                 .set_magic_keyword_scan_override(keyword_scan_source.clone());
             session
-                .run_with_content_with_abort(
+                .run_with_content_with_abort_capturing_prompt(
                     content.clone(),
                     Some(abort_signal.clone()),
+                    &mut turn_system_prompt,
                     make_event_handler(),
                 )
                 .await
@@ -9484,11 +9933,14 @@ where
         // the decision — JSON events, the backoff sleep, tail restoration and
         // the chain swap.
         //
-        // The context window is None here, which is print mode's long-standing
-        // behaviour and is preserved deliberately: RPC supplies the real window
-        // and so refuses a SILENT context overflow that print retries to budget
-        // exhaustion. Resolving the window on this path is a behaviour change
-        // and needs its own test.
+        // Resolve the live model again after every swap. A transient-looking
+        // error with an already oversized input cannot recover by resending
+        // the same prompt, and an embedder's compaction threshold is not the
+        // provider's context capacity. Zero means no known capacity.
+        let context_window = session
+            .current_model_entry()
+            .map(|entry| entry.model.context_window)
+            .filter(|window| *window > 0);
         let decision = {
             let progress = pi::failover::TurnProgress {
                 retry_count,
@@ -9502,13 +9954,13 @@ where
                     pi::failover::TurnOutcome::Completed(msg),
                     &progress,
                     &policy,
-                    None,
+                    context_window,
                 ),
                 Err(err) => pi::failover::decide(
                     pi::failover::TurnOutcome::Failed(err),
                     &progress,
                     &policy,
-                    None,
+                    context_window,
                 ),
             }
         };
@@ -9564,7 +10016,11 @@ where
                     return Err(restore_err);
                 }
                 current_result = session
-                    .run_continue_with_abort(Some(abort_signal.clone()), make_event_handler())
+                    .run_continue_with_abort_and_system_prompt(
+                        Some(abort_signal.clone()),
+                        turn_system_prompt.as_deref(),
+                        make_event_handler(),
+                    )
                     .await;
             }
             Ok(msg) => {
@@ -9619,8 +10075,9 @@ where
                         failovers_this_turn += 1;
                         retry_count = 0;
                         current_result = session
-                            .run_continue_with_abort(
+                            .run_continue_with_abort_and_system_prompt(
                                 Some(abort_signal.clone()),
+                                turn_system_prompt.as_deref(),
                                 make_event_handler(),
                             )
                             .await;
@@ -9720,7 +10177,11 @@ where
                         }
                     }
                     current_result = session
-                        .run_continue_with_abort(Some(abort_signal.clone()), make_event_handler())
+                        .run_continue_with_abort_and_system_prompt(
+                            Some(abort_signal.clone()),
+                            turn_system_prompt.as_deref(),
+                            make_event_handler(),
+                        )
                         .await;
                 } else {
                     // Failover (bd-cv653.3.2): HTTP/transport errors surface on
@@ -9761,8 +10222,9 @@ where
                         failovers_this_turn += 1;
                         retry_count = 0;
                         current_result = session
-                            .run_continue_with_abort(
+                            .run_continue_with_abort_and_system_prompt(
                                 Some(abort_signal.clone()),
+                                turn_system_prompt.as_deref(),
                                 make_event_handler(),
                             )
                             .await;
@@ -9786,7 +10248,7 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::future_not_send)]
 async fn run_interactive_mode(
     session: AgentSession,
     initial: Option<InitialMessage>,
@@ -9795,7 +10257,7 @@ async fn run_interactive_mode(
     model_entry: ModelEntry,
     model_scope: Vec<ModelEntry>,
     available_models: Vec<ModelEntry>,
-    title_model_entry: Option<ModelEntry>,
+    title_client: Option<Arc<pi::session_title::TitleClient>>,
     save_enabled: bool,
     resources: ResourceLoader,
     resource_cli: ResourceCliOptions,
@@ -9807,6 +10269,7 @@ async fn run_interactive_mode(
     btw_client: Option<Arc<pi::btw::BtwClient>>,
     btw_factory: Option<pi::btw::BtwClientFactory>,
     mcp_manager: Option<std::sync::Arc<pi::mcp::McpManager>>,
+    failover: Option<pi::sdk::FailoverOptions>,
 ) -> Result<()> {
     let mut pending = Vec::new();
     if let Some(mut initial) = initial {
@@ -9826,28 +10289,20 @@ async fn run_interactive_mode(
         pending.push(pi::interactive::PendingInput::Text(message));
     }
 
-    let AgentSession {
-        agent,
-        session,
-        extensions: region,
-        ..
-    } = session;
-    // Extract manager for the interactive loop; the region stays alive to
-    let extensions = region.as_ref().map(|r| r.manager().clone());
-    let interactive_result = pi::interactive::run_interactive(
-        agent,
+    // Keep the configured AgentSession intact: classic turns need the same
+    // durable recovery, provider admission and extension ownership as the SDK.
+    pi::interactive::run_interactive(
         session,
         config,
         model_entry,
         model_scope,
         available_models,
-        title_model_entry,
+        title_client,
         pending,
         save_enabled,
         resources,
         resource_cli,
         package_manager,
-        extensions,
         cwd,
         runtime_handle,
         workspace,
@@ -9855,16 +10310,9 @@ async fn run_interactive_mode(
         btw_client,
         btw_factory,
         mcp_manager,
+        failover,
     )
-    .await;
-    // Explicitly shut down extension runtimes so the QuickJS GC can
-    // collect all objects before JS_FreeRuntime asserts an empty gc_obj_list.
-    // Must run even on error — otherwise ExtensionRegion::drop() runs
-    // synchronously and the GC assertion fires.
-    if let Some(ref region) = region {
-        region.shutdown().await;
-    }
-    interactive_result?;
+    .await?;
     Ok(())
 }
 
@@ -9953,8 +10401,267 @@ fn default_export_path(input: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use anyhow::anyhow;
+    use clap::Parser as _;
     use serde_json::json;
     use tempfile::TempDir;
+
+    fn run_cli_workdir_test<T>(future: impl std::future::Future<Output = T>) -> T {
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(create_reactor().expect("reactor"))
+            .build()
+            .expect("runtime");
+        runtime.block_on(Box::pin(future))
+    }
+
+    async fn saved_cli_workdir_fixture(path: &Path, cwd: &Path) -> Session {
+        let mut session = Session::in_memory();
+        session.header.cwd = cwd.to_str().expect("UTF-8 workspace").to_owned();
+        session.header.parent_session = Some("original-parent.jsonl".to_owned());
+        session.session_dir = path.parent().map(Path::to_path_buf);
+        session.path = Some(path.to_path_buf());
+        session.append_model_message(pi::model::Message::User(pi::model::UserMessage {
+            content: pi::model::UserContent::Text("Keep this conversation".to_owned()),
+            timestamp: 1,
+        }));
+        session.save().await.expect("save source session");
+        session
+    }
+
+    #[test]
+    fn cli_saved_workspace_precedes_project_configuration_and_native_open() {
+        run_cli_workdir_test(async {
+            let root = TempDir::new().expect("tempdir");
+            let caller = root.path().join("caller");
+            let project = root.path().join("saved-project");
+            let global = root.path().join("global");
+            fs::create_dir_all(caller.join(".pi")).expect("caller workspace");
+            fs::create_dir_all(project.join(".pi")).expect("saved workspace");
+            fs::create_dir(&global).expect("global configuration root");
+            fs::write(
+                caller.join(".pi/settings.json"),
+                r#"{"requestTimeoutSecs":99}"#,
+            )
+            .expect("caller config");
+            fs::write(
+                project.join(".pi/settings.json"),
+                r#"{"requestTimeoutSecs":23}"#,
+            )
+            .expect("saved config");
+            let path = caller.join("saved.jsonl");
+            let original = saved_cli_workdir_fixture(&path, &project).await;
+            let before = fs::read(&path).expect("original bytes");
+            let process_cwd = std::env::current_dir().expect("process cwd");
+            let mut cli =
+                cli::Cli::parse_from(["pi", "--session", "saved.jsonl", "--continue", "--resume"]);
+            let saved = resolve_cli_session_workdir(&mut cli, &caller)
+                .await
+                .expect("resolve saved workspace")
+                .expect("existing session");
+            let cwd = saved.resolve_runtime_cwd(None).expect("runtime cwd");
+            assert_eq!(cwd, project.canonicalize().expect("canonical workspace"));
+            let canonical_path = path.canonicalize().expect("canonical source");
+            assert_eq!(cli.session.as_deref(), canonical_path.to_str());
+            assert!(!cli.resume && !cli.r#continue, "selection must happen once");
+            let config = Config::load_with_roots_and_project_trust(None, &global, &cwd, true)
+                .expect("selected project config");
+            assert_eq!(config.request_timeout_secs, Some(23));
+            let loaded = Session::new(&cli, &config)
+                .await
+                .expect("native session open");
+            saved
+                .check_loaded_session(&loaded)
+                .expect("same original source");
+            assert_eq!(loaded.header.id, original.header.id);
+            assert_eq!(loaded.header.cwd, original.header.cwd);
+            assert_eq!(loaded.header.parent_session, original.header.parent_session);
+            assert_eq!(fs::read(&path).expect("source after discovery"), before);
+            assert_eq!(
+                std::env::current_dir().expect("unchanged process cwd"),
+                process_cwd
+            );
+        });
+    }
+
+    #[test]
+    fn cli_moved_workspace_requires_attachment_and_persists_provenance_before_resume() {
+        run_cli_workdir_test(async {
+            let root = TempDir::new().expect("tempdir");
+            let missing = root.path().join("moved-away");
+            let replacement = root.path().join("replacement");
+            fs::create_dir(&replacement).expect("replacement workspace");
+            let path = root.path().join("saved.jsonl");
+            let original = saved_cli_workdir_fixture(&path, &missing).await;
+            let before = fs::read(&path).expect("original bytes");
+            let mut cli = cli::Cli::parse_from(["pi", "--session", "saved.jsonl"]);
+            let saved = resolve_cli_session_workdir(&mut cli, root.path())
+                .await
+                .expect("metadata remains readable")
+                .expect("existing session");
+            assert!(
+                saved
+                    .resolve_runtime_cwd(None)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("PI_SESSION_WORKDIR_UNAVAILABLE")
+            );
+            assert_eq!(fs::read(&path).expect("unchanged source"), before);
+
+            let mut cli = cli::Cli::parse_from([
+                "pi",
+                "--session",
+                "saved.jsonl",
+                "--session-workdir",
+                "replacement",
+            ]);
+            let saved = resolve_cli_session_workdir(&mut cli, root.path())
+                .await
+                .expect("explicit attachment")
+                .expect("attached metadata");
+            let cwd = replacement.canonicalize().expect("canonical replacement");
+            assert_eq!(
+                saved.resolve_runtime_cwd(None).expect("attached runtime"),
+                cwd
+            );
+            let reopened = Session::open(cli.session.as_deref().expect("selected source"))
+                .await
+                .expect("attachment was persisted before launch");
+            saved
+                .check_loaded_session(&reopened)
+                .expect("fresh observation after save");
+            assert_eq!(reopened.header.id, original.header.id);
+            assert_eq!(reopened.header.cwd, original.header.cwd);
+            assert_eq!(
+                reopened.header.parent_session,
+                original.header.parent_session
+            );
+            assert_eq!(
+                serde_json::to_value(reopened.entries.first()).expect("reopened entry"),
+                serde_json::to_value(original.entries.first()).expect("original entry")
+            );
+            let attachment = reopened
+                .entries
+                .iter()
+                .find_map(|entry| match entry {
+                    pi::session::SessionEntry::Custom(custom)
+                        if custom.custom_type == pi::session_workdir::WORKDIR_BINDING_TYPE =>
+                    {
+                        custom.data.as_ref()
+                    }
+                    _ => None,
+                })
+                .expect("persisted attachment");
+            assert_eq!(attachment["originalCwd"], original.header.cwd);
+            assert_eq!(attachment["previousCwd"], original.header.cwd);
+            assert_eq!(attachment["cwd"], cwd.to_str().expect("UTF-8 replacement"));
+
+            let attached_bytes = fs::read(&path).expect("attached bytes");
+            resolve_cli_session_workdir(&mut cli, root.path())
+                .await
+                .expect("idempotent attach");
+            assert_eq!(
+                fs::read(&path).expect("after repeated attach"),
+                attached_bytes
+            );
+        });
+    }
+
+    #[test]
+    fn cli_attachment_rejects_missing_targets_and_new_session_paths() {
+        run_cli_workdir_test(async {
+            let root = TempDir::new().expect("tempdir");
+            let path = root.path().join("saved.jsonl");
+            saved_cli_workdir_fixture(&path, root.path()).await;
+            let before = fs::read(&path).expect("original bytes");
+            let mut cli = cli::Cli::parse_from([
+                "pi",
+                "--session",
+                "saved.jsonl",
+                "--session-workdir",
+                "missing",
+            ]);
+            assert!(
+                resolve_cli_session_workdir(&mut cli, root.path())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read(&path).expect("source after rejected target"),
+                before
+            );
+            let mut cli =
+                cli::Cli::parse_from(["pi", "--session", "new.jsonl", "--session-workdir", "."]);
+            assert!(
+                resolve_cli_session_workdir(&mut cli, root.path())
+                    .await
+                    .is_err()
+            );
+            assert!(!root.path().join("new.jsonl").exists());
+
+            let mut cli = cli::Cli::parse_from(["pi", "--session", "new.jsonl"]);
+            assert!(
+                resolve_cli_session_workdir(&mut cli, root.path())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                cli.session.as_deref(),
+                root.path().join("new.jsonl").to_str()
+            );
+            assert!(!root.path().join("new.jsonl").exists());
+        });
+    }
+
+    #[test]
+    fn cli_read_only_and_ephemeral_modes_do_not_require_a_saved_workspace() {
+        run_cli_workdir_test(async {
+            let root = TempDir::new().expect("tempdir");
+            for args in [
+                vec!["pi", "--export", "missing.jsonl"],
+                vec!["pi", "--acp", "--session", "missing.jsonl"],
+                vec!["pi", "--list-models", "--session", "missing.jsonl"],
+                vec!["pi", "--no-session", "--session", "missing.jsonl"],
+            ] {
+                let mut cli = cli::Cli::parse_from(args);
+                assert!(
+                    resolve_cli_session_workdir(&mut cli, root.path())
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            assert!(!root.path().join("missing.jsonl").exists());
+        });
+    }
+
+    #[test]
+    fn cli_discovery_rejects_a_session_changed_before_native_open() {
+        run_cli_workdir_test(async {
+            let root = TempDir::new().expect("tempdir");
+            let path = root.path().join("saved.jsonl");
+            let mut original = saved_cli_workdir_fixture(&path, root.path()).await;
+            let mut cli = cli::Cli::parse_from(["pi", "--session", "saved.jsonl"]);
+            let saved = resolve_cli_session_workdir(&mut cli, root.path())
+                .await
+                .unwrap()
+                .expect("saved observation");
+            original.append_custom_entry("concurrent-update".to_owned(), Some(json!({"v": 1})));
+            original
+                .save()
+                .await
+                .expect("another writer updated the source");
+            let loaded = Session::open(cli.session.as_deref().expect("selected source"))
+                .await
+                .expect("native open sees latest source");
+            assert!(
+                saved
+                    .check_loaded_session(&loaded)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("PI_SESSION_WORKDIR_SOURCE_CHANGED")
+            );
+        });
+    }
 
     // Print mode's retry classification moved into `pi::failover` (bd-u2qv4),
     // where RPC and the interactive stacks can reach it. These three aliases
@@ -9973,6 +10680,108 @@ mod tests {
     fn print_mode_retry_delay_ms(config: &Config, attempt: u32) -> u32 {
         let policy = print_mode_retry_policy(config, 0);
         pi::failover::retry_delay_ms(policy.base_delay_ms, policy.max_delay_ms, attempt)
+    }
+
+    /// A `MakeWriter` that keeps what a subscriber wrote, so a filter can be
+    /// asserted on what actually comes out rather than on its own opinion of
+    /// itself.
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        // A panic inside the emitting closure poisons this buffer, and the
+        // assertion that follows says far more than a second panic about a
+        // lock would, so poisoning recovers rather than propagates.
+        fn with_bytes<R>(&self, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+            f(&mut self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.with_bytes(|bytes| bytes.extend_from_slice(buf));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn logged_under(filter: EnvFilter, emit: impl FnOnce()) -> String {
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = captured.with_bytes(|bytes| bytes.clone());
+        String::from_utf8(bytes).expect("log output is utf-8")
+    }
+
+    #[test]
+    fn settings_diagnostics_reach_the_user_without_rust_log() {
+        // The bug this pins: `EnvFilter::from_default_env()` with `RUST_LOG`
+        // unset enabled nothing above ERROR, so every settings warning pi
+        // emitted was formatted and then dropped. Asserting on the rendered
+        // output is deliberate — the first attempt at this filter named the
+        // target `pi_agent_rust::config`, which is not a target that exists,
+        // and a directive matching nothing is not an error.
+        let seen = logged_under(default_log_filter_for(None), || {
+            tracing::warn!(target: pi::config::USER_DIAGNOSTIC_TARGET, "misspelled key");
+            tracing::info!(target: pi::config::USER_DIAGNOSTIC_TARGET, "routine chatter");
+            tracing::warn!(target: "pi::agent", "somebody else's warning");
+            tracing::error!(target: "pi::agent", "somebody else's error");
+        });
+
+        assert!(
+            seen.contains("misspelled key"),
+            "the settings warning was dropped: {seen:?}"
+        );
+        assert!(
+            !seen.contains("routine chatter"),
+            "the default filter got louder than WARN: {seen:?}"
+        );
+        assert!(
+            !seen.contains("somebody else's warning"),
+            "the default filter reached past the user-diagnostic target: {seen:?}"
+        );
+        assert!(
+            seen.contains("somebody else's error"),
+            "errors elsewhere went quiet, which is a regression: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn rust_log_replaces_the_default_filter_wholesale() {
+        let silenced = logged_under(default_log_filter_for(Some("off")), || {
+            tracing::warn!(target: pi::config::USER_DIAGNOSTIC_TARGET, "misspelled key");
+        });
+        assert!(
+            silenced.is_empty(),
+            "RUST_LOG=off did not silence settings warnings: {silenced:?}"
+        );
+
+        let asked_for = logged_under(default_log_filter_for(Some("pi::agent=info")), || {
+            tracing::info!(target: "pi::agent", "what the user asked for");
+        });
+        assert!(
+            asked_for.contains("what the user asked for"),
+            "RUST_LOG was not honored: {asked_for:?}"
+        );
     }
 
     fn spawn_auth_response_server(status: u16, body: &str) -> String {
@@ -10120,6 +10929,34 @@ mod tests {
         assert_eq!(exit_code_for_error(&other), EXIT_CODE_FAILURE);
     }
 
+    /// gh #223: a failure loading configured skills/prompts/themes/extensions carries its own
+    /// exit code (4) and distinct fatal error code "`resource.load_failed`".
+    #[test]
+    fn configured_resource_load_failed_has_its_own_exit_code() {
+        let err = anyhow::Error::new(ConfiguredResourceLoadFailed(
+            "failed to resolve package".into(),
+        ));
+        assert_eq!(exit_code_for_error(&err), EXIT_CODE_RESOURCE_LOAD_FAILED);
+        assert_ne!(EXIT_CODE_RESOURCE_LOAD_FAILED, EXIT_CODE_FAILURE);
+        assert_ne!(EXIT_CODE_RESOURCE_LOAD_FAILED, EXIT_CODE_USAGE);
+        assert_ne!(
+            EXIT_CODE_RESOURCE_LOAD_FAILED,
+            EXIT_CODE_APPROVAL_UNAVAILABLE
+        );
+
+        let wrapped = anyhow::Error::new(ConfiguredResourceLoadFailed(
+            "failed to resolve package".into(),
+        ))
+        .context("startup");
+        assert_eq!(
+            exit_code_for_error(&wrapped),
+            EXIT_CODE_RESOURCE_LOAD_FAILED
+        );
+
+        assert_eq!(fatal_error_code(&err), "resource.load_failed");
+        assert_eq!(fatal_error_code(&wrapped), "resource.load_failed");
+    }
+
     /// gh #217: the stdout record's `code` comes from the typed error in the
     /// chain, clap/usage failures are `usage`, and untyped errors are
     /// `internal`.
@@ -10154,6 +10991,10 @@ mod tests {
         // a provider failure without parsing prose.
         let approval = anyhow::Error::new(ApprovalSurfaceUnavailable).context("print mode");
         assert_eq!(fatal_error_code(&approval), "approval.surface_unavailable");
+        // gh #223: configured resource load failure classified distinctly.
+        let resource_err =
+            anyhow::Error::new(ConfiguredResourceLoadFailed("broken package".into()));
+        assert_eq!(fatal_error_code(&resource_err), "resource.load_failed");
         let clap_err = anyhow::Error::new(clap::Error::raw(
             clap::error::ErrorKind::UnknownArgument,
             "unknown --bogus",
@@ -10824,6 +11665,197 @@ mod tests {
             "anthropic/claude-sonnet-4-6"
         ])));
         assert!(startup_oauth_refresh_required(&parse(&[])));
+    }
+
+    #[test]
+    fn startup_oauth_failure_waits_for_the_final_scoped_extension_destination() {
+        use clap::Parser as _;
+
+        let temp = TempDir::new().expect("tempdir"); // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture setup must succeed.
+        let auth = AuthStorage::empty_at(temp.path().join("auth.json"));
+        let mut registry = ModelRegistry::load(&auth, None);
+        let mut cli = cli::Cli::parse_from(["pi"]);
+        cli.provider = None;
+        cli.model = None;
+        cli.api_key = None;
+        let mut config = Config::default();
+        let bootstrap = build_extension_bootstrap_selection(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture bootstrap must resolve.
+            &config,
+            &registry,
+            &temp.path().join("models.json"),
+        )
+        .expect("native construction model");
+        let refresh = pi::auth::OAuthRefreshReport {
+            failed: vec![pi::auth::OAuthRefreshFailure {
+                provider: bootstrap.model_entry.model.provider.clone(),
+                error: "expired native login".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            validate_startup_oauth_refresh(
+                &cli,
+                &refresh,
+                &bootstrap.model_entry.model.provider,
+                &[],
+                true,
+            )
+            .is_ok(),
+            "a preliminary native identity must not block extension registration"
+        );
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            validate_startup_oauth_refresh(
+                &cli,
+                &refresh,
+                &bootstrap.model_entry.model.provider,
+                &[],
+                false,
+            )
+            .is_err(),
+            "the same failed identity must still be rejected when final"
+        );
+
+        // Model registration adds an allowed, credentialed extension row.
+        // Resolve its actual scope/selection before validating the destination.
+        config.disabled_providers = Some(vec![bootstrap.model_entry.model.provider.clone()]);
+        let mut registered = bootstrap.model_entry;
+        registered.model.provider = "startup-oauth-extension".to_string();
+        registered.model.id = "scoped".to_string();
+        registered.model.name = "Scoped extension".to_string();
+        registered.api_key = Some("configured-extension-key".to_string());
+        registry.merge_entries(vec![registered]);
+        let session = pi::session::Session::in_memory();
+        let patterns = vec!["startup-oauth-extension/scoped".to_string()];
+        let scoped = pi::app::resolve_startup_model_scope(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture scope must resolve.
+            &cli,
+            &session,
+            &patterns,
+            &registry,
+            &config,
+            temp.path(),
+        )
+        .expect("allowed registered scope");
+        let selection = pi::app::select_model_and_thinking(
+            // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture selection must resolve.
+            &cli,
+            &config,
+            &session,
+            &registry,
+            &scoped,
+            temp.path(),
+        )
+        .expect("registered extension destination");
+        assert_eq!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            selection.model_entry.model.provider,
+            "startup-oauth-extension"
+        );
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            validate_startup_oauth_refresh(
+                &cli,
+                &refresh,
+                &selection.model_entry.model.provider,
+                &[],
+                false,
+            )
+            .is_ok(),
+            "an unrelated stale native login must not block the final scoped provider"
+        );
+    }
+
+    #[test]
+    fn final_oauth_validation_requires_a_key_or_matching_extension_auth_override() {
+        use clap::Parser as _;
+
+        let mut cli = cli::Cli::parse_from(["pi"]);
+        let refresh = pi::auth::OAuthRefreshReport {
+            failed: vec![pi::auth::OAuthRefreshFailure {
+                provider: "OPEN-ROUTER".to_string(),
+                error: "expired native login".to_string(),
+            }],
+            ..Default::default()
+        };
+        for key in [None, Some(" \t ")] {
+            cli.api_key = key.map(str::to_string);
+            let error = validate_startup_oauth_refresh(
+                // ubs:ignore[rust.ownership.unwrap-expect] -- Rejection is the regression oracle.
+                &cli,
+                &refresh,
+                "openrouter",
+                &[],
+                false,
+            )
+            .expect_err("provider aliases and blank keys cannot evade the final OAuth failure");
+            assert!(
+                // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+                error
+                    .to_string()
+                    .contains("OAuth token refresh failed for: OPEN-ROUTER")
+            );
+        }
+        cli.api_key = Some(" explicit-run-key ".to_string());
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            validate_startup_oauth_refresh(&cli, &refresh, "openrouter", &[], false).is_ok()
+        );
+        cli.api_key = None;
+
+        let mut binding = ExtensionProviderBinding {
+            provider: "Open-Router".to_string(),
+            oauth_config: None,
+        };
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            validate_startup_oauth_refresh(
+                &cli,
+                &refresh,
+                "openrouter",
+                std::slice::from_ref(&binding),
+                false,
+            )
+            .is_err(),
+            "registering a provider without replacement OAuth leaves its native failure relevant"
+        );
+        binding.oauth_config = Some(pi::models::OAuthConfig {
+            auth_url: "https://extension.invalid/authorize".to_string(),
+            token_url: "https://extension.invalid/token".to_string(),
+            client_id: "extension-oauth-fixture".to_string(),
+            scopes: vec!["models:use".to_string()],
+            redirect_uri: None,
+        });
+        assert!(
+            // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+            validate_startup_oauth_refresh(
+                &cli,
+                &refresh,
+                "openrouter",
+                std::slice::from_ref(&binding),
+                false,
+            )
+            .is_ok(),
+            "the selected provider's extension OAuth supersedes its native refresh result"
+        );
+        binding.provider = "unrelated-extension".to_string();
+        for oauth in [binding.oauth_config.clone(), None] {
+            binding.oauth_config = oauth;
+            assert!(
+                // ubs:ignore[rust.panic.assert-macros] -- Regression oracle.
+                validate_startup_oauth_refresh(
+                    &cli,
+                    &refresh,
+                    "openrouter",
+                    std::slice::from_ref(&binding),
+                    false,
+                )
+                .is_err(),
+                "an unrelated extension cannot suppress the selected provider's native failure"
+            );
+        }
     }
 
     #[test]
@@ -11740,6 +12772,305 @@ mod tests {
         ));
     }
 
+    struct PrintRecoveryProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        prompts: StdMutex<Vec<Option<String>>>,
+        input_tokens: u64,
+        transport_error: bool,
+    }
+
+    #[async_trait::async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl pi::provider::Provider for PrintRecoveryProvider {
+        fn name(&self) -> &str {
+            "print-recovery"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            context: &pi::provider::Context<'_>,
+            _options: &pi::provider::StreamOptions,
+        ) -> pi::error::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = pi::error::Result<pi::model::StreamEvent>> + Send>,
+            >,
+        > {
+            self.prompts
+                .lock()
+                .expect("capture print prompt")
+                .push(context.system_prompt.as_deref().map(str::to_string));
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 && self.transport_error {
+                return Err(pi::error::Error::api("server error"));
+            }
+            let failed = call == 0;
+            let message = AssistantMessage {
+                content: Vec::new(),
+                api: self.api().to_string(),
+                provider: self.name().to_string(),
+                model: self.model_id().to_string(),
+                usage: pi::model::Usage {
+                    input: self.input_tokens,
+                    ..pi::model::Usage::default()
+                },
+                stop_reason: if failed {
+                    StopReason::Error
+                } else {
+                    StopReason::Stop
+                },
+                stop_details: None,
+                error_message: failed.then(|| "server error".to_string()),
+                timestamp: 0,
+            };
+            let terminal = if failed {
+                pi::model::StreamEvent::Error {
+                    reason: StopReason::Error,
+                    error: message.clone(),
+                }
+            } else {
+                pi::model::StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    message: message.clone(),
+                }
+            };
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(pi::model::StreamEvent::Start { partial: message }),
+                Ok(terminal),
+            ])))
+        }
+    }
+
+    fn print_recovery_session(provider: &Arc<PrintRecoveryProvider>) -> AgentSession {
+        let mut agent = Agent::new(
+            Arc::clone(provider) as Arc<dyn pi::provider::Provider>,
+            ToolRegistry::new(&[], Path::new("."), None),
+            AgentConfig {
+                system_prompt: Some("ordinary-system".to_string()),
+                ..AgentConfig::default()
+            },
+        );
+        agent.set_model_accepts_images(true);
+        let mut stored = Session::in_memory();
+        stored.header.provider = Some("print-recovery".to_string());
+        stored.header.model_id = Some("test-model".to_string());
+        AgentSession::new(
+            agent,
+            Arc::new(Mutex::new(stored)),
+            false,
+            ResolvedCompactionSettings {
+                enabled: false,
+                ..ResolvedCompactionSettings::default()
+            },
+        )
+    }
+
+    async fn run_print_recovery_fixture(
+        session: &mut AgentSession,
+        input: PromptInput,
+    ) -> Result<AssistantMessage> {
+        let config = Config {
+            retry: Some(pi::config::RetrySettings {
+                enabled: Some(true),
+                max_retries: Some(1),
+                base_delay_ms: Some(0),
+                max_delay_ms: Some(0),
+                ..pi::config::RetrySettings::default()
+            }),
+            ..Config::default()
+        };
+        let (_abort, signal) = AbortHandle::new();
+        run_print_prompt_with_retry(
+            session,
+            &config,
+            &signal,
+            &|| |_| {},
+            true,
+            1,
+            true,
+            &Arc::new(StdMutex::new(PrintTextStreamState::default())),
+            input,
+            None,
+            &mut PrintFailoverState::default(),
+        )
+        .await
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn print_recovery_preserves_hook_prompt_without_leaking_into_the_next_turn() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(Box::pin(async {
+            for transport_error in [false, true] {
+                for with_image in [false, true] {
+                    for override_prompt in [Some("hook-system"), Some(""), None] {
+                        let provider = Arc::new(PrintRecoveryProvider {
+                            calls: std::sync::atomic::AtomicUsize::new(0),
+                            prompts: StdMutex::new(Vec::new()),
+                            input_tokens: 0,
+                            transport_error,
+                        });
+                        let mut session = print_recovery_session(&provider);
+                        let root = tempfile::tempdir().expect("extension tempdir");
+                        let path = root.path().join("turn-prompt.native.json");
+                        let mut response = json!({"messages": [{
+                            "customType": "print-prompt-hook", "content": "hook ran once",
+                            "display": false
+                        }]});
+                        if let Some(prompt) = override_prompt {
+                            response["systemPrompt"] = json!(prompt);
+                        }
+                        let descriptor = json!({
+                            "id": "print-prompt-hook", "name": "print-prompt-hook",
+                            "version": "1.0.0", "apiVersion": pi::extensions::PROTOCOL_VERSION,
+                            "eventHooks": ["before_agent_start"],
+                            "eventResponses": {"before_agent_start": response}
+                        });
+                        fs::write(&path, serde_json::to_vec(&descriptor).expect("encode extension"))
+                            .expect("write extension");
+                        let manager = pi::extensions::ExtensionManager::new();
+                        manager.set_native_runtime(
+                            NativeRustExtensionRuntimeHandle::start()
+                                .await
+                                .expect("native runtime"),
+                        );
+                        manager
+                            .load_native_extensions(vec![
+                                pi::extensions::NativeRustExtensionLoadSpec::from_entry_path(&path)
+                                    .expect("native extension spec"),
+                            ])
+                            .await
+                            .expect("load extension");
+                        session.extensions = Some(pi::extensions::ExtensionRegion::new(manager));
+                        let input = if with_image {
+                            PromptInput::Content {
+                                content: vec![
+                                    ContentBlock::Text(pi::model::TextContent::new("first turn")),
+                                    ContentBlock::Image(pi::model::ImageContent {
+                                        data: "aGVsbG8=".to_string(),
+                                        mime_type: "image/png".to_string(),
+                                    }),
+                                ],
+                                keyword_scan_source: None,
+                            }
+                        } else {
+                            PromptInput::Text {
+                                text: "first turn".to_string(),
+                                keyword_scan_source: None,
+                            }
+                        };
+                        let result = run_print_recovery_fixture(&mut session, input)
+                            .await
+                            .expect("recovered turn");
+                        assert_eq!(result.stop_reason, StopReason::Stop);
+                        let expected = Some(override_prompt.unwrap_or("ordinary-system").to_string());
+                        assert_eq!(
+                            *provider.prompts.lock().expect("recorded prompts"),
+                            vec![expected.clone(), expected],
+                            "transport_error={transport_error}, image={with_image}, override={override_prompt:?}"
+                        );
+                        assert_eq!(session.agent.system_prompt(), Some("ordinary-system"));
+                        let cx = pi::agent_cx::AgentCx::for_request();
+                        let hook_count = session
+                            .session
+                            .lock(cx.cx())
+                            .await
+                            .expect("session lock")
+                            .to_messages_for_current_path()
+                            .into_iter()
+                            .filter(|message| matches!(
+                                message, pi::model::Message::Custom(custom)
+                                    if custom.custom_type == "print-prompt-hook"
+                            ))
+                            .count();
+                        assert_eq!(hook_count, 1, "recovery must not replay start hooks");
+                        let _extension = session.extensions.take();
+                        run_print_recovery_fixture(
+                            &mut session,
+                            PromptInput::Text {
+                                text: "next turn".to_string(),
+                                keyword_scan_source: None,
+                            },
+                        )
+                        .await
+                        .expect("next turn");
+                        assert_eq!(
+                            provider.prompts.lock().expect("next prompt").last(),
+                            Some(&Some("ordinary-system".to_string()))
+                        );
+                        assert_eq!(session.agent.system_prompt(), Some("ordinary-system"));
+                    }
+                }
+            }
+        }));
+    }
+
+    #[test]
+    fn print_recovery_uses_live_model_capacity_for_silent_overflow() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(Box::pin(async {
+            for (capacity, tokens, expected_calls) in [
+                (Some(8_192), 8_193, 1),
+                (Some(8_192), 8_192, 2),
+                (Some(0), 8_193, 2),
+                (None, 8_193, 2),
+            ] {
+                let provider = Arc::new(PrintRecoveryProvider {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    prompts: StdMutex::new(Vec::new()),
+                    input_tokens: tokens,
+                    transport_error: false,
+                });
+                let mut session = print_recovery_session(&provider);
+                let root = tempfile::tempdir().expect("auth tempdir");
+                if let Some(capacity) = capacity {
+                    let auth = AuthStorage::empty_at(root.path().join("auth.json"));
+                    let mut registry = ModelRegistry::load(&auth, None);
+                    let mut entry = pi::models::ad_hoc_model_entry("openai", "test-model")
+                        .expect("model entry");
+                    entry.model.provider = "print-recovery".to_string();
+                    entry.model.context_window = capacity;
+                    entry.api_key = Some("fixture-key".to_string());
+                    registry.merge_entries(vec![entry]);
+                    session.set_model_registry(registry);
+                }
+                let result = run_print_recovery_fixture(
+                    &mut session,
+                    PromptInput::Text {
+                        text: "hello".to_string(),
+                        keyword_scan_source: None,
+                    },
+                )
+                .await
+                .expect("classified turn");
+                assert_eq!(
+                    provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+                    expected_calls,
+                    "capacity={capacity:?}, input tokens={tokens}"
+                );
+                assert_eq!(
+                    result.stop_reason,
+                    if expected_calls == 1 {
+                        StopReason::Error
+                    } else {
+                        StopReason::Stop
+                    }
+                );
+            }
+        }));
+    }
+
     struct PersistencePoisonProvider {
         session: Arc<Mutex<Session>>,
         poison_path: PathBuf,
@@ -11840,7 +13171,7 @@ mod tests {
             let temp = tempfile::Builder::new()
                 .prefix("pi-print-persist-")
                 .tempdir_in("/tmp")
-                .expect("tempdir in /tmp");
+                .unwrap_or_else(|_| tempfile::tempdir().expect("tempdir"));
             let cwd = temp.path().to_path_buf();
             let poison = cwd.join("connection reset while saving");
             std::fs::create_dir(&poison).expect("poison directory");
@@ -12399,6 +13730,7 @@ mod tests {
             .blocking_threads(1, 8)
             .build()
             .expect("runtime build");
+        let handle = runtime.handle();
         runtime.block_on(async move {
             let model_entry =
                 |provider: &str, model_id: &str, api: &str, key: Option<&str>| ModelEntry {
@@ -12564,10 +13896,18 @@ mod tests {
             .await
             .expect("second walk");
             assert_eq!(again, None, "the trailing duplicate is not a new swap");
+            // bd-gr6fk: an exhausted walk records nothing, so the cursor stays
+            // where the last COMMITTED swap left it. This assertion previously
+            // read 4 — print advanced the cursor past every rejected entry,
+            // which made a transient rejection (a credential that arrives
+            // later) permanent for the life of the process. RPC and the SDK
+            // never did that; this is print joining them, and the changed
+            // number is the behaviour change, not a loosened assertion.
             assert_eq!(
                 failover_state.chain_position(),
-                4,
-                "the walk is bounded by the chain length"
+                3,
+                "an exhausted walk must not advance the cursor past entries it \
+                 only rejected transiently"
             );
 
             // bd-gm481.1: the restoration REFUSALS, which the e2e pair cannot
@@ -12605,6 +13945,12 @@ mod tests {
                 .expect("swap for the cooldown case")
                 .is_some()
             );
+            let holding_aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            swapped.park_pending_compaction_for_test(&handle, Some(Arc::clone(&holding_aborted)));
+            assert!(
+                swapped.has_pending_background_compaction(),
+                "compaction must be in flight before refused restoration"
+            );
             assert!(
                 !maybe_restore_print_primary(&mut swapped, &mut holding, failover_ctx, false).await,
                 "the cooldown must hold the primary back"
@@ -12613,6 +13959,14 @@ mod tests {
             assert!(
                 holding.active().is_some(),
                 "a refused restoration keeps the recorded fallback"
+            );
+            assert!(
+                swapped.has_pending_background_compaction(),
+                "a refused restoration must keep the in-flight background compaction active"
+            );
+            assert!(
+                !holding_aborted.load(std::sync::atomic::Ordering::SeqCst),
+                "compaction task must not be aborted when restoration is refused"
             );
 
             // The live model is no longer the fallback we recorded: something
@@ -12671,6 +14025,16 @@ mod tests {
                 .is_some()
             );
             assert_eq!(restorable.agent.provider().model_id(), "fallback-model");
+
+            // bd-uyqkk: Park an in-flight background compaction while running on the fallback.
+            let compaction_aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            restorable
+                .park_pending_compaction_for_test(&handle, Some(Arc::clone(&compaction_aborted)));
+            assert!(
+                restorable.has_pending_background_compaction(),
+                "compaction must be in flight before restoration"
+            );
+
             assert!(
                 maybe_restore_print_primary(&mut restorable, &mut ready, failover_ctx, false).await,
                 "an elapsed cooldown with consistent state restores"
@@ -12686,6 +14050,316 @@ mod tests {
                 ready.chain_position(),
                 0,
                 "back on the primary, the chain starts over"
+            );
+            assert!(
+                !restorable.has_pending_background_compaction(),
+                "bd-uyqkk: primary restoration must invalidate the in-flight background compaction"
+            );
+            asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(50),
+            )
+            .await;
+            assert!(
+                compaction_aborted.load(std::sync::atomic::Ordering::SeqCst),
+                "the in-flight compaction task must be aborted on restoration"
+            );
+        });
+    }
+
+    /// bd-gr6fk: an entry skipped because it had no usable credential must be
+    /// reconsidered once one appears.
+    ///
+    /// Print mode used to record the exhausted walk position, which made that
+    /// rejection permanent for the life of the process: configure a chain,
+    /// start without a key for one of its entries, and print would walk past it
+    /// once and never look again — silently shrinking the chain the user
+    /// configured. The cursor number is the mechanism; THIS is the consequence,
+    /// so this is what the test asserts.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn print_failover_reconsiders_an_entry_whose_credential_arrives_later() {
+        let runtime = RuntimeBuilder::new()
+            .blocking_threads(1, 8)
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async move {
+            let model_entry = |provider: &str, model_id: &str, key: Option<&str>| ModelEntry {
+                model: pi::provider::Model {
+                    id: model_id.to_string(),
+                    name: model_id.to_string(),
+                    api: if provider == "openai" {
+                        "openai-completions".to_string()
+                    } else {
+                        "anthropic".to_string()
+                    },
+                    provider: provider.to_string(),
+                    base_url: if provider == "openai" {
+                        "https://api.openai.com/v1".to_string()
+                    } else {
+                        "https://api.anthropic.com".to_string()
+                    },
+                    reasoning: false,
+                    input: vec![InputType::Text],
+                    cost: pi::provider::ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 8_192,
+                    max_tokens: 1_024,
+                    headers: std::collections::HashMap::new(),
+                },
+                api_key: key.map(str::to_string),
+                headers: std::collections::HashMap::new(),
+                auth_header: true,
+                compat: None,
+                oauth_config: None,
+            };
+            let primary = model_entry("openai", "primary-model", Some("primary-key"));
+            let keyless = model_entry("anthropic", "keyless-model", None);
+
+            let provider = providers::create_provider(&primary, None).expect("primary provider");
+            let tools = ToolRegistry::new(&[], Path::new("."), None);
+            let mut agent = Agent::new(provider, tools, AgentConfig::default());
+            agent.stream_options_mut().api_key = Some("primary-key".to_string());
+            let session_temp = tempfile::tempdir().expect("session tempdir");
+            let stored = Session::create_with_dir(Some(session_temp.path().join("sessions")));
+            let mut session = AgentSession::new(
+                agent,
+                Arc::new(Mutex::new(stored)),
+                true,
+                ResolvedCompactionSettings::default(),
+            );
+
+            let auth_temp = tempfile::tempdir().expect("auth tempdir");
+            let auth = AuthStorage::load(auth_temp.path().join("auth.json")).expect("auth load");
+            let available_models = vec![primary, keyless];
+            let mut config = Config::default();
+            config.retry = Some(pi::config::RetrySettings {
+                fallback_chains: Some(std::collections::HashMap::from([(
+                    "default".to_string(),
+                    vec!["anthropic/keyless-model".to_string()],
+                )])),
+                max_failovers_per_turn: Some(1),
+                ..Default::default()
+            });
+            let mut failover_state = PrintFailoverState::new(&config);
+
+            // No credential anywhere: the only entry is skipped and the walk
+            // finds nothing. Failing over into an auth error would be strictly
+            // worse than the error that started this.
+            let refused = try_print_failover(
+                &mut session,
+                &config,
+                Some(FailoverResolution {
+                    available_models: &available_models,
+                    auth: &auth,
+                    cli_api_key: None,
+                }),
+                &mut failover_state,
+                Some("server error"),
+                false,
+                false,
+                None,
+                0,
+            )
+            .await
+            .expect("first walk");
+            assert_eq!(refused, None, "an entry with no credential is not usable");
+            assert_eq!(
+                failover_state.chain_position(),
+                0,
+                "a transient rejection must not advance the cursor"
+            );
+
+            // The credential appears. The SAME state, the SAME chain — and the
+            // entry must now be reachable.
+            let installed = try_print_failover(
+                &mut session,
+                &config,
+                Some(FailoverResolution {
+                    available_models: &available_models,
+                    auth: &auth,
+                    cli_api_key: Some("late-key"),
+                }),
+                &mut failover_state,
+                Some("server error"),
+                false,
+                false,
+                None,
+                0,
+            )
+            .await
+            .expect("second walk");
+            assert_eq!(
+                installed,
+                Some(("anthropic".to_string(), "keyless-model".to_string())),
+                "an entry rejected only for a missing credential must be \
+                 reconsidered once that credential exists (bd-gr6fk)"
+            );
+            assert_eq!(session.agent.provider().model_id(), "keyless-model");
+        });
+    }
+
+    /// bd-jk057 and its unfiled sibling: from the SECOND hop of a chain onwards,
+    /// print mode resolved everything from the LIVE model, which by then is
+    /// itself a fallback. Two things went wrong at once, and this covers both.
+    ///
+    /// A user asking for High, on a chain `primary -> non-reasoning -> reasoning`
+    /// keyed by an exact `provider/model` spec, used to get: hop two never
+    /// running at all (the key names the primary, and the live model is no
+    /// longer it), and — with a role-keyed chain where hop two DID run — the
+    /// level clamped against what hop one allowed, so it ratcheted to Off and
+    /// stayed there for the session.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn print_failover_resolves_the_chain_and_the_thinking_level_from_the_primary() {
+        let runtime = RuntimeBuilder::new()
+            .blocking_threads(1, 8)
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async move {
+            let model_entry = |provider: &str, model_id: &str, reasoning: bool| ModelEntry {
+                model: pi::provider::Model {
+                    id: model_id.to_string(),
+                    name: model_id.to_string(),
+                    api: if provider == "openai" {
+                        "openai-completions".to_string()
+                    } else {
+                        "anthropic".to_string()
+                    },
+                    provider: provider.to_string(),
+                    base_url: if provider == "openai" {
+                        "https://api.openai.com/v1".to_string()
+                    } else {
+                        "https://api.anthropic.com".to_string()
+                    },
+                    reasoning,
+                    input: vec![InputType::Text],
+                    cost: pi::provider::ModelCost {
+                        input: 0.0,
+                        output: 0.0,
+                        cache_read: 0.0,
+                        cache_write: 0.0,
+                    },
+                    context_window: 8_192,
+                    max_tokens: 1_024,
+                    headers: std::collections::HashMap::new(),
+                },
+                api_key: Some(format!("{model_id}-key")),
+                headers: std::collections::HashMap::new(),
+                auth_header: true,
+                compat: None,
+                oauth_config: None,
+            };
+            // A thinks; B does NOT, so it clamps any level to Off; C thinks
+            // again. B is the "worst model the chain touched".
+            let primary = model_entry("openai", "primary-model", true);
+            let no_reasoning = model_entry("anthropic", "b-no-reasoning", false);
+            let reasoning_again = model_entry("anthropic", "c-reasoning", true);
+
+            let provider = providers::create_provider(&primary, None).expect("primary provider");
+            let tools = ToolRegistry::new(&[], Path::new("."), None);
+            let mut agent = Agent::new(provider, tools, AgentConfig::default());
+            agent.stream_options_mut().api_key = Some("primary-model-key".to_string());
+            agent.stream_options_mut().thinking_level = Some(ThinkingLevel::High);
+            let session_temp = tempfile::tempdir().expect("session tempdir");
+            let stored = Session::create_with_dir(Some(session_temp.path().join("sessions")));
+            let mut session = AgentSession::new(
+                agent,
+                Arc::new(Mutex::new(stored)),
+                true,
+                ResolvedCompactionSettings::default(),
+            );
+
+            let auth_temp = tempfile::tempdir().expect("auth tempdir");
+            let auth = AuthStorage::load(auth_temp.path().join("auth.json")).expect("auth load");
+            let available_models = vec![
+                primary.clone(),
+                no_reasoning.clone(),
+                reasoning_again.clone(),
+            ];
+            let failover_ctx = Some(FailoverResolution {
+                available_models: &available_models,
+                auth: &auth,
+                cli_api_key: None,
+            });
+
+            // Keyed by the EXACT primary spec, not "default": this is what makes
+            // hop two depend on resolving the chain from the primary. A
+            // role-keyed chain would hide half the bug.
+            let mut config = Config::default();
+            config.retry = Some(pi::config::RetrySettings {
+                fallback_chains: Some(std::collections::HashMap::from([(
+                    "openai/primary-model".to_string(),
+                    vec![
+                        "anthropic/b-no-reasoning".to_string(),
+                        "anthropic/c-reasoning".to_string(),
+                    ],
+                )])),
+                max_failovers_per_turn: Some(2),
+                ..Default::default()
+            });
+            let mut failover_state = PrintFailoverState::new(&config);
+
+            let hop_one = try_print_failover(
+                &mut session,
+                &config,
+                failover_ctx,
+                &mut failover_state,
+                Some("server error"),
+                false,
+                false,
+                None,
+                0,
+            )
+            .await
+            .expect("hop one");
+            assert_eq!(
+                hop_one,
+                Some(("anthropic".to_string(), "b-no-reasoning".to_string())),
+                "hop one installs the first chain entry"
+            );
+            assert_eq!(
+                session.agent.stream_options().thinking_level,
+                Some(ThinkingLevel::Off),
+                "a non-reasoning model clamps the requested level to Off"
+            );
+
+            let hop_two = try_print_failover(
+                &mut session,
+                &config,
+                failover_ctx,
+                &mut failover_state,
+                Some("server error"),
+                false,
+                false,
+                None,
+                1,
+            )
+            .await
+            .expect("hop two");
+            assert_eq!(
+                hop_two,
+                Some(("anthropic".to_string(), "c-reasoning".to_string())),
+                "the chain is keyed by the PRIMARY, so hop two must still \
+                 resolve it after hop one moved the live model off that key"
+            );
+            assert_eq!(
+                session.agent.stream_options().thinking_level,
+                Some(ThinkingLevel::High),
+                "the clamp respects a MODEL's limit; it must not make hop one's \
+                 limit sticky across the rest of the chain (bd-jk057)"
+            );
+            assert_eq!(
+                failover_state
+                    .primary()
+                    .as_ref()
+                    .map(|p| (p.provider.as_str(), p.model_id.as_str())),
+                Some(("openai", "primary-model")),
+                "two hops in, the identity to restore is still the chain's origin"
             );
         });
     }
@@ -12937,6 +14611,39 @@ mod tests {
         let fatal_io = std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid utf-8");
         let fatal = build_error_turn(pi::error::Error::sse(&fatal_io).to_string());
         assert!(!is_retryable_prompt_result(&fatal));
+    }
+
+    /// bd-print-json-panics-on-closed-stdout: a closed stdout reader is the one
+    /// write failure that must NOT end the run loudly.
+    ///
+    /// The exit itself cannot be asserted in-process — `exit_if_stdout_closed`
+    /// calls `std::process::exit`, so a test that triggered it would take the
+    /// test binary with it. What is checkable here is the classification, which
+    /// is the part that was wrong: `BrokenPipe` is the quiet case and everything
+    /// else is not. `tests/e2e_cli.rs` drives the real pipeline end to end.
+    #[test]
+    fn only_a_broken_pipe_is_a_quiet_stdout_ending() {
+        assert_eq!(
+            EXIT_CODE_STDOUT_CLOSED, 0,
+            "a reader that took what it asked for and left is not a failure"
+        );
+        assert_eq!(
+            io::Error::from(io::ErrorKind::BrokenPipe).kind(),
+            io::ErrorKind::BrokenPipe,
+            "the kind this hinges on"
+        );
+        for loud in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::StorageFull,
+            io::ErrorKind::WriteZero,
+            io::ErrorKind::Interrupted,
+        ] {
+            assert_ne!(
+                loud,
+                io::ErrorKind::BrokenPipe,
+                "a full disk or a denied write on `pi -p > out.json` must stay loud"
+            );
+        }
     }
 
     #[test]

@@ -1,10 +1,12 @@
 /**
  * app 右键菜单（hermes shellSections 移植）的纯投影单测：段结构/项序/
- * 图标/文案、布局段的 ctx 门控、命令面板命令与菜单动作同源、状态栏可见性
- * 解析。node 环境（无 DOM——布局段在 __flModel 缺席时整段缺席，见
+ * 图标/文案、布局段的 ctx 门控、命令面板命令与菜单动作同源。node 环境
+ * （无 DOM——布局段在 __flModel 缺席时整段缺席，见
  * buildShellMenuSections 的 flModel 守卫）。
  * v6.0：布局动词入菜单（隐藏标签/栏显隐/互换/面板栏位置）；「隐藏标签」
  * 行按 ctx.tabsetId 出席——测试里无模型 = 布局段恒空，只验 shell 段。
+ * 2026-10-19：底栏整条撤除（用户"底栏不要了"），「切换状态栏」行与
+ * 命令面板项随之删——本文件相应收窄。
  */
 import { describe, expect, it } from 'vitest'
 
@@ -14,7 +16,6 @@ import {
   PALETTE_COMMANDS,
   runShellAction,
 } from './app-context-menu'
-import { parseStatusbarVisible } from '@/app/shell/statusbar'
 
 const flatten = (sections: ReturnType<typeof buildShellMenuSections>) => sections.flat()
 
@@ -30,14 +31,13 @@ describe('buildShellMenuSections', () => {
       'shell-panels-pos',
       'shell-reset-layout',
     ])
-    expect(sections[2].map((i) => i.id)).toEqual(['shell-statusbar', 'shell-settings'])
+    expect(sections[2].map((i) => i.id)).toEqual(['shell-settings'])
   })
 
   it('文案逐字', () => {
     const labels = new Map(flatten(buildShellMenuSections()).map((i) => [i.id, i.label]))
     expect(labels.get('shell-new-chat')).toBe('新建会话')
     expect(labels.get('shell-palette')).toBe('命令面板')
-    expect(labels.get('shell-statusbar')).toBe('切换状态栏')
     expect(labels.get('shell-settings')).toBe('设置')
     expect(labels.get('shell-left')).toBe('隐藏左侧栏')
     expect(labels.get('shell-panels')).toBe('隐藏面板栏')
@@ -60,7 +60,6 @@ describe('buildShellMenuSections', () => {
       'arrow-both',
       'layout-panel',
       'refresh',
-      'layout-statusbar',
       'layout-menubar',
     ])
   })
@@ -82,7 +81,7 @@ describe('PALETTE_COMMANDS', () => {
   it('命令与菜单动作同源', () => {
     const ids = PALETTE_COMMANDS.map((c) => c.id)
     expect(ids).toContain('shell-new-chat')
-    expect(ids).toContain('shell-statusbar')
+    expect(ids).toContain('shell-settings')
   })
 })
 

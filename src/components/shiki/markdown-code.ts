@@ -50,6 +50,94 @@ export function sanitizeLanguageTag(tag: string): string {
   return VALID_LANGUAGE_RE.test(first) && first.length <= 16 ? first.toLowerCase() : ''
 }
 
+// ── 文件名 → shiki 语言 id（hermes lib/markdown-code.ts 逐字移植）──────────
+// 审查面板的 diff 按被改文件的扩展名高亮；未知扩展返回 '' 让调用方退回
+// 纯色 diff 渲染（不猜语言）。
+const SHIKI_LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  astro: 'astro',
+  bash: 'bash',
+  c: 'c',
+  cc: 'cpp',
+  cjs: 'javascript',
+  clj: 'clojure',
+  cpp: 'cpp',
+  cs: 'csharp',
+  css: 'css',
+  cxx: 'cpp',
+  dart: 'dart',
+  dockerfile: 'docker',
+  ex: 'elixir',
+  exs: 'elixir',
+  fish: 'fish',
+  go: 'go',
+  gql: 'graphql',
+  graphql: 'graphql',
+  h: 'c',
+  hpp: 'cpp',
+  hs: 'haskell',
+  htm: 'html',
+  html: 'html',
+  ini: 'ini',
+  java: 'java',
+  jl: 'julia',
+  js: 'javascript',
+  json: 'json',
+  json5: 'json5',
+  jsonc: 'jsonc',
+  jsx: 'jsx',
+  kt: 'kotlin',
+  kts: 'kotlin',
+  less: 'less',
+  lua: 'lua',
+  makefile: 'make',
+  markdown: 'markdown',
+  md: 'markdown',
+  mdx: 'mdx',
+  mjs: 'javascript',
+  ml: 'ocaml',
+  mts: 'typescript',
+  nix: 'nix',
+  php: 'php',
+  pl: 'perl',
+  proto: 'proto',
+  ps1: 'powershell',
+  py: 'python',
+  pyi: 'python',
+  r: 'r',
+  rb: 'ruby',
+  rs: 'rust',
+  sass: 'sass',
+  scala: 'scala',
+  scss: 'scss',
+  sh: 'bash',
+  sql: 'sql',
+  svelte: 'svelte',
+  swift: 'swift',
+  tf: 'terraform',
+  toml: 'toml',
+  ts: 'typescript',
+  tsx: 'tsx',
+  vue: 'vue',
+  xml: 'xml',
+  yaml: 'yaml',
+  yml: 'yaml',
+  zig: 'zig',
+  zsh: 'bash',
+}
+
+/** 末段路径的扩展名（`Dockerfile`/`Makefile` 这类裸名整段小写）。 */
+function filenameExtToken(path: string | undefined): string {
+  const base = (path || '').replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? ''
+  const dot = base.lastIndexOf('.')
+
+  return dot > 0 ? base.slice(dot + 1) : base
+}
+
+/** 扩展名 → shiki 内置语言 id；未知返回 ''（调用方退回纯色 diff）。 */
+export function shikiLanguageForFilename(path: string | undefined): string {
+  return SHIKI_LANGUAGE_BY_EXTENSION[filenameExtToken(path)] || ''
+}
+
 // ── 预算判定（hermes shiki-highlighter.tsx 同款）────────────────────────────
 // >150k 字符或 >3k 行即放弃高亮：shiki tokenize 是主线程重活，超大块直接
 // 走纯文本分块路径。

@@ -41,7 +41,7 @@ export function SharedConversation({
       {...props}
     >
       <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-3">
-        <LinkIcon className="text-foreground/30 size-3.5 shrink-0" />
+        <LinkIcon className="text-foreground/30 size-[var(--size-icon-md)] shrink-0" />
         <div className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-[13.5px] font-medium">{title}</span>
           <span className={cn(mono, "text-foreground/30 truncate")}>

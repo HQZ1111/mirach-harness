@@ -22,6 +22,7 @@ import type { IDockviewHeaderActionsProps } from 'dockview-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/motion/tooltip'
 import { TabOverviewButton } from './tab-overview-menu'
+import { TabStripNewButton } from './tab-strip-new'
 
 interface StripEdges {
   overflow: boolean
@@ -110,9 +111,9 @@ const TabStripArrow: FC<{ side: 'left' | 'right' } & IDockviewHeaderActionsProps
         type="button"
       >
         {side === 'left' ? (
-          <ChevronLeftIcon aria-hidden className="size-4" />
+          <ChevronLeftIcon aria-hidden className="size-[var(--size-icon-lg)]" />
         ) : (
-          <ChevronRightIcon aria-hidden className="size-4" />
+          <ChevronRightIcon aria-hidden className="size-[var(--size-icon-lg)]" />
         )}
       </button>
     </Tooltip>
@@ -123,10 +124,47 @@ export const TabStripLeftArrow: FC<IDockviewHeaderActionsProps> = (props) => (
   <TabStripArrow side="left" {...props} />
 )
 
-/** 右动作位组合：滚动箭头 + 标签总览下拉（总览保留——用户定稿）。 */
-export const TabStripRightSide: FC<IDockviewHeaderActionsProps> = (props) => (
+/**
+ * 条**左端**组合：**标签总览**（点开选标签）+ 左箭头（溢出时才出现）。
+ *
+ * 2026-11-01 用户纠正（我此前理解反了）：
+ * "标签的前面应该有个按钮，点击能打开，选择标签，这个组件不是已经做过了吗？
+ *  加号应该在标签的右面啊"
+ *
+ * 所以左右分工是：
+ * ```
+ * [标签总览 ▾] [标签1 标签2 …] [+] [右箭头]
+ *   ↑ 左（选标签）              ↑ 右（新建）
+ * ```
+ * - **左** = 标签总览下拉（`TabOverviewButton`，cmdk 检索 + ✕ 关闭）。
+ *   这是"点开能选标签"的那个组件——早就做过（`tab-overview-menu.tsx`），
+ *   只是此前被 `panels<=2` 门槛藏了，且挂在右侧。
+ * - **右** = 加号（`TabStripNewButton`，新建面板）。
+ *
+ * dockview 的槽位语义（`headerActionsService.ts` 的 SLOT_OPTION_KEY）：
+ * `prefix` → `dv-pre-actions-container`（tabs **之前**）；
+ * `left` → `dv-left-actions-container`（tabs **之后**、void 之前）；
+ * `right` → `dv-right-actions-container`（条最右）。
+ * 所以"加号在标签右边"要挂 `leftHeaderActionsComponent`。
+ */
+export const TabStripLeading: FC<IDockviewHeaderActionsProps> = (props) => (
   <>
-    <TabStripArrow side="right" {...props} />
     <TabOverviewButton {...props} />
+    <TabStripArrow side="left" {...props} />
   </>
+)
+
+/**
+ * 条**标签之后**的组合：加号（新建面板）。
+ *
+ * 挂 `leftHeaderActionsComponent` → `dv-left-actions-container`，DOM 序在
+ * tabs 之后、void 之前，所以视觉上就是"最后一个标签的右边"。
+ */
+export const TabStripTrailing: FC<IDockviewHeaderActionsProps> = (props) => (
+  <TabStripNewButton {...props} />
+)
+
+/** 右动作位组合：右滚动箭头（溢出时出现）。 */
+export const TabStripRightSide: FC<IDockviewHeaderActionsProps> = (props) => (
+  <TabStripArrow side="right" {...props} />
 )

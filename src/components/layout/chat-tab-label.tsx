@@ -15,6 +15,7 @@ import {
   sessionDisplayName,
   sessionProjectCwd,
 } from '@/components/panes/session-manage/session-catalog';
+import { VoiceLiveButton } from '@/components/assistant-ui/voice-live-panel';
 
 export function ChatTabLabel(): React.ReactElement | null {
   const entry = useStore(sessionCatalog, (s) =>
@@ -28,9 +29,14 @@ export function ChatTabLabel(): React.ReactElement | null {
   const workspace = cwd != null ? workspaceGroupLabel(cwd) : 'WORK SPACE';
   return (
     <div className="chat-tab-label" data-slot="chat-tab-label">
-      <span className="chat-tab-label__workspace" data-workspace={workspace}>
-        {workspace}
-      </span>
+      {/* 双工语音钮在项目名右侧（2026-11-14 用户定稿"像微信的语音通话按钮
+          一样"）——行容器接住钮的 pointer-events（列头整体 none，见 CSS）。 */}
+      <div className="chat-tab-label__row" data-slot="chat-tab-label-row">
+        <span className="chat-tab-label__workspace" data-workspace={workspace}>
+          {workspace}
+        </span>
+        <VoiceLiveButton />
+      </div>
       {/* title 悬停看全名：pointer-events 需在 span 上放行（锚层整体
           none——见 flexlayout.css 的 __session 规则） */}
       <span className="chat-tab-label__session" data-session={title} title={title}>

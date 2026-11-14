@@ -489,7 +489,7 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
         aria-label="Download image"
         className="hover:bg-muted inline-flex size-7 items-center justify-center rounded"
       >
-        <DownloadIcon className="size-4" />
+        <DownloadIcon className="size-[var(--size-icon-lg)]" />
       </button>
       <button
         type="button"
@@ -500,7 +500,7 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
         aria-label="Copy image"
         className="hover:bg-muted inline-flex size-7 items-center justify-center rounded"
       >
-        <CopyIcon className="size-4" />
+        <CopyIcon className="size-[var(--size-icon-lg)]" />
       </button>
       {onRegenerate && <RegenerateButton onRegenerate={onRegenerate} />}
     </div>

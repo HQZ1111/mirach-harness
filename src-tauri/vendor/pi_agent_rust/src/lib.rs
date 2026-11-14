@@ -18,6 +18,10 @@
 //! - [`sdk`] module
 
 #![forbid(unsafe_code)]
+// The pinned nightly exposes safe, lifetime-bound Windows process attributes.
+// Assigning a Job during creation keeps even the child's first descendants
+// inside its cancellation boundary, including when Pi is used as a library.
+#![cfg_attr(windows, feature(windows_process_extensions_raw_attribute))]
 // Raised from the default 128 because the RPC command dispatcher's nested
 // async blocks exceed it while the compiler proves `Send` for the spawned
 // future (src/rpc.rs:2057, `run_extension_command` inside
@@ -93,6 +97,8 @@ pub mod agent_hub;
 #[doc(hidden)]
 pub mod app;
 pub mod approval;
+#[doc(hidden)]
+pub(crate) mod artifact_output;
 pub mod ask;
 #[doc(hidden)]
 pub mod ast_tools;
@@ -290,6 +296,7 @@ pub mod self_update;
 pub mod semantic_workspace_graph;
 #[doc(hidden)]
 pub mod session;
+pub mod session_control;
 #[doc(hidden)]
 pub mod session_import;
 #[doc(hidden)]
@@ -304,6 +311,11 @@ pub mod session_picker;
 pub mod session_sqlite;
 #[doc(hidden)]
 pub mod session_store_v2;
+#[cfg(feature = "tui")]
+#[doc(hidden)]
+pub mod session_title;
+#[doc(hidden)]
+pub mod session_workdir;
 #[doc(hidden)]
 pub mod skills_managed;
 pub mod sse;
@@ -323,6 +335,7 @@ pub mod swarm_progress_slo;
 pub mod swarm_replay;
 #[doc(hidden)]
 pub mod terminal_images;
+pub(crate) mod text_completion;
 #[doc(hidden)]
 pub mod theme;
 #[doc(hidden)]
@@ -366,8 +379,7 @@ pub mod fuzz_exports {
     //! Re-exports of internal parsing/deserialization functions for
     //! `cargo-fuzz` / `libFuzzer` harnesses.
     //!
-    //! Enabled only when the `fuzzing` Cargo feature is active.
-    //! The `fuzz/Cargo.toml` depends on this crate with
+    //! Enabled only when the `fuzz/Cargo.toml` depends on this crate with
     //! `features = ["fuzzing"]`.
 
     pub use crate::config::Config;

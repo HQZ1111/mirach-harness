@@ -79,7 +79,7 @@ export function EditMessage({
 
       {discardedReplies > 0 && (
         <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
-          <AlertTriangleIcon className="size-3.5 shrink-0" />
+          <AlertTriangleIcon className="size-[var(--size-icon-md)] shrink-0" />
           <span className={cn(mono, "tabular-nums")}>
             sending discards {discardedReplies}{" "}
             {discardedReplies === 1 ? "reply" : "replies"}

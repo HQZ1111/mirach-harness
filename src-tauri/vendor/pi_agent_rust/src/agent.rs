@@ -26,12 +26,12 @@ use crate::extension_events::{
 };
 use crate::extension_tools::collect_extension_tool_wrappers;
 use crate::extensions::{
-    EXTENSION_EVENT_TIMEOUT_MS, ExtensionAiCompletionRequest, ExtensionDeliverAs,
-    ExtensionEventName, ExtensionHostActions, ExtensionLoadSpec, ExtensionManager, ExtensionPolicy,
-    ExtensionRegion, ExtensionRuntimeHandle, ExtensionSendMessage, ExtensionSendUserMessage,
-    JsExtensionLoadSpec, JsExtensionRuntimeHandle, NativeRustExtensionLoadSpec,
-    NativeRustExtensionRuntimeHandle, RepairPolicyMode, SessionActionOrigin,
-    SessionActionOriginSource, resolve_extension_load_spec,
+    EXTENSION_EVENT_TIMEOUT_MS, ExtensionAiCompletionRequest, ExtensionCompactionOptions,
+    ExtensionDeliverAs, ExtensionEventName, ExtensionHostActions, ExtensionLoadSpec,
+    ExtensionManager, ExtensionPolicy, ExtensionRegion, ExtensionRuntimeHandle,
+    ExtensionSendMessage, ExtensionSendUserMessage, JsExtensionLoadSpec, JsExtensionRuntimeHandle,
+    NativeRustExtensionLoadSpec, NativeRustExtensionRuntimeHandle, RepairPolicyMode,
+    SessionActionOrigin, SessionActionOriginSource, resolve_extension_load_spec,
 };
 #[cfg(feature = "wasm-host")]
 use crate::extensions::{WasmExtensionHost, WasmExtensionLoadSpec};
@@ -686,6 +686,32 @@ pub fn iteration_handoff_steering_text(current: usize, max: usize) -> String {
     )
 }
 
+/// Recognize only the synthetic successful boundary message emitted by the
+/// run-time cap. Frontends must publish it after AgentSession persistence has
+/// succeeded, rather than rendering its pre-save MessageStart/MessageEnd.
+pub(crate) fn time_cap_marker(message: &AssistantMessage) -> Option<&str> {
+    if message.stop_reason != StopReason::Stop
+        || !message.api.is_empty()
+        || !message.provider.is_empty()
+        || !message.model.is_empty()
+        || message.error_message.is_some()
+    {
+        return None;
+    }
+    let [crate::model::ContentBlock::Text(text)] = message.content.as_slice() else {
+        return None;
+    };
+    let seconds = text
+        .text
+        .strip_prefix("[time cap reached] time cap reached after ")?
+        .strip_suffix("s (--max-time); stopping at the turn boundary")?;
+    if seconds.is_empty() || !seconds.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    seconds.parse::<u64>().ok()?;
+    Some(text.text.as_str())
+}
+
 /// Configuration for the agent.
 #[derive(Clone)]
 pub struct AgentConfig {
@@ -698,9 +724,10 @@ pub struct AgentConfig {
     /// Default stream options.
     pub stream_options: StreamOptions,
 
-    /// Whether the active model accepts image inputs (bd-cv653.7.6).
-    /// When false, snapcompact compaction frames are stripped from the
-    /// outbound context with a logged degradation reason.
+    /// Whether the active model accepts image inputs.
+    /// When false, native images become omission explanations in outbound
+    /// context and snapcompact frames are stripped with a logged reason.
+    /// Session history retains the original images for later model switches.
     pub model_accepts_images: bool,
 
     /// Strip image blocks before sending context to providers.
@@ -1557,16 +1584,10 @@ impl AbortSignal {
     }
 
     pub async fn wait(&self) {
-        if self.is_aborted() {
-            return;
-        }
-
-        loop {
-            self.inner.notify.notified().await;
-            if self.is_aborted() {
-                return;
-            }
-        }
+        // Broadcast notifications are edge-triggered. Sample their generation
+        // before checking the latched flag, so an abort between that check and
+        // waiter registration cannot strand provider or tool cancellation.
+        self.inner.notify.wait_until(|| self.is_aborted()).await;
     }
 }
 
@@ -1585,6 +1606,64 @@ pub fn context_window_tokens_for_entry(entry: &crate::models::ModelEntry) -> u32
         return ResolvedCompactionSettings::default().context_window_tokens;
     }
     entry.model.context_window
+}
+
+/// A walk of a fallback chain looking for an entry worth swapping to.
+pub struct FailoverSwapAttempt<'a> {
+    /// The chain resolved for the live model.
+    pub chain: &'a crate::failover::FailoverChain,
+    /// Where to resume the walk, from the caller's cross-turn state.
+    pub start_position: usize,
+    /// Models a chain spec can resolve against.
+    pub available_models: &'a [crate::models::ModelEntry],
+    /// Credential store consulted for each candidate.
+    pub auth: &'a crate::auth::AuthStorage,
+    /// An explicit `--api-key`, which pins and never rotates.
+    pub cli_api_key: Option<&'a str>,
+    /// Why the swap is happening, recorded in the transcript.
+    pub class: crate::failover::FailoverClass,
+    /// The level a candidate is clamped against; see
+    /// [`FailoverSwapRequest::thinking_level_to_clamp`].
+    pub thinking_level_to_clamp: crate::model::ThinkingLevel,
+    /// Whether a completed error response must have left a revertible tail.
+    pub require_incomplete_tail: bool,
+    /// The primary identity before failover started (bd-gm481.2).
+    pub primary: Option<&'a crate::failover::FailoverPrimary>,
+    /// Cooldown duration in seconds (bd-gm481.2).
+    pub cooldown_secs: Option<u64>,
+    /// Unique lifecycle ID across hops in this failover cycle (bd-gm481.2).
+    pub lifecycle_id: Option<&'a str>,
+}
+
+/// A swap that committed, with what the caller needs for its own events and
+/// cross-turn bookkeeping.
+#[derive(Debug, Clone)]
+pub struct CommittedFailover {
+    /// Where the installed entry sits in the chain. Note this is the entry's
+    /// index, not the resume position — reporting the latter is off by one
+    /// (bd-oqo03).
+    pub entry_index: usize,
+    /// Provider left behind.
+    pub from_provider: String,
+    /// Model left behind.
+    pub from_model: String,
+    /// Provider now installed.
+    pub to_provider: String,
+    /// Model now installed.
+    pub to_model: String,
+    /// Exact durable branch record captured before releasing the commit lock.
+    /// Recovery callers use it to preserve the live monotonic cooldown.
+    pub(crate) source: Option<crate::failover::FailoverSource>,
+}
+
+/// The result of a chain walk, swapped or not.
+#[derive(Debug, Clone)]
+pub struct FailoverSwapOutcome {
+    /// Where the NEXT walk resumes. Record it either way, so a later turn does
+    /// not re-walk entries this one already rejected.
+    pub next_position: usize,
+    /// `None` means the chain held nothing installable.
+    pub committed: Option<CommittedFailover>,
 }
 
 /// One fallback-chain swap, as [`AgentSession::commit_failover_swap`] needs it.
@@ -1607,17 +1686,86 @@ pub struct FailoverSwapRequest<'a> {
     pub class: crate::failover::FailoverClass,
     /// Chain index recorded with the transcript entry.
     pub chain_position: usize,
-    /// The level the entry is clamped against.
+    /// The level the entry is clamped against: the level ORIGINALLY REQUESTED,
+    /// captured before any swap — never the live level (bd-jk057, settled).
     ///
-    /// Print mode passes the LIVE level and RPC the level originally requested
-    /// before any swap. They differ only from the second hop of a chain
-    /// onwards, where print's choice ratchets the level down through whatever
-    /// the previous fallback allowed and never recovers it. Passed in rather
-    /// than chosen here so this extraction changes neither surface; the
-    /// divergence is real and tracked separately.
+    /// A clamp exists to respect a MODEL's limit, not to make one model's limit
+    /// sticky across models. Passing the live level ratchets it down through
+    /// whatever the worst model the chain happened to touch allowed, and never
+    /// recovers it — for the turn and, because the level is written into the
+    /// session header, for the session.
+    ///
+    /// Every surface gets this value the same way, from
+    /// `FailoverState::primary_for_swap`, which yields the recorded primary
+    /// while a chain is in flight and the live identity otherwise. Print mode
+    /// passed the live level until bd-jk057; RPC and the SDK never did.
     pub thinking_level_to_clamp: crate::model::ThinkingLevel,
     /// Whether a completed error response must have left a revertible tail.
     pub require_incomplete_tail: bool,
+    /// The primary identity before failover started (bd-gm481.2).
+    pub primary: Option<&'a crate::failover::FailoverPrimary>,
+    /// Cooldown duration in seconds (bd-gm481.2).
+    pub cooldown_secs: Option<u64>,
+    /// Unique lifecycle ID across hops in this failover cycle (bd-gm481.2).
+    pub lifecycle_id: Option<&'a str>,
+}
+
+/// One restoration of the captured primary after a failover cooldown, as
+/// [`AgentSession::restore_primary_swap`] needs it.
+///
+/// The mirror image of [`FailoverSwapRequest`]: same staged-candidate
+/// transition, but the transcript records `primary_restore` rather than
+/// `failover`, and there is no incomplete tail to revert because the turn that
+/// ran on the fallback completed.
+pub struct PrimaryRestoreRequest<'a> {
+    /// The primary captured at the first swap, to be reinstalled.
+    pub primary: &'a crate::failover::FailoverPrimary,
+    /// The fallback the caller believes is live, as `(provider, model)`. Both
+    /// the runtime and the persisted Session must still agree with it, or the
+    /// caller's model of the session is stale and nothing is installed.
+    pub active: &'a (String, String),
+    /// Whether the cooldown has actually elapsed. Passed in rather than
+    /// computed here because the cooldown lives in each surface's own
+    /// cross-turn state, and it is checked at the point RPC checks it so a
+    /// stale-runtime session is still reported before this short-circuits.
+    pub cooldown_elapsed: bool,
+    /// Models the primary can resolve against.
+    pub available_models: &'a [crate::models::ModelEntry],
+    /// Credential store consulted for the primary.
+    pub auth: &'a crate::auth::AuthStorage,
+    /// An explicit `--api-key`, which pins and never rotates.
+    pub cli_api_key: Option<&'a str>,
+    /// How a refusal is reported, which is the one place print and RPC
+    /// genuinely disagree.
+    ///
+    /// RPC treats a mismatch between its recorded fallback and the live
+    /// runtime or the persisted Session as a corrupted model of the session:
+    /// it blocks provider admission and fails the call, because re-entering a
+    /// provider against a session nobody can describe is how work gets
+    /// re-billed against a record that no longer matches it. Print has no
+    /// admission gate and no long-lived state to corrupt, so it declines and
+    /// runs the next prompt on the fallback, which is a correct outcome there.
+    ///
+    /// Preserved rather than unified, because unifying it would silently
+    /// change a surface people depend on; the divergence is tracked
+    /// separately.
+    pub strict_invariants: bool,
+    /// Whether to discard an in-flight background compaction.
+    ///
+    /// RPC, the SDK, and print mode discard an in-flight background compaction across
+    /// primary restoration (bd-uyqkk). The restoration changes the model and the context
+    /// window in the same transition, so a compaction computed against the fallback's
+    /// window is stale by construction.
+    pub invalidate_background_compaction: bool,
+}
+
+/// What a restoration actually installed.
+#[derive(Debug, Clone)]
+pub struct RestoredPrimary {
+    /// Provider now installed.
+    pub provider: String,
+    /// Model now installed.
+    pub model: String,
 }
 
 /// The agent runtime that orchestrates LLM calls and tool execution.
@@ -1646,6 +1794,11 @@ pub struct Agent {
 
     /// Fetchers for queued follow-up messages (idle).
     follow_up_fetchers: Vec<MessageFetcher>,
+
+    /// Whether queue sources may be polled and dispatched automatically.
+    /// Hosts can pause either lane and explicitly take already staged batches.
+    automatic_steering_dispatch: bool,
+    automatic_follow_up_dispatch: bool,
 
     /// Live owner resolver for background completions. Notices retain the
     /// resolved owner across the registry-to-Agent handoff and are checked
@@ -1709,6 +1862,37 @@ pub struct Agent {
     /// Session-scoped secrets vault (bd-cv653.7.9): placeholder map lives in
     /// memory and dies with the session — never persisted raw.
     secrets_vault: crate::secrets::SecretVault,
+    /// Extension compaction cannot borrow the running Agent. Its shared
+    /// snapshot is refreshed at each successful vault update and Session reset.
+    compaction_privacy_state: Arc<StdMutex<compaction::CompactionPrivacy>>,
+}
+
+/// Restore temporary keyword settings even if an in-flight run is dropped.
+/// Capture these only at agent-loop entry, after session model selection has
+/// installed the model's supported baseline thinking level.
+struct AgentTurnSettingsGuard<'a> {
+    agent: &'a mut Agent,
+    thinking_level: Option<crate::model::ThinkingLevel>,
+    system_prompt: Option<String>,
+}
+
+impl<'a> AgentTurnSettingsGuard<'a> {
+    fn new(agent: &'a mut Agent) -> Self {
+        let thinking_level = agent.config.stream_options.thinking_level;
+        let system_prompt = agent.config.system_prompt.clone();
+        Self {
+            agent,
+            thinking_level,
+            system_prompt,
+        }
+    }
+}
+
+impl Drop for AgentTurnSettingsGuard<'_> {
+    fn drop(&mut self) {
+        self.agent.config.stream_options.thinking_level = self.thinking_level;
+        self.agent.config.system_prompt = self.system_prompt.take();
+    }
 }
 
 /// Activation state for glob-scoped foreign rules (bd-cv653.6.2).
@@ -1773,7 +1957,14 @@ impl Agent {
             .stream_options
             .thinking_level
             .unwrap_or(crate::model::ThinkingLevel::Off);
-        let job_session_scope = tools.snapshot().job_session_scope();
+        let registry = tools.snapshot();
+        let job_session_scope = registry.job_session_scope();
+        registry
+            .model_scope()
+            .set(provider.name(), provider.model_id());
+        let compaction_privacy_state = Arc::new(StdMutex::new(
+            compaction::CompactionPrivacy::from_settings(config.secrets.as_ref()),
+        ));
         Self {
             provider,
             tools,
@@ -1783,6 +1974,8 @@ impl Agent {
             steering_fetchers: Vec::new(),
             initial_follow_up_fetcher: None,
             follow_up_fetchers: Vec::new(),
+            automatic_steering_dispatch: true,
+            automatic_follow_up_dispatch: true,
             job_session_scope,
             message_queue: MessageQueue::new(QueueMode::OneAtATime, QueueMode::OneAtATime),
             cached_tool_defs: None,
@@ -1798,6 +1991,7 @@ impl Agent {
             magic_keyword_scan_override: None,
             keyword_max_thinking_level,
             secrets_vault: crate::secrets::SecretVault::default(),
+            compaction_privacy_state,
         }
     }
 
@@ -1893,6 +2087,7 @@ impl Agent {
     /// state is shared with the submit-plan tool and must be reset in place.
     pub fn reset_session_scoped_state(&mut self, plan_mode: crate::plan::PlanMode) {
         self.secrets_vault = crate::secrets::SecretVault::default();
+        self.refresh_compaction_privacy();
         self.plan_state.reset_for_session(plan_mode);
     }
 
@@ -1900,6 +2095,12 @@ impl Agent {
     #[must_use]
     pub fn approval_state(&self) -> Option<crate::approval::ApprovalState> {
         self.config.approval_state.clone()
+    }
+
+    /// Credential rules shared with project-memory command projections.
+    #[must_use]
+    pub(crate) const fn secrets_settings(&self) -> Option<&crate::secrets::SecretsSettings> {
+        self.config.secrets.as_ref()
     }
 
     /// Report whether the dialect-repair audit ledger has pending entries.
@@ -2024,14 +2225,23 @@ impl Agent {
     }
 
     /// Replace the provider implementation (used for model/provider switching).
+    ///
+    /// Bare providers have no catalog metadata. This resets image support and
+    /// thinking to disabled and the tool-call dialect to native; catalog-aware
+    /// callers must install the selected model's capabilities afterwards.
     pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
         self.provider = provider;
+        self.tools
+            .snapshot()
+            .model_scope()
+            .set(self.provider.name(), self.provider.model_id());
         // A bare provider object does not carry registry capability metadata.
         // Reset fail-closed so a new or external call site cannot accidentally
-        // carry a high thinking cap from the previous model. Registry-aware
-        // switch paths immediately install the target model's clamped cap.
+        // carry capabilities from the previous model. Registry-aware switch
+        // paths immediately install the target model's thinking and image caps.
         self.keyword_max_thinking_level = crate::model::ThinkingLevel::Off;
         self.tool_call_dialect = crate::dialects::Dialect::Native;
+        self.config.model_accepts_images = false;
     }
 
     /// Set the model-clamped target used when a turn contains `ultrathink`.
@@ -2156,6 +2366,39 @@ impl Agent {
         )
     }
 
+    /// Enable or pause automatic queue dispatch independently of batch mode.
+    ///
+    /// Pausing a lane prevents the agent from polling that lane's external
+    /// fetchers and from consuming already staged messages automatically.
+    /// Direct tool-call continuations are unaffected. Pausing follow-ups also
+    /// suppresses synthetic turn-recovery nudges, so an idle/truncated turn
+    /// cannot trigger an unexpected provider request.
+    pub const fn set_automatic_queue_dispatch(&mut self, steering: bool, follow_up: bool) {
+        self.automatic_steering_dispatch = steering;
+        self.automatic_follow_up_dispatch = follow_up;
+    }
+
+    #[must_use]
+    pub const fn automatic_queue_dispatch(&self) -> (bool, bool) {
+        (
+            self.automatic_steering_dispatch,
+            self.automatic_follow_up_dispatch,
+        )
+    }
+
+    /// Explicitly take one configured steering batch without polling fetchers.
+    pub fn take_queued_steering_batch(&mut self) -> Vec<QueuedAgentMessage> {
+        self.message_queue.pop_steering()
+    }
+
+    /// Explicitly take one configured follow-up batch without polling fetchers.
+    ///
+    /// Background-job notices are still owner-validated before they leave the
+    /// queue; stale notices are restored to their owning session registry.
+    pub async fn take_queued_follow_up_batch(&mut self) -> Vec<QueuedAgentMessage> {
+        self.pop_follow_up_for_current_session().await
+    }
+
     /// Count queued messages (steering + follow-up).
     #[must_use]
     pub fn queued_message_count(&self) -> usize {
@@ -2200,6 +2443,29 @@ impl Agent {
         self.config.system_prompt = system_prompt;
     }
 
+    /// What the next completion request would carry: the system prompt,
+    /// tool definitions and messages after the same filtering a real request
+    /// applies. OMP `/dump` writes this beside the transcript.
+    pub fn request_context_json(&mut self) -> serde_json::Value {
+        let context = self.build_context();
+        let tools: Vec<serde_json::Value> = context
+            .tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "systemPrompt": context.system_prompt,
+            "tools": tools,
+            "messages": context.messages,
+        })
+    }
+
     /// Build context for a completion request.
     fn build_context(&mut self) -> Context<'_> {
         // `display` governs TUI rendering only: a hidden custom message still
@@ -2217,36 +2483,22 @@ impl Agent {
             .messages
             .iter()
             .any(|m| matches!(m, Message::Custom(c) if context_excluded_custom_message(c)));
-        let messages: Cow<'_, [Message]> = if self.config.block_images || has_excluded {
+        let needs_image_filter = (self.config.block_images || !self.config.model_accepts_images)
+            && self.messages.iter().any(message_has_images);
+        let messages: Cow<'_, [Message]> = if needs_image_filter || has_excluded {
             let mut msgs = self.messages.clone();
             msgs.retain(|m| match m {
                 Message::Custom(c) => !context_excluded_custom_message(c),
                 _ => true,
             });
-            if self.config.block_images {
-                let stats = filter_images_for_provider(&mut msgs);
-                if stats.removed_images > 0 {
-                    tracing::debug!(
-                        filtered_images = stats.removed_images,
-                        affected_messages = stats.affected_messages,
-                        "Filtered image content from outbound provider context (images.block_images=true)"
-                    );
-                }
-            }
+            apply_image_input_policy(
+                &mut msgs,
+                self.config.block_images,
+                self.config.model_accepts_images,
+            );
             Cow::Owned(msgs)
         } else {
             Cow::Borrowed(self.messages.as_slice())
-        };
-
-        // Snapcompact vision gating (bd-cv653.7.6): text-only models never see
-        // rasterized compaction frames; the helper logs the degradation with a
-        // stable reason code and never touches user-pasted images.
-        let messages = if self.config.model_accepts_images {
-            messages
-        } else {
-            let mut owned = messages.into_owned();
-            let _stats = crate::compaction_snap::strip_snapcompact_images(&mut owned, false);
-            std::borrow::Cow::Owned(owned)
         };
 
         // Borrow cached tool defs if available; otherwise build + cache + borrow.
@@ -2411,9 +2663,13 @@ impl Agent {
         .await
     }
 
-    /// Outbound secrets transform (bd-cv653.7.9): obfuscate credential
-    /// shapes in the context before the provider sees it (or refuse the
-    /// send in block mode). Off mode is byte-identical.
+    /// Outbound secret screening at the primary provider boundary.
+    ///
+    /// The whole request is transactional: all mutations happen against a
+    /// cloned vault and owned context, and the live vault is installed only
+    /// after every field succeeds. This prevents a late refusal from learning
+    /// credentials or consuming placeholder identities.
+    #[allow(clippy::too_many_lines)] // one transaction; splitting it would scatter the commit point
     fn apply_secrets_outbound(
         &mut self,
         mut context: Context<'static>,
@@ -2431,87 +2687,288 @@ impl Agent {
                 .and_then(|s| s.extra_patterns.as_deref())
                 .unwrap_or(&[]),
         );
+        let mut staged_vault = self.secrets_vault.clone();
+
+        // Discover across the complete screenable request before rewriting any
+        // one field. A later assignment such as {"api_key": "..."} can
+        // therefore identify an earlier bare echo of the same opaque value.
+        // Binary image/media bytes and provider-opaque redacted reasoning are
+        // deliberately absent from this projection. Block mode refuses here on
+        // any detection, signed and paused content included; discovery never
+        // rewrites, so it cannot fail on content that is replayed verbatim.
+        let discovery = Self::secrets_discovery_projection(&context);
+        crate::secrets::discover_outbound_json(&discovery, &mut staged_vault, mode, &extra)?;
+
         let mut total = 0usize;
         let mut labels: Vec<String> = Vec::new();
 
         if let Some(prompt) = context.system_prompt.as_deref() {
-            let out = Self::secrets_transform_text(
+            context.system_prompt = Some(Cow::Owned(Self::secrets_transform_text(
                 prompt,
-                &mut self.secrets_vault,
+                &mut staged_vault,
                 mode,
                 &extra,
                 &mut total,
                 &mut labels,
-            )?;
-            context.system_prompt = Some(std::borrow::Cow::Owned(out));
+            )?));
         }
+
         for message in context.messages.to_mut().iter_mut() {
             match message {
-                Message::User(user) => {
-                    Self::secrets_transform_user_content(
-                        &mut user.content,
-                        &mut self.secrets_vault,
-                        mode,
-                        &extra,
-                        &mut total,
-                        &mut labels,
-                    )?;
-                }
+                Message::User(user) => Self::secrets_transform_user_content(
+                    &mut user.content,
+                    &mut staged_vault,
+                    mode,
+                    &extra,
+                    &mut total,
+                    &mut labels,
+                )?,
                 Message::Assistant(assistant) => {
+                    let same_origin = assistant.api == self.provider.api()
+                        && assistant.provider == self.provider.name()
+                        && assistant.model == self.provider.model_id();
+                    // Paused server-tool responses and signed blocks must remain
+                    // byte/structure stable when replayed to their original
+                    // provider, API and model. After a switch, these bytes are
+                    // ordinary history: screen them and discard signatures so
+                    // the new provider cannot receive a now-known raw secret
+                    // or a signature over rewritten content. Block mode has
+                    // already refused detections in either case above.
+                    if same_origin && assistant.stop_reason == StopReason::PauseTurn {
+                        // Typed request-wide discovery above covers the
+                        // screenable text, arguments and media metadata.
+                        // Serializing this whole message for another scan
+                        // would incorrectly treat payloads and signatures as
+                        // credential-bearing text in block mode.
+                        continue;
+                    }
+
                     let assistant_mut = Arc::make_mut(assistant);
                     for block in &mut assistant_mut.content {
-                        match block {
-                            ContentBlock::Text(t) => {
-                                t.text = Self::secrets_transform_text(
-                                    &t.text,
-                                    &mut self.secrets_vault,
-                                    mode,
-                                    &extra,
-                                    &mut total,
-                                    &mut labels,
-                                )?;
-                            }
-                            ContentBlock::Thinking(t) => {
-                                t.thinking = Self::secrets_transform_text(
-                                    &t.thinking,
-                                    &mut self.secrets_vault,
-                                    mode,
-                                    &extra,
-                                    &mut total,
-                                    &mut labels,
-                                )?;
-                            }
-                            _ => {}
-                        }
+                        Self::secrets_transform_content_block(
+                            block,
+                            same_origin,
+                            &mut staged_vault,
+                            mode,
+                            &extra,
+                            &mut total,
+                            &mut labels,
+                        )?;
+                    }
+                    if let Some(error_message) = assistant_mut.error_message.as_mut() {
+                        *error_message = Self::secrets_transform_text(
+                            error_message,
+                            &mut staged_vault,
+                            mode,
+                            &extra,
+                            &mut total,
+                            &mut labels,
+                        )?;
+                    }
+                    if let Some(details) = assistant_mut.stop_details.as_mut()
+                        && let Some(explanation) = details.explanation.as_mut()
+                    {
+                        *explanation = Self::secrets_transform_text(
+                            explanation,
+                            &mut staged_vault,
+                            mode,
+                            &extra,
+                            &mut total,
+                            &mut labels,
+                        )?;
                     }
                 }
                 Message::ToolResult(result) => {
                     let result_mut = Arc::make_mut(result);
                     for block in &mut result_mut.content {
-                        if let ContentBlock::Text(t) = block {
-                            t.text = Self::secrets_transform_text(
-                                &t.text,
-                                &mut self.secrets_vault,
-                                mode,
-                                &extra,
-                                &mut total,
-                                &mut labels,
-                            )?;
-                        }
+                        Self::secrets_transform_content_block(
+                            block,
+                            false,
+                            &mut staged_vault,
+                            mode,
+                            &extra,
+                            &mut total,
+                            &mut labels,
+                        )?;
+                    }
+                    if let Some(details) = result_mut.details.as_mut() {
+                        *details = Self::secrets_transform_json(
+                            details,
+                            &mut staged_vault,
+                            mode,
+                            &extra,
+                            &mut total,
+                            &mut labels,
+                        )?;
                     }
                 }
-                Message::Custom(_) => {}
+                Message::Custom(custom) => {
+                    custom.content = Self::secrets_transform_text(
+                        &custom.content,
+                        &mut staged_vault,
+                        mode,
+                        &extra,
+                        &mut total,
+                        &mut labels,
+                    )?;
+                    if let Some(details) = custom.details.as_mut() {
+                        *details = Self::secrets_transform_json(
+                            details,
+                            &mut staged_vault,
+                            mode,
+                            &extra,
+                            &mut total,
+                            &mut labels,
+                        )?;
+                    }
+                }
             }
         }
+
+        for tool in context.tools.to_mut().iter_mut() {
+            // Tool names are routing identifiers. A replacement here would
+            // advertise a name the local registry cannot execute, so names are
+            // never rewritten. Only block mode refuses; obfuscate mode sends
+            // the name as registered (MCP server keys are user configuration).
+            let screened_name = Self::secrets_transform_text(
+                &tool.name,
+                &mut staged_vault,
+                mode,
+                &extra,
+                &mut total,
+                &mut labels,
+            )?;
+            if screened_name != tool.name && mode == crate::secrets::SecretsMode::Block {
+                return Err(Error::validation(
+                    "PI_SECRET_IDENTIFIER: tool name contains secret material and cannot be rewritten safely"
+                        .to_string(),
+                ));
+            }
+            tool.description = Self::secrets_transform_text(
+                &tool.description,
+                &mut staged_vault,
+                mode,
+                &extra,
+                &mut total,
+                &mut labels,
+            )?;
+            tool.parameters = Self::secrets_transform_json(
+                &tool.parameters,
+                &mut staged_vault,
+                mode,
+                &extra,
+                &mut total,
+                &mut labels,
+            )?;
+        }
+
+        self.secrets_vault = staged_vault;
+        self.refresh_compaction_privacy();
         if total > 0 {
             tracing::info!(
                 event = "pi.secrets.outbound",
                 detections = total,
                 rules = ?labels,
-                "secrets obfuscated in outbound context (redacted)"
+                "secrets screened in outbound provider context (redacted)"
             );
         }
         Ok(context)
+    }
+
+    fn secrets_discovery_projection(context: &Context<'_>) -> Value {
+        let mut fields = Vec::new();
+        if let Some(prompt) = context.system_prompt.as_deref() {
+            fields.push(Value::String(prompt.to_string()));
+        }
+        for message in context.messages.iter() {
+            match message {
+                Message::User(user) => match &user.content {
+                    UserContent::Text(text) => fields.push(Value::String(text.clone())),
+                    UserContent::Blocks(blocks) => {
+                        Self::secrets_discovery_blocks(blocks, &mut fields);
+                    }
+                },
+                Message::Assistant(assistant) => {
+                    Self::secrets_discovery_blocks(&assistant.content, &mut fields);
+                    if let Some(error) = &assistant.error_message {
+                        fields.push(Value::String(error.clone()));
+                    }
+                    if let Some(explanation) = assistant
+                        .stop_details
+                        .as_ref()
+                        .and_then(|details| details.explanation.as_ref())
+                    {
+                        fields.push(Value::String(explanation.clone()));
+                    }
+                }
+                Message::ToolResult(result) => {
+                    Self::secrets_discovery_blocks(&result.content, &mut fields);
+                    if let Some(details) = &result.details {
+                        fields.push(details.clone());
+                    }
+                }
+                Message::Custom(custom) => {
+                    fields.push(Value::String(custom.content.clone()));
+                    if let Some(details) = &custom.details {
+                        fields.push(details.clone());
+                    }
+                }
+            }
+        }
+        for tool in context.tools.iter() {
+            fields.push(Value::String(tool.name.clone()));
+            fields.push(Value::String(tool.description.clone()));
+            fields.push(tool.parameters.clone());
+        }
+        Value::Array(fields)
+    }
+
+    fn secrets_discovery_blocks(blocks: &[ContentBlock], fields: &mut Vec<Value>) {
+        for block in blocks {
+            match block {
+                ContentBlock::Text(text) => fields.push(Value::String(text.text.clone())),
+                ContentBlock::Thinking(thinking) => {
+                    fields.push(Value::String(thinking.thinking.clone()));
+                }
+                ContentBlock::ToolCall(call) => fields.push(call.arguments.clone()),
+                ContentBlock::Image(image) => {
+                    fields.push(Value::String(image.mime_type.clone()));
+                }
+                ContentBlock::Media(media) => {
+                    fields.push(Value::String(media.mime_type.clone()));
+                    if let Some(name) = &media.name {
+                        fields.push(Value::String(name.clone()));
+                    }
+                }
+                ContentBlock::RedactedThinking(_) => {}
+            }
+        }
+    }
+
+    fn secrets_add_audit(
+        audit: crate::secrets::TransformAudit,
+        total: &mut usize,
+        labels: &mut Vec<String>,
+    ) {
+        *total = total.saturating_add(audit.detections);
+        for rule in audit.rules {
+            if !labels.contains(&rule) {
+                labels.push(rule);
+            }
+        }
+    }
+
+    fn secrets_transform_json(
+        value: &Value,
+        vault: &mut crate::secrets::SecretVault,
+        mode: crate::secrets::SecretsMode,
+        extra: &[regex::Regex],
+        total: &mut usize,
+        labels: &mut Vec<String>,
+    ) -> Result<Value> {
+        let (output, audit) = crate::secrets::transform_outbound_json(value, vault, mode, extra)?;
+        Self::secrets_add_audit(audit, total, labels);
+        Ok(output)
     }
 
     fn secrets_transform_text(
@@ -2522,23 +2979,137 @@ impl Agent {
         total: &mut usize,
         labels: &mut Vec<String>,
     ) -> Result<String> {
-        if mode == crate::secrets::SecretsMode::Block {
-            crate::secrets::gate_outbound(text, mode, extra)?;
-        }
-        let (out, audit) = crate::secrets::obfuscate(text, vault, extra);
-        *total += audit.detections;
-        for rule in audit.rules {
-            if !labels.contains(&rule) {
-                labels.push(rule);
-            }
-        }
-        Ok(out)
+        let value = Value::String(text.to_string());
+        let output = Self::secrets_transform_json(&value, vault, mode, extra, total, labels)?;
+        output.as_str().map(ToString::to_string).ok_or_else(|| {
+            Error::validation(
+                "PI_SECRET_JSON_PRIMITIVE: text screening changed the JSON value type".to_string(),
+            )
+        })
     }
 
-    /// Outbound secret hygiene for a user message. Attachment-carrying
-    /// messages (`Blocks`: text + images) must get the same treatment as
-    /// plain text — that is the shape the interactive app sends whenever an
-    /// attachment exists.
+    /// Media payload bytes stay opaque, but names and MIME labels can appear
+    /// in provider-visible text. MIME labels also control native transport
+    /// routing, so replacing a secret there cannot safely produce a usable
+    /// identifier. Refuse instead of sending the secret or a malformed type.
+    fn secrets_transform_media_metadata(
+        mime_type: &str,
+        name: Option<&mut String>,
+        vault: &mut crate::secrets::SecretVault,
+        mode: crate::secrets::SecretsMode,
+        extra: &[regex::Regex],
+        total: &mut usize,
+        labels: &mut Vec<String>,
+    ) -> Result<()> {
+        if Self::secrets_transform_text(mime_type, vault, mode, extra, total, labels)? != mime_type
+        {
+            return Err(Error::validation(
+                "PI_SECRET_MEDIA_MIME: media MIME type contains secret material and cannot be rewritten without changing transport; provide a nonsecret MIME type",
+            ));
+        }
+        if let Some(name) = name {
+            *name = Self::secrets_transform_text(name, vault, mode, extra, total, labels)?;
+        }
+        Ok(())
+    }
+
+    /// `same_origin_assistant` is true only for assistant output from the
+    /// current provider, API and model. Foreign history, user and tool-result
+    /// blocks receive neither signature nor primitive replay exceptions (an
+    /// extension can set a signature on any JSON).
+    fn secrets_transform_content_block(
+        block: &mut ContentBlock,
+        same_origin_assistant: bool,
+        vault: &mut crate::secrets::SecretVault,
+        mode: crate::secrets::SecretsMode,
+        extra: &[regex::Regex],
+        total: &mut usize,
+        labels: &mut Vec<String>,
+    ) -> Result<()> {
+        // A signed assistant block (a real provider signature, or a plain item
+        // id such as OpenAI's `fc_`/`msg_` that replay is keyed on) stays intact
+        // only for its original destination outside block mode. Skipping the
+        // rewrite (not just discarding it) also keeps a type-changing
+        // replacement from refusing the request.
+        let keep_signed = same_origin_assistant && mode != crate::secrets::SecretsMode::Block;
+        match block {
+            ContentBlock::Text(text) => {
+                if keep_signed && text.text_signature.is_some() {
+                    return Ok(());
+                }
+                if !same_origin_assistant {
+                    text.text_signature = None;
+                }
+                text.text =
+                    Self::secrets_transform_text(&text.text, vault, mode, extra, total, labels)?;
+            }
+            ContentBlock::Thinking(thinking) => {
+                if keep_signed && thinking.thinking_signature.is_some() {
+                    return Ok(());
+                }
+                if !same_origin_assistant {
+                    thinking.thinking_signature = None;
+                }
+                thinking.thinking = Self::secrets_transform_text(
+                    &thinking.thinking,
+                    vault,
+                    mode,
+                    extra,
+                    total,
+                    labels,
+                )?;
+            }
+            ContentBlock::ToolCall(call) => {
+                if keep_signed && call.thought_signature.is_some() {
+                    return Ok(());
+                }
+                if !same_origin_assistant {
+                    call.thought_signature = None;
+                }
+                call.arguments = if same_origin_assistant {
+                    let (output, audit) = crate::secrets::transform_assistant_replay_json(
+                        &call.arguments,
+                        vault,
+                        mode,
+                        extra,
+                    )?;
+                    Self::secrets_add_audit(audit, total, labels);
+                    output
+                } else {
+                    Self::secrets_transform_json(
+                        &call.arguments,
+                        vault,
+                        mode,
+                        extra,
+                        total,
+                        labels,
+                    )?
+                };
+            }
+            ContentBlock::Image(image) => Self::secrets_transform_media_metadata(
+                &image.mime_type,
+                None,
+                vault,
+                mode,
+                extra,
+                total,
+                labels,
+            )?,
+            ContentBlock::Media(media) => Self::secrets_transform_media_metadata(
+                &media.mime_type,
+                media.name.as_mut(),
+                vault,
+                mode,
+                extra,
+                total,
+                labels,
+            )?,
+            ContentBlock::RedactedThinking(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Outbound secret hygiene for user content, including structured blocks.
     fn secrets_transform_user_content(
         content: &mut UserContent,
         vault: &mut crate::secrets::SecretVault,
@@ -2552,12 +3123,10 @@ impl Agent {
                 *text = Self::secrets_transform_text(text, vault, mode, extra, total, labels)?;
             }
             UserContent::Blocks(blocks) => {
-                for block in blocks.iter_mut() {
-                    if let ContentBlock::Text(t) = block {
-                        t.text = Self::secrets_transform_text(
-                            &t.text, vault, mode, extra, total, labels,
-                        )?;
-                    }
+                for block in blocks {
+                    Self::secrets_transform_content_block(
+                        block, false, vault, mode, extra, total, labels,
+                    )?;
                 }
             }
         }
@@ -2643,9 +3212,9 @@ impl Agent {
         if !prompts.is_empty() || initial_follow_up {
             self.retry_keyword_activations.clear();
         }
-        let saved_thinking = self.config.stream_options.thinking_level;
-        let saved_system_prompt = self.config.system_prompt.clone();
-        let result = self
+        let settings_scope = AgentTurnSettingsGuard::new(self);
+        let result = settings_scope
+            .agent
             .run_loop_inner(
                 prompts,
                 initial_follow_up,
@@ -2654,8 +3223,7 @@ impl Agent {
                 abort,
             )
             .await;
-        self.config.stream_options.thinking_level = saved_thinking;
-        self.config.system_prompt = saved_system_prompt;
+        drop(settings_scope);
         if result.as_ref().is_ok_and(|message| {
             !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted)
         }) {
@@ -2997,7 +3565,7 @@ impl Agent {
                 );
 
                 let assistant_message = match assistant_result {
-                    Ok(msg) => self.maybe_repair_dialect_tool_calls(msg),
+                    Ok(msg) => msg,
                     Err(err) => {
                         let err_string = err.to_string();
                         let steering_to_add = self.drain_steering_messages().await;
@@ -3115,7 +3683,10 @@ impl Agent {
                 // A paused Anthropic server-tool turn must be resubmitted
                 // verbatim. Its content can contain tool-use blocks, but those
                 // are not a request to execute our local tool registry.
-                let execute_local_tools = !pause_turn && !tool_calls.is_empty();
+                let execute_local_tools = matches!(
+                    assistant_arc.stop_reason,
+                    StopReason::Stop | StopReason::ToolUse | StopReason::Length
+                ) && !tool_calls.is_empty();
                 has_more_tool_calls = execute_local_tools;
                 if pause_turn {
                     pause_turn_continuations = pause_turn_continuations.saturating_add(1);
@@ -3322,7 +3893,10 @@ impl Agent {
                 // synthetic continue nudge (hard-capped) instead of a silent
                 // end. The nudge flows through pending_messages so it is
                 // evented and persisted like any user message.
-                if pending_messages.is_empty() && !has_more_tool_calls {
+                if self.automatic_follow_up_dispatch
+                    && pending_messages.is_empty()
+                    && !has_more_tool_calls
+                {
                     let text = assistant_text_content(&assistant_arc.content);
                     if let Some(action) = turn_recovery.evaluate(assistant_arc.stop_reason, &text) {
                         pending_messages =
@@ -3510,6 +4084,9 @@ impl Agent {
     }
 
     async fn drain_steering_messages(&mut self) -> Vec<QueuedAgentMessage> {
+        if !self.automatic_steering_dispatch {
+            return Vec::new();
+        }
         for fetcher in &self.steering_fetchers {
             let fetched = self.fetch_messages(Some(fetcher)).await;
             for message in fetched {
@@ -3524,6 +4101,9 @@ impl Agent {
     }
 
     async fn stage_follow_up_messages(&mut self) -> bool {
+        if !self.automatic_follow_up_dispatch {
+            return false;
+        }
         let mut owning_surface_ready = self.message_queue.follow_up_batch_len() > 0;
         if !owning_surface_ready {
             let owning_surface = self
@@ -3624,6 +4204,9 @@ impl Agent {
         abort: Option<AbortSignal>,
         checkpoint_cx: &crate::agent_cx::AgentCx,
     ) -> Result<AssistantMessage> {
+        // Refresh admitted MCP catalogs before capturing the provider's tool
+        // schema, under the same owner and cancellation as this request.
+        crate::mcp::refresh_agent_tools(&self.tools, abort.as_ref(), checkpoint_cx).await;
         // Build context and stream completion
         let provider = Arc::clone(&self.provider);
         let mut stream_options = self.config.stream_options.clone();
@@ -3639,17 +4222,79 @@ impl Agent {
                 context.messages.to_vec(),
             )
         };
-        let messages = self
+        let mut messages = self
             .dispatch_context_event(&base_messages)
             .await
             .unwrap_or(base_messages);
+        // Context hooks can return new native image blocks. Enforce the active
+        // model's policy on the final request as well as the history projection;
+        // the durable messages keep their bytes for later vision-model turns.
+        apply_image_input_policy(
+            &mut messages,
+            self.config.block_images,
+            self.config.model_accepts_images,
+        );
         let context = Context::owned(system_prompt, messages, tools);
         // Secrets vault (bd-cv653.7.9): credential shapes in the outbound
         // context become stable placeholders (obfuscate) or a named refusal
         // (block) before any provider sees them. The vault is in-memory and
         // dies with the session.
         let context = self.apply_secrets_outbound(context)?;
-        let mut stream = provider.stream(&context, &stream_options).await?;
+
+        if checkpoint_cx.checkpoint().is_err()
+            || abort.as_ref().is_some_and(AbortSignal::is_aborted)
+        {
+            let abort_arc = Arc::new(self.build_abort_message(None));
+            on_event(AgentEvent::MessageStart {
+                message: Message::Assistant(Arc::clone(&abort_arc)),
+            });
+            self.messages
+                .push(Message::Assistant(Arc::clone(&abort_arc)));
+            on_event(AgentEvent::MessageUpdate {
+                message: Message::Assistant(Arc::clone(&abort_arc)),
+                assistant_message_event: AssistantMessageEvent::Error {
+                    reason: StopReason::Aborted,
+                    error: Arc::clone(&abort_arc),
+                },
+            });
+            return Ok(self.finalize_assistant_message(
+                Arc::try_unwrap(abort_arc).unwrap_or_else(|a| (*a).clone()),
+                &on_event,
+                true,
+            ));
+        }
+
+        let stream_fut = provider.stream(&context, &stream_options);
+        let mut stream = if let Some(signal) = abort.as_ref() {
+            let abort_fut = signal.wait().fuse();
+            let stream_fut = stream_fut.fuse();
+            futures::pin_mut!(abort_fut, stream_fut);
+            match futures::future::select(abort_fut, stream_fut).await {
+                futures::future::Either::Left(((), _)) => {
+                    let abort_arc = Arc::new(self.build_abort_message(None));
+                    on_event(AgentEvent::MessageStart {
+                        message: Message::Assistant(Arc::clone(&abort_arc)),
+                    });
+                    self.messages
+                        .push(Message::Assistant(Arc::clone(&abort_arc)));
+                    on_event(AgentEvent::MessageUpdate {
+                        message: Message::Assistant(Arc::clone(&abort_arc)),
+                        assistant_message_event: AssistantMessageEvent::Error {
+                            reason: StopReason::Aborted,
+                            error: Arc::clone(&abort_arc),
+                        },
+                    });
+                    return Ok(self.finalize_assistant_message(
+                        Arc::try_unwrap(abort_arc).unwrap_or_else(|a| (*a).clone()),
+                        &on_event,
+                        true,
+                    ));
+                }
+                futures::future::Either::Right((res, _)) => res?,
+            }
+        } else {
+            stream_fut.await?
+        };
 
         let mut added_partial = false;
         // Track whether we've already emitted `MessageStart` for this streaming response.
@@ -3663,13 +4308,15 @@ impl Agent {
         // uniformly for every provider.
         let mut tool_call_raw_args: std::collections::HashMap<usize, String> =
             std::collections::HashMap::new();
-        // #148: whether this streaming response ever began assembling a tool
-        // call. Needed to tell "cut off mid tool call" apart from "cut off in
-        // the middle of plain prose", which is an ordinary `Length` stop.
-        let mut tool_call_started = false;
+        // #148: count distinct streamed calls, including any unfinished call
+        // later omitted from the terminal snapshot. Repeated updates at one
+        // content index still describe one call.
+        let mut streamed_tool_call_indices = std::collections::HashSet::new();
 
         'stream: loop {
-            if checkpoint_cx.checkpoint().is_err() {
+            if checkpoint_cx.checkpoint().is_err()
+                || abort.as_ref().is_some_and(AbortSignal::is_aborted)
+            {
                 let last_partial = if added_partial {
                     match self
                         .messages
@@ -4105,7 +4752,7 @@ impl Agent {
                     id,
                     name,
                 } => {
-                    tool_call_started = true;
+                    streamed_tool_call_indices.insert(content_index);
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -4155,7 +4802,7 @@ impl Agent {
                     delta,
                     ..
                 } => {
-                    tool_call_started = true;
+                    streamed_tool_call_indices.insert(content_index);
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -4219,7 +4866,7 @@ impl Agent {
                     tool_call,
                     ..
                 } => {
-                    tool_call_started = true;
+                    streamed_tool_call_indices.insert(content_index);
                     self.seed_partial_message_if_missing(&mut added_partial);
                     if let Some(Message::Assistant(msg_arc)) = self
                         .messages
@@ -4262,21 +4909,48 @@ impl Agent {
                         });
                     }
                 }
-                StreamEvent::Done { mut message, .. } => {
-                    // #148: a turn cut short by the provider's token limit while a
-                    // tool call was still being assembled must not finalize as an
-                    // ordinary stop. The half-built call is unusable, so the run
-                    // loop would see no executable tool call and quietly end the
-                    // turn. Re-stamping it as `Error` routes it through the
-                    // existing error handling, which surfaces `error_message` to
-                    // the caller via `AgentEnd`.
-                    if is_truncated_before_tool_call(&message, tool_call_started) {
+                StreamEvent::Done {
+                    reason,
+                    mut message,
+                } => {
+                    // Failures, refusals, and server-tool pauses must win over
+                    // a stale success reason in the final message snapshot.
+                    let terminal_override = match reason {
+                        StopReason::Error | StopReason::Aborted | StopReason::Refusal => {
+                            !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted)
+                        }
+                        StopReason::PauseTurn => matches!(
+                            message.stop_reason,
+                            StopReason::Stop | StopReason::ToolUse | StopReason::Length
+                        ),
+                        StopReason::Length => {
+                            matches!(message.stop_reason, StopReason::Stop | StopReason::ToolUse)
+                        }
+                        _ => false,
+                    };
+                    if terminal_override {
+                        message.stop_reason = reason;
+                    }
+                    // #148: a token-limited snapshot may omit an unfinished
+                    // call even while completed peers remain. Report the
+                    // truncation before any peer executes, through the existing
+                    // Error/AgentEnd path.
+                    if is_truncated_before_tool_call(&message, streamed_tool_call_indices.len()) {
                         message.stop_reason = StopReason::Error;
                         message.error_message = Some(TRUNCATED_TOOL_CALL_ERROR.to_string());
                     }
                     return Ok(self.finalize_assistant_message(message, &on_event, added_partial));
                 }
-                StreamEvent::Error { error, .. } => {
+                StreamEvent::Error { reason, mut error } => {
+                    // Custom providers can leave the partial snapshot stamped
+                    // Stop/ToolUse. An Error envelope never authorizes tools.
+                    if !matches!(error.stop_reason, StopReason::Error | StopReason::Aborted) {
+                        error.stop_reason = if reason == StopReason::Aborted {
+                            StopReason::Aborted
+                        } else {
+                            StopReason::Error
+                        };
+                    }
                     return Ok(self.finalize_assistant_message(error, &on_event, added_partial));
                 }
             }
@@ -4298,7 +4972,8 @@ impl Agent {
             // the connection without a terminal event; the resulting error
             // should name the truncated tool call rather than the generic
             // missing-`Done` condition.
-            let truncated_tool_call = is_truncated_before_tool_call(&final_msg, tool_call_started);
+            let truncated_tool_call =
+                is_truncated_before_tool_call(&final_msg, streamed_tool_call_indices.len());
             final_msg.stop_reason = StopReason::Error;
             final_msg.error_message = Some(if truncated_tool_call {
                 TRUNCATED_TOOL_CALL_ERROR.to_string()
@@ -4371,6 +5046,14 @@ impl Agent {
         on_event: &Arc<dyn Fn(AgentEvent) + Send + Sync>,
         added_partial: bool,
     ) -> AssistantMessage {
+        // Repair before the execution check and terminal publication so the
+        // persisted message, MessageEnd, and local executor see one batch.
+        message = self.maybe_repair_dialect_tool_calls(message);
+        if let Some(error) = terminal_tool_batch_error(&message) {
+            message.stop_reason = StopReason::Error;
+            // Preserve the provider's original diagnostic if it supplied one.
+            message.error_message.get_or_insert(error);
+        }
         // gh #221: price the finished turn from the catalog rates. Transports
         // only fill token counts (plus OpenRouter's billed total); without
         // this every `usage.cost` stayed 0.0 on every provider.
@@ -4426,17 +5109,25 @@ impl Agent {
 
         if let Some(signal) = abort.as_ref() {
             use futures::future::{Either, select};
-            let all_fut = stream::iter(futures)
-                .buffer_unordered(parallelism)
-                .collect::<Vec<_>>()
-                .fuse();
+            let pending = stream::iter(futures).buffer_unordered(parallelism);
             let abort_fut = signal.wait().fuse();
-            futures::pin_mut!(all_fut, abort_fut);
-
-            match select(all_fut, abort_fut).await {
-                Either::Left((batch_results, _)) => batch_results,
-                Either::Right(_) => Vec::new(), // Aborted
+            futures::pin_mut!(pending, abort_fut);
+            // Completed work belongs to the transcript even when a sibling
+            // remains blocked. Racing cancellation against collect() drops
+            // its already-collected outputs and later misreports those calls
+            // as aborted. Keep each observed completion outside the future
+            // that cancellation drops; only unfinished calls receive the
+            // synthetic cancellation results in execute_tool_calls.
+            let mut completed = Vec::new();
+            while !signal.is_aborted() {
+                let next = pending.next().fuse();
+                futures::pin_mut!(next);
+                match select(next, abort_fut.as_mut()).await {
+                    Either::Left((Some(result), _)) => completed.push(result),
+                    Either::Left((None, _)) | Either::Right(_) => break,
+                }
             }
+            completed
         } else {
             stream::iter(futures)
                 .buffer_unordered(parallelism)
@@ -4681,7 +5372,28 @@ impl Agent {
         // arguments become the real values before approval/execution (the
         // operator approves the REAL command), and restored values are
         // masked again in the result heading back to the model.
-        let tool_call = self.restore_secrets_inbound(tool_call);
+        let tool_call = match self.restore_secrets_inbound(tool_call) {
+            Ok(tool_call) => tool_call,
+            Err(error) => {
+                return (Self::xdev_text_output(&error.to_string(), true), true);
+            }
+        };
+
+        // Plan-mode gate (bd-cv653.3.5): Planning/PendingApproval reject any
+        // tool whose effects intersect the mutation/process BARRIER set before
+        // soliciting approval or running extensions.
+        if !self
+            .plan_state
+            .allows_effects(self.effects_for_call(&tool_call))
+        {
+            return (
+                Self::xdev_text_output(
+                    &crate::plan::PlanState::block_message(&tool_call.name),
+                    true,
+                ),
+                true,
+            );
+        }
 
         let approval_denied_output = self
             .request_tool_approval(&tool_call, Arc::clone(&on_event))
@@ -4734,36 +5446,20 @@ impl Agent {
 
     /// Inbound restore (bd-cv653.7.9): placeholders in tool-call arguments
     /// become real values before approval/execution.
-    pub fn restore_secrets_inbound(&self, mut tool_call: ToolCall) -> ToolCall {
+    ///
+    /// # Errors
+    /// Refuses excessive nesting or distinct object keys that would restore
+    /// to the same key. Ambiguous arguments must never reach approval or a tool.
+    pub fn restore_secrets_inbound(&self, mut tool_call: ToolCall) -> Result<ToolCall> {
         if crate::secrets::SecretsMode::from_setting(
             self.config.secrets.as_ref().and_then(|s| s.mode.as_deref()),
         ) == crate::secrets::SecretsMode::Off
         {
-            return tool_call;
+            return Ok(tool_call);
         }
-        tool_call.arguments = Self::restore_json_value(&self.secrets_vault, tool_call.arguments);
-        tool_call
-    }
-
-    fn restore_json_value(
-        vault: &crate::secrets::SecretVault,
-        value: serde_json::Value,
-    ) -> serde_json::Value {
-        match value {
-            serde_json::Value::String(text) => serde_json::Value::String(vault.restore(&text)),
-            serde_json::Value::Array(items) => serde_json::Value::Array(
-                items
-                    .into_iter()
-                    .map(|item| Self::restore_json_value(vault, item))
-                    .collect(),
-            ),
-            serde_json::Value::Object(map) => serde_json::Value::Object(
-                map.into_iter()
-                    .map(|(key, item)| (vault.restore(&key), Self::restore_json_value(vault, item)))
-                    .collect(),
-            ),
-            other => other,
-        }
+        tool_call.arguments =
+            crate::secrets::restore_inbound_json(&tool_call.arguments, &self.secrets_vault)?;
+        Ok(tool_call)
     }
 
     /// Echo hygiene (bd-cv653.7.9): restored real values in tool output are
@@ -4780,17 +5476,18 @@ impl Agent {
                 t.text = self.secrets_vault.mask(&t.text);
             }
         }
-        if let Some(details) = &mut output.details
-            && let Some(text) = serde_json::to_string(details).ok()
-        {
-            // Mask maps real secret values back to placeholders; only
-            // re-parse when something actually changed.
-            let masked = self.secrets_vault.mask(&text);
-            if masked != text
-                && let Ok(value) = serde_json::from_str(&masked)
-            {
-                *details = value;
-            }
+        if let Some(details) = &mut output.details {
+            *details = crate::secrets::mask_known_json(details, &self.secrets_vault)
+                .unwrap_or_else(|error| {
+                    // A diagnostic cannot retain raw output as a fallback.
+                    // Keep the tool's execution outcome, but replace unsafe
+                    // details with an explicit, value-free omission record.
+                    json!({
+                        "schema": crate::secrets::SECRETS_SCHEMA,
+                        "detailsOmitted": true,
+                        "reason": error.to_string(),
+                    })
+                });
         }
     }
 
@@ -4815,14 +5512,43 @@ impl Agent {
         );
         let mut total = 0usize;
         let mut labels: Vec<String> = Vec::new();
-        Self::secrets_transform_text(
+        let result = Self::secrets_transform_text(
             text,
             &mut self.secrets_vault,
             mode,
             &extra,
             &mut total,
             &mut labels,
-        )
+        );
+        if result.is_ok() {
+            self.refresh_compaction_privacy();
+        }
+        result
+    }
+
+    /// Capture the policy and remembered values for one compaction request.
+    #[must_use]
+    pub fn compaction_privacy(&self) -> compaction::CompactionPrivacy {
+        compaction::CompactionPrivacy::with_vault(self.config.secrets.as_ref(), &self.secrets_vault)
+    }
+
+    fn refresh_compaction_privacy(&self) {
+        if let Ok(mut privacy) = self.compaction_privacy_state.lock() {
+            *privacy = self.compaction_privacy();
+        }
+        // A poisoned snapshot is never used: extension callers propagate the
+        // lock error before either provider entry point is admitted.
+    }
+
+    /// Screen bounded auxiliary fields against both configured policy and
+    /// credentials learned earlier in this conversation. The disposable
+    /// projection never mutates the live vault or exports its reversible IDs.
+    pub(crate) fn project_auxiliary_inputs(
+        &self,
+        parts: &[&str],
+        privacy: &crate::text_completion::AuxiliaryPrivacy,
+    ) -> Result<Vec<String>> {
+        crate::text_completion::redact_inputs_with_vault(parts, privacy, &self.secrets_vault)
     }
 
     /// Export hygiene (bd-cv653.7.9): mask known secret values in arbitrary
@@ -5007,14 +5733,17 @@ impl Agent {
                         true,
                     ));
                 };
+                let protect = |parts: &[&str]| {
+                    let privacy = crate::text_completion::AuxiliaryPrivacy::from_settings(
+                        self.config.secrets.as_ref(),
+                    );
+                    self.project_auxiliary_inputs(parts, &privacy)
+                };
                 let mut output = inner
-                    .execute(&tool_call.id, inner_args, None)
+                    .execute_with_auxiliary_privacy(&tool_call.id, inner_args, None, &protect)
                     .await
                     .unwrap_or_else(|err| Self::xdev_text_output(&err.to_string(), true));
-                output.details = Some(json!({
-                    "dispatchedVia": "xdev",
-                    "tool": name,
-                }));
+                output.details = Some(Self::xdev_dispatch_details(name, output.details.take()));
                 Some(output)
             }
             "promote" => {
@@ -5060,10 +5789,27 @@ impl Agent {
         }
     }
 
+    fn xdev_dispatch_details(name: &str, original: Option<Value>) -> Value {
+        let mut details = match original {
+            Some(Value::Object(fields))
+                if !fields.contains_key("dispatchedVia") && !fields.contains_key("tool") =>
+            {
+                fields
+            }
+            // Preserve non-object details and objects owning reserved routing
+            // keys intact, including any pre-existing resultDetails field.
+            Some(value) => serde_json::Map::from_iter([("resultDetails".to_string(), value)]),
+            None => serde_json::Map::new(),
+        };
+        details.insert("dispatchedVia".to_string(), json!("xdev"));
+        details.insert("tool".to_string(), json!(name));
+        Value::Object(details)
+    }
+
     /// Effective side effects for a tool call (bd-cv653.3.5): for `xdev run`
-    /// dispatches, the INNER tool's effects decide (read-only runs stay
-    /// allowed in plan mode); unknown names default to read-only here — the
-    /// not-found path produces its own error downstream.
+    /// dispatches, the INNER tool's actual arguments decide (read-only runs
+    /// stay allowed in plan mode). Unknown names default to read-only here;
+    /// the not-found path produces its own error downstream.
     fn effects_for_call(&self, tool_call: &ToolCall) -> crate::tools::ToolEffects {
         if tool_call.name == "xdev" {
             let action = tool_call
@@ -5079,16 +5825,24 @@ impl Agent {
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            // Match dispatch_xdev's default input exactly. Non-object inputs
+            // reach the tool unchanged so its conservative validation applies.
+            let default_args = json!({});
+            let inner_args = tool_call.arguments.get("args").unwrap_or(&default_args);
             return self
                 .tools
                 .snapshot()
                 .get(inner)
-                .map_or_else(crate::tools::ToolEffects::read, crate::tools::Tool::effects);
+                .map_or_else(crate::tools::ToolEffects::read, |tool| {
+                    tool.effects_for_input(inner_args)
+                });
         }
         self.tools
             .snapshot()
             .get(&tool_call.name)
-            .map_or_else(crate::tools::ToolEffects::read, crate::tools::Tool::effects)
+            .map_or_else(crate::tools::ToolEffects::read, |tool| {
+                tool.effects_for_input(&tool_call.arguments)
+            })
     }
 
     async fn execute_tool_without_hooks(
@@ -5156,11 +5910,21 @@ impl Agent {
                     crate::tools::register_tool_output_artifact_session(&tool_call.id, session_id)
                 });
 
+        // Tool-free secondary requests need the discoveries from this exact
+        // Agent invocation. A shared tool handle must never retain another
+        // session's vault or a snapshot taken before its latest discoveries.
+        let protect = |parts: &[&str]| {
+            let privacy = crate::text_completion::AuxiliaryPrivacy::from_settings(
+                self.config.secrets.as_ref(),
+            );
+            self.project_auxiliary_inputs(parts, &privacy)
+        };
         match tool
-            .execute(
+            .execute_with_auxiliary_privacy(
                 &tool_call.id,
                 tool_call.arguments.clone(),
                 Some(Box::new(update_callback)),
+                &protect,
             )
             .await
         {
@@ -5449,6 +6213,58 @@ pub struct AgentSession {
     session_action_admission: SessionActionAdmissionGate,
 }
 
+/// Keep an extension-selected prompt local to one provider attempt, including
+/// when its future is dropped inside the agent loop or session persistence.
+/// Owning the session borrow lets `Drop` restore state without an async lock.
+struct SessionTurnPromptGuard<'a> {
+    session: &'a mut AgentSession,
+    base_system_prompt: Option<String>,
+}
+
+impl<'a> SessionTurnPromptGuard<'a> {
+    fn new(session: &'a mut AgentSession, system_prompt: Option<String>) -> Self {
+        let base_system_prompt = session.agent.system_prompt().map(str::to_string);
+        session.agent.set_system_prompt(system_prompt);
+        Self {
+            session,
+            base_system_prompt,
+        }
+    }
+}
+
+impl Drop for SessionTurnPromptGuard<'_> {
+    fn drop(&mut self) {
+        self.session
+            .agent
+            .set_system_prompt(self.base_system_prompt.take());
+        // The agent normally consumes this at loop entry. Early returns and
+        // cancellation must not hand this turn's provenance to another input.
+        let _ = self.session.agent.magic_keyword_scan_override.take();
+    }
+}
+
+/// Extension-generated idle turns temporarily change input provenance.
+struct SessionInputSourceGuard<'a> {
+    session: &'a mut AgentSession,
+    previous_source: InputSource,
+}
+
+impl<'a> SessionInputSourceGuard<'a> {
+    const fn new(session: &'a mut AgentSession, source: InputSource) -> Self {
+        let previous_source = std::mem::replace(&mut session.input_source, source);
+        Self {
+            session,
+            previous_source,
+        }
+    }
+}
+
+impl Drop for SessionInputSourceGuard<'_> {
+    fn drop(&mut self) {
+        self.session.input_source = self.previous_source;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderAdmissionGate {
     permit: Arc<Mutex<()>>,
@@ -5501,6 +6317,21 @@ impl ProviderAdmissionGate {
             .map_err(|err| Error::session(format!("provider admission lock failed: {err}")))
     }
 
+    /// Reserve provider admission before acquiring Session-action authority.
+    /// Preparing or declining a swap does not quarantine the session; the
+    /// shared transition code marks uncertainty at its persistence boundary.
+    pub(crate) async fn acquire_transition_authority(
+        &self,
+        cx: &asupersync::Cx,
+    ) -> Result<ProviderTransitionAuthority> {
+        let permit = self.acquire(cx).await?;
+        self.ensure_allowed()?;
+        Ok(ProviderTransitionAuthority {
+            gate: self.clone(),
+            _permit: permit,
+        })
+    }
+
     pub(crate) async fn begin_transition(
         &self,
         reason: String,
@@ -5510,6 +6341,44 @@ impl ProviderAdmissionGate {
         self.ensure_allowed()?;
         self.block(reason);
         Ok(permit)
+    }
+}
+
+/// Proof that a caller owns this gate's provider permit. Recovery keeps this
+/// authority while acquiring Session-action admission, then uses the same
+/// transition machinery without recursively acquiring the provider mutex.
+pub(crate) struct ProviderTransitionAuthority {
+    gate: ProviderAdmissionGate,
+    _permit: OwnedMutexGuard<()>,
+}
+
+#[derive(Clone, Copy)]
+enum ProviderSwapAdmission<'a> {
+    Gate(&'a ProviderAdmissionGate),
+    Held(&'a ProviderTransitionAuthority),
+}
+
+impl<'a> ProviderSwapAdmission<'a> {
+    const fn gate(self) -> &'a ProviderAdmissionGate {
+        match self {
+            Self::Gate(gate) => gate,
+            Self::Held(authority) => &authority.gate,
+        }
+    }
+
+    async fn begin_transition(
+        self,
+        reason: String,
+        cx: &asupersync::Cx,
+    ) -> Result<Option<OwnedMutexGuard<()>>> {
+        match self {
+            Self::Gate(gate) => gate.begin_transition(reason, cx).await.map(Some),
+            Self::Held(authority) => {
+                authority.gate.ensure_allowed()?;
+                authority.gate.block(reason);
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -5710,6 +6579,136 @@ struct ExtensionAiCompletionHostState {
     provider: Arc<dyn Provider>,
     stream_options: StreamOptions,
     models: Vec<Value>,
+    compaction_models: ExtensionCompactionModelState,
+    compaction_privacy: Arc<StdMutex<compaction::CompactionPrivacy>>,
+}
+
+#[derive(Clone, Default)]
+struct ExtensionCompactionModelState {
+    registry: Option<Arc<ModelRegistry>>,
+    auth: Option<Arc<AuthStorage>>,
+    js_provider_ids: Vec<String>,
+}
+
+impl ExtensionCompactionModelState {
+    fn resolve(
+        &self,
+        current_provider: Arc<dyn Provider>,
+        mut stream_options: StreamOptions,
+        options: &ExtensionCompactionOptions,
+    ) -> Result<(Arc<dyn Provider>, StreamOptions)> {
+        let (provider_id, model_id) = options.model.as_ref().map_or_else(
+            || (current_provider.name(), current_provider.model_id()),
+            |model| (model.provider.trim(), model.id.trim()),
+        );
+        if provider_id.is_empty() || model_id.is_empty() {
+            return Err(Error::validation(
+                "compact: model provider and id must be non-empty strings",
+            ));
+        }
+        let entry = self
+            .registry
+            .as_ref()
+            .and_then(|registry| registry.find(provider_id, model_id));
+        let (resolved_provider, resolved_model) =
+            entry.as_ref().map_or((provider_id, model_id), |entry| {
+                (entry.model.provider.as_str(), entry.model.id.as_str())
+            });
+        if self
+            .js_provider_ids
+            .iter()
+            .any(|id| id == resolved_provider)
+        {
+            return Err(Error::validation(
+                "compact: extension streamSimple models cannot be called from a compaction hook",
+            ));
+        }
+
+        let same_provider = resolved_provider == current_provider.name();
+        let same_model = same_provider && resolved_model == current_provider.model_id();
+        let requested_thinking = options
+            .thinking_level
+            .or(stream_options.thinking_level)
+            .unwrap_or(crate::model::ThinkingLevel::High);
+        stream_options.thinking_level = Some(entry.as_ref().map_or(requested_thinking, |entry| {
+            entry.clamp_thinking_level(requested_thinking)
+        }));
+        // The normal provider hook can itself be the extension awaiting this
+        // request. The summary engine also clears it for ordinary callers.
+        stream_options.before_provider_request = None;
+        if same_model {
+            return Ok((current_provider, stream_options));
+        }
+
+        let mut entry = entry.ok_or_else(|| {
+            Error::validation(format!(
+                "compact: model {provider_id}/{model_id} is not registered"
+            ))
+        })?;
+        let target_key = same_provider
+            .then(|| normalize_api_key_opt(stream_options.api_key.clone()))
+            .flatten()
+            .or_else(|| {
+                self.auth.as_ref().and_then(|auth| {
+                    normalize_api_key_opt(auth.resolve_api_key(&entry.model.provider, None))
+                })
+            })
+            .or_else(|| normalize_api_key_opt(entry.api_key.clone()));
+        // Some providers bind credentials during construction (Copilot's
+        // token exchange). They must see the same resolved target credential
+        // as providers that read it from StreamOptions for each request.
+        entry.api_key.clone_from(&target_key);
+        let provider =
+            crate::providers::create_provider_with_auth(&entry, None, self.auth.as_deref())?;
+        if model_requires_configured_credential(&entry)
+            && target_key.is_none()
+            && !Self::has_registered_header_auth(&entry, provider.as_ref())
+        {
+            return Err(Error::auth(format!(
+                "compact: missing credentials for {}/{}",
+                entry.model.provider, entry.model.id
+            )));
+        }
+        // A model override never carries the source provider's key or
+        // authorization headers into a different provider. Endpoints and
+        // target headers come exclusively from the registered host entry.
+        stream_options.api_key = target_key;
+        stream_options.headers.clone_from(&entry.headers);
+        stream_options.max_tokens = Some(entry.model.max_tokens);
+        Ok((provider, stream_options))
+    }
+
+    fn has_registered_header_auth(entry: &ModelEntry, provider: &dyn Provider) -> bool {
+        if crate::provider_metadata::canonical_provider_id(provider.name())
+            == Some("github-copilot")
+        {
+            // Copilot reports openai-completions but requires its own GitHub
+            // token exchange before it can send a completion request.
+            return false;
+        }
+        let names: &[&str] = match provider.api() {
+            "openai-completions"
+            | "openai-responses"
+            | "openai-codex-responses"
+            | "google-vertex" => &["authorization"],
+            "anthropic-messages" => &["authorization", "x-api-key"],
+            "azure-openai" => &["authorization", "api-key"],
+            "google-generative-ai" => &["authorization", "x-goog-api-key"],
+            // Gemini CLI and other providers still require their native
+            // credential payloads; unrelated headers do not make them ready.
+            _ => return false,
+        };
+        let has_auth = |headers| {
+            crate::providers::first_non_empty_header_value_case_insensitive(headers, names)
+                .is_some()
+        };
+        has_auth(&entry.headers)
+            || entry
+                .compat
+                .as_ref()
+                .and_then(|compat| compat.custom_headers.as_ref())
+                .is_some_and(has_auth)
+    }
 }
 
 impl AgentSessionHostActions {
@@ -5901,7 +6900,11 @@ impl ExtensionHostActions for AgentSessionHostActions {
         Ok(Value::Array(state.models.clone()))
     }
 
-    async fn compact_session(&self, preparation: Value) -> Result<Value> {
+    async fn compact_session(
+        &self,
+        preparation: Value,
+        options: ExtensionCompactionOptions,
+    ) -> Result<Value> {
         let _provider_admission = self.acquire_provider_admission().await?;
         // gh #167 / bd-i28yz: bridge ctx.compact() / pi-coding-agent
         // compact() to the native compaction engine. The preparation JSON is
@@ -5909,29 +6912,41 @@ impl ExtensionHostActions for AgentSessionHostActions {
         // malformed shapes instead of defaulting them.
         let preparation = crate::compaction::compaction_preparation_from_value(&preparation)?;
 
-        // Always compact with the SESSION's own provider + resolved API key
-        // (the same state the agent's auto-compaction path reads via
-        // `agent.provider()` / `agent.stream_options().api_key`, mirrored
-        // into the ai-completion host state and refreshed on model change).
-        // `custom_instructions` is None to match the auto-compaction path.
-        //
         // Lock order / re-entrancy: this briefly locks only the
         // ai-completion `StdMutex` (exactly like `complete_ai` /
         // `list_ai_models`) and never touches the session mutex, while
         // `dispatch_before_compact` holds neither when awaiting extension
         // handlers -- so an extension calling compact() from inside
         // `session_before_compact` cannot deadlock.
-        let (provider, api_key) = {
+        let (provider, stream_options, models, privacy) = {
             let state = self.ai_completion.lock().map_err(|_| {
                 Error::extension("extension completion host state mutex poisoned".to_string())
             })?;
             (
                 Arc::clone(&state.provider),
-                state.stream_options.api_key.clone().unwrap_or_default(),
+                state.stream_options.clone(),
+                state.compaction_models.clone(),
+                Arc::clone(&state.compaction_privacy),
             )
         };
+        // Registry/auth resolution can evaluate a host-configured credential
+        // command, so it runs after releasing the shared completion mutex.
+        let (provider, stream_options) = models.resolve(provider, stream_options, &options)?;
 
-        let result = crate::compaction::compact(preparation, provider, &api_key, None).await?;
+        let privacy = privacy
+            .lock()
+            .map_err(|_| {
+                Error::extension("extension compaction privacy state mutex poisoned".to_string())
+            })?
+            .clone();
+        let result = crate::compaction::compact(
+            preparation,
+            provider,
+            &stream_options,
+            options.custom_instructions.as_deref(),
+            &privacy,
+        )
+        .await?;
         serde_json::to_value(&result).map_err(|err| {
             Error::extension(format!("serialize extension compaction result: {err}"))
         })
@@ -5947,13 +6962,17 @@ impl ExtensionHostActions for AgentSessionHostActions {
         // POST happens inside the provider with the session's credentials.
         // Every failure is an `Err` so the calling extension fails open to
         // pi's default compaction (never a fabricated result).
-        let preparation = crate::compaction::compaction_preparation_from_value(&preparation)?;
+        let mut preparation = crate::compaction::compaction_preparation_from_value(&preparation)?;
 
-        let (provider, stream_options) = {
+        let (provider, stream_options, privacy) = {
             let state = self.ai_completion.lock().map_err(|_| {
                 Error::extension("extension completion host state mutex poisoned".to_string())
             })?;
-            (Arc::clone(&state.provider), state.stream_options.clone())
+            (
+                Arc::clone(&state.provider),
+                state.stream_options.clone(),
+                Arc::clone(&state.compaction_privacy),
+            )
         };
 
         if provider.api() != "openai-responses" {
@@ -5964,17 +6983,25 @@ impl ExtensionHostActions for AgentSessionHostActions {
         }
 
         let sanitized = sanitize_native_compact_request(&request, provider.model_id())?;
+        let mut privacy = privacy
+            .lock()
+            .map_err(|_| {
+                Error::extension("extension compaction privacy state mutex poisoned".to_string())
+            })?
+            .clone();
+        let sanitized = privacy.screen_native_request(&mut preparation, &sanitized)?;
         let response = provider.compact_native(&sanitized, &stream_options).await?;
 
         let (read_files, modified_files) =
             crate::compaction::compute_file_lists(&preparation.file_ops);
-        shape_native_compact_result(
+        let result = shape_native_compact_result(
             &response,
             &preparation.first_kept_entry_id,
             preparation.tokens_before,
             read_files,
             modified_files,
-        )
+        )?;
+        privacy.screen_native_result(result)
     }
 }
 
@@ -7198,6 +8225,7 @@ mod extensions_integration_tests {
                 content: "Use strict TypeScript.".to_string(),
                 globs: vec!["*.ts".to_string()],
                 always_apply: false,
+                description: None,
                 source: ".cursor/rules/ts.mdc".to_string(),
                 format: crate::context_files::ForeignRuleFormat::CursorMdc,
             }],
@@ -7841,6 +8869,10 @@ mod extensions_integration_tests {
                     provider: Arc::new(NoopProvider),
                     stream_options: StreamOptions::default(),
                     models: Vec::new(),
+                    compaction_models: ExtensionCompactionModelState::default(),
+                    compaction_privacy: Arc::new(StdMutex::new(
+                        compaction::CompactionPrivacy::default(),
+                    )),
                 })),
                 provider_admission: ProviderAdmissionGate::default(),
                 session_action_admission,
@@ -7907,6 +8939,10 @@ mod extensions_integration_tests {
                     provider: Arc::new(NoopProvider),
                     stream_options: StreamOptions::default(),
                     models: Vec::new(),
+                    compaction_models: ExtensionCompactionModelState::default(),
+                    compaction_privacy: Arc::new(StdMutex::new(
+                        compaction::CompactionPrivacy::default(),
+                    )),
                 })),
                 provider_admission: ProviderAdmissionGate::default(),
                 session_action_admission: session_action_admission.clone(),
@@ -8018,6 +9054,7 @@ mod extensions_integration_tests {
     pub(super) struct PiAiCapturedProviderContext {
         pub(super) system_prompt: Option<String>,
         pub(super) messages: Vec<Message>,
+        pub(super) options: StreamOptions,
     }
 
     #[derive(Debug)]
@@ -8042,7 +9079,7 @@ mod extensions_integration_tests {
         async fn stream(
             &self,
             context: &Context<'_>,
-            _options: &StreamOptions,
+            options: &StreamOptions,
         ) -> crate::error::Result<
             std::pin::Pin<
                 Box<dyn futures::Stream<Item = crate::error::Result<StreamEvent>> + Send>,
@@ -8054,6 +9091,7 @@ mod extensions_integration_tests {
                 .push(PiAiCapturedProviderContext {
                     system_prompt: context.system_prompt.as_ref().map(ToString::to_string),
                     messages: context.messages.iter().cloned().collect(),
+                    options: options.clone(),
                 });
             let final_message = AssistantMessage {
                 content: vec![ContentBlock::Text(TextContent::new("captured"))],
@@ -8101,6 +9139,10 @@ mod extensions_integration_tests {
                         "provider": "capturing-provider",
                         "api": "test-api",
                     })],
+                    compaction_models: ExtensionCompactionModelState::default(),
+                    compaction_privacy: Arc::new(StdMutex::new(
+                        compaction::CompactionPrivacy::default(),
+                    )),
                 })),
                 provider_admission: ProviderAdmissionGate::default(),
                 session_action_admission: SessionActionAdmissionGate::default(),
@@ -8184,6 +9226,7 @@ mod extensions_integration_tests {
     /// preparation is rejected with a validation error, never a fabricated
     /// summary.
     #[test]
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     fn agent_host_actions_compact_session_bridges_native_compaction() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -8203,8 +9246,21 @@ mod extensions_integration_tests {
                 pending_idle_actions: Arc::new(StdMutex::new(VecDeque::new())),
                 ai_completion: Arc::new(StdMutex::new(ExtensionAiCompletionHostState {
                     provider,
-                    stream_options: StreamOptions::default(),
+                    stream_options: StreamOptions {
+                        api_key: Some("host-managed-key".to_string()),
+                        headers: std::collections::HashMap::from([(
+                            "x-compaction-route".to_string(),
+                            "required-route".to_string(),
+                        )]),
+                        max_tokens: Some(4096),
+                        thinking_level: Some(crate::model::ThinkingLevel::High),
+                        ..StreamOptions::default()
+                    },
                     models: Vec::new(),
+                    compaction_models: ExtensionCompactionModelState::default(),
+                    compaction_privacy: Arc::new(StdMutex::new(
+                        compaction::CompactionPrivacy::default(),
+                    )),
                 })),
                 provider_admission: ProviderAdmissionGate::default(),
                 session_action_admission: SessionActionAdmissionGate::default(),
@@ -8233,7 +9289,17 @@ mod extensions_integration_tests {
             });
 
             let result = actions
-                .compact_session(preparation)
+                .compact_session(
+                    preparation,
+                    ExtensionCompactionOptions {
+                        model: Some(crate::extensions::ExtensionCompactionModel {
+                            provider: "capturing-provider".to_string(),
+                            id: "capture-model".to_string(),
+                        }),
+                        custom_instructions: Some("Preserve the retry-count decision".to_string()),
+                        thinking_level: Some(crate::model::ThinkingLevel::Low),
+                    },
+                )
                 .await
                 .expect("compact through session provider");
 
@@ -8254,10 +9320,39 @@ mod extensions_integration_tests {
                 Err(poisoned) => poisoned.into_inner().len(),
             };
             assert_eq!(captured_len, 1);
+            {
+                let captured = calls.lock().expect("captured request");
+                let call = &captured[0];
+                assert_eq!(call.options.api_key.as_deref(), Some("host-managed-key"));
+                assert_eq!(call.options.headers["x-compaction-route"], "required-route");
+                assert_eq!(call.options.max_tokens, Some(4096));
+                assert_eq!(
+                    call.options.thinking_level,
+                    Some(crate::model::ThinkingLevel::Low)
+                );
+                assert!(
+                    serde_json::to_string(&call.messages)
+                        .unwrap()
+                        .contains("Preserve the retry-count decision")
+                );
+            }
+            assert_eq!(
+                actions
+                    .ai_completion
+                    .lock()
+                    .unwrap()
+                    .stream_options
+                    .thinking_level,
+                Some(crate::model::ThinkingLevel::High),
+                "per-compaction options must not change the active session",
+            );
 
             // Malformed preparation is rejected with a validation error.
             let err = actions
-                .compact_session(json!({ "firstKeptEntryId": "" }))
+                .compact_session(
+                    json!({ "firstKeptEntryId": "" }),
+                    ExtensionCompactionOptions::default(),
+                )
                 .await
                 .expect_err("empty firstKeptEntryId must be rejected");
             assert!(
@@ -8267,7 +9362,10 @@ mod extensions_integration_tests {
             );
 
             let err = actions
-                .compact_session(json!("not-an-object"))
+                .compact_session(
+                    json!("not-an-object"),
+                    ExtensionCompactionOptions::default(),
+                )
                 .await
                 .expect_err("non-object preparation must be rejected");
             assert!(
@@ -8275,6 +9373,677 @@ mod extensions_integration_tests {
                     .contains("compaction preparation must be a JSON object"),
                 "unexpected error: {err}"
             );
+        });
+    }
+
+    fn compaction_override_entry(provider: &str, id: &str, requires_key: bool) -> ModelEntry {
+        ModelEntry {
+            model: crate::provider::Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "openai-completions".to_string(),
+                provider: provider.to_string(),
+                base_url: "https://compaction.example.invalid/v1".to_string(),
+                reasoning: false,
+                input: vec![crate::provider::InputType::Text],
+                cost: crate::provider::ModelCost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 32_768,
+                max_tokens: 2048,
+                headers: std::collections::HashMap::new(),
+            },
+            api_key: None,
+            headers: std::collections::HashMap::from([(
+                "x-target-route".to_string(),
+                "target-only".to_string(),
+            )]),
+            auth_header: requires_key,
+            compat: None,
+            oauth_config: None,
+        }
+    }
+
+    fn compaction_override(provider: &str, id: &str) -> ExtensionCompactionOptions {
+        ExtensionCompactionOptions {
+            model: Some(crate::extensions::ExtensionCompactionModel {
+                provider: provider.to_string(),
+                id: id.to_string(),
+            }),
+            thinking_level: Some(crate::model::ThinkingLevel::Max),
+            ..ExtensionCompactionOptions::default()
+        }
+    }
+
+    #[test]
+    fn extension_compaction_override_uses_target_auth_headers_and_model_limits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut auth = AuthStorage::load(dir.path().join("auth.json")).expect("auth");
+        auth.set(
+            "compaction-target",
+            crate::auth::AuthCredential::ApiKey {
+                key: "target-auth-key".to_string(),
+            },
+        );
+        let mut entry = compaction_override_entry("compaction-target", "summary-model", true);
+        entry.api_key = Some("catalog-fallback-key".to_string());
+        let mut registry = ModelRegistry::load_with_credential_resolver(None, |_| None);
+        registry.merge_entries(vec![entry]);
+        let state = ExtensionCompactionModelState {
+            registry: Some(Arc::new(registry)),
+            auth: Some(Arc::new(auth)),
+            js_provider_ids: Vec::new(),
+        };
+        let current: Arc<dyn Provider> = Arc::new(PiAiCaptureProvider {
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let original = StreamOptions {
+            api_key: Some("source-provider-key".to_string()),
+            headers: std::collections::HashMap::from([(
+                "authorization".to_string(),
+                "Bearer source-private-header".to_string(),
+            )]),
+            max_tokens: Some(8192),
+            ..StreamOptions::default()
+        };
+        let (provider, options) = state
+            .resolve(
+                Arc::clone(&current),
+                original.clone(),
+                &compaction_override("compaction-target", "summary-model"),
+            )
+            .expect("resolve registered model");
+        assert_eq!(provider.name(), "compaction-target");
+        assert_eq!(provider.model_id(), "summary-model");
+        assert!(!Arc::ptr_eq(&provider, &current));
+        assert_eq!(options.api_key.as_deref(), Some("target-auth-key"));
+        assert_eq!(options.headers["x-target-route"], "target-only");
+        assert!(!options.headers.contains_key("authorization"));
+        assert_eq!(options.max_tokens, Some(2048));
+        assert_eq!(
+            options.thinking_level,
+            Some(crate::model::ThinkingLevel::Off)
+        );
+        assert_eq!(original.api_key.as_deref(), Some("source-provider-key"));
+        assert_eq!(current.name(), "capturing-provider");
+    }
+
+    #[test]
+    fn extension_compaction_override_accepts_registered_header_auth_without_a_key() {
+        let current: Arc<dyn Provider> = Arc::new(PiAiCaptureProvider {
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        });
+        for api in ["openai-completions", "openai-responses"] {
+            for use_compat in [false, true] {
+                for (header, value, ready) in [
+                    ("AUTHORIZATION", "Bearer target-header", true),
+                    ("Authorization", "   ", false),
+                    ("x-tenant", "not-an-auth-header", false),
+                ] {
+                    let mut entry =
+                        compaction_override_entry("compaction-header", "summary-model", true);
+                    entry.model.api = api.to_string();
+                    let headers =
+                        std::collections::HashMap::from([(header.to_string(), value.to_string())]);
+                    if use_compat {
+                        entry.compat = Some(crate::models::CompatConfig {
+                            custom_headers: Some(headers),
+                            ..crate::models::CompatConfig::default()
+                        });
+                    } else {
+                        entry.headers.extend(headers);
+                    }
+                    let mut registry = ModelRegistry::load_with_credential_resolver(None, |_| None);
+                    registry.merge_entries(vec![entry]);
+                    let state = ExtensionCompactionModelState {
+                        registry: Some(Arc::new(registry)),
+                        ..ExtensionCompactionModelState::default()
+                    };
+                    let result = state.resolve(
+                        Arc::clone(&current),
+                        StreamOptions {
+                            api_key: Some("unrelated-source-key".to_string()),
+                            headers: std::collections::HashMap::from([(
+                                "x-source-private".to_string(),
+                                "source-only".to_string(),
+                            )]),
+                            ..StreamOptions::default()
+                        },
+                        &compaction_override("compaction-header", "summary-model"),
+                    );
+                    if ready {
+                        let (provider, options) = result.expect("registered header authentication");
+                        assert_eq!(provider.api(), api);
+                        assert!(options.api_key.is_none());
+                        assert!(!options.headers.contains_key("x-source-private"));
+                        if !use_compat {
+                            assert_eq!(options.headers[header], value);
+                        }
+                    } else {
+                        let error = result.err().expect("no usable target credential");
+                        assert!(error.to_string().contains("missing credentials"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extension_compaction_override_supplies_fresh_constructor_auth() {
+        const CHILD_ENV: &str = "PI_COMPACTION_CONSTRUCTOR_AUTH_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Copilot can otherwise hide a missing constructor credential by
+            // falling back to the test runner's ambient GitHub credentials.
+            let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "agent::extensions_integration_tests::extension_compaction_override_supplies_fresh_constructor_auth",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .env_remove("GITHUB_COPILOT_API_KEY")
+                .env_remove("GITHUB_TOKEN")
+                .output()
+                .expect("run isolated constructor-auth regression");
+            assert!(
+                output.status.success(),
+                "constructor-auth child failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut auth = AuthStorage::load(dir.path().join("auth.json")).expect("auth");
+        auth.set(
+            "github-copilot",
+            crate::auth::AuthCredential::ApiKey {
+                key: "fresh-target-github-token".to_string(),
+            },
+        );
+        let entry = compaction_override_entry("github-copilot", "copilot-summary", true);
+        assert!(
+            entry.api_key.is_none(),
+            "catalog intentionally has no credential"
+        );
+        let mut registry = ModelRegistry::load_with_credential_resolver(None, |_| None);
+        registry.merge_entries(vec![entry]);
+        let state = ExtensionCompactionModelState {
+            registry: Some(Arc::new(registry)),
+            auth: Some(Arc::new(auth)),
+            js_provider_ids: Vec::new(),
+        };
+        let current: Arc<dyn Provider> = Arc::new(PiAiCaptureProvider {
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let (provider, options) = state
+            .resolve(
+                current,
+                StreamOptions::default(),
+                &compaction_override("github-copilot", "copilot-summary"),
+            )
+            .expect("factory receives auth resolved after the catalog was loaded");
+        assert_eq!(provider.name(), "github-copilot");
+        assert_eq!(
+            options.api_key.as_deref(),
+            Some("fresh-target-github-token")
+        );
+    }
+
+    #[test]
+    fn extension_compaction_override_rejects_unknown_uncredentialed_and_js_models() {
+        let mut registry = ModelRegistry::load_with_credential_resolver(None, |_| None);
+        registry.merge_entries(vec![
+            compaction_override_entry("compaction-private", "requires-key", true),
+            compaction_override_entry("compaction-js", "js-model", false),
+            compaction_override_entry("compaction-local", "local-model", false),
+        ]);
+        let state = ExtensionCompactionModelState {
+            registry: Some(Arc::new(registry)),
+            auth: None,
+            js_provider_ids: vec!["compaction-js".to_string()],
+        };
+        let current: Arc<dyn Provider> = Arc::new(PiAiCaptureProvider {
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        });
+        for (provider, model, expected) in [
+            ("compaction-missing", "absent", "not registered"),
+            ("compaction-private", "requires-key", "missing credentials"),
+            ("compaction-js", "js-model", "streamSimple"),
+            ("", "bad-id", "non-empty"),
+        ] {
+            let error = state
+                .resolve(
+                    Arc::clone(&current),
+                    StreamOptions {
+                        api_key: Some("unrelated-key".to_string()),
+                        ..StreamOptions::default()
+                    },
+                    &compaction_override(provider, model),
+                )
+                .err()
+                .expect("invalid target must fail before provider work");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+        }
+        let (_, options) = state
+            .resolve(
+                current,
+                StreamOptions {
+                    api_key: Some("unrelated-key".to_string()),
+                    ..StreamOptions::default()
+                },
+                &compaction_override("compaction-local", "local-model"),
+            )
+            .expect("keyless registered model");
+        assert!(
+            options.api_key.is_none(),
+            "keyless target must not inherit a source credential"
+        );
+    }
+
+    #[test]
+    fn extension_compaction_registry_and_auth_follow_session_updates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut auth = AuthStorage::load(dir.path().join("auth.json")).expect("auth");
+        let provider: Arc<dyn Provider> = Arc::new(PiAiCaptureProvider {
+            calls: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let agent = Agent::new(
+            provider,
+            ToolRegistry::new(&[], Path::new("."), None),
+            AgentConfig::default(),
+        );
+        let mut session = AgentSession::new(
+            agent,
+            Arc::new(Mutex::new(Session::in_memory())),
+            false,
+            ResolvedCompactionSettings::default(),
+        );
+        let mut registry = ModelRegistry::load_with_credential_resolver(None, |_| None);
+        registry.merge_entries(vec![compaction_override_entry(
+            "compaction-live",
+            "live-model",
+            true,
+        )]);
+
+        // Without extensions nothing can read the compaction registry, so
+        // setting the registry and auth does not build it.
+        session.set_model_registry(registry.clone());
+        session.set_auth_storage(auth.clone());
+        assert!(
+            session
+                .extension_ai_completion
+                .lock()
+                .unwrap()
+                .compaction_models
+                .registry
+                .is_none(),
+            "the compaction registry is built only for sessions with extensions"
+        );
+
+        // With extensions it follows every registry and auth update.
+        session.extensions = Some(crate::extensions::ExtensionRegion::new(
+            crate::extensions::ExtensionManager::new(),
+        ));
+        session.set_model_registry(registry);
+        for key in ["first-live-key", "replacement-live-key"] {
+            auth.set(
+                "compaction-live",
+                crate::auth::AuthCredential::ApiKey {
+                    key: key.to_string(),
+                },
+            );
+            session.set_auth_storage(auth.clone());
+            let state = session.extension_ai_completion.lock().unwrap().clone();
+            let (_, options) = state
+                .compaction_models
+                .resolve(
+                    state.provider,
+                    state.stream_options,
+                    &compaction_override("compaction-live", "live-model"),
+                )
+                .expect("updated target auth");
+            assert_eq!(options.api_key.as_deref(), Some(key));
+        }
+        assert_eq!(session.agent.provider().name(), "capturing-provider");
+    }
+
+    struct NativePrivacyCapture {
+        requests: Arc<StdMutex<Vec<Value>>>,
+        response: Arc<StdMutex<Value>>,
+    }
+
+    #[async_trait]
+    impl Provider for NativePrivacyCapture {
+        fn name(&self) -> &'static str {
+            "native-privacy"
+        }
+
+        fn api(&self) -> &'static str {
+            "openai-responses"
+        }
+
+        fn model_id(&self) -> &'static str {
+            "native-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>>
+        {
+            Err(Error::api(
+                "native privacy fixture only supports native compaction",
+            ))
+        }
+
+        async fn compact_native(&self, body: &Value, options: &StreamOptions) -> Result<Value> {
+            assert_eq!(options.api_key.as_deref(), Some("auth-kept"));
+            self.requests.lock().expect("requests").push(body.clone());
+            Ok(self
+                .response
+                .lock()
+                .expect("scripted native response") // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture response ownership must remain intact.
+                .clone())
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn native_compaction_host_screens_configured_patterns_and_fresh_live_vault() {
+        asupersync::test_utils::run_test(|| async {
+            for mode in ["obfuscate", "block"] {
+                let requests = Arc::new(StdMutex::new(Vec::new()));
+                let provider = Arc::new(NativePrivacyCapture {
+                    requests: Arc::clone(&requests),
+                    response: Arc::new(StdMutex::new(json!({"output": [{
+                        "type": "compaction", "id": "opaque-window", "encrypted_content": "opaque-data"
+                    }]}))),
+                });
+                let agent = Agent::new(
+                    provider,
+                    ToolRegistry::without_builtins(None),
+                    AgentConfig {
+                        secrets: Some(crate::secrets::SecretsSettings {
+                            mode: Some(mode.to_string()),
+                            extra_patterns: Some(vec![r"^ACME-[0-9]{6}$".to_string()]),
+                        }),
+                        stream_options: StreamOptions {
+                            api_key: Some("auth-kept".to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                );
+                let mut session = AgentSession::new(
+                    agent,
+                    Arc::new(Mutex::new(Session::in_memory())),
+                    false,
+                    ResolvedCompactionSettings::default(),
+                );
+                let actions = AgentSessionHostActions {
+                    session: Arc::clone(&session.session),
+                    injected: Arc::new(StdMutex::new(ExtensionInjectedQueue::default())),
+                    is_streaming: Arc::new(AtomicBool::new(false)),
+                    is_turn_active: Arc::new(AtomicBool::new(false)),
+                    pending_idle_actions: Arc::new(StdMutex::new(VecDeque::new())),
+                    ai_completion: Arc::clone(&session.extension_ai_completion),
+                    provider_admission: session.provider_admission_gate(),
+                    session_action_admission: session.session_action_admission_gate(),
+                };
+                let known = "rememberedNativeCredential123456789";
+                if mode == "obfuscate" {
+                    // Learn AFTER the host action is constructed. A one-time
+                    // host-state snapshot would leak this otherwise bare echo.
+                    session
+                        .agent
+                        .secrets_transform_outbound_text(&format!("API_KEY={known}"))
+                        .expect("learn current-session credential");
+                }
+                let preparation = compaction::compaction_preparation_to_value(
+                    &compaction::CompactionPreparation {
+                        first_kept_entry_id: "anchor-kept".to_string(),
+                        messages_to_summarize: Vec::new(),
+                        turn_prefix_messages: Vec::new(),
+                        is_split_turn: false,
+                        tokens_before: 100,
+                        previous_summary: None,
+                        file_ops: compaction::FileOperations::default(),
+                        settings: ResolvedCompactionSettings::default(),
+                    },
+                );
+                let request = json!({
+                    "model": "native-model",
+                    "instructions": "summarize this work",
+                    "input": [
+                        {"role": "user", "content": [
+                            {"type": "input_text", "text": known},
+                            {"type": "input_text", "text": "ACME-123456"}
+                        ]},
+                        {"type": "function_call", "id": "item-kept", "call_id": "call-kept",
+                         "name": "configure", "arguments": "{\"project_token\":\"ACME-654321\"}"}
+                    ]
+                });
+                let result = actions
+                    .compact_session_native(preparation.clone(), request.clone())
+                    .await;
+                if mode == "block" {
+                    assert!(
+                        result
+                            .expect_err("block before native dispatch")
+                            .to_string()
+                            .contains("PI_SECRET_BLOCK")
+                    );
+                    assert!(requests.lock().expect("requests").is_empty());
+                    continue;
+                }
+                assert_eq!(
+                    result.expect("native result")["firstKeptEntryId"],
+                    "anchor-kept"
+                );
+                let captured = requests.lock().expect("requests")[0].clone();
+                let rendered = captured.to_string();
+                for secret in [known, "ACME-123456", "ACME-654321"] {
+                    assert!(!rendered.contains(secret));
+                }
+                assert!(rendered.contains("<pi-secret:redacted>"));
+                assert_eq!(captured["input"][1]["call_id"], "call-kept");
+                assert_eq!(captured["input"][1]["id"], "item-kept");
+                let arguments: Value = serde_json::from_str(
+                    // ubs:ignore[rust.parsing.serde-unwrap] -- Parsing provider-observed fixture arguments verifies preserved native wire syntax.
+                    captured["input"][1]["arguments"]
+                        .as_str()
+                        .expect("JSON arguments stay encoded"),
+                )
+                .expect("screened arguments remain valid JSON"); // ubs:ignore[rust.ownership.unwrap-expect] -- Malformed provider-observed fixture arguments must fail the regression.
+                assert_eq!(arguments["project_token"], "<pi-secret:redacted>");
+                assert_eq!(request["input"][0]["content"][0]["text"], known);
+
+                session
+                    .agent
+                    .reset_session_scoped_state(crate::plan::PlanMode::default());
+                actions
+                    .compact_session_native(
+                        preparation,
+                        json!({
+                            "model": "native-model",
+                            "input": [{"role": "user", "content": known}]
+                        }),
+                    )
+                    .await
+                    .expect("a new Session must not inherit the old vault");
+                assert_eq!(
+                    requests.lock().expect("requests")[1]["input"][0]["content"],
+                    known
+                );
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn native_compaction_screens_returned_windows_and_refuses_fragmented_text() {
+        asupersync::test_utils::run_test(|| async {
+            for mode in ["obfuscate", "block"] {
+                let known = "rememberedNativeWindowCredential123456789";
+                let discovered = "requestDiscoveredCredential987654321";
+                let requests = Arc::new(StdMutex::new(Vec::new()));
+                let response = Arc::new(StdMutex::new(json!({"output": [
+                    {"type": "compaction", "id": "window-kept", "encrypted_content": "opaque-kept"},
+                    {"type": "message", "role": "assistant", "id": "message-kept", "content": [
+                        {"type": "output_text", "text": known},
+                        {"type": "output_text", "text": discovered},
+                        {"type": "output_text", "text": "ACME-123456"}
+                    ]}
+                ]})));
+                let mut session = AgentSession::new(
+                    Agent::new(
+                        Arc::new(NativePrivacyCapture {
+                            requests: Arc::clone(&requests),
+                            response: Arc::clone(&response),
+                        }),
+                        ToolRegistry::without_builtins(None),
+                        AgentConfig {
+                            secrets: Some(crate::secrets::SecretsSettings {
+                                mode: Some(mode.to_string()),
+                                extra_patterns: Some(vec![
+                                    r"^ACME-[0-9]{6}$".to_string(),
+                                    r"^ACME-\n[0-9]{6}$".to_string(),
+                                ]),
+                            }),
+                            stream_options: StreamOptions {
+                                api_key: Some("auth-kept".to_string()),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    ),
+                    Arc::new(Mutex::new(Session::in_memory())),
+                    false,
+                    ResolvedCompactionSettings::default(),
+                );
+                let actions = AgentSessionHostActions {
+                    session: Arc::clone(&session.session),
+                    injected: Arc::new(StdMutex::new(ExtensionInjectedQueue::default())),
+                    is_streaming: Arc::new(AtomicBool::new(false)),
+                    is_turn_active: Arc::new(AtomicBool::new(false)),
+                    pending_idle_actions: Arc::new(StdMutex::new(VecDeque::new())),
+                    ai_completion: Arc::clone(&session.extension_ai_completion),
+                    provider_admission: session.provider_admission_gate(),
+                    session_action_admission: session.session_action_admission_gate(),
+                };
+                if mode == "obfuscate" {
+                    session
+                        .agent
+                        .secrets_transform_outbound_text(&format!("API_KEY={known}"))
+                        .expect("learn old-window credential"); // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture seeds a live credential before native replay.
+                }
+                let preparation = compaction::compaction_preparation_to_value(
+                    &compaction::CompactionPreparation {
+                        first_kept_entry_id: "ACME-654321".to_string(),
+                        messages_to_summarize: Vec::new(),
+                        turn_prefix_messages: Vec::new(),
+                        is_split_turn: false,
+                        tokens_before: 100,
+                        previous_summary: None,
+                        file_ops: compaction::FileOperations::default(),
+                        settings: ResolvedCompactionSettings::default(),
+                    },
+                );
+                let error = actions
+                    .compact_session_native(
+                        preparation.clone(),
+                        json!({"model": "native-model", "input": [{"role": "user", "content": [
+                            {"type": "input_text", "text": "ACME-"},
+                            {"type": "input_text", "text": "123456"}
+                        ]}]}),
+                    )
+                    .await
+                    .expect_err("independent native fragments must not dispatch"); // ubs:ignore[rust.ownership.unwrap-expect] -- Empty preparation must not hide a fragmented native request.
+                let refusal = if mode == "block" {
+                    "PI_SECRET_BLOCK"
+                } else {
+                    "PI_COMPACTION_FRAGMENTED"
+                };
+                assert!(error.to_string().contains(refusal)); // ubs:ignore[rust.panic.assert-macros] -- The named refusal identifies the actual privacy boundary.
+                assert!(requests.lock().expect("requests").is_empty()); // ubs:ignore[rust.panic.assert-macros,rust.ownership.unwrap-expect] -- Provider observation proves pre-dispatch refusal.
+
+                let mut input = vec![json!({
+                    "type": "compaction", "id": "old-window", "encrypted_content": "old-opaque"
+                })];
+                if mode == "obfuscate" {
+                    input.push(json!({
+                        "type": "function_call", "id": "call-item", "call_id": "call-kept",
+                        "name": "configure", "arguments": json!({"api_key": discovered}).to_string()
+                    }));
+                }
+                let result = actions
+                    .compact_session_native(
+                        preparation.clone(),
+                        json!({"model": "native-model", "input": input}),
+                    )
+                    .await;
+                assert_eq!(requests.lock().expect("requests").len(), 1); // ubs:ignore[rust.panic.assert-macros,rust.ownership.unwrap-expect] -- Clean replay is admitted exactly once before output validation.
+                if mode == "block" {
+                    let error = result.expect_err("blocked output cannot become a replay window"); // ubs:ignore[rust.ownership.unwrap-expect] -- Returned plaintext from an old opaque window must be refused.
+                    assert!(error.to_string().contains("PI_SECRET_BLOCK")); // ubs:ignore[rust.panic.assert-macros] -- No native result is returned after blocked output.
+                } else {
+                    let result = result.expect("screen native replay result"); // ubs:ignore[rust.ownership.unwrap-expect] -- Safe native output remains usable after redaction.
+                    let visible = json!({
+                        "summary": result.get("summary"),
+                        "window": result.pointer("/details/compactedWindow")
+                    })
+                    .to_string();
+                    for secret in [known, discovered, "ACME-123456"] {
+                        assert!(!visible.contains(secret)); // ubs:ignore[rust.panic.assert-macros] -- Both human summary and replayable native text must be screened.
+                    }
+                    assert_eq!(
+                        // ubs:ignore[rust.panic.assert-macros] -- Cut-point IDs remain exact even when their spelling matches a pattern.
+                        result.get("firstKeptEntryId"),
+                        Some(&json!("ACME-654321"))
+                    );
+                    assert_eq!(
+                        // ubs:ignore[rust.panic.assert-macros] -- Native replay identifiers are immutable protocol metadata.
+                        result.pointer("/details/compactedWindow/0/id"),
+                        Some(&json!("window-kept"))
+                    );
+                    assert_eq!(
+                        // ubs:ignore[rust.panic.assert-macros] -- The opaque replay payload must not be rewritten.
+                        result.pointer("/details/compactedWindow/0/encrypted_content"),
+                        Some(&json!("opaque-kept"))
+                    );
+                    assert_eq!(
+                        // ubs:ignore[rust.panic.assert-macros] -- Request discoveries remain private to this compaction transaction.
+                        session.agent.mask_secrets_text(discovered),
+                        discovered
+                    );
+                }
+
+                *response.lock().expect("response") = json!({"output": [{ // ubs:ignore[rust.ownership.unwrap-expect] -- Fixture switches to a fragmented native response after the first request.
+                    "type": "message", "role": "assistant", "id": "message-kept", "content": [
+                        {"type": "output_text", "text": "ACME-"},
+                        {"type": "output_text", "text": "123456"}
+                    ]
+                }]});
+                let error = actions
+                    .compact_session_native(
+                        preparation,
+                        json!({"model": "native-model", "input": [{"role": "user", "content": "clean"}]}),
+                    )
+                    .await
+                    .expect_err("fragmented native output cannot be replayed"); // ubs:ignore[rust.ownership.unwrap-expect] -- An unsafe assembled summary/window must not escape output validation.
+                assert!(error.to_string().contains(refusal)); // ubs:ignore[rust.panic.assert-macros] -- Output refusal matches the configured block or preserve-or-refuse mode.
+                assert_eq!(requests.lock().expect("requests").len(), 2); // ubs:ignore[rust.panic.assert-macros,rust.ownership.unwrap-expect] -- Response refusal occurs after exactly one additional admitted request.
+            }
         });
     }
 
@@ -8424,6 +10193,10 @@ mod extensions_integration_tests {
                     provider,
                     stream_options: StreamOptions::default(),
                     models: Vec::new(),
+                    compaction_models: ExtensionCompactionModelState::default(),
+                    compaction_privacy: Arc::new(StdMutex::new(
+                        compaction::CompactionPrivacy::default(),
+                    )),
                 })),
                 provider_admission: ProviderAdmissionGate::default(),
                 session_action_admission: SessionActionAdmissionGate::default(),
@@ -9382,6 +11155,147 @@ mod extensions_integration_tests {
             let final_message = agent.run("write main", |_| {}).await.expect("run");
             assert_eq!(final_message.stop_reason, StopReason::Length);
             assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn manual_follow_up_dispatch_keeps_staged_work_without_an_extra_provider_call() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let provider = Arc::new(TruncatingProvider::new(0));
+            let provider_dyn: Arc<dyn Provider> = provider.clone();
+            let mut agent = Agent::new(
+                provider_dyn,
+                ToolRegistry::from_tools(vec![]),
+                AgentConfig::default(),
+            );
+            agent.set_automatic_queue_dispatch(true, false);
+            agent.queue_follow_up(Message::User(UserMessage {
+                content: UserContent::Text("manual follow-up".to_string()),
+                timestamp: 0,
+            }));
+
+            let final_message = agent.run("initial", |_| {}).await.expect("run");
+            assert_eq!(final_message.stop_reason, StopReason::Stop);
+            assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(agent.queued_message_count(), 1);
+
+            let batch = agent.take_queued_follow_up_batch().await;
+            assert_eq!(batch.len(), 1);
+            assert_eq!(agent.queued_message_count(), 0);
+        });
+    }
+
+    #[test]
+    fn manual_follow_up_dispatch_suppresses_turn_recovery_continuations() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let provider = Arc::new(TruncatingProvider::new(10));
+            let provider_dyn: Arc<dyn Provider> = provider.clone();
+            let mut agent = Agent::new(
+                provider_dyn,
+                ToolRegistry::from_tools(vec![]),
+                AgentConfig::default(),
+            );
+            agent.set_automatic_queue_dispatch(true, false);
+
+            let final_message = agent.run("write main", |_| {}).await.expect("run");
+            assert_eq!(final_message.stop_reason, StopReason::Length);
+            assert_eq!(
+                provider.stream_calls.load(Ordering::SeqCst),
+                1,
+                "manual follow-up control must suppress synthetic recovery requests"
+            );
+            assert!(!agent.messages().iter().any(|message| {
+                matches!(message, Message::User(user)
+                    if matches!(&user.content, UserContent::Text(text)
+                        if text.contains("auto-continue")))
+            }));
+        });
+    }
+
+    #[test]
+    fn manual_steering_dispatch_never_polls_external_fetchers() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let provider = Arc::new(TruncatingProvider::new(0));
+            let provider_dyn: Arc<dyn Provider> = provider.clone();
+            // The fixture's final reply ("}\n```\nAll done.") reads as an
+            // unclosed fence, so conservative turn recovery would add a
+            // continuation call. Only steering is manual here (follow-up
+            // dispatch, which suppresses recovery, stays automatic), so turn
+            // recovery is switched off to isolate steering dispatch.
+            let mut agent = Agent::new(
+                provider_dyn,
+                ToolRegistry::from_tools(vec![]),
+                AgentConfig {
+                    turn_recovery: crate::turn_recovery::TurnRecoveryMode::Off,
+                    ..AgentConfig::default()
+                },
+            );
+            let polls = Arc::new(AtomicUsize::new(0));
+            let polls_for_fetcher = Arc::clone(&polls);
+            agent.register_message_fetchers(
+                Some(Arc::new(move || {
+                    let polls = Arc::clone(&polls_for_fetcher);
+                    Box::pin(async move {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        vec![QueuedAgentMessage::generated(Message::User(UserMessage {
+                            content: UserContent::Text("should not be fetched".to_string()),
+                            timestamp: 0,
+                        }))]
+                    })
+                })),
+                None,
+            );
+            agent.set_automatic_queue_dispatch(false, true);
+
+            let final_message = agent.run("initial", |_| {}).await.expect("run");
+            assert_eq!(final_message.stop_reason, StopReason::Stop);
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn explicit_manual_batch_take_respects_queue_modes_without_enabling_dispatch() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let provider: Arc<dyn Provider> = Arc::new(TruncatingProvider::new(0));
+            let mut agent = Agent::new(
+                provider,
+                ToolRegistry::from_tools(vec![]),
+                AgentConfig::default(),
+            );
+            agent.set_queue_modes(QueueMode::All, QueueMode::All);
+            agent.set_automatic_queue_dispatch(false, false);
+            assert_eq!(agent.automatic_queue_dispatch(), (false, false));
+
+            for text in ["s1", "s2"] {
+                agent.queue_steering(Message::User(UserMessage {
+                    content: UserContent::Text(text.to_string()),
+                    timestamp: 0,
+                }));
+            }
+            for text in ["f1", "f2"] {
+                agent.queue_follow_up(Message::User(UserMessage {
+                    content: UserContent::Text(text.to_string()),
+                    timestamp: 0,
+                }));
+            }
+            assert_eq!(agent.queued_message_count(), 4);
+            assert_eq!(agent.take_queued_steering_batch().len(), 2);
+            assert_eq!(agent.take_queued_follow_up_batch().await.len(), 2);
+            assert_eq!(agent.queued_message_count(), 0);
+            assert_eq!(agent.automatic_queue_dispatch(), (false, false));
         });
     }
 
@@ -10377,6 +12291,108 @@ mod abort_tests {
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context as TaskContext, Poll};
 
+    #[derive(Default)]
+    struct AbortWakeCounter(AtomicUsize);
+
+    impl std::task::Wake for AbortWakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn abort_signal_is_latched_before_waiter_subscription() {
+        let (handle, signal) = AbortHandle::new();
+        let mut created_before_abort = Box::pin(signal.wait());
+        let waker = futures::task::noop_waker();
+        let mut task = TaskContext::from_waker(&waker);
+
+        handle.abort();
+        assert!(std::future::Future::poll(created_before_abort.as_mut(), &mut task).is_ready());
+
+        // Broadcasts do not retain permits for future subscribers. The latched
+        // predicate must still complete a newly created waiter without a
+        // second abort or any provider/tool progress to wake it.
+        let late_signal = signal.clone();
+        let mut created_after_abort = Box::pin(late_signal.wait());
+        assert!(std::future::Future::poll(created_after_abort.as_mut(), &mut task).is_ready());
+    }
+
+    #[test]
+    fn abort_signal_wakes_every_waiter_after_a_nonterminal_notification() {
+        let (handle, signal) = AbortHandle::new();
+        let cloned_signal = signal.clone();
+        let mut first = Box::pin(signal.wait());
+        let mut second = Box::pin(cloned_signal.wait());
+        let first_wakes = Arc::new(AbortWakeCounter::default());
+        let second_wakes = Arc::new(AbortWakeCounter::default());
+        let first_waker = std::task::Waker::from(Arc::clone(&first_wakes));
+        let second_waker = std::task::Waker::from(Arc::clone(&second_wakes));
+        let mut first_task = TaskContext::from_waker(&first_waker);
+        let mut second_task = TaskContext::from_waker(&second_waker);
+        assert!(std::future::Future::poll(first.as_mut(), &mut first_task).is_pending());
+        assert!(std::future::Future::poll(second.as_mut(), &mut second_task).is_pending());
+
+        signal.inner.notify.notify_waiters();
+        assert_eq!(first_wakes.0.load(Ordering::SeqCst), 1);
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 1);
+        assert!(!signal.is_aborted());
+        assert!(std::future::Future::poll(first.as_mut(), &mut first_task).is_pending());
+        assert!(std::future::Future::poll(second.as_mut(), &mut second_task).is_pending());
+
+        // Removing one subscriber must not consume another subscriber's abort.
+        drop(first);
+        let mut replacement = Box::pin(signal.wait());
+        assert!(std::future::Future::poll(replacement.as_mut(), &mut first_task).is_pending());
+        handle.abort();
+        assert_eq!(first_wakes.0.load(Ordering::SeqCst), 2);
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 2);
+        assert!(std::future::Future::poll(replacement.as_mut(), &mut first_task).is_ready());
+        assert!(std::future::Future::poll(second.as_mut(), &mut second_task).is_ready());
+        handle.abort();
+        assert_eq!(first_wakes.0.load(Ordering::SeqCst), 2);
+        assert_eq!(second_wakes.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn abort_signal_registration_racing_another_thread_never_stays_pending() {
+        const ATTEMPTS: usize = 256;
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<AbortHandle>(1);
+        let rendezvous = Arc::new(std::sync::Barrier::new(2));
+        let worker_rendezvous = Arc::clone(&rendezvous);
+        let worker = std::thread::spawn(move || {
+            for _ in 0..ATTEMPTS {
+                let handle = receiver
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("next independent abort signal");
+                worker_rendezvous.wait();
+                handle.abort();
+                worker_rendezvous.wait();
+            }
+        });
+        let waker = futures::task::noop_waker();
+        let mut task = TaskContext::from_waker(&waker);
+        for _ in 0..ATTEMPTS {
+            let (handle, signal) = AbortHandle::new();
+            let mut waiting = Box::pin(signal.wait());
+            sender.send(handle).expect("abort worker remains alive");
+            rendezvous.wait();
+            let first = std::future::Future::poll(waiting.as_mut(), &mut task);
+            rendezvous.wait();
+            assert!(signal.is_aborted());
+            // Do not repoll a future that already completed. Otherwise, the
+            // first poll raced the abort and must retain that notification.
+            if first.is_pending() {
+                assert!(std::future::Future::poll(waiting.as_mut(), &mut task).is_ready());
+            }
+        }
+        worker.join().expect("abort worker completed");
+    }
+
     struct StartThenPending {
         start: Option<StreamEvent>,
     }
@@ -10474,6 +12490,7 @@ mod abort_tests {
     struct PhasedProvider {
         pending_calls: usize,
         calls: AtomicUsize,
+        system_prompts: StdMutex<Vec<Option<String>>>,
     }
 
     impl PhasedProvider {
@@ -10481,6 +12498,7 @@ mod abort_tests {
             Self {
                 pending_calls,
                 calls: AtomicUsize::new(0),
+                system_prompts: StdMutex::new(Vec::new()),
             }
         }
 
@@ -10516,11 +12534,15 @@ mod abort_tests {
 
         async fn stream(
             &self,
-            _context: &Context<'_>,
+            context: &Context<'_>,
             _options: &StreamOptions,
         ) -> crate::error::Result<
             Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
         > {
+            self.system_prompts
+                .lock()
+                .unwrap()
+                .push(context.system_prompt.as_deref().map(str::to_string));
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call < self.pending_calls {
                 return Ok(Box::pin(StartThenPending {
@@ -10547,7 +12569,10 @@ mod abort_tests {
     }
 
     #[derive(Debug)]
-    struct ToolCallProvider;
+    struct ToolCallProvider {
+        tool_calls: Vec<ToolCall>,
+        calls: AtomicUsize,
+    }
 
     #[async_trait]
     #[allow(clippy::unnecessary_literal_bound)]
@@ -10571,13 +12596,14 @@ mod abort_tests {
         ) -> crate::error::Result<
             Pin<Box<dyn Stream<Item = crate::error::Result<StreamEvent>> + Send>>,
         > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             let message = AssistantMessage {
-                content: vec![ContentBlock::ToolCall(ToolCall {
-                    id: "call-1".to_string(),
-                    name: "hanging_tool".to_string(),
-                    arguments: json!({}),
-                    thought_signature: None,
-                })],
+                content: self
+                    .tool_calls
+                    .iter()
+                    .cloned()
+                    .map(ContentBlock::ToolCall)
+                    .collect(),
                 api: "test-api".to_string(),
                 provider: "test-provider".to_string(),
                 model: "test-model".to_string(),
@@ -10631,6 +12657,105 @@ mod abort_tests {
         ) -> crate::error::Result<ToolOutput> {
             futures::future::pending::<()>().await;
             unreachable!("hanging tool should be aborted by the agent")
+        }
+    }
+
+    /// Exercise the real read tool while making its completion visible to the
+    /// blocked sibling without a scheduler- or wall-clock-dependent delay.
+    struct NotifyingReadTool {
+        inner: crate::tools::ReadTool,
+        completed: Arc<AtomicUsize>,
+        ready: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Tool for NotifyingReadTool {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn label(&self) -> &str {
+            self.inner.label()
+        }
+
+        fn description(&self) -> &str {
+            self.inner.description()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            self.inner.parameters()
+        }
+
+        fn effects(&self) -> ToolEffects {
+            self.inner.effects()
+        }
+
+        async fn execute(
+            &self,
+            tool_call_id: &str,
+            input: serde_json::Value,
+            on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            let result = self.inner.execute(tool_call_id, input, on_update).await;
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            self.ready.notify_one();
+            result
+        }
+    }
+
+    struct BlockedToolDropGuard(Arc<AtomicBool>);
+
+    impl Drop for BlockedToolDropGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct AbortAfterReadsTool {
+        completed: Arc<AtomicUsize>,
+        ready: Arc<Notify>,
+        abort: AbortHandle,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Tool for AbortAfterReadsTool {
+        fn name(&self) -> &'static str {
+            "blocked_network"
+        }
+
+        fn label(&self) -> &'static str {
+            "Blocked network operation"
+        }
+
+        fn description(&self) -> &'static str {
+            "Remains pending when the operator cancels after both reads complete"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        fn effects(&self) -> ToolEffects {
+            ToolEffects::network()
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(ToolUpdate) + Send + Sync>>,
+        ) -> crate::error::Result<ToolOutput> {
+            let _drop_guard = BlockedToolDropGuard(Arc::clone(&self.dropped));
+            loop {
+                let ready = self.ready.notified();
+                if self.completed.load(Ordering::SeqCst) == 2 {
+                    break;
+                }
+                ready.await;
+            }
+            self.abort.abort();
+            futures::future::pending().await
         }
     }
 
@@ -10716,6 +12841,110 @@ mod abort_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn dropping_extension_custom_turn_restores_prompt_and_activity() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(Box::pin(async {
+            let temp = tempfile::tempdir().unwrap();
+            let entry = temp.path().join("custom-prompt.native.json");
+            let descriptor = json!({
+                "id": "custom-prompt-test",
+                "name": "custom-prompt-test",
+                "version": "1.0.0",
+                "apiVersion": crate::extensions::PROTOCOL_VERSION,
+                "eventHooks": ["before_agent_start"],
+                "eventResponses": {
+                    "before_agent_start": {"systemPrompt": "custom-hook-system"},
+                },
+            });
+            std::fs::write(&entry, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+            let manager = ExtensionManager::new();
+            manager.set_native_runtime(NativeRustExtensionRuntimeHandle::start().await.unwrap());
+            manager
+                .load_native_extensions(vec![
+                    crate::extensions::NativeRustExtensionLoadSpec::from_entry_path(&entry)
+                        .unwrap(),
+                ])
+                .await
+                .unwrap();
+            let provider = Arc::new(PhasedProvider::new(1));
+            let agent = Agent::new(
+                Arc::clone(&provider) as Arc<dyn Provider>,
+                ToolRegistry::new(&[], Path::new("."), None),
+                AgentConfig {
+                    system_prompt: Some("base-system".to_string()),
+                    ..AgentConfig::default()
+                },
+            );
+            let mut agent_session = AgentSession::new(
+                agent,
+                Arc::new(Mutex::new(Session::in_memory())),
+                false,
+                ResolvedCompactionSettings::default(),
+            );
+            agent_session.extensions = Some(ExtensionRegion::new(manager));
+            let active = Arc::clone(&agent_session.extensions_turn_active);
+            let streaming = Arc::clone(&agent_session.extensions_is_streaming);
+            let previous_source = agent_session.input_source;
+            let message = Message::Custom(CustomMessage {
+                content: "extension work".to_string(),
+                custom_type: "note".to_string(),
+                display: true,
+                details: None,
+                timestamp: 0,
+            });
+            agent_session
+                .extensions_pending_idle_actions
+                .lock()
+                .unwrap()
+                .push_back(PendingIdleAction::CustomMessage(message));
+            let mut turn =
+                Box::pin(agent_session.run_pending_idle_actions_with_abort(None, Arc::new(|_| {})));
+            let reached_provider = futures::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(turn.as_mut(), cx).is_pending());
+                if provider.calls.load(Ordering::SeqCst) == 1 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            });
+            asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                Duration::from_secs(5),
+                reached_provider,
+            )
+            .await
+            .expect("custom turn must reach its pending provider");
+            assert!(active.load(Ordering::SeqCst));
+            assert!(streaming.load(Ordering::SeqCst));
+            drop(turn);
+            assert!(!active.load(Ordering::SeqCst));
+            assert!(!streaming.load(Ordering::SeqCst));
+            assert_eq!(agent_session.agent.system_prompt(), Some("base-system"));
+            assert_eq!(
+                agent_session.input_source.as_str(),
+                previous_source.as_str()
+            );
+
+            agent_session.extensions = None;
+            let result = agent_session
+                .run_text("next input".to_string(), |_| {})
+                .await
+                .unwrap();
+            assert_eq!(result.stop_reason, StopReason::Stop);
+            assert_eq!(
+                *provider.system_prompts.lock().unwrap(),
+                vec![
+                    Some("custom-hook-system".to_string()),
+                    Some("base-system".to_string()),
+                ],
+            );
+        }));
+    }
+
+    #[test]
     fn abort_interrupts_in_flight_stream() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -10782,31 +13011,24 @@ mod abort_tests {
 
             let cancel_thread = std::thread::spawn(move || {
                 started_rx
-                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .recv_timeout(std::time::Duration::from_secs(10))
                     .expect("stream start");
                 cancel_cx.set_cancel_requested(true);
             });
 
-            let run = agent_session.run_text_with_abort("hello".to_string(), None, move |event| {
-                if matches!(
-                    event,
-                    AgentEvent::MessageStart {
-                        message: Message::Assistant(_)
+            let message = agent_session
+                .run_text_with_abort("hello".to_string(), None, move |event| {
+                    if matches!(
+                        event,
+                        AgentEvent::MessageStart {
+                            message: Message::Assistant(_)
+                        }
+                    ) {
+                        let _ = started_tx.send(());
                     }
-                ) {
-                    let _ = started_tx.send(());
-                }
-            });
-            futures::pin_mut!(run);
-
-            let message = asupersync::time::timeout(
-                asupersync::time::wall_now(),
-                std::time::Duration::from_secs(1),
-                run,
-            )
-            .await
-            .expect("ambient cancellation should finish before timeout")
-            .expect("run_text_with_abort");
+                })
+                .await
+                .expect("run_text_with_abort");
 
             cancel_thread.join().expect("cancel thread");
 
@@ -11023,7 +13245,15 @@ mod abort_tests {
         let handle = runtime.handle();
 
         runtime.block_on(async move {
-            let provider = Arc::new(ToolCallProvider);
+            let provider = Arc::new(ToolCallProvider {
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    name: "hanging_tool".to_string(),
+                    arguments: json!({}),
+                    thought_signature: None,
+                }],
+                calls: AtomicUsize::new(0),
+            });
             let tools = ToolRegistry::from_tools(vec![Box::new(HangingTool)]);
             let agent = Agent::new(provider, tools, AgentConfig::default());
             let session = Arc::new(Mutex::new(Session::in_memory()));
@@ -11090,6 +13320,198 @@ mod abort_tests {
             assert_eq!(details["reason"], "abort_signal");
             assert_eq!(details["toolName"], "hanging_tool");
             assert_eq!(details["cleanup"], "tool_result_recorded_no_success");
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    fn abort_preserves_completed_batch_results_in_persisted_history() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                temp.path().join("completed.txt"),
+                "completed before cancellation\n",
+            )
+            .unwrap();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ready = Arc::new(Notify::new());
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (abort_handle, abort_signal) = AbortHandle::new();
+            let tools = ToolRegistry::from_tools(vec![
+                Box::new(NotifyingReadTool {
+                    inner: crate::tools::ReadTool::new(temp.path()),
+                    completed: Arc::clone(&completed),
+                    ready: Arc::clone(&ready),
+                }),
+                Box::new(AbortAfterReadsTool {
+                    completed: Arc::clone(&completed),
+                    ready,
+                    abort: abort_handle,
+                    dropped: Arc::clone(&dropped),
+                }),
+                Box::new(crate::tools::WriteTool::new(temp.path())),
+            ]);
+            let provider = Arc::new(ToolCallProvider {
+                tool_calls: [
+                    ("read-complete", "read", json!({"path": "completed.txt"})),
+                    (
+                        "read-error",
+                        "read",
+                        json!({"path": "completed.txt", "limit": 0}),
+                    ),
+                    ("still-running", "blocked_network", json!({})),
+                    (
+                        "never-started",
+                        "write",
+                        json!({"path": "must-not-exist.txt", "content": "not admitted"}),
+                    ),
+                ]
+                .into_iter()
+                .map(|(id, name, arguments)| ToolCall {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    arguments,
+                    thought_signature: None,
+                })
+                .collect(),
+                calls: AtomicUsize::new(0),
+            });
+            let agent = Agent::new(
+                Arc::clone(&provider) as Arc<dyn Provider>,
+                tools,
+                AgentConfig::default(),
+            );
+            let session = Arc::new(Mutex::new(Session::create_with_dir(Some(
+                temp.path().join("sessions"),
+            ))));
+            let mut agent_session = AgentSession::new(
+                agent,
+                Arc::clone(&session),
+                true,
+                ResolvedCompactionSettings::default(),
+            );
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let observed = Arc::clone(&events);
+            let result = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                Duration::from_secs(30),
+                agent_session.run_text_with_abort(
+                    "read the file twice, then write".to_string(),
+                    Some(abort_signal),
+                    move |event| observed.lock().unwrap().push(event),
+                ),
+            )
+            .await
+            .expect("cancelling a blocked sibling must finish the turn")
+            .expect("the cancelled turn must save completed work");
+            assert_eq!(result.stop_reason, StopReason::Aborted);
+            assert_eq!(completed.load(Ordering::SeqCst), 2);
+            assert!(dropped.load(Ordering::SeqCst));
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            assert!(!temp.path().join("must-not-exist.txt").exists());
+
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let path = session
+                .lock(cx.cx())
+                .await
+                .unwrap()
+                .path
+                .clone()
+                .expect("the cancelled turn must have a persisted session");
+            let reopened = Session::open(path.to_string_lossy().as_ref())
+                .await
+                .expect("reopen the cancelled session");
+            let persisted = reopened.to_messages_for_current_path();
+            let results = persisted
+                .iter()
+                .filter_map(|message| match message {
+                    Message::ToolResult(result) => Some(result),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                results
+                    .iter()
+                    .map(|result| result.tool_call_id.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "read-complete",
+                    "read-error",
+                    "still-running",
+                    "never-started"
+                ],
+            );
+            assert!(!results[0].is_error);
+            assert!(results[0].content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text(text) if text.text.contains("completed before cancellation")
+                )
+            }));
+            assert!(results[1].is_error);
+            assert!(results[1].content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text(text) if text.text.contains("`limit` must be greater than 0")
+                )
+            }));
+            assert!(results[1].details.is_none());
+            for result in &results[2..] {
+                assert!(result.is_error);
+                let details = result.details.as_ref().expect("cancellation details");
+                assert_eq!(details["schema"], TOOL_CANCELLATION_SCHEMA_V1);
+                assert_eq!(details["reason"], "abort_signal");
+            }
+
+            let events = events.lock().unwrap();
+            for result in &results {
+                let ends = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        AgentEvent::ToolExecutionEnd {
+                            tool_call_id,
+                            result: output,
+                            is_error,
+                            ..
+                        } if tool_call_id == &result.tool_call_id => Some((output, is_error)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(ends.len(), 1, "one terminal event per tool call");
+                assert_eq!(*ends[0].1, result.is_error);
+                assert_eq!(
+                    serde_json::to_value(&ends[0].0.content).unwrap(),
+                    serde_json::to_value(&result.content).unwrap(),
+                );
+                assert_eq!(ends[0].0.details, result.details);
+                let message_end_count = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            AgentEvent::MessageEnd {
+                                message: Message::ToolResult(message),
+                            } if message.tool_call_id == result.tool_call_id
+                        )
+                    })
+                    .count();
+                assert_eq!(message_end_count, 1, "one transcript event per tool result");
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, AgentEvent::AgentEnd { .. }))
+                    .count(),
+                1,
+            );
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::AgentEnd { error: Some(error), .. }) if error == "Aborted"
+            ));
         });
     }
 }
@@ -11967,7 +14389,55 @@ impl crate::extensions::ExtensionSession for AgentExtensionSession {
     }
 }
 
-fn finish_turn_persistence<T>(result: Result<T>, persist_result: Result<()>) -> Result<T> {
+/// Dropping a save future does not stop its blocking filesystem work. Arm this
+/// guard only around the save itself: waiting for the Session lock or running a
+/// provider does not yet make persistence indeterminate. Do not hold a provider
+/// permit here; extension callbacks may already own it while awaiting Session.
+struct TurnPersistenceGuard<'a> {
+    admission: &'a ProviderAdmissionGate,
+    completed: bool,
+}
+
+impl Drop for TurnPersistenceGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            let mut reason = self
+                .admission
+                .reason
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            reason.get_or_insert_with(|| {
+                "turn persistence was interrupted before its durable result was observed"
+                    .to_string()
+            });
+        }
+    }
+}
+
+async fn flush_turn_autosave(
+    session: &mut Session,
+    admission: &ProviderAdmissionGate,
+    trigger: AutosaveFlushTrigger,
+) -> Result<()> {
+    let mut guard = TurnPersistenceGuard {
+        admission,
+        completed: false,
+    };
+    let result = session.flush_autosave(trigger).await;
+    // The caller handles an observed error with its original turn failure.
+    // Never clear admission here: another operation may own its quarantine.
+    guard.completed = true;
+    result
+}
+
+/// A failed turn save leaves durability uncertain for every caller, including
+/// surfaces that use [`AgentSession`] without the SDK recovery driver. Fence the
+/// shared admission gate before returning the typed persistence error.
+fn finish_turn_persistence<T>(
+    admission: &ProviderAdmissionGate,
+    result: Result<T>,
+    persist_result: Result<()>,
+) -> Result<T> {
     match persist_result {
         Ok(()) => result,
         Err(persist_err) => {
@@ -11977,9 +14447,23 @@ fn finish_turn_persistence<T>(result: Result<T>, persist_result: Result<()>) -> 
                     format!("{persist_err}; primary provider/tool turn also failed: {primary_err}")
                 }
             };
+            admission.block(message.clone());
             Err(Error::session_persistence(message))
         }
     }
+}
+
+/// Persist mutations already protected by their Session lock using the same
+/// interruption guard and returned-error fence as an AgentSession turn.
+/// Extension callbacks cannot acquire the Agent while owning Session-action
+/// authority, so they carry the shared admission gate to this boundary.
+pub(crate) async fn persist_session_mutations(
+    session: &mut Session,
+    admission: &ProviderAdmissionGate,
+    trigger: AutosaveFlushTrigger,
+) -> Result<()> {
+    let persist_result = flush_turn_autosave(session, admission, trigger).await;
+    finish_turn_persistence(admission, Ok(()), persist_result)
 }
 
 #[cfg(test)]
@@ -11987,8 +14471,46 @@ mod finish_turn_persistence_tests {
     use super::*;
 
     #[test]
+    fn pending_turn_save_does_not_block_or_replace_another_quarantine() {
+        let admission = ProviderAdmissionGate::default();
+        let guard = TurnPersistenceGuard {
+            admission: &admission,
+            completed: false,
+        };
+        admission
+            .ensure_allowed()
+            .expect("an active save must not reject an in-flight extension completion");
+        admission.block("a separate transition failed".to_string());
+        drop(guard);
+        assert_eq!(
+            admission.reason().as_deref(),
+            Some("a separate transition failed")
+        );
+    }
+
+    #[test]
+    fn completed_no_op_turn_flush_preserves_existing_quarantine() {
+        let admission = ProviderAdmissionGate::default();
+        admission.block("an earlier save was interrupted".to_string());
+        let mut session = Session::in_memory();
+        futures::executor::block_on(flush_turn_autosave(
+            &mut session,
+            &admission,
+            AutosaveFlushTrigger::Manual,
+        ))
+        .expect("an empty autosave queue needs no filesystem work");
+        assert_eq!(session.autosave_metrics().flush_started, 0);
+        assert_eq!(
+            admission.reason().as_deref(),
+            Some("an earlier save was interrupted")
+        );
+    }
+
+    #[test]
     fn persistence_failure_is_terminal_without_hiding_primary_turn_error() {
+        let admission = ProviderAdmissionGate::default();
         let err = finish_turn_persistence::<()>(
+            &admission,
             Err(Error::provider("test", "provider failed")),
             Err(Error::session("disk flush failed")),
         )
@@ -11998,6 +14520,11 @@ mod finish_turn_persistence_tests {
         let message = err.to_string();
         assert!(message.contains("disk flush failed"));
         assert!(message.contains("provider failed"));
+        let blocked = admission
+            .ensure_allowed()
+            .expect_err("every caller must retain the persistence fence");
+        assert!(blocked.is_session_persistence());
+        assert!(blocked.to_string().contains("provider failed"));
     }
 }
 
@@ -12091,6 +14618,8 @@ impl AgentSession {
             provider: agent.provider(),
             stream_options: agent.stream_options().clone(),
             models: Vec::new(),
+            compaction_models: ExtensionCompactionModelState::default(),
+            compaction_privacy: Arc::clone(&agent.compaction_privacy_state),
         }));
 
         Self {
@@ -12170,7 +14699,7 @@ impl AgentSession {
 
     #[must_use]
     pub fn with_auth_storage(mut self, auth: AuthStorage) -> Self {
-        self.auth_storage = Some(auth);
+        self.set_auth_storage(auth);
         self
     }
 
@@ -12197,10 +14726,44 @@ impl AgentSession {
                 .set_extension_models(pi_ai_model_registry_values(&registry));
         }
         self.model_registry = Some(registry);
+        self.refresh_extension_compaction_models();
     }
 
     pub fn set_auth_storage(&mut self, auth: AuthStorage) {
         self.auth_storage = Some(auth);
+        self.refresh_extension_compaction_models();
+    }
+
+    pub(crate) fn scope_auth_storage(&self, auth: &mut AuthStorage) {
+        if let Some(previous) = &self.auth_storage {
+            auth.inherit_command_working_directory(previous);
+        }
+    }
+
+    /// Adopt credentials changed outside this session (`/login`, `/logout`)
+    /// and re-resolve the running model's key with the usual precedence:
+    /// CLI override, then stored credential, then the catalog entry's key.
+    pub(crate) fn adopt_auth_storage(&mut self, mut auth: AuthStorage) {
+        self.scope_auth_storage(&mut auth);
+        self.set_auth_storage(auth);
+        let entry = self.current_model_entry();
+        let key = entry.as_ref().map_or_else(
+            || {
+                let provider = self.agent.provider();
+                normalize_api_key_opt(self.api_key_override.clone()).or_else(|| {
+                    self.auth_storage.as_ref().and_then(|auth| {
+                        normalize_api_key_opt(auth.resolve_api_key(provider.name(), None))
+                    })
+                })
+            },
+            |entry| self.resolve_stream_api_key_for_model(entry),
+        );
+        self.agent.stream_options_mut().api_key = key;
+        self.refresh_extension_completion_host_state();
+    }
+
+    pub(crate) const fn model_registry(&self) -> Option<&ModelRegistry> {
+        self.model_registry.as_ref()
     }
 
     #[must_use]
@@ -12220,6 +14783,42 @@ impl AgentSession {
         };
         state.provider = self.agent.provider();
         state.stream_options = self.agent.stream_options().clone();
+    }
+
+    fn refresh_extension_compaction_models(&self) {
+        // Only extensions read this state (`ctx.compact` with a `model`), and
+        // building it deep-copies the whole model registry and auth store.
+        // Startup sets both, so a session without extensions paid for two
+        // copies it could never use, several milliseconds of every start.
+        // Installing extensions calls this again, so they still get it.
+        if self.extensions.is_none() {
+            return;
+        }
+        let models = ExtensionCompactionModelState {
+            registry: self.model_registry.clone().map(Arc::new),
+            auth: self.auth_storage.clone().map(Arc::new),
+            js_provider_ids: self.extensions.as_ref().map_or_else(Vec::new, |region| {
+                region
+                    .manager()
+                    .extension_providers()
+                    .iter()
+                    .filter(|spec| {
+                        spec.get("hasStreamSimple")
+                            .and_then(Value::as_bool)
+                            .or_else(|| spec.get("streamSimple").and_then(Value::as_bool))
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|spec| spec.get("id").and_then(Value::as_str).map(str::to_string))
+                    .collect()
+            }),
+        };
+        let Ok(mut state) = self.extension_ai_completion.lock() else {
+            tracing::error!(
+                "extension completion host state mutex poisoned; keeping stale compaction registry"
+            );
+            return;
+        };
+        state.compaction_models = models;
     }
 
     fn set_extension_ai_models(&self, models: Vec<Value>) {
@@ -12266,6 +14865,16 @@ impl AgentSession {
     /// The resolved compaction settings this session was constructed with.
     pub const fn compaction_settings(&self) -> &ResolvedCompactionSettings {
         &self.compaction_settings
+    }
+
+    /// Enable or pause automatic compaction without changing the model's
+    /// context window or the configured summary/token budgets. Disabling it
+    /// also invalidates a summary already running in the background.
+    pub fn set_auto_compaction(&mut self, enabled: bool) {
+        if !enabled {
+            self.invalidate_background_compaction();
+        }
+        self.compaction_settings.enabled = enabled;
     }
 
     pub(crate) fn provider_admission_gate(&self) -> ProviderAdmissionGate {
@@ -12337,9 +14946,10 @@ impl AgentSession {
             None
         } else {
             Some(
-                crate::providers::create_provider(
+                crate::providers::create_provider_with_auth(
                     &entry,
                     self.extensions.as_ref().map(ExtensionRegion::manager),
+                    self.auth_storage.as_ref(),
                 )
                 .map_err(|e| {
                     Error::validation(format!(
@@ -12446,7 +15056,13 @@ impl AgentSession {
             .as_ref()
             .map(|(provider, model_id)| (provider.as_str(), model_id.as_str()))
             != Some((target_provider_id.as_str(), target_model_id.as_str()))
+            || candidate
+                .active_failover_provenance_for_current_path()
+                .is_some()
         {
+            // Explicitly choosing the active fallback makes it the user's
+            // primary. Persist that intent even when its identity is unchanged,
+            // or reopening the session revives the old automatic restoration.
             candidate.append_model_change(target_provider_id.clone(), target_model_id.clone());
         }
         candidate.set_model_header(
@@ -12456,9 +15072,6 @@ impl AgentSession {
         );
         if !previous_thinking.is_some_and(|previous| previous.eq(&next_thinking)) {
             candidate.append_thinking_level_change(next_thinking.to_string());
-        }
-        if runtime_model_changed {
-            self.invalidate_background_compaction();
         }
         let _provider_transition = self
             .provider_admission
@@ -12477,6 +15090,11 @@ impl AgentSession {
             );
             self.quarantine_provider_reentry(reason.clone());
             return Err(Error::session_persistence(reason));
+        }
+        // Only a durable switch retires in-flight background compaction; a
+        // failed save leaves the old model live, so its compaction stays valid.
+        if runtime_model_changed {
+            self.invalidate_background_compaction();
         }
         *session = candidate;
         drop(session);
@@ -12515,8 +15133,10 @@ impl AgentSession {
             .effective_thinking_level_for_current_path()
             .as_deref()
             != Some(level_string.as_str());
-        candidate.set_model_header(None, None, Some(level_string.clone()));
+        // An unchanged level is not saved below, so it must not mutate the
+        // header either: the installed session would diverge from disk.
         if changed {
+            candidate.set_model_header(None, None, Some(level_string.clone()));
             candidate.append_thinking_level_change(level_string);
         }
         let _provider_transition = if changed {
@@ -12550,6 +15170,20 @@ impl AgentSession {
             self.clear_provider_reentry_quarantine();
         }
         Ok(())
+    }
+
+    /// The catalog entry for the model this session is currently running.
+    ///
+    /// `None` when no registry was installed or the running model is not in
+    /// it — an extension-registered or ad-hoc model, say. Callers that need a
+    /// model's declared capabilities (thinking levels, context window) should
+    /// resolve through here rather than re-deriving them, so a session that
+    /// cannot be resolved degrades the same way everywhere.
+    pub fn current_model_entry(&self) -> Option<ModelEntry> {
+        let provider = self.agent.provider();
+        self.model_registry
+            .as_ref()
+            .and_then(|registry| registry.find(provider.name(), provider.model_id()))
     }
 
     pub(crate) fn clamp_thinking_level_for_model(
@@ -12690,6 +15324,24 @@ impl AgentSession {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Whether a background compaction task is currently pending.
+    #[must_use]
+    pub const fn has_pending_background_compaction(&self) -> bool {
+        self.compaction_worker.has_pending()
+    }
+
+    /// Inject a parked background compaction task for testing context-switch invalidation.
+    pub fn park_pending_compaction_for_test(
+        &mut self,
+        runtime_handle: &RuntimeHandle,
+        aborted: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.compaction_worker
+            .park_pending_for_test(runtime_handle, aborted);
+        self.extensions_is_compacting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Strip the failed request's incomplete output so a retry RESUMES the turn
     /// instead of replaying it.
     ///
@@ -12818,6 +15470,424 @@ impl AgentSession {
         self.commit_failover_swap(cx, request, None).await
     }
 
+    /// Walk a fallback chain and install the first entry that is actually
+    /// usable, or report that the chain held nothing.
+    ///
+    /// The walk is bounded by the chain, never by `max_failovers_per_turn`: the
+    /// caller counts committed swaps against that cap. Bounding the cursor by
+    /// the cap let malformed, uncredentialed, unconstructible, current or
+    /// duplicate entries consume the budget and hide a later valid entry
+    /// (bd-oqo03.1). An entry with no usable credential is skipped rather than
+    /// installed — failing over into an auth error is strictly worse than the
+    /// quota error that started this.
+    ///
+    /// Print mode and the RPC server each had this loop, and it is what a third
+    /// surface would otherwise copy: the interactive stacks, where a configured
+    /// chain is currently inert (bd-u2qv4). Classification, chain resolution
+    /// and event emission stay with the caller, because those genuinely differ.
+    pub async fn try_failover(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        attempt: &FailoverSwapAttempt<'_>,
+    ) -> Result<FailoverSwapOutcome> {
+        self.try_failover_swap(cx, attempt, None).await
+    }
+
+    /// Reinstall the primary captured at the first swap, once its cooldown has
+    /// elapsed.
+    ///
+    /// The counterpart to [`Self::try_failover`]: a failover is only half a
+    /// policy if nothing ever goes back. Without this a single 429 pins a
+    /// long-lived session to a fallback model for as long as it runs, which on
+    /// an interactive surface can be hours.
+    ///
+    /// Returns `Ok(None)` when nothing was installed — the cooldown has not
+    /// elapsed, there is no fallback live, the primary no longer resolves, it
+    /// has no usable credential, or (in lenient mode) the caller's record of
+    /// the live model is stale. Every one of those leaves the working fallback
+    /// installed, which is the right outcome: restoring into an auth error or a
+    /// half-written transition is strictly worse than staying on a model that
+    /// works.
+    ///
+    /// Print mode and the RPC server each had their own copy of this, and the
+    /// interactive stacks had none at all (bd-u2qv4, bd-gm481).
+    pub async fn restore_primary(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        request: &PrimaryRestoreRequest<'_>,
+    ) -> Result<Option<RestoredPrimary>> {
+        self.restore_primary_swap(cx, request, None).await
+    }
+
+    /// [`Self::restore_primary`] with RPC's provider-admission gate. The gate
+    /// type is internal, so this stays crate-visible while the plain form above
+    /// is what print mode and any embedder call.
+    pub(crate) async fn restore_primary_swap(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        request: &PrimaryRestoreRequest<'_>,
+        admission: Option<&ProviderAdmissionGate>,
+    ) -> Result<Option<RestoredPrimary>> {
+        self.restore_primary_swap_admitted(cx, request, admission.map(ProviderSwapAdmission::Gate))
+            .await
+    }
+
+    pub(crate) async fn restore_primary_with_authority(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        request: &PrimaryRestoreRequest<'_>,
+        authority: &ProviderTransitionAuthority,
+    ) -> Result<Option<RestoredPrimary>> {
+        self.restore_primary_swap_admitted(
+            cx,
+            request,
+            Some(ProviderSwapAdmission::Held(authority)),
+        )
+        .await
+    }
+
+    async fn restore_primary_swap_admitted(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        request: &PrimaryRestoreRequest<'_>,
+        admission: Option<ProviderSwapAdmission<'_>>,
+    ) -> Result<Option<RestoredPrimary>> {
+        let gate = admission.map(ProviderSwapAdmission::gate);
+        let (active_provider, active_model) = request.active;
+
+        // The runtime must still be on the fallback the caller recorded.
+        let runtime_provider = self.agent.provider();
+        if !crate::provider_metadata::provider_ids_match(runtime_provider.name(), active_provider)
+            || !runtime_provider
+                .model_id()
+                .eq_ignore_ascii_case(active_model)
+        {
+            return Self::refuse_restore(
+                request,
+                gate,
+                format!(
+                    "primary restore invariant failed: runtime {}/{} does not match recorded fallback {active_provider}/{active_model}",
+                    runtime_provider.name(),
+                    runtime_provider.model_id()
+                ),
+            );
+        }
+
+        let session_store = Arc::clone(&self.session);
+        let mut inner = OwnedMutexGuard::lock(session_store, cx)
+            .await
+            .map_err(|err| Error::session(format!("primary restore inner lock failed: {err}")))?;
+        let session_matches_active = inner.effective_model_for_current_path().is_some_and(
+            |(session_provider, session_model)| {
+                crate::provider_metadata::provider_ids_match(&session_provider, active_provider)
+                    && session_model.eq_ignore_ascii_case(active_model)
+            },
+        );
+        if !session_matches_active {
+            return Self::refuse_restore(
+                request,
+                gate,
+                format!(
+                    "primary restore invariant failed: Session path does not match recorded fallback {active_provider}/{active_model}"
+                ),
+            );
+        }
+
+        // Checked here, after the invariants, so a session whose runtime has
+        // drifted is still reported rather than hidden behind a live cooldown.
+        if !request.cooldown_elapsed {
+            return Ok(None);
+        }
+
+        let Some((entry, key)) = Self::resolve_restore_target(request)? else {
+            return Ok(None);
+        };
+        let provider_impl = match crate::providers::create_provider_with_auth(
+            &entry,
+            self.extensions.as_ref().map(ExtensionRegion::manager),
+            Some(request.auth),
+        ) {
+            Ok(provider_impl) => provider_impl,
+            Err(err) if request.strict_invariants => return Err(err),
+            Err(_) => return Ok(None),
+        };
+
+        let to_provider = entry.model.provider.clone();
+        let to_model = entry.model.id.clone();
+        let (mut candidate, target_thinking) =
+            Self::prepare_restore_candidate(&inner, &entry, request.primary);
+
+        let save_enabled = self.save_enabled();
+        if request.invalidate_background_compaction {
+            self.invalidate_background_compaction();
+        }
+        let _provider_transition = match admission {
+            Some(admission) => {
+                admission
+                    .begin_transition(
+                        "primary restore persistence was interrupted before live installation completed"
+                            .to_string(),
+                        cx,
+                    )
+                    .await?
+            }
+            None => None,
+        };
+        if save_enabled
+            && let Err(first_err) = candidate.save().await
+            && let Err(retry_err) = candidate.save().await
+        {
+            // Leave the fallback installed. A half-written restoration is worse
+            // than a working session on the wrong model.
+            let reason = format!(
+                "primary restore persistence remained indeterminate after an idempotent retry: first failure: {first_err}; retry failure: {retry_err}"
+            );
+            if let Some(gate) = gate {
+                gate.block(reason.clone());
+            }
+            if request.strict_invariants {
+                return Err(Error::session_persistence(reason));
+            }
+            return Ok(None);
+        }
+
+        // No fallible operation remains after installing the candidate.
+        *inner = candidate;
+        self.install_restored_entry(&entry, provider_impl, key, target_thinking);
+        if let Some(gate) = gate {
+            gate.clear();
+        }
+        drop(inner);
+        Ok(Some(RestoredPrimary {
+            provider: to_provider,
+            model: to_model,
+        }))
+    }
+
+    /// Resolve the primary to a model entry and a credential, or decline.
+    ///
+    /// `Ok(None)` is the lenient decline; the same conditions are hard errors
+    /// under `strict_invariants`, with the error kinds RPC has always returned
+    /// for them.
+    fn resolve_restore_target(
+        request: &PrimaryRestoreRequest<'_>,
+    ) -> Result<Option<(crate::models::ModelEntry, Option<String>)>> {
+        let primary = request.primary;
+        let Some(entry) = request
+            .available_models
+            .iter()
+            .find(|m| {
+                crate::provider_metadata::provider_ids_match(&m.model.provider, &primary.provider)
+                    && m.model.id.eq_ignore_ascii_case(&primary.model_id)
+            })
+            .cloned()
+            .or_else(|| crate::models::ad_hoc_model_entry(&primary.provider, &primary.model_id))
+        else {
+            if request.strict_invariants {
+                return Err(Error::validation(format!(
+                    "Unable to restore primary provider/model {}/{}",
+                    primary.provider, primary.model_id
+                )));
+            }
+            return Ok(None);
+        };
+
+        let key = crate::models::resolve_model_key(request.cli_api_key, request.auth, &entry);
+        if crate::models::model_requires_configured_credential(&entry) && key.is_none() {
+            // Restoring into an auth error would be strictly worse than staying
+            // on a working fallback.
+            if request.strict_invariants {
+                return Err(Error::auth(format!(
+                    "Missing credentials for primary provider/model {}/{}",
+                    primary.provider, primary.model_id
+                )));
+            }
+            return Ok(None);
+        }
+        Ok(Some((entry, key)))
+    }
+
+    /// Stage the restoration on a private `Session` candidate, so the live
+    /// transcript is untouched unless its persistence succeeds.
+    fn prepare_restore_candidate(
+        inner: &Session,
+        entry: &crate::models::ModelEntry,
+        primary: &crate::failover::FailoverPrimary,
+    ) -> (Session, crate::model::ThinkingLevel) {
+        let to_provider = entry.model.provider.clone();
+        let to_model = entry.model.id.clone();
+        let target_thinking = entry.clamp_thinking_level(primary.requested_thinking_level);
+        let target_thinking_text = target_thinking.to_string();
+        let mut candidate = inner.clone();
+        let thinking_changed = candidate
+            .effective_thinking_level_for_current_path()
+            .as_deref()
+            != Some(target_thinking_text.as_str());
+        candidate.set_model_header(
+            Some(to_provider.clone()),
+            Some(to_model.clone()),
+            Some(target_thinking_text.clone()),
+        );
+        candidate.append_model_change_with_role(
+            to_provider,
+            to_model,
+            Some("primary_restore".to_string()),
+        );
+        if thinking_changed {
+            candidate.append_thinking_level_change(target_thinking_text);
+        }
+        (candidate, target_thinking)
+    }
+
+    /// The infallible half of the transition: no operation here can fail, so
+    /// the live agent can never be left describing a model it is not using.
+    fn install_restored_entry(
+        &mut self,
+        entry: &crate::models::ModelEntry,
+        provider_impl: Arc<dyn Provider>,
+        key: Option<String>,
+        target_thinking: crate::model::ThinkingLevel,
+    ) {
+        self.agent.set_provider(provider_impl);
+        self.agent.set_keyword_max_thinking_level(
+            entry.clamp_thinking_level(crate::model::ThinkingLevel::Max),
+        );
+        self.agent.set_tool_call_dialect(entry.tool_call_dialect());
+        self.agent.set_model_accepts_images(
+            entry
+                .model
+                .input
+                .contains(&crate::provider::InputType::Image),
+        );
+        {
+            let stream_options = self.agent.stream_options_mut();
+            stream_options.api_key = key;
+            stream_options.headers.clone_from(&entry.headers);
+            stream_options.max_tokens = Some(entry.model.max_tokens);
+            stream_options.thinking_level = Some(target_thinking);
+        }
+        self.set_compaction_context_window(context_window_tokens_for_entry(entry));
+        self.refresh_extension_completion_host_state();
+        if let Some(region) = &self.extensions {
+            region.manager().set_current_model(
+                Some(entry.model.provider.clone()),
+                Some(entry.model.id.clone()),
+            );
+        }
+    }
+
+    /// A refused restoration: a hard, admission-blocking failure where the
+    /// caller keeps long-lived state that is now known to be wrong, and a plain
+    /// decline where it does not.
+    fn refuse_restore(
+        request: &PrimaryRestoreRequest<'_>,
+        admission: Option<&ProviderAdmissionGate>,
+        reason: String,
+    ) -> Result<Option<RestoredPrimary>> {
+        if request.strict_invariants {
+            if let Some(gate) = admission {
+                gate.block(reason.clone());
+            }
+            return Err(Error::session_persistence(reason));
+        }
+        Ok(None)
+    }
+
+    /// [`Self::try_failover`] with RPC's provider-admission gate. The gate type
+    /// is internal, so this stays crate-visible while the plain form above is
+    /// what print mode and any embedder call.
+    pub(crate) async fn try_failover_swap(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        attempt: &FailoverSwapAttempt<'_>,
+        admission: Option<&ProviderAdmissionGate>,
+    ) -> Result<FailoverSwapOutcome> {
+        self.try_failover_swap_admitted(cx, attempt, admission.map(ProviderSwapAdmission::Gate))
+            .await
+    }
+
+    pub(crate) async fn try_failover_with_authority(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        attempt: &FailoverSwapAttempt<'_>,
+        authority: &ProviderTransitionAuthority,
+    ) -> Result<FailoverSwapOutcome> {
+        self.try_failover_swap_admitted(cx, attempt, Some(ProviderSwapAdmission::Held(authority)))
+            .await
+    }
+
+    async fn try_failover_swap_admitted(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        attempt: &FailoverSwapAttempt<'_>,
+        admission: Option<ProviderSwapAdmission<'_>>,
+    ) -> Result<FailoverSwapOutcome> {
+        let (from_provider, from_model) = {
+            let provider = self.agent.provider();
+            (provider.name().to_string(), provider.model_id().to_string())
+        };
+        let mut walk = crate::failover::FailoverWalk::new(
+            attempt.chain,
+            attempt.start_position,
+            &from_provider,
+            &from_model,
+        );
+        while let Some((entry_index, spec)) = walk.next_spec() {
+            let next_position = walk.position();
+            let Some(entry) = crate::failover::resolve_chain_spec(spec, attempt.available_models)
+            else {
+                continue;
+            };
+            let api_key =
+                crate::models::resolve_model_key(attempt.cli_api_key, attempt.auth, &entry);
+            if crate::models::model_requires_configured_credential(&entry) && api_key.is_none() {
+                continue;
+            }
+            let Ok(provider) = crate::providers::create_provider_with_auth(
+                &entry,
+                self.extensions.as_ref().map(ExtensionRegion::manager),
+                Some(attempt.auth),
+            ) else {
+                continue;
+            };
+
+            let to_provider = entry.model.provider.clone();
+            let to_model = entry.model.id.clone();
+            let request = FailoverSwapRequest {
+                entry: &entry,
+                api_key,
+                provider,
+                from_provider: &from_provider,
+                from_model: &from_model,
+                class: attempt.class,
+                chain_position: next_position,
+                thinking_level_to_clamp: attempt.thinking_level_to_clamp,
+                require_incomplete_tail: attempt.require_incomplete_tail,
+                primary: attempt.primary,
+                cooldown_secs: attempt.cooldown_secs,
+                lifecycle_id: attempt.lifecycle_id,
+            };
+            let (_, source) = self
+                .commit_failover_swap_admitted(cx, &request, admission)
+                .await?;
+            return Ok(FailoverSwapOutcome {
+                next_position,
+                committed: Some(CommittedFailover {
+                    entry_index,
+                    from_provider,
+                    from_model,
+                    to_provider,
+                    to_model,
+                    source,
+                }),
+            });
+        }
+        Ok(FailoverSwapOutcome {
+            next_position: walk.position(),
+            committed: None,
+        })
+    }
+
     /// The private `Session` candidate a swap would install, plus the message
     /// list and thinking level that go with it.
     ///
@@ -12859,10 +15929,49 @@ impl AgentSession {
                 "attempt": request.chain_position,
             })),
         );
-        candidate.append_model_change_with_role(
+
+        let primary_provider = request
+            .primary
+            .as_ref()
+            .map_or_else(|| request.from_provider.to_string(), |p| p.provider.clone());
+        let primary_model_id = request
+            .primary
+            .as_ref()
+            .map_or_else(|| request.from_model.to_string(), |p| p.model_id.clone());
+        let primary_thinking_level = request
+            .primary
+            .as_ref()
+            .map(|p| p.requested_thinking_level.to_string())
+            .or_else(|| Some(request.thinking_level_to_clamp.to_string()));
+        let cooldown_secs = request.cooldown_secs.unwrap_or(0);
+        let now = chrono::Utc::now();
+        let cooldown_i64 = i64::try_from(cooldown_secs).unwrap_or(i64::MAX);
+        let deadline = now + chrono::Duration::seconds(cooldown_i64);
+        let cooldown_deadline = Some(deadline.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        let lifecycle_id = request.lifecycle_id.map(String::from).or_else(|| {
+            inner
+                .active_failover_provenance_for_current_path()
+                .and_then(|p| p.lifecycle_id.clone())
+                .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
+        });
+
+        let failover_meta = crate::session::ModelChangeFailover {
+            primary_provider,
+            primary_model_id,
+            primary_thinking_level,
+            fallback_provider: to_provider.clone(),
+            fallback_model_id: to_model.clone(),
+            chain_position: Some(request.chain_position),
+            cooldown_deadline,
+            cooldown_secs: Some(cooldown_secs),
+            lifecycle_id,
+        };
+
+        candidate.append_model_change_with_role_and_failover(
             to_provider,
             to_model,
             Some("failover".to_string()),
+            Some(failover_meta),
         );
         if thinking_changed {
             candidate.append_thinking_level_change(target_thinking_text);
@@ -12879,6 +15988,21 @@ impl AgentSession {
         request: &FailoverSwapRequest<'_>,
         admission: Option<&ProviderAdmissionGate>,
     ) -> Result<crate::model::ThinkingLevel> {
+        self.commit_failover_swap_admitted(cx, request, admission.map(ProviderSwapAdmission::Gate))
+            .await
+            .map(|(thinking_level, _)| thinking_level)
+    }
+
+    async fn commit_failover_swap_admitted(
+        &mut self,
+        cx: &crate::agent_cx::AgentCx,
+        request: &FailoverSwapRequest<'_>,
+        admission: Option<ProviderSwapAdmission<'_>>,
+    ) -> Result<(
+        crate::model::ThinkingLevel,
+        Option<crate::failover::FailoverSource>,
+    )> {
+        let gate = admission.map(ProviderSwapAdmission::gate);
         let session_store = Arc::clone(&self.session);
         let mut inner = OwnedMutexGuard::lock(session_store, cx)
             .await
@@ -12892,14 +16016,15 @@ impl AgentSession {
         let save_enabled = self.save_enabled();
         self.invalidate_background_compaction();
         let _provider_transition = match admission {
-            Some(gate) => Some(
-                gate.begin_transition(
-                    "failover Session persistence was interrupted before live installation completed"
-                        .to_string(),
-                    cx,
-                )
-                .await?,
-            ),
+            Some(admission) => {
+                admission
+                    .begin_transition(
+                        "failover Session persistence was interrupted before live installation completed"
+                            .to_string(),
+                        cx,
+                    )
+                    .await?
+            }
             None => None,
         };
         if save_enabled
@@ -12909,12 +16034,15 @@ impl AgentSession {
             let reason = format!(
                 "failover Session persistence remained indeterminate after an idempotent retry: first failure: {first_err}; retry failure: {retry_err}"
             );
-            if let Some(gate) = admission {
+            if let Some(gate) = gate {
                 gate.block(reason.clone());
             }
             return Err(Error::session_persistence(reason));
         }
 
+        // Capture provenance before releasing this lock. Reading it back
+        // afterwards would add a fallible step after a committed transition.
+        let source = crate::failover::FailoverSource::from_session(&candidate);
         // No fallible operation remains after installing the candidate.
         *inner = candidate;
         self.agent.replace_messages(restored_messages);
@@ -12943,10 +16071,10 @@ impl AgentSession {
                 .manager()
                 .set_current_model(Some(to_provider), Some(to_model));
         }
-        if let Some(gate) = admission {
+        if let Some(gate) = gate {
             gate.clear();
         }
-        Ok(target_thinking)
+        Ok((target_thinking, source))
     }
 
     async fn current_compaction_origin(&self) -> Result<CompactionOrigin> {
@@ -13005,7 +16133,17 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<()> {
         self.ensure_provider_reentry_allowed()?;
-        self.compact_synchronous(Arc::new(on_event)).await
+        self.compact_synchronous(Arc::new(on_event), false).await
+    }
+
+    /// OMP `/shake` (bd-cv653.3.18): compact by dropping bulky tool output
+    /// from the older span instead of asking the model for a summary.
+    /// Instant, and no provider request is made.
+    pub async fn shake_now(
+        &mut self,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.compact_synchronous(Arc::new(on_event), true).await
     }
 
     pub async fn execute_extension_command(
@@ -13315,12 +16453,7 @@ impl AgentSession {
             }
 
             let provider = self.agent.provider();
-            let credential = self
-                .agent
-                .stream_options()
-                .api_key
-                .clone()
-                .unwrap_or_default();
+            let stream_options = self.agent.stream_options().clone();
 
             let runtime_handle = match self.compaction_runtime_handle() {
                 Ok(runtime_handle) => runtime_handle,
@@ -13363,8 +16496,9 @@ impl AgentSession {
                 &runtime_handle,
                 prep,
                 provider,
-                credential,
+                stream_options,
                 None,
+                self.agent.compaction_privacy(),
             ) {
                 on_event(AgentEvent::AutoCompactionEnd {
                     result: None,
@@ -13434,7 +16568,7 @@ impl AgentSession {
         });
         let _compacting_guard = AtomicBoolGuard::activate(&self.extensions_is_compacting);
 
-        let result = compaction::compact_local(prep);
+        let result = compaction::compact_local(prep, &self.agent.compaction_privacy());
         let cx = crate::agent_cx::AgentCx::for_current_or_request();
         let provider_admission = match self.provider_admission.acquire(cx.cx()).await {
             Ok(provider_admission) => provider_admission,
@@ -13635,7 +16769,11 @@ impl AgentSession {
 
     /// Run compaction synchronously (inline), blocking until completion.
     #[allow(clippy::too_many_lines)]
-    async fn compact_synchronous(&mut self, on_event: AgentEventHandler) -> Result<()> {
+    async fn compact_synchronous(
+        &mut self,
+        on_event: AgentEventHandler,
+        shake: bool,
+    ) -> Result<()> {
         if !self.compaction_settings.enabled {
             return Ok(());
         }
@@ -13727,12 +16865,7 @@ impl AgentSession {
             }
 
             let provider = self.agent.provider();
-            let credential = self
-                .agent
-                .stream_options()
-                .api_key
-                .clone()
-                .unwrap_or_default();
+            let stream_options = self.agent.stream_options().clone();
 
             self.invalidate_background_compaction();
             let cx = crate::agent_cx::AgentCx::for_current_or_request();
@@ -13757,7 +16890,21 @@ impl AgentSession {
                 });
                 return Err(err);
             }
-            let compaction_result = compaction::compact(prep, provider, &credential, None).await;
+            let compaction_result = if shake {
+                Ok(compaction::compact_shake(
+                    prep,
+                    &self.agent.compaction_privacy(),
+                ))
+            } else {
+                compaction::compact(
+                    prep,
+                    provider,
+                    &stream_options,
+                    None,
+                    &self.agent.compaction_privacy(),
+                )
+                .await
+            };
 
             match compaction_result {
                 Ok(result) => {
@@ -14155,6 +17302,7 @@ impl AgentSession {
         self.agent.extend_tools(wrappers);
         self.agent.extensions = Some(manager.clone());
         self.extensions = Some(ExtensionRegion::new(manager));
+        self.refresh_extension_compaction_models();
         Ok(())
     }
 
@@ -14164,9 +17312,13 @@ impl AgentSession {
             let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
                 .await
                 .map_err(|e| Error::session(e.to_string()))?;
-            session
-                .flush_autosave(AutosaveFlushTrigger::Periodic)
-                .await?;
+            let persist_result = flush_turn_autosave(
+                &mut session,
+                &self.provider_admission,
+                AutosaveFlushTrigger::Periodic,
+            )
+            .await;
+            finish_turn_persistence(&self.provider_admission, Ok(()), persist_result)?;
         }
         Ok(())
     }
@@ -14179,10 +17331,13 @@ impl AgentSession {
         let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
             .await
             .map_err(|e| Error::session(e.to_string()))?;
-        session
-            .flush_autosave(AutosaveFlushTrigger::Periodic)
-            .await?;
-        Ok(())
+        let persist_result = flush_turn_autosave(
+            &mut session,
+            &self.provider_admission,
+            AutosaveFlushTrigger::Periodic,
+        )
+        .await;
+        finish_turn_persistence(&self.provider_admission, Ok(()), persist_result)
     }
 
     pub async fn run_text(
@@ -14198,19 +17353,30 @@ impl AgentSession {
     /// into the next turn via the steering queue. Zero-overhead gate: no
     /// advisor configured → no digest built. Failures are isolated inside
     /// the runtime and never fail the run.
-    async fn maybe_advise_turn(&mut self) {
-        if self.advisor.is_none() {
+    async fn maybe_advise_turn(&mut self, abort: Option<&AbortSignal>) {
+        if abort.is_some_and(AbortSignal::is_aborted) {
             return;
         }
-        let digest = crate::advisor::build_digest(self.agent.messages());
+        let Some(runtime) = self.advisor.as_mut() else {
+            return;
+        };
+        let Ok(digest) = runtime.build_digest_with_agent(&self.agent) else {
+            tracing::info!(
+                event = "pi.advisor.privacy_projection_refused",
+                "Advisor request omitted because the configured privacy policy refused its digest"
+            );
+            return;
+        };
         if digest.is_trivial() {
             return;
         }
         let turn_index = self.agent.messages().len() as u64;
-        let Some(runtime) = self.advisor.as_mut() else {
+        let outcome = runtime
+            .review_turn_with_abort(&digest, turn_index, abort)
+            .await;
+        if abort.is_some_and(AbortSignal::is_aborted) {
             return;
-        };
-        let outcome = runtime.review_turn(&digest, turn_index).await;
+        }
         if std::env::var_os("PI_DEBUG_ADVISOR").is_some() {
             eprintln!(
                 "[advisor] digest tools={} trivial={} outcome={}",
@@ -14247,10 +17413,12 @@ impl AgentSession {
             content: crate::model::UserContent::Text(injection.clone()),
             timestamp: chrono::Utc::now().timestamp_millis(),
         });
-        self.agent.queue_generated_steering(message);
         // Session audit entry (replayable advisor trail).
         let cx = pi::agent_cx::AgentCx::for_request();
         if let Ok(mut inner) = self.session.lock(cx.cx()).await {
+            if abort.is_some_and(AbortSignal::is_aborted) {
+                return;
+            }
             inner.append_custom_entry(
                 "advisor_note".to_string(),
                 Some(serde_json::json!({
@@ -14259,6 +17427,28 @@ impl AgentSession {
                 })),
             );
         }
+        if !abort.is_some_and(AbortSignal::is_aborted) {
+            self.agent.queue_generated_steering(message);
+        }
+    }
+
+    /// Every execution entrypoint reaches this boundary once, after its
+    /// transcript save. Pauses and failed turns retain their existing queue;
+    /// only a durable completion can admit a new advisory provider request.
+    async fn finish_turn_with_advice(
+        &mut self,
+        result: Result<AssistantMessage>,
+        persist_result: Result<()>,
+        abort: Option<&AbortSignal>,
+    ) -> Result<AssistantMessage> {
+        let message = finish_turn_persistence(&self.provider_admission, result, persist_result)?;
+        if !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted)
+            && time_cap_marker(&message).is_none()
+            && !abort.is_some_and(AbortSignal::is_aborted)
+        {
+            self.maybe_advise_turn(abort).await;
+        }
+        Ok(message)
     }
 
     pub async fn run_text_with_abort(
@@ -14267,9 +17457,26 @@ impl AgentSession {
         abort: Option<AbortSignal>,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
+        let mut turn_system_prompt = None;
+        self.run_text_with_abort_capturing_prompt(input, abort, &mut turn_system_prompt, on_event)
+            .await
+    }
+
+    /// Capture the hook-selected base for one logical recovery turn.
+    /// Semantic context and keyword directives are applied later by the agent
+    /// and must not become part of the base reapplied on every attempt.
+    /// Keep this snapshot only until this logical turn completes; continue it
+    /// with [`Self::run_continue_with_abort_and_system_prompt`] after recovery.
+    pub async fn run_text_with_abort_capturing_prompt(
+        &mut self,
+        input: String,
+        abort: Option<AbortSignal>,
+        turn_system_prompt: &mut Option<String>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
         self.ensure_provider_reentry_allowed()?;
-        self.extensions_turn_active.store(true, Ordering::SeqCst);
-        let result = async {
+        let _turn_active = AtomicBoolGuard::activate(&self.extensions_turn_active);
+        async {
             // Consume the one-shot provenance before extension dispatch so a
             // blocked/failed input cannot leak it into the next user turn.
             let keyword_scan_override = self.agent.magic_keyword_scan_override.take();
@@ -14293,39 +17500,26 @@ impl AgentSession {
                     base_system_prompt.as_deref().unwrap_or(""),
                 )
                 .await;
-            if let Some(prompt) = system_prompt {
-                self.agent.set_system_prompt(Some(prompt));
-            } else {
-                self.agent.set_system_prompt(base_system_prompt.clone());
-            }
-            self.agent.magic_keyword_scan_override = keyword_scan_override;
+            *turn_system_prompt = system_prompt.or(base_system_prompt);
+            let prompt_scope = SessionTurnPromptGuard::new(self, turn_system_prompt.clone());
+            prompt_scope.session.agent.magic_keyword_scan_override = keyword_scan_override;
 
             let result = if images.is_empty() {
-                self.run_agent_with_text(text, abort, on_event, custom_messages)
+                prompt_scope
+                    .session
+                    .run_agent_with_text(text, abort, on_event, custom_messages)
                     .await
             } else {
                 let content = Self::build_content_blocks_for_input(&text, &images);
-                self.run_agent_with_content(content, abort, on_event, custom_messages)
+                prompt_scope
+                    .session
+                    .run_agent_with_content(content, abort, on_event, custom_messages)
                     .await
             };
-            // `run_loop_inner` normally consumes this. Clear it here as the
-            // fail-closed fallback when setup/synchronization returns early.
-            let _ = self.agent.magic_keyword_scan_override.take();
-
-            self.agent.set_system_prompt(base_system_prompt);
-            match result {
-                Ok(message) => {
-                    if !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
-                        self.maybe_advise_turn().await;
-                    }
-                    Ok(message)
-                }
-                Err(err) => Err(err),
-            }
+            drop(prompt_scope);
+            result
         }
-        .await;
-        self.extensions_turn_active.store(false, Ordering::SeqCst);
-        result
+        .await
     }
 
     pub async fn run_with_content(
@@ -14343,14 +17537,36 @@ impl AgentSession {
         abort: Option<AbortSignal>,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
+        let mut turn_system_prompt = None;
+        self.run_with_content_with_abort_capturing_prompt(
+            content,
+            abort,
+            &mut turn_system_prompt,
+            on_event,
+        )
+        .await
+    }
+
+    /// Capture the effective turn prompt while admitting native content once.
+    /// Recovery uses the captured prompt without replaying input/start hooks.
+    pub async fn run_with_content_with_abort_capturing_prompt(
+        &mut self,
+        content: Vec<ContentBlock>,
+        abort: Option<AbortSignal>,
+        turn_system_prompt: &mut Option<String>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
         self.ensure_provider_reentry_allowed()?;
-        self.extensions_turn_active.store(true, Ordering::SeqCst);
-        let result = async {
+        let _turn_active = AtomicBoolGuard::activate(&self.extensions_turn_active);
+        async {
             // See the text path above: provenance is one-shot even when an
             // input extension blocks before the Agent loop starts.
             let keyword_scan_override = self.agent.magic_keyword_scan_override.take();
-            let (text, images) = Self::split_content_blocks_for_input(&content);
-            let outcome = self.dispatch_input_event(text, images).await?;
+            Self::validate_user_content_blocks(&content)?;
+            let (original_text, images) = Self::split_content_blocks_for_input(&content);
+            let outcome = self
+                .dispatch_input_event(original_text.clone(), images)
+                .await?;
             let (text, images) = match outcome {
                 InputEventOutcome::Continue { text, images } => (text, images),
                 InputEventOutcome::Block { reason } => {
@@ -14359,6 +17575,9 @@ impl AgentSession {
                 }
             };
 
+            let content_for_agent =
+                Self::merge_input_event_content(content, &original_text, &text, &images);
+            Self::validate_user_content_blocks(&content_for_agent)?;
             let base_system_prompt = self.agent.system_prompt().map(str::to_string);
             let BeforeAgentStartOutcome {
                 messages: custom_messages,
@@ -14370,33 +17589,18 @@ impl AgentSession {
                     base_system_prompt.as_deref().unwrap_or(""),
                 )
                 .await;
-            if let Some(prompt) = system_prompt {
-                self.agent.set_system_prompt(Some(prompt));
-            } else {
-                self.agent.set_system_prompt(base_system_prompt.clone());
-            }
-            self.agent.magic_keyword_scan_override = keyword_scan_override;
+            *turn_system_prompt = system_prompt.or(base_system_prompt);
+            let prompt_scope = SessionTurnPromptGuard::new(self, turn_system_prompt.clone());
+            prompt_scope.session.agent.magic_keyword_scan_override = keyword_scan_override;
 
-            let content_for_agent = Self::build_content_blocks_for_input(&text, &images);
-            let result = self
+            let result = prompt_scope
+                .session
                 .run_agent_with_content(content_for_agent, abort, on_event, custom_messages)
                 .await;
-            let _ = self.agent.magic_keyword_scan_override.take();
-
-            self.agent.set_system_prompt(base_system_prompt);
-            match result {
-                Ok(message) => {
-                    if !matches!(message.stop_reason, StopReason::Error | StopReason::Aborted) {
-                        self.maybe_advise_turn().await;
-                    }
-                    Ok(message)
-                }
-                Err(err) => Err(err),
-            }
+            drop(prompt_scope);
+            result
         }
-        .await;
-        self.extensions_turn_active.store(false, Ordering::SeqCst);
-        result
+        .await
     }
 
     pub async fn revert_last_user_message(&mut self) -> Result<bool> {
@@ -14672,6 +17876,44 @@ impl AgentSession {
         }
     }
 
+    /// Re-project the last matching provenance record for the active provider.
+    /// A model swap can change both its budget and whether the bundle belongs
+    /// in a custom message or the system prompt. Replacing a history entry
+    /// keeps the durable provenance and message count stable across retries.
+    fn prepare_semantic_context_continuation(
+        &self,
+        history: &mut Vec<Message>,
+    ) -> Option<PreparedSemanticContextPrompt> {
+        let prepared = self.prepare_semantic_context_prompt()?;
+        let existing = history.iter().rposition(|message| {
+            matches!(message, Message::Custom(custom)
+            if custom.custom_type == SEMANTIC_CONTEXT_CUSTOM_TYPE
+                && custom.details.as_ref().is_some_and(|details| {
+                    details.get("schema").and_then(Value::as_str)
+                        == Some(SEMANTIC_CONTEXT_PROVENANCE_SCHEMA_V1)
+                        && details.get("bundleRevision").and_then(Value::as_str)
+                            == Some(prepared.revision.as_str())
+                }))
+        });
+        let timestamp = existing
+            .and_then(|index| match &history[index] {
+                Message::Custom(custom) => Some(custom.timestamp),
+                _ => None,
+            })
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        let projected = Self::semantic_context_prompt_messages(&prepared, timestamp)
+            .into_iter()
+            .next()?;
+        if let Some(index) = existing {
+            history[index] = projected;
+        } else {
+            // An explicit continuation can start without an earlier bundle
+            // record. Persist its first representation with the new artifacts.
+            history.push(projected);
+        }
+        Some(prepared)
+    }
+
     fn semantic_context_system_prompt_for_turn(
         base_system_prompt: Option<String>,
         prepared: Option<&PreparedSemanticContextPrompt>,
@@ -14692,6 +17934,25 @@ impl AgentSession {
         }
         prompt.push_str(&prepared.prompt);
         Some(prompt)
+    }
+
+    pub(crate) fn validate_user_content_blocks(blocks: &[ContentBlock]) -> Result<()> {
+        if blocks.is_empty() {
+            return Err(Error::validation(
+                "PI_INPUT_CONTENT: a structured prompt must contain at least one content block",
+            ));
+        }
+        if let Some(index) = blocks.iter().position(|block| {
+            !matches!(
+                block,
+                ContentBlock::Text(_) | ContentBlock::Image(_) | ContentBlock::Media(_)
+            )
+        }) {
+            return Err(Error::validation(format!(
+                "PI_INPUT_CONTENT: user content block {index} must be text, image, or media"
+            )));
+        }
+        Ok(())
     }
 
     fn split_content_blocks_for_input(blocks: &[ContentBlock]) -> (String, Vec<ImageContent>) {
@@ -14723,6 +17984,61 @@ impl AgentSession {
         content
     }
 
+    /// Input hooks edit text and images, not the remaining native media.
+    /// Preserve the original block order when that projection is unchanged.
+    /// A transformed text replaces the old text at its first slot; transformed
+    /// images replace image slots in order, with new extra images at the end.
+    /// Neither operation can silently discard an intervening audio/video block.
+    fn merge_input_event_content(
+        content: Vec<ContentBlock>,
+        original_text: &str,
+        text: &str,
+        images: &[ImageContent],
+    ) -> Vec<ContentBlock> {
+        let text_changed = original_text != text;
+        let images_unchanged = content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::Image(_)))
+            .count()
+            == images.len()
+            && content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Image(image) => Some(image),
+                    _ => None,
+                })
+                .zip(images)
+                .all(|(before, after)| {
+                    before.data == after.data && before.mime_type == after.mime_type
+                });
+        if !text_changed && images_unchanged {
+            return content;
+        }
+
+        let mut replacement_text = (text_changed && !text.trim().is_empty())
+            .then(|| ContentBlock::Text(TextContent::new(text)));
+        let mut replacement_images = images.iter().cloned();
+        let mut result = Vec::with_capacity(content.len());
+        for block in content {
+            match block {
+                ContentBlock::Text(_) if text_changed => {
+                    result.extend(replacement_text.take());
+                }
+                ContentBlock::Image(_) if !images_unchanged => {
+                    result.extend(replacement_images.next().map(ContentBlock::Image));
+                }
+                other => result.push(other),
+            }
+        }
+        if let Some(text) = replacement_text {
+            result.insert(0, text);
+        }
+        if !images_unchanged {
+            result.extend(replacement_images.map(ContentBlock::Image));
+        }
+        result
+    }
+
     fn take_pending_idle_actions(&self) -> Vec<PendingIdleAction> {
         let Ok(mut actions) = self.extensions_pending_idle_actions.lock() else {
             return Vec::new();
@@ -14740,37 +18056,37 @@ impl AgentSession {
             return Ok(());
         }
 
-        let previous_source = self.input_source;
-        self.input_source = InputSource::Extension;
-        let result = async {
-            for action in actions {
-                match action {
-                    PendingIdleAction::CustomMessage(message) => {
-                        let handler = Arc::clone(&on_event);
-                        self.run_custom_message_with_abort(message, abort.clone(), move |event| {
+        let source_scope = SessionInputSourceGuard::new(self, InputSource::Extension);
+        for action in actions {
+            match action {
+                PendingIdleAction::CustomMessage(message) => {
+                    let handler = Arc::clone(&on_event);
+                    source_scope
+                        .session
+                        .run_custom_message_with_abort(message, abort.clone(), move |event| {
                             handler(event);
                         })
                         .await?;
-                    }
-                    PendingIdleAction::UserText(text) => {
-                        let handler = Arc::clone(&on_event);
-                        // Extension-authored user-shaped text is generated
-                        // input. An explicit empty override suppresses the
-                        // normal fallback scan of its provider-visible text.
-                        self.agent
-                            .set_magic_keyword_scan_override(Some(String::new()));
-                        self.run_text_with_abort(text, abort.clone(), move |event| {
+                }
+                PendingIdleAction::UserText(text) => {
+                    let handler = Arc::clone(&on_event);
+                    // Extension-authored user-shaped text is generated
+                    // input. An explicit empty override suppresses the
+                    // normal fallback scan of its provider-visible text.
+                    source_scope
+                        .session
+                        .agent
+                        .set_magic_keyword_scan_override(Some(String::new()));
+                    source_scope
+                        .session
+                        .run_text_with_abort(text, abort.clone(), move |event| {
                             handler(event);
                         })
                         .await?;
-                    }
                 }
             }
-            Ok(())
         }
-        .await;
-        self.input_source = previous_source;
-        result
+        Ok(())
     }
 
     async fn run_custom_message_with_abort(
@@ -14780,31 +18096,19 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         self.ensure_provider_reentry_allowed()?;
-        self.extensions_turn_active.store(true, Ordering::SeqCst);
-        let result = async {
-            let base_system_prompt = self.agent.system_prompt().map(str::to_string);
-            let BeforeAgentStartOutcome {
-                messages: custom_messages,
-                system_prompt,
-            } = self
-                .dispatch_before_agent_start("", &[], base_system_prompt.as_deref().unwrap_or(""))
-                .await;
-            if let Some(prompt) = system_prompt {
-                self.agent.set_system_prompt(Some(prompt));
-            } else {
-                self.agent.set_system_prompt(base_system_prompt.clone());
-            }
-
-            let result = self
-                .run_agent_with_prompt_message(message, abort, on_event, custom_messages)
-                .await;
-
-            self.agent.set_system_prompt(base_system_prompt);
-            result
-        }
-        .await;
-        self.extensions_turn_active.store(false, Ordering::SeqCst);
-        result
+        let _turn_active = AtomicBoolGuard::activate(&self.extensions_turn_active);
+        let base_system_prompt = self.agent.system_prompt().map(str::to_string);
+        let BeforeAgentStartOutcome {
+            messages: custom_messages,
+            system_prompt,
+        } = self
+            .dispatch_before_agent_start("", &[], base_system_prompt.as_deref().unwrap_or(""))
+            .await;
+        let prompt_scope = SessionTurnPromptGuard::new(self, system_prompt.or(base_system_prompt));
+        prompt_scope
+            .session
+            .run_agent_with_prompt_message(message, abort, on_event, custom_messages)
+            .await
     }
 
     async fn run_agent_with_prompt_message(
@@ -14841,7 +18145,13 @@ impl AgentSession {
                 .map_err(|e| Error::session(e.to_string()))?;
             session.append_model_message(prompt_message.clone());
             if self.save_enabled {
-                session.flush_autosave(AutosaveFlushTrigger::Manual).await?;
+                let persist_result = flush_turn_autosave(
+                    &mut session,
+                    &self.provider_admission,
+                    AutosaveFlushTrigger::Manual,
+                )
+                .await;
+                finish_turn_persistence(&self.provider_admission, Ok(()), persist_result)?;
             }
         }
 
@@ -14863,7 +18173,7 @@ impl AgentSession {
         prompts.extend(semantic_context_messages);
         let result = self
             .agent
-            .run_with_messages_with_abort(prompts, abort, move |event| {
+            .run_with_messages_with_abort(prompts, abort.clone(), move |event| {
                 on_event_for_run(event);
             })
             .await;
@@ -14877,7 +18187,8 @@ impl AgentSession {
             .persist_turn_artifacts(start_len + 1, result.is_err(), run_incomplete)
             .await;
 
-        finish_turn_persistence(result, persist_result)
+        self.finish_turn_with_advice(result, persist_result, abort.as_ref())
+            .await
     }
 
     pub(crate) async fn run_agent_with_text(
@@ -14931,7 +18242,13 @@ impl AgentSession {
                 .map_err(|e| Error::session(e.to_string()))?;
             session.append_model_message(user_message.clone());
             if self.save_enabled {
-                session.flush_autosave(AutosaveFlushTrigger::Manual).await?;
+                let persist_result = flush_turn_autosave(
+                    &mut session,
+                    &self.provider_admission,
+                    AutosaveFlushTrigger::Manual,
+                )
+                .await;
+                finish_turn_persistence(&self.provider_admission, Ok(()), persist_result)?;
             }
         }
 
@@ -14945,7 +18262,7 @@ impl AgentSession {
         let on_event_for_run = Arc::clone(&on_event);
         let result = self
             .agent
-            .run_with_messages_with_abort(prompts, abort, move |event| {
+            .run_with_messages_with_abort(prompts, abort.clone(), move |event| {
                 on_event_for_run(event);
             })
             .await;
@@ -14961,7 +18278,8 @@ impl AgentSession {
             .persist_turn_artifacts(start_len + 1, result.is_err(), run_incomplete)
             .await;
 
-        finish_turn_persistence(result, persist_result)
+        self.finish_turn_with_advice(result, persist_result, abort.as_ref())
+            .await
     }
 
     pub(crate) async fn run_agent_with_content(
@@ -15015,7 +18333,13 @@ impl AgentSession {
                 .map_err(|e| Error::session(e.to_string()))?;
             session.append_model_message(user_message.clone());
             if self.save_enabled {
-                session.flush_autosave(AutosaveFlushTrigger::Manual).await?;
+                let persist_result = flush_turn_autosave(
+                    &mut session,
+                    &self.provider_admission,
+                    AutosaveFlushTrigger::Manual,
+                )
+                .await;
+                finish_turn_persistence(&self.provider_admission, Ok(()), persist_result)?;
             }
         }
 
@@ -15029,7 +18353,7 @@ impl AgentSession {
         let on_event_for_run = Arc::clone(&on_event);
         let result = self
             .agent
-            .run_with_messages_with_abort(prompts, abort, move |event| {
+            .run_with_messages_with_abort(prompts, abort.clone(), move |event| {
                 on_event_for_run(event);
             })
             .await;
@@ -15045,7 +18369,8 @@ impl AgentSession {
             .persist_turn_artifacts(start_len + 1, result.is_err(), run_incomplete)
             .await;
 
-        finish_turn_persistence(result, persist_result)
+        self.finish_turn_with_advice(result, persist_result, abort.as_ref())
+            .await
     }
 
     /// Resume the current turn after a transient failure WITHOUT adding a new
@@ -15068,6 +18393,44 @@ impl AgentSession {
             .await
     }
 
+    /// Reuse the first attempt's extension prompt without replaying its hooks.
+    /// The caller owns this snapshot only for the duration of one logical turn.
+    /// The session's ordinary prompt is restored when this attempt ends.
+    pub async fn run_continue_with_abort_and_system_prompt(
+        &mut self,
+        abort: Option<AbortSignal>,
+        turn_system_prompt: Option<&str>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        self.run_continue_with_follow_up_with_abort_and_system_prompt(
+            false,
+            abort,
+            turn_system_prompt,
+            || true,
+            on_event,
+        )
+        .await
+    }
+
+    /// Keep a logical turn's prompt while admitting follow-up input at the
+    /// existing durable continuation boundary. RPC uses this when input was
+    /// queued just as an attempt finished, including after a recovered attempt.
+    pub(crate) async fn run_continue_with_follow_up_with_abort_and_system_prompt(
+        &mut self,
+        follow_up_first: bool,
+        abort: Option<AbortSignal>,
+        turn_system_prompt: Option<&str>,
+        on_ready: impl FnOnce() -> bool + Send + 'static,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        let prompt_scope =
+            SessionTurnPromptGuard::new(self, turn_system_prompt.map(str::to_string));
+        prompt_scope
+            .session
+            .run_continue_with_follow_up_with_abort(follow_up_first, abort, on_ready, on_event)
+            .await
+    }
+
     /// Resume from persisted history and optionally drain the registered
     /// follow-up fetchers before issuing the first provider request.
     pub(crate) async fn run_continue_with_follow_up_with_abort(
@@ -15078,12 +18441,13 @@ impl AgentSession {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
     ) -> Result<AssistantMessage> {
         self.ensure_provider_reentry_allowed()?;
+        let _turn_active = AtomicBoolGuard::activate(&self.extensions_turn_active);
         let on_event: AgentEventHandler = Arc::new(on_event);
         self.sync_runtime_selection_from_session_header().await?;
 
         // Rehydrate the agent transcript from the (already reverted) session
         // path so the resume streams from the last completed state.
-        let history = {
+        let mut history = {
             let cx = crate::agent_cx::AgentCx::for_request();
             let session = self
                 .session
@@ -15092,26 +18456,42 @@ impl AgentSession {
                 .map_err(|e| Error::session(e.to_string()))?;
             session.to_messages_for_current_path()
         };
+        let start_len = history.len();
+        let semantic_context = self.prepare_semantic_context_continuation(&mut history);
         self.agent.replace_messages(history);
-        let start_len = self.agent.messages().len();
+        let system_prompt = Self::semantic_context_system_prompt_for_turn(
+            self.agent.system_prompt().map(str::to_string),
+            semantic_context.as_ref(),
+        );
+        let prompt_scope = SessionTurnPromptGuard::new(self, system_prompt);
 
-        let streaming_guard = AtomicBoolGuard::activate(&self.extensions_is_streaming);
+        let streaming_guard =
+            AtomicBoolGuard::activate(&prompt_scope.session.extensions_is_streaming);
         let on_event_for_run = Arc::clone(&on_event);
         let result = if follow_up_first {
-            self.agent
-                .run_continue_with_follow_up_on_ready_with_abort(abort, on_ready, move |event| {
-                    on_event_for_run(event);
-                })
+            prompt_scope
+                .session
+                .agent
+                .run_continue_with_follow_up_on_ready_with_abort(
+                    abort.clone(),
+                    on_ready,
+                    move |event| {
+                        on_event_for_run(event);
+                    },
+                )
                 .await
         } else {
             on_ready();
-            self.agent
-                .run_continue_with_abort(abort, move |event| {
+            prompt_scope
+                .session
+                .agent
+                .run_continue_with_abort(abort.clone(), move |event| {
                     on_event_for_run(event);
                 })
                 .await
         };
         drop(streaming_guard);
+        drop(prompt_scope);
 
         // Persist any NEW messages generated by the resume, even on error.
         // No user message was added, so nothing to skip: persist from start_len.
@@ -15122,7 +18502,8 @@ impl AgentSession {
             .persist_turn_artifacts(start_len, result.is_err(), run_incomplete)
             .await;
 
-        finish_turn_persistence(result, persist_result)
+        self.finish_turn_with_advice(result, persist_result, abort.as_ref())
+            .await
     }
 
     /// Persist the turn transcript and both audit ledgers under one session
@@ -15166,9 +18547,12 @@ impl AgentSession {
                 session.append_model_message(message);
             }
             if self.save_enabled {
-                session
-                    .flush_autosave(AutosaveFlushTrigger::Periodic)
-                    .await?;
+                flush_turn_autosave(
+                    &mut session,
+                    &self.provider_admission,
+                    AutosaveFlushTrigger::Periodic,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -15578,6 +18962,8 @@ fn log_repair_diagnostics(events: &[crate::extensions_js::ExtensionRepairEvent])
 }
 
 const BLOCK_IMAGES_PLACEHOLDER: &str = "Image reading is disabled.";
+const UNSUPPORTED_IMAGES_PLACEHOLDER: &str =
+    "[Image omitted: the active model does not support image input.]";
 
 #[derive(Debug, Default, Clone, Copy)]
 struct ImageFilterStats {
@@ -15585,10 +18971,55 @@ struct ImageFilterStats {
     affected_messages: usize,
 }
 
-fn filter_images_for_provider(messages: &mut [Message]) -> ImageFilterStats {
+fn apply_image_input_policy(
+    messages: &mut [Message],
+    block_images: bool,
+    model_accepts_images: bool,
+) {
+    let placeholder = if block_images {
+        BLOCK_IMAGES_PLACEHOLDER
+    } else if !model_accepts_images {
+        UNSUPPORTED_IMAGES_PLACEHOLDER
+    } else {
+        return;
+    };
+
+    if !model_accepts_images {
+        // Preserve snapcompact's named degradation and its text-only summary
+        // shape before replacing ordinary images with omission explanations.
+        crate::compaction_snap::strip_snapcompact_images(messages, false);
+    }
+    let stats = filter_images_for_provider(messages, placeholder);
+    if stats.removed_images > 0 {
+        tracing::debug!(
+            filtered_images = stats.removed_images,
+            affected_messages = stats.affected_messages,
+            block_images,
+            model_accepts_images,
+            "Filtered image content from outbound provider context"
+        );
+    }
+}
+
+fn message_has_images(message: &Message) -> bool {
+    let blocks = match message {
+        Message::User(UserMessage {
+            content: UserContent::Blocks(blocks),
+            ..
+        }) => blocks.as_slice(),
+        Message::Assistant(assistant) => assistant.content.as_slice(),
+        Message::ToolResult(result) => result.content.as_slice(),
+        Message::User(_) | Message::Custom(_) => return false,
+    };
+    blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image(_)))
+}
+
+fn filter_images_for_provider(messages: &mut [Message], placeholder: &str) -> ImageFilterStats {
     let mut stats = ImageFilterStats::default();
     for message in messages {
-        let removed = filter_images_from_message(message);
+        let removed = filter_images_from_message(message, placeholder);
         if removed > 0 {
             stats.removed_images += removed;
             stats.affected_messages += 1;
@@ -15597,24 +19028,29 @@ fn filter_images_for_provider(messages: &mut [Message]) -> ImageFilterStats {
     stats
 }
 
-fn filter_images_from_message(message: &mut Message) -> usize {
+fn filter_images_from_message(message: &mut Message, placeholder: &str) -> usize {
+    // Most text-only sessions contain no images. Keep their shared assistant
+    // and tool-result payloads intact instead of deep-cloning every Arc.
+    if !message_has_images(message) {
+        return 0;
+    }
     match message {
         Message::User(user) => match &mut user.content {
             UserContent::Text(_) => 0,
-            UserContent::Blocks(blocks) => filter_image_blocks(blocks),
+            UserContent::Blocks(blocks) => filter_image_blocks(blocks, placeholder),
         },
         Message::Assistant(assistant) => {
             let assistant = Arc::make_mut(assistant);
-            filter_image_blocks(&mut assistant.content)
+            filter_image_blocks(&mut assistant.content, placeholder)
         }
         Message::ToolResult(tool_result) => {
-            filter_image_blocks(&mut Arc::make_mut(tool_result).content)
+            filter_image_blocks(&mut Arc::make_mut(tool_result).content, placeholder)
         }
         Message::Custom(_) => 0,
     }
 }
 
-fn filter_image_blocks(blocks: &mut Vec<ContentBlock>) -> usize {
+fn filter_image_blocks(blocks: &mut Vec<ContentBlock>, placeholder: &str) -> usize {
     let mut removed = 0usize;
     let mut filtered = Vec::with_capacity(blocks.len());
 
@@ -15625,11 +19061,9 @@ fn filter_image_blocks(blocks: &mut Vec<ContentBlock>) -> usize {
                 let previous_is_placeholder =
                     filtered
                         .last()
-                        .is_some_and(|prev| matches!(prev, ContentBlock::Text(TextContent { text, .. }) if text.as_str().eq(BLOCK_IMAGES_PLACEHOLDER)));
+                        .is_some_and(|prev| matches!(prev, ContentBlock::Text(TextContent { text, .. }) if text.as_str().eq(placeholder)));
                 if !previous_is_placeholder {
-                    filtered.push(ContentBlock::Text(TextContent::new(
-                        BLOCK_IMAGES_PLACEHOLDER,
-                    )));
+                    filtered.push(ContentBlock::Text(TextContent::new(placeholder)));
                 }
             }
             other => filtered.push(other),
@@ -15645,6 +19079,43 @@ fn filter_image_blocks(blocks: &mut Vec<ContentBlock>) -> usize {
 const TRUNCATED_TOOL_CALL_ERROR: &str = "Model output truncated before tool call completed (provider stop reason: length); \
      the incomplete tool call was not executed";
 
+/// Validate every call before any peer can reach approval, hooks, or execution.
+/// Streaming ToolCallEnd events are content updates, not execution authority.
+fn terminal_tool_batch_error(message: &AssistantMessage) -> Option<String> {
+    if matches!(
+        message.stop_reason,
+        StopReason::Error | StopReason::Aborted | StopReason::PauseTurn | StopReason::Refusal
+    ) {
+        // Failed or refused turns cannot execute. Paused turns must retain
+        // their signed provider payload verbatim for continuation.
+        return None;
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    for (index, block) in message.content.iter().enumerate() {
+        let ContentBlock::ToolCall(call) = block else {
+            continue;
+        };
+        let detail = if call.id.trim().is_empty() {
+            "tool call ID must not be blank"
+        } else if !ids.insert(call.id.as_str()) {
+            "tool call IDs must be unique within the response"
+        } else if call.name.trim().is_empty() {
+            "tool name must not be blank"
+        } else if !call.arguments.is_object() {
+            "tool arguments must be a JSON object"
+        } else {
+            continue;
+        };
+        // IDs, names, and arguments come from the provider and may contain
+        // secrets. The diagnostic identifies only the field and block index.
+        return Some(format!(
+            "PI_TOOL_CALL_PROTOCOL: invalid tool call at content index {index}: {detail}; local tool batch withheld"
+        ));
+    }
+    None
+}
+
 /// Whether a tool call survived streaming intact enough to execute.
 ///
 /// Two ways a truncated call fails this: an empty `name` (the placeholder
@@ -15659,33 +19130,34 @@ fn is_complete_tool_call(tool_call: &ToolCall) -> bool {
     !tool_call.name.trim().is_empty() && !tool_call.arguments.is_null()
 }
 
-/// Whether `message` represents a response the provider truncated at its token
-/// limit before any tool call finished (#148).
+/// Whether the provider's token limit left an incomplete or missing tool batch.
 ///
-/// `tool_call_started` says a `ToolCall{Start,Delta,End}` event arrived on this
-/// stream; without it, a `Length` stop in the middle of plain prose (no tool
-/// call involved) would be misreported as a failure. It also covers the case
-/// where truncation drops the half-built call from the final message entirely,
-/// leaving nothing in `content` to inspect.
+/// Count distinct indices from `ToolCall{Start,Delta,End}` events so repeated
+/// updates do not invent extra calls. A terminal snapshot can omit an unfinished
+/// call; even if a peer completed, executing it would apply only part of the
+/// batch. Done-only providers have no streamed indices and remain supported.
 ///
-/// Returns `false` when at least one usable tool call survived — that turn still
-/// has work the run loop can execute, so it keeps its provider stop reason.
-fn is_truncated_before_tool_call(message: &AssistantMessage, tool_call_started: bool) -> bool {
+/// Otherwise retain #148's incomplete-only detection. Malformed peers still
+/// present in the snapshot are refused by `terminal_tool_batch_error`.
+fn is_truncated_before_tool_call(
+    message: &AssistantMessage,
+    streamed_tool_call_count: usize,
+) -> bool {
     if message.stop_reason != StopReason::Length {
         return false;
     }
 
-    let mut saw_incomplete = false;
+    let mut final_tool_call_count = 0;
+    let mut has_complete_tool_call = false;
     for block in &message.content {
         if let ContentBlock::ToolCall(tool_call) = block {
-            if is_complete_tool_call(tool_call) {
-                return false;
-            }
-            saw_incomplete = true;
+            final_tool_call_count += 1;
+            has_complete_tool_call |= is_complete_tool_call(tool_call);
         }
     }
 
-    tool_call_started || saw_incomplete
+    final_tool_call_count < streamed_tool_call_count
+        || (!has_complete_tool_call && (streamed_tool_call_count > 0 || final_tool_call_count > 0))
 }
 
 /// Extract tool calls from content blocks.
@@ -16552,6 +20024,588 @@ mod tests {
                 ["prev".to_string(), "hello".to_string()]
             );
         });
+    }
+
+    /// Feed terminal protocol cases through the real Agent loop, then stop so
+    /// a pre-check regression fails on observable tool effects instead of looping.
+    struct TerminalBatchProvider {
+        events: Vec<StreamEvent>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for TerminalBatchProvider {
+        fn name(&self) -> &str {
+            "test-provider"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.events.clone()
+            } else {
+                vec![StreamEvent::Done {
+                    reason: StopReason::Stop,
+                    message: assistant_message("finished"),
+                }]
+            };
+            Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    fn batch_write_call(id: &str, path: &str, content: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            name: "write".to_string(),
+            arguments: json!({"path": path, "content": content}),
+            thought_signature: Some("provider-call-signature".to_string()),
+        }
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    fn invalid_terminal_tool_peer_withholds_the_whole_batch_before_approval() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target.txt");
+            let valid = batch_write_call("valid-call", "target.txt", "changed");
+            let mut invalid = Vec::new();
+            for id in ["", " \t", "valid-call"] {
+                invalid.push(ToolCall {
+                    id: id.to_string(),
+                    ..valid.clone()
+                });
+            }
+            for name in ["", " \n"] {
+                invalid.push(ToolCall {
+                    id: "invalid-peer".to_string(),
+                    name: name.to_string(),
+                    ..valid.clone()
+                });
+            }
+            for arguments in [
+                Value::Null,
+                json!(true),
+                json!(42),
+                json!("private-argument"),
+                json!([]),
+            ] {
+                invalid.push(ToolCall {
+                    id: "invalid-peer".to_string(),
+                    arguments,
+                    ..valid.clone()
+                });
+            }
+
+            for bad in invalid {
+                for reason in [StopReason::Stop, StopReason::ToolUse, StopReason::Length] {
+                    std::fs::write(&target, "original").unwrap();
+                    let mut message = assistant_message("Retain the partial explanation");
+                    message.stop_reason = reason;
+                    message.usage.input = 17;
+                    message.usage.output = 5;
+                    message.usage.total_tokens = 22;
+                    message.content.extend([
+                        ContentBlock::ToolCall(valid.clone()),
+                        ContentBlock::ToolCall(bad.clone()),
+                    ]);
+                    let original_content = serde_json::to_value(&message.content).unwrap();
+                    let provider = Arc::new(TerminalBatchProvider {
+                        events: vec![
+                            StreamEvent::Start {
+                                partial: assistant_message(""),
+                            },
+                            StreamEvent::ToolCallEnd {
+                                content_index: 1,
+                                tool_call: valid.clone(),
+                            },
+                            StreamEvent::Done { reason, message },
+                        ],
+                        calls: std::sync::atomic::AtomicUsize::new(0),
+                    });
+                    let approvals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let observed = Arc::clone(&approvals);
+                    let mut agent = Agent::new(
+                        provider.clone(),
+                        ToolRegistry::new(&["write"], temp.path(), None),
+                        AgentConfig {
+                            tool_approval: Some(Arc::new(move |_| {
+                                observed.fetch_add(1, Ordering::SeqCst);
+                                Box::pin(async { ToolApprovalDecision::Allow })
+                            })),
+                            ..AgentConfig::default()
+                        },
+                    );
+                    let events = Arc::new(StdMutex::new(Vec::new()));
+                    let captured = Arc::clone(&events);
+                    let result = agent
+                        .run("Apply the edits", move |event| {
+                            captured.lock().unwrap().push(event);
+                        })
+                        .await
+                        .unwrap();
+
+                    assert_eq!(result.stop_reason, StopReason::Error, "{reason:?}/{bad:?}");
+                    let error = result.error_message.as_deref().unwrap();
+                    assert!(error.contains("PI_TOOL_CALL_PROTOCOL"));
+                    assert!(!error.contains("private-argument"));
+                    assert_eq!(
+                        serde_json::to_value(&result.content).unwrap(),
+                        original_content
+                    );
+                    assert_eq!(
+                        (
+                            result.usage.input,
+                            result.usage.output,
+                            result.usage.total_tokens
+                        ),
+                        (17, 5, 22)
+                    );
+                    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+                    assert!(
+                        !agent
+                            .messages()
+                            .iter()
+                            .any(|m| matches!(m, Message::ToolResult(_)))
+                    );
+                    let events = events.lock().unwrap();
+                    assert!(
+                        !events
+                            .iter()
+                            .any(|event| matches!(event, AgentEvent::ToolExecutionStart { .. }))
+                    );
+                    let ended = events
+                        .iter()
+                        .find_map(|event| match event {
+                            AgentEvent::MessageEnd {
+                                message: Message::Assistant(message),
+                            } => Some(message),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(ended).unwrap(),
+                        serde_json::to_value(&result).unwrap()
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn valid_parallel_tool_batch_executes_with_stop_tool_use_and_length() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            for reason in [StopReason::Stop, StopReason::ToolUse, StopReason::Length] {
+                let temp = tempfile::tempdir().unwrap();
+                let mut message = assistant_message("Apply both edits");
+                message.stop_reason = reason;
+                message.content.extend([
+                    ContentBlock::ToolCall(batch_write_call("first", "first.txt", "one")),
+                    ContentBlock::ToolCall(batch_write_call("second", "second.txt", "two")),
+                ]);
+                let original = serde_json::to_value(&message).unwrap();
+                let provider = Arc::new(TerminalBatchProvider {
+                    events: vec![StreamEvent::Done { reason, message }],
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let mut agent = Agent::new(
+                    provider.clone(),
+                    ToolRegistry::new(&["write"], temp.path(), None),
+                    AgentConfig::default(),
+                );
+                let result = agent.run("Apply the edits", |_| {}).await.unwrap();
+                assert_eq!(result.stop_reason, StopReason::Stop);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+                assert_eq!(
+                    std::fs::read_to_string(temp.path().join("first.txt")).unwrap(),
+                    "one"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(temp.path().join("second.txt")).unwrap(),
+                    "two"
+                );
+                let Message::Assistant(stored) = &agent.messages()[1] else {
+                    panic!("validated assistant batch stays in history");
+                };
+                assert_eq!(serde_json::to_value(stored).unwrap(), original);
+                let results: Vec<_> = agent
+                    .messages()
+                    .iter()
+                    .filter_map(|message| match message {
+                        Message::ToolResult(result) => {
+                            Some((result.tool_call_id.as_str(), result.is_error))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(results, [("first", false), ("second", false)]);
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn length_tool_batch_withholds_completed_peer_when_another_call_disappears() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            for omit_started_peer in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let target = temp.path().join("target.txt");
+                std::fs::write(&target, "original").unwrap();
+                let completed = batch_write_call("complete", "target.txt", "changed");
+                let mut message = assistant_message("Apply the edits");
+                message.stop_reason = StopReason::Length;
+                message
+                    .content
+                    .push(ContentBlock::ToolCall(completed.clone()));
+                let mut events = vec![StreamEvent::Start {
+                    partial: assistant_message(""),
+                }];
+                // Start, delta, and repeated end updates at the same index
+                // represent one call, not four separate batch members.
+                events.extend([
+                    StreamEvent::ToolCallStart {
+                        content_index: 1,
+                        id: completed.id.clone(),
+                        name: completed.name.clone(),
+                    },
+                    StreamEvent::ToolCallDelta {
+                        content_index: 1,
+                        delta: serde_json::to_string(&completed.arguments).unwrap(),
+                    },
+                    StreamEvent::ToolCallEnd {
+                        content_index: 1,
+                        tool_call: completed.clone(),
+                    },
+                    StreamEvent::ToolCallEnd {
+                        content_index: 1,
+                        tool_call: completed,
+                    },
+                ]);
+                if omit_started_peer {
+                    events.extend([
+                        StreamEvent::ToolCallStart {
+                            content_index: 2,
+                            id: "unfinished".to_string(),
+                            name: "write".to_string(),
+                        },
+                        StreamEvent::ToolCallDelta {
+                            content_index: 2,
+                            delta: "{\"path\":\"other.txt\",\"content\":\"".to_string(),
+                        },
+                    ]);
+                }
+                events.push(StreamEvent::Done {
+                    reason: StopReason::Length,
+                    message,
+                });
+                let provider = Arc::new(TerminalBatchProvider {
+                    events,
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let approvals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let observed = Arc::clone(&approvals);
+                let mut agent = Agent::new(
+                    provider.clone(),
+                    ToolRegistry::new(&["write"], temp.path(), None),
+                    AgentConfig {
+                        tool_approval: Some(Arc::new(move |_| {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            Box::pin(async { ToolApprovalDecision::Allow })
+                        })),
+                        ..AgentConfig::default()
+                    },
+                );
+                let result = agent.run("Apply the edits", |_| {}).await.unwrap();
+                if omit_started_peer {
+                    assert_eq!(result.stop_reason, StopReason::Error);
+                    assert_eq!(
+                        result.error_message.as_deref(),
+                        Some(TRUNCATED_TOOL_CALL_ERROR)
+                    );
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(approvals.load(Ordering::SeqCst), 0);
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+                    assert!(
+                        !agent
+                            .messages()
+                            .iter()
+                            .any(|m| matches!(m, Message::ToolResult(_)))
+                    );
+                } else {
+                    assert_eq!(result.stop_reason, StopReason::Stop);
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+                    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+                    assert_eq!(std::fs::read_to_string(&target).unwrap(), "changed");
+                }
+                assert!(!temp.path().join("other.txt").exists());
+            }
+        });
+    }
+
+    #[test]
+    fn terminal_failure_envelopes_never_execute_stale_success_snapshots() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target.txt");
+            for reason in [StopReason::Error, StopReason::Aborted] {
+                for error_envelope in [false, true] {
+                    let mut message = assistant_message("Partial provider answer");
+                    message.error_message = Some("original provider diagnostic".to_string());
+                    message
+                        .content
+                        .push(ContentBlock::ToolCall(batch_write_call(
+                            "call",
+                            "target.txt",
+                            "must not execute",
+                        )));
+                    let event = if error_envelope {
+                        StreamEvent::Error {
+                            reason,
+                            error: message,
+                        }
+                    } else {
+                        StreamEvent::Done { reason, message }
+                    };
+                    let provider = Arc::new(TerminalBatchProvider {
+                        events: vec![event],
+                        calls: std::sync::atomic::AtomicUsize::new(0),
+                    });
+                    let mut agent = Agent::new(
+                        provider,
+                        ToolRegistry::new(&["write"], temp.path(), None),
+                        AgentConfig::default(),
+                    );
+                    let result = agent.run("Apply the edit", |_| {}).await.unwrap();
+                    assert_eq!(result.stop_reason, reason);
+                    assert_eq!(
+                        result.error_message.as_deref(),
+                        Some("original provider diagnostic")
+                    );
+                    assert!(!target.exists(), "a terminal failure cannot create a file");
+                    assert!(
+                        !agent
+                            .messages()
+                            .iter()
+                            .any(|m| matches!(m, Message::ToolResult(_)))
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn terminal_length_envelope_rejects_a_dropped_incomplete_call() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            for snapshot_reason in [StopReason::Stop, StopReason::ToolUse] {
+                let mut message = assistant_message("Retain the partial explanation");
+                message.stop_reason = snapshot_reason;
+                message.usage.input = 9;
+                message.usage.output = 2;
+                message.usage.total_tokens = 11;
+                let original_content = serde_json::to_value(&message.content).unwrap();
+                let provider = Arc::new(TerminalBatchProvider {
+                    events: vec![
+                        StreamEvent::Start {
+                            partial: assistant_message(""),
+                        },
+                        StreamEvent::ToolCallStart {
+                            content_index: 1,
+                            id: "partial-call".to_string(),
+                            name: "write".to_string(),
+                        },
+                        StreamEvent::ToolCallDelta {
+                            content_index: 1,
+                            delta: "{\"path\":\"target.txt\",\"content\":\"".to_string(),
+                        },
+                        // The provider omits the unfinished call from its
+                        // snapshot while the envelope still reports Length.
+                        StreamEvent::Done {
+                            reason: StopReason::Length,
+                            message,
+                        },
+                    ],
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let temp = tempfile::tempdir().unwrap();
+                let mut agent = Agent::new(
+                    provider.clone(),
+                    ToolRegistry::new(&["write"], temp.path(), None),
+                    AgentConfig::default(),
+                );
+                let result = agent.run("Apply the edit", |_| {}).await.unwrap();
+                assert_eq!(result.stop_reason, StopReason::Error);
+                assert_eq!(
+                    result.error_message.as_deref(),
+                    Some(TRUNCATED_TOOL_CALL_ERROR)
+                );
+                assert_eq!(
+                    serde_json::to_value(&result.content).unwrap(),
+                    original_content
+                );
+                assert_eq!(result.usage.total_tokens, 11);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                assert!(!temp.path().join("target.txt").exists());
+            }
+        });
+    }
+
+    #[test]
+    fn terminal_pause_envelope_continues_signed_calls_without_local_execution() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target.txt");
+            let mut message = assistant_message("The server tool is still working");
+            message
+                .content
+                .push(ContentBlock::ToolCall(batch_write_call(
+                    "server-call",
+                    "target.txt",
+                    "must not execute",
+                )));
+            let original_content = serde_json::to_value(&message.content).unwrap();
+            let provider = Arc::new(TerminalBatchProvider {
+                events: vec![StreamEvent::Done {
+                    reason: StopReason::PauseTurn,
+                    message,
+                }],
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut agent = Agent::new(
+                provider.clone(),
+                ToolRegistry::new(&["write"], temp.path(), None),
+                AgentConfig::default(),
+            );
+            let result = agent.run("Apply the edit", |_| {}).await.unwrap();
+            assert_eq!(result.stop_reason, StopReason::Stop);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+            assert!(
+                !target.exists(),
+                "server tool pauses cannot execute locally"
+            );
+            assert!(
+                !agent
+                    .messages()
+                    .iter()
+                    .any(|m| matches!(m, Message::ToolResult(_)))
+            );
+            let Message::Assistant(stored) = &agent.messages()[1] else {
+                panic!("paused assistant stays in history for continuation");
+            };
+            assert_eq!(stored.stop_reason, StopReason::PauseTurn);
+            assert_eq!(
+                serde_json::to_value(&stored.content).unwrap(),
+                original_content
+            );
+        });
+    }
+
+    #[test]
+    fn terminal_refusal_preserves_provider_details_without_local_execution() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("target.txt");
+            for (snapshot_reason, reason) in [
+                (StopReason::Refusal, StopReason::Refusal),
+                (StopReason::Stop, StopReason::Refusal),
+                (StopReason::Refusal, StopReason::Stop),
+                (StopReason::Refusal, StopReason::PauseTurn),
+            ] {
+                let mut message = assistant_message("Provider declined the request");
+                message.stop_reason = snapshot_reason;
+                message.stop_details = Some(crate::model::StopDetails {
+                    kind: "refusal".to_string(),
+                    category: Some("provider-policy".to_string()),
+                    explanation: Some("original provider explanation".to_string()),
+                });
+                message
+                    .content
+                    .push(ContentBlock::ToolCall(batch_write_call(
+                        "refused-call",
+                        "target.txt",
+                        "must not execute",
+                    )));
+                let mut expected = message.clone();
+                expected.stop_reason = StopReason::Refusal;
+                let provider = Arc::new(TerminalBatchProvider {
+                    events: vec![StreamEvent::Done { reason, message }],
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                });
+                let mut agent = Agent::new(
+                    provider.clone(),
+                    ToolRegistry::new(&["write"], temp.path(), None),
+                    AgentConfig::default(),
+                );
+                let result = agent.run("Apply the edit", |_| {}).await.unwrap();
+                assert_eq!(
+                    serde_json::to_value(&result).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+                assert!(!target.exists(), "refused requests cannot execute locally");
+                assert!(
+                    !agent
+                        .messages()
+                        .iter()
+                        .any(|m| matches!(m, Message::ToolResult(_)))
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn terminal_validation_preserves_failed_aborted_and_signed_pause_payloads() {
+        for reason in [
+            StopReason::Error,
+            StopReason::Aborted,
+            StopReason::PauseTurn,
+            StopReason::Refusal,
+        ] {
+            let mut message = assistant_message("provider explanation");
+            message.stop_reason = reason;
+            message.error_message = Some("original diagnostic".to_string());
+            message.content.extend([
+                ContentBlock::Thinking(ThinkingContent {
+                    thinking: "signed reasoning".to_string(),
+                    thinking_signature: Some("opaque-signature".to_string()),
+                }),
+                ContentBlock::ToolCall(ToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: Value::Null,
+                    thought_signature: Some("opaque-call".to_string()),
+                }),
+            ]);
+            let original = serde_json::to_value(&message).unwrap();
+            let mut agent = Agent::new(
+                Arc::new(SilentProvider),
+                ToolRegistry::from_tools(Vec::new()),
+                AgentConfig::default(),
+            );
+            let on_event: AgentEventHandler = Arc::new(|_| {});
+            let result = agent.finalize_assistant_message(message, &on_event, false);
+            assert_eq!(serde_json::to_value(result).unwrap(), original);
+        }
     }
 
     /// #148: first turn is cut off by the token cap while a tool call is still
@@ -17914,6 +21968,108 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    fn semantic_context_continuation_preserves_bundle_across_provider_shapes_without_duplicate_entries()
+     {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(Box::pin(async {
+            for initial_api in ["gitlab-chat", "test-api"] {
+                let bundle = sample_semantic_context_bundle();
+                let agent = Agent::new(
+                    Arc::new(CapturingProvider::new(initial_api)),
+                    ToolRegistry::from_tools(Vec::new()),
+                    AgentConfig {
+                        system_prompt: Some("base prompt".to_string()),
+                        ..AgentConfig::default()
+                    },
+                );
+                let session = Arc::new(Mutex::new(Session::in_memory()));
+                let mut agent_session = AgentSession::new(
+                    agent,
+                    Arc::clone(&session),
+                    false,
+                    ResolvedCompactionSettings::default(),
+                );
+                agent_session.set_semantic_context_bundle(Some(
+                    SemanticContextBundleInjection::enabled(bundle).with_prompt_budget(4, 2048),
+                ));
+                agent_session
+                    .run_text("first turn".to_string(), |_| {})
+                    .await
+                    .unwrap();
+
+                let semantic_entries = |stored: &Session| {
+                    stored
+                        .to_messages_for_current_path()
+                        .into_iter()
+                        .filter(|message| {
+                            matches!(
+                                message,
+                                Message::Custom(custom)
+                                    if custom.custom_type == SEMANTIC_CONTEXT_CUSTOM_TYPE
+                            )
+                        })
+                        .map(|message| serde_json::to_value(message).unwrap())
+                        .collect::<Vec<_>>()
+                };
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let original = {
+                    let stored = session.lock(cx.cx()).await.unwrap();
+                    semantic_entries(&stored)
+                };
+                assert_eq!(original.len(), 1);
+
+                for target_api in ["bedrock-converse-stream", "test-api", "gitlab-chat"] {
+                    let provider = CapturingProvider::new(target_api);
+                    let calls = provider.calls();
+                    agent_session.agent.set_provider(Arc::new(provider));
+                    agent_session
+                        .run_continue_with_abort_and_system_prompt(
+                            None,
+                            Some("hook-system"),
+                            |_| {},
+                        )
+                        .await
+                        .unwrap();
+                    {
+                        let calls = calls.lock().unwrap();
+                        assert_eq!(calls.len(), 1);
+                        let request = &calls[0];
+                        let system = request.system_prompt.as_deref().unwrap();
+                        assert!(system.starts_with("hook-system"));
+                        let semantic_messages = request
+                            .messages
+                            .iter()
+                            .filter_map(|message| match message {
+                                Message::Custom(custom)
+                                    if custom.custom_type == SEMANTIC_CONTEXT_CUSTOM_TYPE =>
+                                {
+                                    Some(custom)
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if target_api == "test-api" {
+                            assert_eq!(system, "hook-system");
+                            assert_eq!(semantic_messages.len(), 1);
+                            assert!(semantic_messages[0].content.contains("src/agent.rs"));
+                        } else {
+                            assert!(semantic_messages.is_empty());
+                            assert_eq!(system.matches("# Semantic Context Bundle").count(), 1);
+                            assert!(system.contains("src/agent.rs"));
+                        }
+                    }
+                    assert_eq!(agent_session.agent.system_prompt(), Some("base prompt"));
+                    let stored = session.lock(cx.cx()).await.unwrap();
+                    assert_eq!(semantic_entries(&stored), original);
+                }
+            }
+        }));
+    }
+
+    #[test]
     fn enable_extensions_policy_resolution_defaults_to_permissive() {
         let policy = AgentSession::resolve_extension_policy_for_enable(None, None);
         assert_eq!(
@@ -18158,7 +22314,7 @@ mod tests {
             sample_image_block(),
         ];
 
-        let removed = filter_image_blocks(&mut blocks);
+        let removed = filter_image_blocks(&mut blocks, BLOCK_IMAGES_PLACEHOLDER);
 
         assert_eq!(removed, 3);
         assert!(
@@ -18216,7 +22372,7 @@ mod tests {
             }),
         ];
 
-        let stats = filter_images_for_provider(&mut messages);
+        let stats = filter_images_for_provider(&mut messages, BLOCK_IMAGES_PLACEHOLDER);
 
         assert_eq!(stats.removed_images, 3);
         assert_eq!(stats.affected_messages, 3);
@@ -18296,6 +22452,258 @@ mod tests {
         let context = agent.build_context();
         assert_eq!(context.messages.len(), 1);
         assert_eq!(image_count_in_message(&context.messages[0]), 1);
+    }
+
+    #[test]
+    fn model_image_capability_filters_requests_without_losing_history() {
+        let mut assistant = assistant_message("assistant text");
+        assistant.content = vec![
+            ContentBlock::Text(TextContent {
+                text: "signed text".to_string(),
+                text_signature: Some("preserved-signature".to_string()),
+            }),
+            sample_image_block(),
+        ];
+        let media = ContentBlock::Media(crate::model::MediaContent {
+            data: "YXVkaW8=".to_string(),
+            mime_type: "audio/wav".to_string(),
+            name: Some("recording.wav".to_string()),
+        });
+        let original = vec![
+            Message::User(UserMessage {
+                content: UserContent::Blocks(vec![
+                    ContentBlock::Text(TextContent::new("before")),
+                    sample_image_block(),
+                    sample_image_block(),
+                    ContentBlock::Text(TextContent::new("after")),
+                ]),
+                timestamp: 7,
+            }),
+            Message::assistant(assistant),
+            Message::tool_result(ToolResultMessage {
+                tool_call_id: "read-image".to_string(),
+                tool_name: "read".to_string(),
+                content: vec![sample_image_block(), media.clone()],
+                details: Some(json!({"type": "image", "data": "opaque tool metadata"})),
+                is_error: false,
+                timestamp: 11,
+            }),
+            Message::Custom(crate::model::CustomMessage {
+                content: "custom text".to_string(),
+                custom_type: "image-test".to_string(),
+                display: true,
+                details: Some(json!({"type": "image", "data": "opaque custom metadata"})),
+                timestamp: 13,
+            }),
+        ];
+        let original_json = serde_json::to_value(&original).unwrap();
+        let mut agent = Agent::new(
+            Arc::new(SilentProvider),
+            ToolRegistry::from_tools(Vec::new()),
+            AgentConfig::default(),
+        );
+        agent.replace_messages(original);
+        assert_eq!(
+            serde_json::to_value(&agent.build_context().messages).unwrap(),
+            original_json,
+        );
+
+        agent.set_model_accepts_images(false);
+        let context = agent.build_context();
+        assert_eq!(context.messages.len(), 4);
+        assert!(!context.messages.iter().any(message_has_images));
+        let projected = serde_json::to_value(&context.messages).unwrap();
+        assert_eq!(
+            projected[0]["content"],
+            json!([
+                {"type": "text", "text": "before"},
+                {"type": "text", "text": UNSUPPORTED_IMAGES_PLACEHOLDER},
+                {"type": "text", "text": "after"}
+            ]),
+        );
+        assert_eq!(projected[1]["content"][0], original_json[1]["content"][0]);
+        assert_eq!(projected[1]["usage"], original_json[1]["usage"]);
+        assert_eq!(projected[2]["toolCallId"], "read-image");
+        assert_eq!(
+            projected[2]["content"][1],
+            serde_json::to_value(media).unwrap()
+        );
+        assert_eq!(projected[2]["details"], original_json[2]["details"]);
+        assert_eq!(projected[3], original_json[3]);
+        drop(context);
+        assert_eq!(
+            serde_json::to_value(agent.messages()).unwrap(),
+            original_json
+        );
+
+        agent.set_model_accepts_images(true);
+        assert_eq!(
+            serde_json::to_value(&agent.build_context().messages).unwrap(),
+            original_json,
+            "returning to a vision model must restore the original image bytes",
+        );
+    }
+
+    #[test]
+    fn image_policy_keeps_image_free_history_shared() {
+        let assistant = Arc::new(assistant_message("unchanged assistant"));
+        let tool = Arc::new(ToolResultMessage {
+            tool_call_id: "text-tool".to_string(),
+            tool_name: "read".to_string(),
+            content: vec![ContentBlock::Text(TextContent::new(
+                "unchanged tool result",
+            ))],
+            details: None,
+            is_error: false,
+            timestamp: 0,
+        });
+        let mut agent = Agent::new(
+            Arc::new(SilentProvider),
+            ToolRegistry::from_tools(Vec::new()),
+            AgentConfig {
+                model_accepts_images: false,
+                ..AgentConfig::default()
+            },
+        );
+        agent.replace_messages(vec![
+            Message::Assistant(Arc::clone(&assistant)),
+            Message::ToolResult(Arc::clone(&tool)),
+        ]);
+        assert!(matches!(agent.build_context().messages, Cow::Borrowed(_)));
+
+        agent.add_message(Message::User(UserMessage {
+            content: UserContent::Blocks(vec![sample_image_block()]),
+            timestamp: 0,
+        }));
+        let context = agent.build_context();
+        assert!(
+            matches!(&context.messages[0], Message::Assistant(value) if Arc::ptr_eq(value, &assistant))
+        );
+        assert!(
+            matches!(&context.messages[1], Message::ToolResult(value) if Arc::ptr_eq(value, &tool))
+        );
+        assert!(!context.messages.iter().any(message_has_images));
+    }
+
+    #[test]
+    fn bare_provider_switch_does_not_inherit_image_capability() {
+        let mut agent = Agent::new(
+            Arc::new(SilentProvider),
+            ToolRegistry::from_tools(Vec::new()),
+            AgentConfig::default(),
+        );
+        agent.add_message(Message::User(UserMessage {
+            content: UserContent::Blocks(vec![sample_image_block()]),
+            timestamp: 0,
+        }));
+        assert!(
+            agent
+                .build_context()
+                .messages
+                .iter()
+                .any(message_has_images)
+        );
+        agent.set_provider(Arc::new(SilentProvider));
+        assert!(
+            !agent
+                .build_context()
+                .messages
+                .iter()
+                .any(message_has_images)
+        );
+        assert!(agent.messages().iter().any(message_has_images));
+        agent.set_model_accepts_images(true);
+        assert!(
+            agent
+                .build_context()
+                .messages
+                .iter()
+                .any(message_has_images)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn context_hook_images_obey_the_final_provider_image_policy() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let entry_path = temp_dir.path().join("context-image.mjs");
+            std::fs::write(
+                &entry_path,
+                r#"
+                export default function init(pi) {
+                  pi.on("context", async (event) => ({
+                    messages: [...event.messages, {
+                      role: "user",
+                      content: [
+                        { type: "text", text: "context hook reached provider" },
+                        { type: "image", mimeType: "image/png", data: "aGVsbG8=" }
+                      ],
+                      timestamp: 17
+                    }]
+                  }));
+                }
+                "#,
+            )
+            .expect("write extension");
+
+            for (block_images, model_accepts_images, expected_images, placeholder) in [
+                (false, false, 0, Some(UNSUPPORTED_IMAGES_PLACEHOLDER)),
+                (true, true, 0, Some(BLOCK_IMAGES_PLACEHOLDER)),
+                (false, true, 1, None),
+            ] {
+                let provider = CapturingProvider::new("test-api");
+                let calls = provider.calls();
+                let agent = Agent::new(
+                    Arc::new(provider),
+                    ToolRegistry::from_tools(Vec::new()),
+                    AgentConfig {
+                        model_accepts_images,
+                        block_images,
+                        ..AgentConfig::default()
+                    },
+                );
+                let mut session = AgentSession::new(
+                    agent,
+                    Arc::new(Mutex::new(Session::in_memory())),
+                    false,
+                    ResolvedCompactionSettings::default(),
+                );
+                session
+                    .enable_extensions(
+                        &[],
+                        temp_dir.path(),
+                        None,
+                        std::slice::from_ref(&entry_path),
+                    )
+                    .await
+                    .expect("enable context extension");
+                session
+                    .run_text("hello".to_string(), |_| {})
+                    .await
+                    .expect("complete provider turn");
+
+                let recorded = calls.lock().expect("captured requests");
+                assert_eq!(recorded.len(), 1);
+                let messages = &recorded[0].messages;
+                assert_eq!(
+                    messages.iter().map(image_count_in_message).sum::<usize>(),
+                    expected_images,
+                );
+                let projected = serde_json::to_value(messages).unwrap();
+                let injected = projected.as_array().unwrap().last().unwrap();
+                assert_eq!(
+                    injected["content"][0]["text"], "context hook reached provider",
+                    "the extension must actually rewrite the provider context",
+                );
+                if let Some(placeholder) = placeholder {
+                    assert_eq!(injected["content"][1]["text"], placeholder);
+                }
+            }
+        });
     }
 
     #[test]
@@ -18799,6 +23207,8 @@ mod tests {
             let auth_path = dir.path().join("auth.json");
             let auth = AuthStorage::load(auth_path).expect("load auth");
             let mut agent_session = build_switch_test_session(&auth);
+            let model_scope = agent_session.agent.shared_tools().snapshot().model_scope();
+            let original_model = model_scope.current();
 
             {
                 let cx = crate::agent_cx::AgentCx::for_request();
@@ -18820,6 +23230,7 @@ mod tests {
                     .contains("Missing credentials for openai/gpt-4o"),
                 "unexpected error: {err}"
             );
+            assert_eq!(model_scope.current(), original_model);
             assert_eq!(agent_session.agent.provider().name(), "anthropic");
             assert_eq!(
                 agent_session.agent.provider().model_id(),
@@ -18845,6 +23256,7 @@ mod tests {
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build runtime");
+        let handle = runtime.handle();
 
         runtime.block_on(async {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -18863,6 +23275,8 @@ mod tests {
                 },
             );
             let mut agent_session = build_switch_test_session(&auth);
+            let model_scope = agent_session.agent.shared_tools().snapshot().model_scope();
+            let original_model = model_scope.current();
             let blocked_path = dir.path().join("blocked.jsonl");
             std::fs::create_dir_all(&blocked_path).expect("create blocking directory");
             {
@@ -18877,12 +23291,22 @@ mod tests {
             agent_session.save_enabled = true;
             let original_compaction_window =
                 agent_session.compaction_settings().context_window_tokens;
+            agent_session.park_pending_compaction_for_test(&handle, None);
 
             let err = agent_session
                 .set_provider_model("openai", "gpt-4o")
                 .await
                 .expect_err("unwritable model-selection candidate must fail closed");
             assert!(err.is_session_persistence(), "unexpected error: {err}");
+            assert_eq!(
+                model_scope.current(),
+                original_model,
+                "a failed model commit must not retarget delegated work"
+            );
+            assert!(
+                agent_session.has_pending_background_compaction(),
+                "a switch that never became durable must not retire the live model's compaction"
+            );
             assert_eq!(agent_session.agent.provider().name(), "anthropic");
             assert_eq!(
                 agent_session.agent.provider().model_id(),
@@ -18977,6 +23401,61 @@ mod tests {
                         crate::session::SessionEntry::ThinkingLevelChange(_)
                     ))
             );
+        });
+    }
+
+    /// bd-5jfkl: a setter cancelled while its save is in flight. The write may
+    /// still land on the blocking thread, so the durable outcome is unknown;
+    /// the live runtime and live Session must stay as they were and provider
+    /// re-entry must be quarantined rather than silently resumed.
+    #[test]
+    fn set_thinking_level_cancelled_mid_save_quarantines_without_live_mutation() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("build runtime");
+
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let auth = AuthStorage::load(dir.path().join("auth.json")).expect("load auth");
+            let mut agent_session = build_switch_test_session(&auth);
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = agent_session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("session lock");
+                session.session_dir = Some(dir.path().to_path_buf());
+                session.path = Some(dir.path().join("cancelled.jsonl"));
+            }
+            agent_session.save_enabled = true;
+            let original_thinking = agent_session.agent.stream_options().thinking_level;
+
+            {
+                let setter = agent_session.set_thinking_level(crate::model::ThinkingLevel::High);
+                futures::pin_mut!(setter);
+                assert!(
+                    futures::poll!(setter.as_mut()).is_pending(),
+                    "the first poll must park on the blocking save"
+                );
+            }
+
+            assert_eq!(
+                agent_session.agent.stream_options().thinking_level,
+                original_thinking
+            );
+            assert!(
+                agent_session.ensure_provider_reentry_allowed().is_err(),
+                "a cancelled transition must leave provider re-entry quarantined"
+            );
+            let cx = crate::agent_cx::AgentCx::for_request();
+            let session = agent_session
+                .session
+                .lock(cx.cx())
+                .await
+                .expect("session lock after cancellation");
+            assert!(session.header.thinking_level.is_none());
         });
     }
 
@@ -19093,6 +23572,138 @@ mod tests {
     }
 
     #[test]
+    fn tool_model_scope_tracks_provider_swaps_without_changing_captured_selections() {
+        let tools = ToolRegistry::new(&[], Path::new("."), None);
+        let standalone_scope = tools.model_scope();
+        assert!(standalone_scope.current().is_none());
+        let shared = crate::tools::SharedToolRegistry::new(tools);
+        let old_snapshot = shared.snapshot();
+        let mut agent = Agent::with_shared_tools(
+            Arc::new(SilentProvider),
+            shared.clone(),
+            AgentConfig {
+                stream_options: StreamOptions {
+                    api_key: Some("private-parent-credential".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let captured = standalone_scope.current().expect("initial model affinity");
+        assert_eq!(captured.provider, "silent-provider");
+        assert_eq!(captured.model, "test-model");
+
+        let other = Agent::new(
+            Arc::new(SilentProvider),
+            ToolRegistry::from_tools(Vec::new()),
+            AgentConfig::default(),
+        );
+        let fallback = crate::models::ad_hoc_model_entry("openrouter", "vendor/fallback-model")
+            .expect("fallback entry");
+        agent.set_provider(
+            crate::providers::create_provider(&fallback, None).expect("fallback provider"),
+        );
+        let expected = crate::tools::ToolModelSelection {
+            provider: "openrouter".to_string(),
+            model: "vendor/fallback-model".to_string(),
+        };
+        assert_eq!(standalone_scope.current(), Some(expected.clone()));
+        assert_eq!(old_snapshot.model_scope().current(), Some(expected.clone()));
+        assert_eq!(shared.snapshot().model_scope().current(), Some(expected));
+        assert_eq!(captured.provider, "silent-provider");
+        assert_eq!(captured.model, "test-model");
+        assert_eq!(
+            other.shared_tools().snapshot().model_scope().current(),
+            Some(captured.clone()),
+            "another registry must retain its own parent model"
+        );
+
+        agent.set_provider(Arc::new(SilentProvider));
+        assert_eq!(standalone_scope.current(), Some(captured));
+    }
+
+    struct ModelScopeProbeTool {
+        name: &'static str,
+        bindings: StdArc<StdTestMutex<Vec<crate::tools::ToolModelScope>>>,
+    }
+
+    #[async_trait]
+    impl crate::tools::Tool for ModelScopeProbeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn label(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            self.name
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn bind_model_scope(&mut self, scope: crate::tools::ToolModelScope) {
+            self.bindings.lock().unwrap().push(scope);
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _input: serde_json::Value,
+            _on_update: Option<Box<dyn Fn(crate::tools::ToolUpdate) + Send + Sync>>,
+        ) -> Result<crate::tools::ToolOutput> {
+            panic!("model affinity binding must not execute a tool");
+        }
+    }
+
+    #[test]
+    fn newly_mounted_and_replaced_tools_share_the_live_model_scope() {
+        let bindings = StdArc::new(StdTestMutex::new(Vec::new()));
+        let probe = |name| -> Box<dyn crate::tools::Tool> {
+            Box::new(ModelScopeProbeTool {
+                name,
+                bindings: StdArc::clone(&bindings),
+            })
+        };
+        let tools = ToolRegistry::from_tools(vec![probe("initial")]);
+        let mut agent = Agent::new(Arc::new(SilentProvider), tools, AgentConfig::default());
+        let shared = agent.shared_tools();
+        let old_snapshot = shared.snapshot();
+        shared.update(|registry| {
+            registry.push(probe("pushed"));
+            registry.extend(vec![probe("extended")]);
+        });
+
+        let target = crate::models::ad_hoc_model_entry("openai", "next-model").unwrap();
+        agent.set_provider(crate::providers::create_provider(&target, None).unwrap());
+        shared.update(|registry| {
+            registry.push(probe("pushed"));
+            registry.extend(vec![probe("extended"), probe("late")]);
+        });
+
+        assert_eq!(old_snapshot.tools().len(), 1);
+        assert_eq!(shared.snapshot().tools().len(), 4);
+        let bindings = bindings.lock().unwrap();
+        assert_eq!(bindings.len(), 6, "initial, mounted, and replacement tools");
+        for scope in bindings.iter() {
+            assert_eq!(
+                scope.current(),
+                Some(crate::tools::ToolModelSelection {
+                    provider: "openai".to_string(),
+                    model: "next-model".to_string(),
+                })
+            );
+        }
+        agent.set_provider(Arc::new(SilentProvider));
+        for scope in bindings.iter() {
+            assert_eq!(scope.current().unwrap().provider, "silent-provider");
+        }
+    }
+
+    #[test]
     fn set_provider_model_records_model_change_once() {
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
@@ -19116,6 +23727,7 @@ mod tests {
             );
 
             let mut agent_session = build_switch_test_session(&auth);
+            let model_scope = agent_session.agent.shared_tools().snapshot().model_scope();
             agent_session
                 .set_provider_model("openai", "gpt-4o")
                 .await
@@ -19124,6 +23736,13 @@ mod tests {
                 .set_provider_model("openai", "gpt-4o")
                 .await
                 .expect("repeat same model");
+            assert_eq!(
+                model_scope.current(),
+                Some(crate::tools::ToolModelSelection {
+                    provider: "openai".to_string(),
+                    model: "gpt-4o".to_string(),
+                })
+            );
 
             let cx = crate::agent_cx::AgentCx::for_request();
             let session = agent_session
@@ -20346,7 +24965,174 @@ mod tests {
         assert!(full_registry.get("xdev").is_some(), "xdev auto-registered");
     }
 
+    #[test]
+    fn xdev_dispatch_preserves_result_details_without_routing_key_collisions() {
+        let original = json!({
+            "schema": "pi.memory.v1",
+            "memories": [{"id": 7}],
+            "history": {"status": "unavailable", "diagnostic": "CASS_NOT_INSTALLED"},
+            "resultDetails": {"existing": true}
+        });
+        let details = Agent::xdev_dispatch_details("recall", Some(original.clone()));
+        for (key, value) in original.as_object().unwrap() {
+            assert_eq!(details.get(key), Some(value));
+        }
+        assert_eq!(details["dispatchedVia"], "xdev");
+        assert_eq!(details["tool"], "recall");
+
+        for original in [
+            Value::Null,
+            json!(42),
+            json!(["evidence"]),
+            json!("plain metadata"),
+            json!({"tool": "inner-tool", "resultDetails": {"existing": true}}),
+            json!({"dispatchedVia": "original-route", "history": {"status": "completed"}}),
+        ] {
+            let details = Agent::xdev_dispatch_details("recall", Some(original.clone()));
+            assert_eq!(details["resultDetails"], original);
+            assert_eq!(details["dispatchedVia"], "xdev");
+            assert_eq!(details["tool"], "recall");
+        }
+        assert_eq!(
+            Agent::xdev_dispatch_details("recall", None),
+            json!({"dispatchedVia": "xdev", "tool": "recall"})
+        );
+    }
+
     // === Plan mode (bd-cv653.3.5) ===
+
+    fn cass_recall_plan_test_agent(cwd: &Path, through_xdev: bool) -> Agent {
+        let config: crate::config::Config =
+            serde_json::from_value(json!({"memory": {"backend": "cass"}})).unwrap();
+        let mut tools = ToolRegistry::new(&[], cwd, Some(&config));
+        assert!(tools.is_discoverable("recall"));
+        if !through_xdev {
+            tools.mark_promoted("recall");
+        }
+        tools.bind_job_session_resolver(Arc::new(|| {
+            Box::pin(async { Some("cass-plan-owner".to_string()) })
+        }));
+        let store = Arc::new(crate::memory::MemoryStore::open(cwd).unwrap());
+        store
+            .retain(
+                crate::memory::MemoryKind::Fact,
+                "parser fact available while planning",
+                &[],
+                None,
+            )
+            .unwrap();
+        crate::memory::shared::SharedMemoryStore::new(store, "cass-plan-owner")
+            .unwrap()
+            .write("handoff", "exact planning handoff", None)
+            .unwrap();
+        let agent = Agent::new(Arc::new(SilentProvider), tools, AgentConfig::default());
+        agent.plan_state().enter_planning();
+        agent
+    }
+
+    #[test]
+    fn plan_gate_cass_recall_keeps_history_and_malformed_inputs_behind_process_barrier() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            for through_xdev in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let agent = cass_recall_plan_test_agent(root.path(), through_xdev);
+                for input in [
+                    None,
+                    Some(json!({"query": "parser"})),
+                    Some(json!({"query": "parser", "includeHistory": true})),
+                    Some(json!({"query": "parser", "includeHistory": null})),
+                    Some(json!({"query": "parser", "includeHistory": "false"})),
+                    Some(Value::Null),
+                    Some(json!([{"includeHistory": false}])),
+                ] {
+                    let call = if through_xdev {
+                        let mut call = xdev_call("run", Some("recall"), input);
+                        // Outer dispatcher fields cannot suppress the inner
+                        // invocation's process effect or impersonate its scope.
+                        call.arguments["includeHistory"] = json!(false);
+                        call.arguments["scope"] = json!("session");
+                        call
+                    } else {
+                        ToolCall {
+                            id: "cass-blocked".to_string(),
+                            name: "recall".to_string(),
+                            arguments: input.unwrap_or_else(|| json!({})),
+                            thought_signature: None,
+                        }
+                    };
+                    let effects = agent.effects_for_call(&call);
+                    assert!(effects.processes(), "history input: {:?}", call.arguments);
+                    assert!(!agent.plan_state().allows_effects(effects));
+                    // Verify the real gate only after the effect assertions;
+                    // this test never dispatches a CASS search.
+                    let (output, is_error) = agent
+                        .execute_tool_without_hooks(&call, Arc::new(|_| {}))
+                        .await;
+                    assert!(is_error);
+                    let ContentBlock::Text(text) = &output.content[0] else {
+                        panic!("plan gate must return an explanation");
+                    };
+                    assert!(text.text.contains("PLAN_MODE_BLOCKED"));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn plan_gate_allows_local_and_shared_recall_directly_and_through_xdev() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(async {
+            for through_xdev in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let agent = cass_recall_plan_test_agent(root.path(), through_xdev);
+                for (input, expected_text, details_key) in [
+                    (
+                        json!({"query": "parser", "includeHistory": false}),
+                        "parser fact available while planning",
+                        "memories",
+                    ),
+                    (
+                        json!({"scope": "session", "key": "handoff"}),
+                        "exact planning handoff",
+                        "value",
+                    ),
+                    (
+                        json!({"scope": "session", "limit": 1}),
+                        "handoff",
+                        "entries",
+                    ),
+                ] {
+                    let call = if through_xdev {
+                        xdev_call("run", Some("recall"), Some(input))
+                    } else {
+                        ToolCall {
+                            id: "cass-read-only".to_string(),
+                            name: "recall".to_string(),
+                            arguments: input,
+                            thought_signature: None,
+                        }
+                    };
+                    assert_eq!(agent.effects_for_call(&call), ToolEffects::read());
+                    let (output, is_error) = agent
+                        .execute_tool_without_hooks(&call, Arc::new(|_| {}))
+                        .await;
+                    assert!(!is_error, "read-only recall failed: {:?}", output.content);
+                    let ContentBlock::Text(text) = &output.content[0] else {
+                        panic!("recall must return readable results");
+                    };
+                    assert!(text.text.contains(expected_text));
+                    let details = output.details.unwrap();
+                    assert!(details.get(details_key).is_some());
+                    assert!(details.get("history").is_none());
+                    if through_xdev {
+                        assert_eq!(details["dispatchedVia"], "xdev");
+                        assert_eq!(details["tool"], "recall");
+                    }
+                }
+            }
+        });
+    }
 
     #[test]
     fn plan_gate_blocks_mutation_and_allows_reads() {
@@ -20440,6 +25226,56 @@ mod tests {
         });
     }
 
+    /// bd-wfcu7: the github tool declares a process effect, so plan mode must
+    /// refuse it through the real dispatch path before any `gh` is spawned.
+    #[cfg(unix)]
+    #[test]
+    fn plan_gate_refuses_github_before_spawning_gh() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let spawned = temp.path().join("gh-was-spawned");
+            let stub = temp.path().join("gh");
+            std::fs::write(
+                &stub,
+                format!("#!/bin/sh\ntouch '{}'\nprintf '[]'\n", spawned.display()),
+            )
+            .expect("write gh stub");
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod gh stub");
+            let tools = ToolRegistry::from_tools(vec![Box::new(crate::github::GithubTool::new(
+                temp.path(),
+                Some(stub.to_str().expect("utf-8 path")),
+            ))]);
+            let agent = Agent::new(Arc::new(SilentProvider), tools, AgentConfig::default());
+            agent.plan_state().enter_planning();
+
+            let call = ToolCall {
+                id: "gh1".to_string(),
+                name: "github".to_string(),
+                arguments: json!({"op": "run_list", "repo": "o/r"}),
+                thought_signature: None,
+            };
+            let (output, is_error) = agent
+                .execute_tool_without_hooks(&call, Arc::new(|_| {}))
+                .await;
+            assert!(is_error, "github must be blocked while planning");
+            let text = match &output.content[0] {
+                ContentBlock::Text(t) => t.text.clone(),
+                other => panic!("expected text, got {other:?}"),
+            };
+            assert!(text.contains("PLAN_MODE_BLOCKED"), "gate error: {text}");
+            assert!(
+                !spawned.exists(),
+                "plan mode must refuse before gh is spawned"
+            );
+        });
+    }
+
     #[test]
     fn plan_gate_xdev_run_uses_inner_tool_effects() {
         let runtime = RuntimeBuilder::current_thread()
@@ -20524,6 +25360,79 @@ mod tests {
     }
 
     #[test]
+    fn colliding_restored_tool_keys_are_refused_before_approval_and_execution() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let target = temp.path().join("credential.txt");
+            std::fs::write(&target, "original").expect("existing file");
+            let approvals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_approvals = Arc::clone(&approvals);
+            let config = AgentConfig {
+                tool_approval: Some(Arc::new(move |_| {
+                    observed_approvals.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async { ToolApprovalDecision::Allow })
+                })),
+                ..AgentConfig::default()
+            };
+            let tools = ToolRegistry::new(&["write"], temp.path(), None);
+            let mut agent = Agent::new(Arc::new(SilentProvider), tools, config);
+            let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+            let placeholder = agent
+                .secrets_transform_outbound_text(secret)
+                .expect("establish credential mapping");
+            let mut fields = serde_json::Map::new();
+            fields.insert(secret.to_string(), json!("first field"));
+            fields.insert(placeholder.clone(), json!("second field"));
+            let call = ToolCall {
+                id: "ambiguous-write".to_string(),
+                name: "write".to_string(),
+                arguments: json!({
+                    "path": "credential.txt",
+                    "content": placeholder,
+                    "metadata": [Value::Object(fields)],
+                }),
+                thought_signature: None,
+            };
+            let (output, is_error) = agent
+                .execute_tool(
+                    call,
+                    Arc::new(|_| panic!("refused arguments must not reach approval or tools")),
+                    Arc::new(StdMutex::new(TurnLatencyAccumulator::started())),
+                )
+                .await;
+            assert!(is_error && output.is_error);
+            let report = serde_json::to_string(&output).expect("error output");
+            assert!(report.contains("PI_SECRET_JSON_RESTORE_KEY_COLLISION"));
+            assert!(!report.contains(secret));
+            assert_eq!(approvals.load(Ordering::SeqCst), 0);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+
+            // The same real tool and vault remain usable after a rejected call.
+            let (output, is_error) = agent
+                .execute_tool(
+                    ToolCall {
+                        id: "valid-write".to_string(),
+                        name: "write".to_string(),
+                        arguments: json!({
+                            "path": "credential.txt",
+                            "content": placeholder,
+                        }),
+                        thought_signature: None,
+                    },
+                    Arc::new(|_| {}),
+                    Arc::new(StdMutex::new(TurnLatencyAccumulator::started())),
+                )
+                .await;
+            assert!(!is_error && !output.is_error);
+            assert_eq!(approvals.load(Ordering::SeqCst), 1);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), secret);
+        });
+    }
+
+    #[test]
     fn session_state_reset_drops_secret_placeholders_and_plan_gate() {
         let provider = Arc::new(SilentProvider);
         let tools = ToolRegistry::new(&[], Path::new("."), None);
@@ -20535,23 +25444,27 @@ mod tests {
         assert_ne!(placeholder, raw_secret);
         agent.plan_state().enter_planning();
 
-        let before_reset = agent.restore_secrets_inbound(ToolCall {
-            id: "before".to_string(),
-            name: "read".to_string(),
-            arguments: json!({"token": placeholder}),
-            thought_signature: None,
-        });
+        let before_reset = agent
+            .restore_secrets_inbound(ToolCall {
+                id: "before".to_string(),
+                name: "read".to_string(),
+                arguments: json!({"token": placeholder}),
+                thought_signature: None,
+            })
+            .expect("restore source session credential");
         assert_eq!(before_reset.arguments["token"], raw_secret);
 
         agent.reset_session_scoped_state(crate::plan::PlanMode::Off);
 
         assert_eq!(agent.plan_state().mode(), crate::plan::PlanMode::Off);
-        let after_reset = agent.restore_secrets_inbound(ToolCall {
-            id: "after".to_string(),
-            name: "read".to_string(),
-            arguments: json!({"token": placeholder}),
-            thought_signature: None,
-        });
+        let after_reset = agent
+            .restore_secrets_inbound(ToolCall {
+                id: "after".to_string(),
+                name: "read".to_string(),
+                arguments: json!({"token": placeholder}),
+                thought_signature: None,
+            })
+            .expect("unknown placeholder remains literal");
         assert_eq!(after_reset.arguments["token"], placeholder);
         assert_eq!(agent.mask_secrets_text(raw_secret), raw_secret);
     }
@@ -21239,6 +26152,465 @@ mod tests {
         }
     }
 
+    struct AdvisorLifecycleDoer {
+        replies: StdMutex<VecDeque<Result<AssistantMessage>>>,
+        calls: std::sync::atomic::AtomicUsize,
+        session: Arc<Mutex<Session>>,
+        fail_save_at_completion: StdMutex<Option<PathBuf>>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for AdvisorLifecycleDoer {
+        fn name(&self) -> &str {
+            "doer"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "doer-model"
+        }
+
+        async fn stream(
+            &self,
+            _context: &Context<'_>,
+            _options: &StreamOptions,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let reply = self
+                .replies
+                .lock()
+                .expect("scripted doer replies") // ubs:ignore[rust.panic.expect] -- Fixture synchronization failure invalidates the regression.
+                .pop_front()
+                .expect("unexpected doer request")?; // ubs:ignore[rust.panic.expect] -- An extra request is the regression under test.
+            let blocked_path = self
+                .fail_save_at_completion
+                .lock()
+                .expect("save failure injection") // ubs:ignore[rust.panic.expect] -- The fixture must retain its one explicit fault.
+                .clone();
+            if reply.stop_reason == StopReason::Stop
+                && let Some(path) = blocked_path
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut session = OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx())
+                    .await
+                    .map_err(|error| Error::session(error.to_string()))?;
+                session.path = Some(path);
+            }
+            Ok(Box::pin(futures::stream::iter([Ok(StreamEvent::Done {
+                reason: reply.stop_reason,
+                message: reply,
+            })])))
+        }
+    }
+
+    struct AdvisorLifecycleReview {
+        calls: std::sync::atomic::AtomicUsize,
+        session: Arc<Mutex<Session>>,
+        observed_durable_completion: AtomicBool,
+        abort_on_call: Option<AbortHandle>,
+    }
+
+    #[async_trait]
+    #[allow(clippy::unnecessary_literal_bound)]
+    impl Provider for AdvisorLifecycleReview {
+        fn name(&self) -> &str {
+            "advisor"
+        }
+
+        fn api(&self) -> &str {
+            "test-api"
+        }
+
+        fn model_id(&self) -> &str {
+            "advisor-model"
+        }
+
+        async fn stream(
+            &self,
+            context: &Context<'_>,
+            options: &StreamOptions,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let path = {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let session = self
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .map_err(|error| Error::session(error.to_string()))?;
+                session
+                    .path
+                    .clone()
+                    .ok_or_else(|| Error::session("advisor ran before the first save"))?
+            };
+            let reopened = Session::open(path.to_string_lossy().as_ref()).await?;
+            self.observed_durable_completion.store(
+                reopened
+                    .to_messages_for_current_path()
+                    .iter()
+                    .any(|message| {
+                        matches!(
+                            message,
+                            Message::Assistant(assistant)
+                                if assistant.stop_reason == StopReason::Stop
+                                    && assistant_text_content(&assistant.content)
+                                        == "durable doer completion"
+                        )
+                    }),
+                Ordering::SeqCst,
+            );
+            if let Some(handle) = &self.abort_on_call {
+                handle.abort();
+            }
+            ScriptedAdvisorProvider.stream(context, options).await
+        }
+    }
+
+    fn advisor_lifecycle_reply(stop_reason: StopReason) -> AssistantMessage {
+        AssistantMessage {
+            content: vec![ContentBlock::Text(TextContent::new(
+                "durable doer completion",
+            ))],
+            api: "test-api".to_string(),
+            provider: "doer".to_string(),
+            model: "doer-model".to_string(),
+            stop_reason,
+            error_message: (stop_reason == StopReason::Error)
+                .then(|| "temporary provider failure".to_string()),
+            ..AssistantMessage::default()
+        }
+    }
+
+    fn advisor_lifecycle_tool_call() -> AssistantMessage {
+        AssistantMessage {
+            content: vec![ContentBlock::ToolCall(ToolCall {
+                id: "advisor-read".to_string(),
+                name: "read".to_string(),
+                arguments: json!({"path": "fixture.txt"}),
+                thought_signature: None,
+            })],
+            ..advisor_lifecycle_reply(StopReason::ToolUse)
+        }
+    }
+
+    fn advisor_lifecycle_session(
+        root: &Path,
+        replies: Vec<Result<AssistantMessage>>,
+        abort_on_review: Option<AbortHandle>,
+    ) -> (
+        AgentSession,
+        Arc<AdvisorLifecycleDoer>,
+        Arc<AdvisorLifecycleReview>,
+    ) {
+        std::fs::write(root.join("fixture.txt"), "fixture content").expect("write read fixture"); // ubs:ignore[rust.panic.expect] -- Real read-tool execution establishes a substantial turn.
+        let session = Arc::new(Mutex::new(Session::create_with_dir(Some(
+            root.join("sessions"),
+        ))));
+        let doer = Arc::new(AdvisorLifecycleDoer {
+            replies: StdMutex::new(replies.into()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            session: Arc::clone(&session),
+            fail_save_at_completion: StdMutex::new(None),
+        });
+        let advisor = Arc::new(AdvisorLifecycleReview {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            session: Arc::clone(&session),
+            observed_durable_completion: AtomicBool::new(false),
+            abort_on_call: abort_on_review,
+        });
+        let mut agent_session = AgentSession::new(
+            Agent::new(
+                doer.clone(),
+                ToolRegistry::new(&["read"], root, None),
+                AgentConfig::default(),
+            ),
+            session,
+            true,
+            ResolvedCompactionSettings {
+                enabled: false,
+                ..ResolvedCompactionSettings::default()
+            },
+        );
+        agent_session.advisor = Some(crate::advisor::AdvisorRuntime::new(
+            advisor.clone(),
+            "advisor/advisor-model".to_string(),
+        ));
+        (agent_session, doer, advisor)
+    }
+
+    #[test]
+    fn every_session_entrypoint_reviews_once_after_the_completed_turn_is_durable() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build"); // ubs:ignore[rust.panic.expect] -- Each path exercises real AgentSession execution and persistence.
+        runtime.block_on(async {
+            for entrypoint in ["text", "content", "custom", "continue"] {
+                let temp = tempfile::tempdir().expect("tempdir"); // ubs:ignore[rust.panic.expect] -- Isolated durable session and read-tool fixture.
+                let (mut session, doer, advisor) = advisor_lifecycle_session(
+                    temp.path(),
+                    vec![
+                        Ok(advisor_lifecycle_tool_call()),
+                        Ok(advisor_lifecycle_reply(StopReason::Stop)),
+                    ],
+                    None,
+                );
+                if entrypoint == "continue" {
+                    let cx = crate::agent_cx::AgentCx::for_request();
+                    session
+                        .session
+                        .lock(cx.cx())
+                        .await
+                        .expect("seed continuation") // ubs:ignore[rust.panic.expect] -- A continuation must start from an authored persisted-path input.
+                        .append_model_message(user_message("check the fixture"));
+                }
+                let ends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let captured_ends = Arc::clone(&ends);
+                let on_event = move |event| {
+                    if matches!(event, AgentEvent::AgentEnd { .. }) {
+                        captured_ends.fetch_add(1, Ordering::SeqCst);
+                    }
+                };
+                let result = match entrypoint {
+                    "text" => {
+                        session
+                            .run_text("check the fixture".to_string(), on_event)
+                            .await
+                    }
+                    "content" => {
+                        session
+                            .run_with_content(
+                                vec![ContentBlock::Text(TextContent::new("check the fixture"))],
+                                on_event,
+                            )
+                            .await
+                    }
+                    "custom" => {
+                        session
+                            .run_custom_message_with_abort(
+                                Message::Custom(CustomMessage {
+                                    content: "check the fixture".to_string(),
+                                    custom_type: "extension-task".to_string(),
+                                    display: true,
+                                    details: None,
+                                    timestamp: Utc::now().timestamp_millis(),
+                                }),
+                                None,
+                                on_event,
+                            )
+                            .await
+                    }
+                    _ => session.run_continue_with_abort(None, on_event).await,
+                }
+                .expect("completed session turn"); // ubs:ignore[rust.panic.expect] -- All four actual execution entrypoints must complete.
+                assert_eq!(result.stop_reason, StopReason::Stop, "{entrypoint}"); // ubs:ignore[rust.panic.assert-macros] -- The primary result remains unchanged by optional review.
+                assert_eq!(doer.calls.load(Ordering::SeqCst), 2, "{entrypoint}"); // ubs:ignore[rust.panic.assert-macros] -- Advice is queued for a later explicit turn.
+                assert_eq!(advisor.calls.load(Ordering::SeqCst), 1, "{entrypoint}"); // ubs:ignore[rust.panic.assert-macros] -- Nested wrappers must neither omit nor duplicate review.
+                assert!(
+                    advisor.observed_durable_completion.load(Ordering::SeqCst),
+                    "{entrypoint}"
+                ); // ubs:ignore[rust.panic.assert-macros] -- Independent disk reopen at provider admission sees the completed doer reply.
+                assert_eq!(ends.load(Ordering::SeqCst), 1, "{entrypoint}"); // ubs:ignore[rust.panic.assert-macros] -- Advisory work adds no extra agent terminal.
+                assert_eq!(
+                    session.agent.message_queue.steering.len(),
+                    1,
+                    "{entrypoint}"
+                ); // ubs:ignore[rust.panic.assert-macros] -- Exactly one generated concern awaits the next turn.
+                assert!(
+                    !session.extensions_turn_active.load(Ordering::SeqCst),
+                    "{entrypoint}"
+                ); // ubs:ignore[rust.panic.assert-macros] -- Completion releases turn ownership on every path.
+            }
+        });
+    }
+
+    #[test]
+    fn advisor_reviews_recovered_tool_work_once_without_reexecuting_it() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build"); // ubs:ignore[rust.panic.expect] -- Exercise the same continuation path used by provider retry.
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().expect("tempdir"); // ubs:ignore[rust.panic.expect] -- Durable retry fixture.
+            let (mut session, doer, advisor) = advisor_lifecycle_session(
+                temp.path(),
+                vec![
+                    Ok(advisor_lifecycle_tool_call()),
+                    Ok(advisor_lifecycle_reply(StopReason::Error)),
+                    Ok(advisor_lifecycle_reply(StopReason::Stop)),
+                ],
+                None,
+            );
+            let tool_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_tools = Arc::clone(&tool_starts);
+            let failed = session
+                .run_text("check the fixture".to_string(), move |event| {
+                    if matches!(event, AgentEvent::ToolExecutionStart { .. }) {
+                        observed_tools.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .await
+                .expect("provider terminal is returned"); // ubs:ignore[rust.panic.expect] -- The scripted failure is a completed Error terminal.
+            assert_eq!(failed.stop_reason, StopReason::Error); // ubs:ignore[rust.panic.assert-macros] -- Review must be withheld for the failed first attempt.
+            assert_eq!(advisor.calls.load(Ordering::SeqCst), 0); // ubs:ignore[rust.panic.assert-macros] -- Substantial but failed work never starts review.
+            assert!(
+                session
+                    .revert_incomplete_response()
+                    .await
+                    .expect("revert failed tail")
+            ); // ubs:ignore[rust.panic.assert-macros,rust.panic.expect] -- Retry restores the real incomplete assistant tail.
+            let observed_tools = Arc::clone(&tool_starts);
+            let recovered = session
+                .run_continue_with_abort(None, move |event| {
+                    if matches!(event, AgentEvent::ToolExecutionStart { .. }) {
+                        observed_tools.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+                .await
+                .expect("retry completion"); // ubs:ignore[rust.panic.expect] -- The successful retry must reach the shared review boundary.
+            assert_eq!(recovered.stop_reason, StopReason::Stop); // ubs:ignore[rust.panic.assert-macros] -- Recovery returns the durable final reply.
+            assert_eq!(doer.calls.load(Ordering::SeqCst), 3); // ubs:ignore[rust.panic.assert-macros] -- One tool request, one failed request, and one resumed request.
+            assert_eq!(tool_starts.load(Ordering::SeqCst), 1); // ubs:ignore[rust.panic.assert-macros] -- Completed tool effects are never replayed for review.
+            assert_eq!(advisor.calls.load(Ordering::SeqCst), 1); // ubs:ignore[rust.panic.assert-macros] -- Only the recovered completion is reviewed.
+            assert!(advisor.observed_durable_completion.load(Ordering::SeqCst)); // ubs:ignore[rust.panic.assert-macros] -- Recovered reply is durable before the advisor sees it.
+            assert_eq!(session.agent.message_queue.steering.len(), 1); // ubs:ignore[rust.panic.assert-macros] -- Recovery publishes one concern.
+        });
+    }
+
+    #[test]
+    fn durable_time_cap_skips_nontrivial_advice_until_explicit_continuation() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build"); // ubs:ignore[rust.panic.expect] -- Exercise the actual zero-budget core boundary.
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().expect("tempdir"); // ubs:ignore[rust.panic.expect] -- The capped conversation must survive an independent reopen.
+            let (mut session, doer, advisor) = advisor_lifecycle_session(
+                temp.path(),
+                vec![Ok(advisor_lifecycle_reply(StopReason::Stop))],
+                None,
+            );
+            {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let mut inner = session.session.lock(cx.cx()).await.expect("seed tool work"); // ubs:ignore[rust.panic.expect] -- A completed tool cycle makes this digest nontrivial even at a zero cap.
+                inner.append_model_message(user_message("check the fixture"));
+                inner.append_model_message(Message::assistant(advisor_lifecycle_tool_call()));
+                inner.append_model_message(Message::tool_result(ToolResultMessage {
+                    tool_call_id: "advisor-read".to_string(),
+                    tool_name: "read".to_string(),
+                    content: vec![ContentBlock::Text(TextContent::new("fixture content"))],
+                    details: None,
+                    is_error: false,
+                    timestamp: Utc::now().timestamp_millis(),
+                }));
+            }
+            session.agent.config.max_time = Some(Duration::ZERO);
+            let capped = session
+                .run_continue_with_abort(None, |_| {})
+                .await
+                .expect("durable capped turn"); // ubs:ignore[rust.panic.expect] -- The real cap is a successful bounded terminal.
+            assert!(time_cap_marker(&capped).is_some()); // ubs:ignore[rust.panic.assert-macros] -- The test must reach the exact synthetic time-cap path.
+            assert!(!crate::advisor::build_digest(session.agent.messages()).is_trivial()); // ubs:ignore[rust.panic.assert-macros] -- Zero calls must result from the cap gate rather than trivial-digest suppression.
+            assert_eq!(doer.calls.load(Ordering::SeqCst), 0); // ubs:ignore[rust.panic.assert-macros] -- Exhausted budget admits no primary provider request.
+            assert_eq!(advisor.calls.load(Ordering::SeqCst), 0); // ubs:ignore[rust.panic.assert-macros] -- Exhausted budget also admits no optional review.
+            assert!(session.agent.message_queue.steering.is_empty()); // ubs:ignore[rust.panic.assert-macros] -- A pause cannot create new generated work.
+            let path = {
+                let cx = crate::agent_cx::AgentCx::for_request();
+                session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("saved cap path") // ubs:ignore[rust.panic.expect] -- Capture the authoritative file after completed persistence.
+                    .path
+                    .clone()
+                    .expect("durable session path") // ubs:ignore[rust.panic.expect] -- Saving the cap must materialize a session file.
+            };
+            let reopened = Session::open(path.to_string_lossy().as_ref())
+                .await
+                .expect("reopen capped session"); // ubs:ignore[rust.panic.expect] -- Assert durable output rather than only the in-memory result.
+            assert!(reopened.to_messages_for_current_path().iter().any(
+                |message| matches!( // ubs:ignore[rust.panic.assert-macros] -- The exact bounded terminal must survive reopen.
+                    message, Message::Assistant(assistant) if time_cap_marker(assistant).is_some()
+                )
+            ));
+            session.agent.config.max_time = None;
+            session
+                .run_continue_with_abort(None, |_| {})
+                .await
+                .expect("explicit continuation"); // ubs:ignore[rust.panic.expect] -- A subsequent authorized turn may complete the paused work.
+            assert_eq!(doer.calls.load(Ordering::SeqCst), 1); // ubs:ignore[rust.panic.assert-macros] -- Only explicit continuation enters the primary provider.
+            assert_eq!(advisor.calls.load(Ordering::SeqCst), 1); // ubs:ignore[rust.panic.assert-macros] -- Review resumes after a fresh durable completion.
+            assert!(advisor.observed_durable_completion.load(Ordering::SeqCst)); // ubs:ignore[rust.panic.assert-macros] -- The new completed reply is saved before review.
+        });
+    }
+
+    #[test]
+    fn advisor_omits_aborted_unsaved_and_cancelled_completions() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build"); // ubs:ignore[rust.panic.expect] -- All cases use the real session completion boundary.
+        runtime.block_on(async {
+            for case in ["aborted", "save_failed", "late_abort", "advisor_abort"] {
+                let temp = tempfile::tempdir().expect("tempdir"); // ubs:ignore[rust.panic.expect] -- Each fault owns a separate durable session.
+                let (handle, signal) = AbortHandle::new();
+                let (mut session, doer, advisor) = advisor_lifecycle_session(
+                    temp.path(),
+                    vec![
+                        Ok(advisor_lifecycle_tool_call()),
+                        Ok(advisor_lifecycle_reply(if case == "aborted" {
+                            StopReason::Aborted
+                        } else {
+                            StopReason::Stop
+                        })),
+                    ],
+                    (case == "advisor_abort").then(|| handle.clone()),
+                );
+                if case == "save_failed" {
+                    let blocked_path = temp.path().join("blocked.jsonl");
+                    std::fs::create_dir(&blocked_path).expect("block terminal save"); // ubs:ignore[rust.panic.expect] -- A directory at the final file path creates a real save failure.
+                    *doer
+                        .fail_save_at_completion
+                        .lock()
+                        .expect("inject save failure") // ubs:ignore[rust.panic.expect] -- Install the failure after the initial authored input is saved.
+                        = Some(blocked_path);
+                }
+                let result = session
+                    .run_text_with_abort(
+                        "check the fixture".to_string(),
+                        Some(signal),
+                        move |event| {
+                            if case == "late_abort"
+                                && matches!(event, AgentEvent::AgentEnd { .. })
+                            {
+                                handle.abort();
+                            }
+                        },
+                    )
+                    .await;
+                if case == "save_failed" {
+                    assert!(result.is_err()); // ubs:ignore[rust.panic.assert-macros] -- A failed durable completion cannot report success.
+                    assert!(session.ensure_provider_reentry_allowed().is_err()); // ubs:ignore[rust.panic.assert-macros] -- The existing persistence fence remains installed.
+                } else {
+                    let reply = result.expect("primary terminal remains available"); // ubs:ignore[rust.panic.expect] -- Optional review cancellation does not rewrite a completed main turn.
+                    assert_eq!(reply.stop_reason, if case == "aborted" { StopReason::Aborted } else { StopReason::Stop }); // ubs:ignore[rust.panic.assert-macros] -- Main-turn outcomes retain their original meaning.
+                }
+                assert_eq!(doer.calls.load(Ordering::SeqCst), 2, "{case}"); // ubs:ignore[rust.panic.assert-macros] -- Every fault occurs after substantive tool work.
+                assert_eq!(advisor.calls.load(Ordering::SeqCst), usize::from(case == "advisor_abort"), "{case}"); // ubs:ignore[rust.panic.assert-macros] -- Only the deliberate in-review cancellation case enters the advisor.
+                assert!(session.agent.message_queue.steering.is_empty(), "{case}"); // ubs:ignore[rust.panic.assert-macros] -- No cancelled or failed completion injects a late concern.
+                let cx = crate::agent_cx::AgentCx::for_request();
+                let inner = session
+                    .session
+                    .lock(cx.cx())
+                    .await
+                    .expect("inspect advisor trail"); // ubs:ignore[rust.panic.expect] -- Publication is checked through the authoritative session path.
+                assert!(inner.entries_for_current_path().iter().all(|entry| !matches!( // ubs:ignore[rust.panic.assert-macros] -- Cancelled or withheld review creates no audit verdict.
+                    entry, crate::session::SessionEntry::Custom(custom) if custom.custom_type == "advisor_note"
+                )), "{case}");
+            }
+        });
+    }
+
     #[test]
     fn advisor_review_injects_concern_into_steering_queue() {
         let runtime = RuntimeBuilder::current_thread()
@@ -21302,6 +26674,75 @@ mod tests {
                 })
             };
             assert!(has_entry, "advisor_note session entry recorded");
+        });
+    }
+
+    #[test]
+    fn advisor_hook_blocks_configured_and_remembered_secrets_before_provider_admission() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        runtime.block_on(async {
+            let advisor = Arc::new(ScriptedDoerProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let mut agent = Agent::new(
+                Arc::new(SilentProvider),
+                ToolRegistry::from_tools(Vec::new()),
+                AgentConfig::default(),
+            );
+            let known = "rememberedCredentialValue123456";
+            agent
+                .secrets_transform_outbound_text(&format!("API_KEY={known}"))
+                .unwrap();
+            let mut session = AgentSession::new(
+                agent,
+                Arc::new(Mutex::new(Session::in_memory())),
+                false,
+                ResolvedCompactionSettings::default(),
+            );
+            session.advisor = Some(
+                crate::advisor::AdvisorRuntime::new(advisor.clone(), "privacy-test".to_string())
+                    .with_secrets_settings(Some(&crate::secrets::SecretsSettings {
+                        mode: Some("block".to_string()),
+                        extra_patterns: Some(vec![r"ACME-\d{6}".to_string()]),
+                    })),
+            );
+            for command in [
+                format!("{} ACME-123456", "x".repeat(300)),
+                "API_KEY=r4nd0mCredentialValue123456".to_string(),
+                format!("echo {known}"),
+            ] {
+                session
+                    .agent
+                    .replace_messages(vec![Message::Assistant(Arc::new(AssistantMessage {
+                        content: vec![ContentBlock::ToolCall(ToolCall {
+                            id: "privacy-call".to_string(),
+                            name: "bash".to_string(),
+                            arguments: json!({"command": command}),
+                            thought_signature: None,
+                        })],
+                        ..Default::default()
+                    }))]);
+                let original = serde_json::to_value(session.agent.messages()).unwrap();
+                session.maybe_advise_turn(None).await;
+                assert_eq!(advisor.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(
+                    serde_json::to_value(session.agent.messages()).unwrap(),
+                    original
+                );
+                assert!(!session.advisor.as_ref().unwrap().is_disabled());
+            }
+            // The zero-call assertions must not pass just because the hook is
+            // disabled or globally paused: a clean substantial turn is admitted.
+            session
+                .agent
+                .replace_messages(vec![Message::Assistant(Arc::new(AssistantMessage {
+                    content: vec![ContentBlock::Text(TextContent::new("x".repeat(500)))],
+                    ..Default::default()
+                }))]);
+            session.maybe_advise_turn(None).await;
+            assert_eq!(advisor.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         });
     }
 

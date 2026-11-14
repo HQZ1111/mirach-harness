@@ -80,7 +80,7 @@
 
 ## 三、验证
 
-- 实跑（CEF + CDP）：面板注入真形状数据后渲染 —
+- 实跑（CDP）：面板注入真形状数据后渲染 —
   `todo-list` / `task-card`(×2, 含 actions/result) 均出现在 DOM
   （`data-slot` 实测），console 错误 0。
 - 实跑验证工具耗时链路：页面内跑归约器 → `startedAt`/`completedAt` 存在，

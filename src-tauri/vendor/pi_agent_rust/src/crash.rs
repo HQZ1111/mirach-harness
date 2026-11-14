@@ -261,8 +261,14 @@ pub fn install(agent_dir: &Path, session_path: Option<&Path>) {
         if PANIC_SUPPRESSION_DEPTH.with(std::cell::Cell::get) > 0 {
             return;
         }
+        // A reader that closed our stdout is not a crash, and must not be
+        // filed as one (bd-print-json-panics-on-closed-stdout).
+        let payload = payload_of(info);
+        if is_closed_stdout_panic(&payload) {
+            std::process::exit(EXIT_STDOUT_CLOSED);
+        }
         let (sha, ts) = build_metadata();
-        let message = redact_text(&payload_of(info));
+        let message = redact_text(&payload);
         let bundle = CrashBundle {
             schema: CRASH_SCHEMA.to_string(),
             kind: "panic".into(),
@@ -278,6 +284,41 @@ pub fn install(agent_dir: &Path, session_path: Option<&Path>) {
         previous(info);
     }));
     spawn_signal_watcher(agent_dir, session_path_redacted);
+}
+
+/// Status for a run whose stdout reader closed the pipe first.
+///
+/// Zero, and matching `EXIT_CODE_STDOUT_CLOSED` in the binary: `head` asked for
+/// five lines, got five, and left. Kept in step deliberately — the two paths
+/// reach the same ending, one by checking the write and one by catching the
+/// panic that check did not cover.
+const EXIT_STDOUT_CLOSED: i32 = 0;
+
+/// Does this panic mean only that nobody is reading our stdout?
+///
+/// `println!` PANICS when the write fails, and Rust disables SIGPIPE at
+/// startup, so `pi ... | head` arrives at the panic hook as
+///
+///     failed printing to stdout: Broken pipe (os error 32)
+///
+/// Writing a crash bundle for that files the user's own pipeline as a pi crash,
+/// and the bundle then announces itself as "previous run crashed" on the next
+/// invocation — noise that outlives the run that caused it.
+///
+/// Print mode handles this at the write site instead
+/// (`write_print_line` in main.rs), which is better because it never enters the
+/// panic machinery at all. This is the net under everything else: the binary
+/// has roughly 250 other `println!` calls — `--list-models`, `--fetch-models`,
+/// help and export output — and every one of them is pipeable.
+///
+/// Matching on the message is unlovely, but a panic hook receives a payload,
+/// not the `io::Error`, so the text is the only signal there is. It is anchored
+/// at the start so an unrelated panic that merely quotes those words does not
+/// slip through.
+fn is_closed_stdout_panic(payload: &str) -> bool {
+    (payload.starts_with("failed printing to stdout")
+        || payload.starts_with("failed writing to stdout"))
+        && payload.contains("Broken pipe")
 }
 
 fn payload_of(info: &std::panic::PanicHookInfo<'_>) -> String {
@@ -447,6 +488,38 @@ mod tests {
         let redacted = redact_text(text);
         assert!(!redacted.contains("sk-ant-api03"), "{redacted}");
         assert!(redacted.contains("[REDACTED:"), "{redacted}");
+    }
+
+    #[test]
+    fn panic_bundle_masks_debug_escaped_keys_before_persistence() {
+        const OPENAI: &str = "sk-proj-0123456789abcdefghijklmn";
+        const ANTHROPIC: &str = "sk-ant-api03-aaaaaaaaaaaaaaaaaaaa";
+        let dir = agent_dir("debug-escaped-keys");
+        let payload = format!("before\n{OPENAI}\t{ANTHROPIC}\rafter");
+        let debug_payload = format!("{payload:?}");
+        let bundle = CrashBundle {
+            schema: CRASH_SCHEMA.to_string(),
+            kind: "panic".into(),
+            panic_message: Some(debug_payload.clone()),
+            backtrace: Some(debug_payload.clone()),
+            build_git_sha: "testsha".into(),
+            build_timestamp: "t".into(),
+            session_path: None,
+            recent_operations: vec![debug_payload],
+            created_at: utc_stamp(),
+        };
+        let bundle_dir = write_bundle(&dir, bundle).expect("write");
+        let raw = std::fs::read_to_string(bundle_dir.join("bundle.json")).unwrap();
+        let report = std::fs::read_to_string(bundle_dir.join("report.txt")).unwrap();
+        for published in [&raw, &report] {
+            assert!(!published.contains(OPENAI), "OpenAI canary leaked");
+            assert!(!published.contains(ANTHROPIC), "Anthropic canary leaked");
+        }
+        let persisted: CrashBundle = serde_json::from_str(&raw).unwrap();
+        let expected = r#""before\n[REDACTED:openai-key]\t[REDACTED:anthropic-key]\rafter""#;
+        assert_eq!(persisted.panic_message.as_deref(), Some(expected));
+        assert_eq!(persisted.backtrace.as_deref(), Some(expected));
+        assert_eq!(persisted.recent_operations, vec![expected.to_string()]);
     }
 
     #[test]
@@ -620,6 +693,7 @@ mod tests {
         assert_eq!(PANIC_SUPPRESSION_DEPTH.with(std::cell::Cell::get), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn suppressed_panics_do_not_write_bundles() {
         // bd-ajg8l #3: recovered-internal panics (catch_unwind sites such as
@@ -652,5 +726,32 @@ mod tests {
         let tail = ring_tail();
         assert_eq!(tail.len(), RING_CAPACITY);
         assert!(tail.last().unwrap().starts_with("op-1"), "newest kept");
+    }
+
+    /// bd-print-json-panics-on-closed-stdout: only the closed-pipe panic skips
+    /// the bundle, and it is recognised in the exact wording std produces.
+    #[test]
+    fn a_closed_stdout_pipe_is_the_only_panic_that_skips_the_bundle() {
+        assert!(is_closed_stdout_panic(
+            "failed printing to stdout: Broken pipe (os error 32)"
+        ));
+        assert!(is_closed_stdout_panic(
+            "failed writing to stdout: Broken pipe (os error 32)"
+        ));
+
+        for real_crash in [
+            // A full disk is a write failure too, and it IS a crash worth a bundle.
+            "failed printing to stdout: No space left on device (os error 28)",
+            // Same words, different origin: a model or a tool can say anything.
+            "tool output mentioned failed printing to stdout: Broken pipe",
+            "assertion failed: Broken pipe",
+            "index out of bounds: the len is 3 but the index is 7",
+            "unknown panic payload",
+        ] {
+            assert!(
+                !is_closed_stdout_panic(real_crash),
+                "{real_crash:?} must still produce a crash bundle"
+            );
+        }
     }
 }

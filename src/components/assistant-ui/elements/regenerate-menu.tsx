@@ -48,7 +48,7 @@ export function RegenerateMenu({
             open && "bg-foreground/[0.06] text-foreground/90",
           )}
         >
-          <RefreshCwIcon className="size-3.5" />
+          <RefreshCwIcon className="size-[var(--size-icon-md)]" />
         </button>
       )}
 

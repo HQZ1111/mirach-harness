@@ -525,7 +525,7 @@ fn js_to_json_inner(value: &Value<'_>, depth: usize) -> rquickjs::Result<serde_j
         return Ok(serde_json::json!(i));
     }
     if let Some(f) = value.as_float() {
-        return Ok(serde_json::json!(f));
+        return Ok(js_float_to_json(f));
     }
     if let Some(s) = value.as_string() {
         let s = s.to_string()?;
@@ -567,6 +567,32 @@ fn js_to_json_inner(value: &Value<'_>, depth: usize) -> rquickjs::Result<serde_j
     }
     // Fallback for functions, symbols, etc.
     Ok(serde_json::Value::Null)
+}
+
+/// Largest magnitude a JS number can hold while still naming every integer
+/// exactly (`Number.MAX_SAFE_INTEGER`, 2^53 - 1).
+const JS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Map a QuickJS float64 onto the JSON number that `JSON.stringify` would
+/// produce for it.
+///
+/// QuickJS keeps integers that fit in `i32` under `JS_TAG_INT` and promotes
+/// everything else — including `Date.now()`, which passed 2^31 in 1970 — to
+/// `JS_TAG_FLOAT64`. The tag is a storage detail: a JS number has no integer
+/// vs. float distinction, and `JSON.stringify(2147483648)` is `2147483648`,
+/// not `2147483648.0`. Emitting the tag as-is made every `i64` field on the
+/// Rust side reject an integral timestamp with "invalid type: floating point,
+/// expected i64" (gh #238). Integral finite values inside the exactly
+/// representable range therefore become JSON integers; non-integral, huge,
+/// or non-finite values keep the float path (`serde_json` renders non-finite
+/// as `null`, matching `JSON.stringify`).
+fn js_float_to_json(f: f64) -> serde_json::Value {
+    if f.is_finite() && f.fract() == 0.0 && f.abs() <= JS_MAX_SAFE_INTEGER {
+        // Exact by construction: |f| <= 2^53 - 1 fits in i64 losslessly.
+        #[allow(clippy::cast_possible_truncation)]
+        return serde_json::json!(f as i64);
+    }
+    serde_json::json!(f)
 }
 
 pub type HostcallQueue = Rc<RefCell<HostcallRequestQueue<HostcallRequest>>>;
@@ -9804,40 +9830,76 @@ export function rawKeyHint(key, description = "") {
   return keyLabel && label ? `${keyLabel} ${label}` : keyLabel || label;
 }
 
-// compact performs conversation compaction host-side via pi's native
-// compaction engine (gh #167 / bd-i28yz). The model / apiKey /
-// customInstructions arguments are DELIBERATELY ignored: the host always
-// compacts with the SESSION's own provider, model, and credentials, so a
-// sandboxed extension can neither choose the endpoint nor supply (or
-// observe) a credential. On malformed preparation or provider failure the
-// returned Promise rejects -- pi's fail-open session_before_compact
-// handling then continues normal compaction; no placeholder summary is
-// ever fabricated.
-// When the second argument is an options object carrying a string
-// `strategy` (gh #167: `compact(preparation, { strategy:
-// "openai-responses-native", request })`), the strategy and the
-// extension-composed request cross the bridge for host-side sanitization
-// and a host-credentialed POST to the provider's native compact endpoint.
-// A legacy Model object in that position (no `strategy` key) keeps the
-// original summary-compaction path. An AbortSignal in `options.signal` is
-// accepted but not propagated -- the host's dedicated compact event budget
-// (gh #178) bounds the round-trip instead.
-export async function compact(preparation, modelOrOptions, _apiKey, _customInstructions, _signal) {
+// Summary compaction accepts public model identity, custom instructions and
+// thinking level. The host resolves registered models and credentials;
+// caller-supplied credentials, headers, endpoints and custom stream functions
+// never control the request. The positional form follows the current exported
+// compact(preparation, model, apiKey, headers, customInstructions, signal,
+// thinkingLevel, streamFn, env) signature. Host-owned arguments must be absent.
+// ctx.compact uses this same implementation with an options object.
+//
+// Cancellation (gh #178): a signal (`options.signal`, or the sixth
+// argument) that has already aborted rejects before any host work starts.
+// An abort that fires mid-call is NOT propagated: hostcalls are serialized on
+// the extension runtime thread, so no JS abort handler can run until the
+// compact hostcall returns. The host's dedicated compact event budget bounds
+// that round-trip instead.
+export async function compact(preparation, modelOrOptions, apiKey, headers, customInstructions, signal, thinkingLevel, streamFn, env) {
+  const supplied = modelOrOptions ?? {};
+  if (typeof supplied !== "object" || Array.isArray(supplied)) {
+    throw new TypeError("compact: model/options must be an object");
+  }
+  const positionalModel = "provider" in supplied || "id" in supplied;
+  const positional = positionalModel || (modelOrOptions == null && arguments.length > 2);
+  const options = positional
+    ? { model: positionalModel ? supplied : undefined, customInstructions, signal, thinkingLevel }
+    : supplied;
+  const abortSignal = options.signal ?? signal;
+  if (abortSignal && abortSignal.aborted) {
+    if (abortSignal.reason !== undefined) {
+      throw abortSignal.reason;
+    }
+    const aborted = new Error("This operation was aborted");
+    aborted.name = "AbortError";
+    throw aborted;
+  }
+  if ([apiKey, headers, streamFn, env].some((value) => value !== undefined && value !== null)) {
+    throw new TypeError("compact: credentials, headers, streamFn and env are host-owned; pass only a public model identity and summary options");
+  }
+  if (!positional && [customInstructions, thinkingLevel].some((value) => value !== undefined && value !== null)) {
+    throw new TypeError("compact: use customInstructions and thinkingLevel inside the options object");
+  }
+  const allowed = new Set(["model", "customInstructions", "thinkingLevel", "signal", "strategy", "request"]);
+  for (const key of Object.keys(options)) {
+    if (!allowed.has(key)) throw new TypeError(`compact: unsupported option ${key}`);
+  }
+  const summaryOptions = {};
+  if (options.model !== undefined && options.model !== null) {
+    const model = options.model;
+    if (typeof model !== "object" || Array.isArray(model) || typeof model.provider !== "string" || !model.provider.trim() || typeof model.id !== "string" || !model.id.trim()) {
+      throw new TypeError("compact: model provider and id must be non-empty strings");
+    }
+    summaryOptions.model = { provider: model.provider, id: model.id };
+  }
+  if (options.customInstructions !== undefined && options.customInstructions !== null) {
+    if (typeof options.customInstructions !== "string") throw new TypeError("compact: customInstructions must be a string");
+    summaryOptions.customInstructions = options.customInstructions;
+  }
+  if (options.thinkingLevel !== undefined && options.thinkingLevel !== null) {
+    if (typeof options.thinkingLevel !== "string") throw new TypeError("compact: thinkingLevel must be a string");
+    summaryOptions.thinkingLevel = options.thinkingLevel;
+  }
   if (!globalThis.pi || typeof globalThis.pi.events !== "function") {
     throw new Error("compact() host bridge is unavailable in this runtime");
   }
-  if (
-    modelOrOptions &&
-    typeof modelOrOptions === "object" &&
-    typeof modelOrOptions.strategy === "string"
-  ) {
-    return await globalThis.pi.events("compact", {
-      preparation: preparation ?? null,
-      strategy: modelOrOptions.strategy,
-      request: modelOrOptions.request ?? null,
-    });
+  const payload = { preparation: preparation ?? null, options: summaryOptions };
+  if (options.strategy !== undefined && options.strategy !== null) {
+    payload.strategy = options.strategy;
+    payload.request = options.request ?? null;
+  } else if (options.request !== undefined && options.request !== null) {
+    throw new TypeError("compact: request requires a native strategy");
   }
-  return await globalThis.pi.events("compact", { preparation: preparation ?? null });
+  return await globalThis.pi.events("compact", payload);
 }
 
 /// Stub: AssistantMessageComponent for rendering assistant messages
@@ -10802,17 +10864,18 @@ export default { config, parse };
     modules.insert(
         "node:path".to_string(),
         compressed_js_literal!(r#"
+function buildPosixPath() {
 function __pi_is_abs(s) {
   return s.startsWith("/") || (s.length >= 3 && s[1] === ":" && s[2] === "/");
 }
 
-export function join(...parts) {
+function join(...parts) {
   const cleaned = parts.map((p) => String(p ?? "").replace(/\\/g, "/")).filter((p) => p.length > 0);
   if (cleaned.length === 0) return ".";
   return normalize(cleaned.join("/"));
 }
 
-export function dirname(p) {
+function dirname(p) {
   const s = String(p ?? "").replace(/\\/g, "/");
   const idx = s.lastIndexOf("/");
   if (idx <= 0) return s.startsWith("/") ? "/" : ".";
@@ -10822,7 +10885,7 @@ export function dirname(p) {
   return dir;
 }
 
-export function resolve(...parts) {
+function resolve(...parts) {
   const base =
     globalThis.pi && globalThis.pi.process && typeof globalThis.pi.process.cwd === "string"
       ? globalThis.pi.process.cwd
@@ -10845,7 +10908,7 @@ export function resolve(...parts) {
   return normalize(out);
 }
 
-export function basename(p, ext) {
+function basename(p, ext) {
   const s = String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
   const idx = s.lastIndexOf("/");
   const name = idx === -1 ? s : s.slice(idx + 1);
@@ -10855,7 +10918,7 @@ export function basename(p, ext) {
   return name;
 }
 
-export function relative(from, to) {
+function relative(from, to) {
   const fromParts = String(from ?? "").replace(/\\/g, "/").split("/").filter(Boolean);
   const toParts = String(to ?? "").replace(/\\/g, "/").split("/").filter(Boolean);
 
@@ -10870,12 +10933,12 @@ export function relative(from, to) {
   return result.join("/") || ".";
 }
 
-export function isAbsolute(p) {
+function isAbsolute(p) {
   const s = String(p ?? "").replace(/\\/g, "/");
   return __pi_is_abs(s);
 }
 
-export function extname(p) {
+function extname(p) {
   const s = String(p ?? "").replace(/\\/g, "/");
   const b = s.lastIndexOf("/");
   const name = b === -1 ? s : s.slice(b + 1);
@@ -10884,7 +10947,7 @@ export function extname(p) {
   return name.slice(dot);
 }
 
-export function normalize(p) {
+function normalize(p) {
   const s = String(p ?? "").replace(/\\/g, "/");
   const isAbs = __pi_is_abs(s);
   const parts = s.split("/").filter(Boolean);
@@ -10898,7 +10961,7 @@ export function normalize(p) {
   return isAbs ? "/" + result : result || ".";
 }
 
-export function parse(p) {
+function parse(p) {
   const s = String(p ?? "").replace(/\\/g, "/");
   const isAbs = s.startsWith("/");
   const lastSlash = s.lastIndexOf("/");
@@ -10910,21 +10973,224 @@ export function parse(p) {
   return { root, dir, base, ext, name };
 }
 
-export function format(pathObj) {
+function format(pathObj) {
   const dir = pathObj.dir || pathObj.root || "";
   const base = pathObj.base || (pathObj.name || "") + (pathObj.ext || "");
   if (!dir) return base;
   return dir === pathObj.root ? dir + base : dir + "/" + base;
 }
 
-export const sep = "/";
-export const delimiter = ":";
-export const posix = { join, dirname, resolve, basename, relative, isAbsolute, extname, normalize, parse, format, sep, delimiter };
+return { join, dirname, resolve, basename, relative, isAbsolute, extname, normalize, parse, format,
+  sep: "/", delimiter: ":", toNamespacedPath: (p) => p };
+}
 
-const win32Stub = new Proxy({}, { get(_, prop) { throw new Error("path.win32." + String(prop) + " is not supported (Pi runs on POSIX only)"); } });
-export const win32 = win32Stub;
+function buildWindowsPath() {
+  const separator = (ch) => ch === "\\" || ch === "/";
+  function stringPath(p) {
+    if (typeof p !== "string") throw new TypeError("Path must be a string");
+    return p;
+  }
+  // Keep the root separate from lexical components: '..' must never remove a
+  // drive, UNC server or share. Preserve original separators for parse/dirname.
+  function rootOf(p, lexical = false) {
+    // Device namespaces resolve components after their prefix; parse/dirname
+    // retain the original device component in the returned root instead.
+    if (lexical && separator(p[0]) && separator(p[1]) && (p[2] === "?" || p[2] === ".") && separator(p[3])) {
+      return { device: "\\\\" + p[2], absolute: true, end: 4 };
+    }
+    if (/^[A-Za-z]:/.test(p)) {
+      const absolute = separator(p[2]);
+      return { device: p.slice(0, 2), absolute, end: absolute ? 3 : 2 };
+    }
+    if (!separator(p[0])) return { device: "", absolute: false, end: 0 };
+    if (separator(p[1]) && p.length > 2 && !separator(p[2])) {
+      let end = 2;
+      while (end < p.length && !separator(p[end])) end++;
+      const server = p.slice(2, end);
+      while (end < p.length && separator(p[end])) end++;
+      const shareStart = end;
+      while (end < p.length && !separator(p[end])) end++;
+      if (end > shareStart) {
+        return {
+          device: "\\\\" + server + "\\" + p.slice(shareStart, end),
+          absolute: true,
+          end: end < p.length ? end + 1 : end,
+        };
+      }
+    }
+    return { device: "", absolute: true, end: 1 };
+  }
+  function components(tail, absolute) {
+    const result = [];
+    for (const part of tail.split(/[\\/]+/)) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (result.length && result[result.length - 1] !== "..") result.pop();
+        else if (!absolute) result.push(part);
+      } else result.push(part);
+    }
+    return result.join("\\");
+  }
+  function normalize(p) {
+    stringPath(p);
+    if (!p) return ".";
+    const root = rootOf(p, true);
+    let tail = components(p.slice(root.end), root.absolute);
+    if (!tail && !root.absolute) tail = ".";
+    if (tail && separator(p[p.length - 1])) tail += "\\";
+    // Normalization may expose a drive-looking component after removing '..'.
+    // Keep a relative input relative instead of turning it into another drive.
+    if (!root.device && !root.absolute && (/^[A-Za-z]:/.test(tail) || /:(?:$|[\\/])/.test(p))) tail = ".\\" + tail;
+    return root.device + (root.absolute ? "\\" : "") + tail;
+  }
+  function cwd() {
+    // Only the runtime's configured process snapshot is consulted; path
+    // operations never inspect the host filesystem or ambient environment.
+    const process = globalThis.pi && globalThis.pi.process;
+    return process && typeof process.cwd === "string" ? process.cwd : "/";
+  }
+  function driveCwd(device) {
+    // The process env proxy reads the configured snapshot under its normal
+    // capability policy. An unavailable per-drive directory falls back safely.
+    const process = globalThis.process;
+    const saved = process && process.env && process.env["=" + device.toUpperCase()];
+    if (typeof saved === "string") {
+      const root = rootOf(saved);
+      if (root.absolute && root.device.toLowerCase() === device.toLowerCase()) return saved;
+    }
+    const current = cwd();
+    const root = rootOf(current);
+    if (root.device && root.device.toLowerCase() !== device.toLowerCase()) return device + "\\";
+    return current;
+  }
+  function resolve(...paths) {
+    // Validate even ignored left-hand segments, before interpreting any path.
+    paths.forEach(stringPath);
+    let device = "";
+    let absolute = false;
+    let tail = "";
+    for (let index = paths.length - 1; index >= -1; index--) {
+      const p = index >= 0 ? paths[index] : device ? driveCwd(device) : cwd();
+      if (!p) continue;
+      const root = rootOf(p, true);
+      if (root.device) {
+        if (device && root.device.toLowerCase() !== device.toLowerCase()) continue;
+        if (!device) device = root.device;
+      }
+      if (!absolute) {
+        tail = p.slice(root.end) + "\\" + tail;
+        absolute = root.absolute;
+      }
+      if (absolute && device) break;
+    }
+    tail = components(tail, absolute);
+    return device + (absolute ? "\\" : "") + tail || ".";
+  }
+  function join(...paths) {
+    paths.forEach(stringPath);
+    const parts = paths.filter((p) => p.length > 0);
+    if (!parts.length) return ".";
+    let joined = parts.join("\\");
+    const first = parts[0];
+    // Joining ordinary rooted segments must not accidentally invent a UNC
+    // share. A UNC prefix must already be present in the first segment.
+    if (!(separator(first[0]) && separator(first[1]) && first.length > 2 && !separator(first[2]))) {
+      joined = joined.replace(/^[\\/]{2,}/, "\\");
+    }
+    return normalize(joined);
+  }
+  function basename(p, suffix) {
+    stringPath(p);
+    if (suffix !== undefined) stringPath(suffix);
+    if (p === suffix) return "";
+    const floor = /^[A-Za-z]:/.test(p) ? 2 : 0;
+    let end = p.length;
+    while (end > floor && separator(p[end - 1])) end--;
+    let start = end;
+    while (start > floor && !separator(p[start - 1])) start--;
+    let base = p.slice(start, end);
+    if (suffix && suffix.length < base.length && base.endsWith(suffix)) base = base.slice(0, -suffix.length);
+    return base;
+  }
+  function extension(base) {
+    const dot = base.lastIndexOf(".");
+    return dot <= 0 || base === ".." ? "" : base.slice(dot);
+  }
+  function extname(p) {
+    return extension(basename(p));
+  }
+  function parse(p) {
+    stringPath(p);
+    const root = rootOf(p);
+    let end = p.length;
+    while (end > root.end && separator(p[end - 1])) end--;
+    let start = end;
+    while (start > root.end && !separator(p[start - 1])) start--;
+    const base = p.slice(start, end);
+    const ext = extension(base);
+    return {
+      root: p.slice(0, root.end),
+      dir: p.slice(0, start > root.end ? start - 1 : root.end),
+      base, ext, name: ext ? base.slice(0, -ext.length) : base,
+    };
+  }
+  function dirname(p) {
+    return parse(p).dir || ".";
+  }
+  function relative(from, to) {
+    const origin = resolve(stringPath(from));
+    const destination = resolve(stringPath(to));
+    if (origin.toLowerCase() === destination.toLowerCase()) return "";
+    const left = origin.split("\\").filter(Boolean);
+    const right = destination.split("\\").filter(Boolean);
+    let common = 0;
+    while (common < left.length && common < right.length && left[common].toLowerCase() === right[common].toLowerCase()) common++;
+    // Distinct drives or UNC hosts have no relative filesystem path.
+    if (!common || origin.startsWith("\\\\") !== destination.startsWith("\\\\")) return destination;
+    return [...Array(left.length - common).fill(".."), ...right.slice(common)].join("\\");
+  }
+  function isAbsolute(p) {
+    return rootOf(stringPath(p)).absolute;
+  }
+  function format(pathObj) {
+    if (!pathObj || typeof pathObj !== "object" || Array.isArray(pathObj)) throw new TypeError("Path object must be an object");
+    const dir = pathObj.dir || pathObj.root || "";
+    const ext = pathObj.ext || "";
+    const base = pathObj.base || (pathObj.name || "") + (ext && !ext.startsWith(".") ? "." + ext : ext);
+    if (!dir) return base;
+    return dir === pathObj.root ? dir + base : dir + "\\" + base;
+  }
+  function toNamespacedPath(p) {
+    if (typeof p !== "string" || !p) return p;
+    const full = resolve(p);
+    if (full.length <= 2) return p;
+    if (full.startsWith("\\\\") && full[2] !== "?" && full[2] !== ".") return "\\\\?\\UNC\\" + full.slice(2);
+    if (/^[A-Za-z]:\\/.test(full)) return "\\\\?\\" + full;
+    return full;
+  }
+  return { join, dirname, resolve, basename, relative, isAbsolute, extname, normalize, parse, format,
+    sep: "\\", delimiter: ";", toNamespacedPath };
+}
 
-export default { join, dirname, resolve, basename, relative, isAbsolute, extname, normalize, parse, format, sep, delimiter, posix, win32 };
+export const posix = buildPosixPath();
+export const win32 = buildWindowsPath();
+posix.posix = win32.posix = posix;
+posix.win32 = win32.win32 = win32;
+const nativePath = globalThis.process && globalThis.process.platform === "win32" ? win32 : posix;
+export const join = nativePath.join;
+export const dirname = nativePath.dirname;
+export const resolve = nativePath.resolve;
+export const basename = nativePath.basename;
+export const relative = nativePath.relative;
+export const isAbsolute = nativePath.isAbsolute;
+export const extname = nativePath.extname;
+export const normalize = nativePath.normalize;
+export const parse = nativePath.parse;
+export const format = nativePath.format;
+export const sep = nativePath.sep;
+export const delimiter = nativePath.delimiter;
+export const toNamespacedPath = nativePath.toNamespacedPath;
+export default nativePath;
 "#)
         .trim()
         .to_string(),
@@ -11888,6 +12154,18 @@ const __pi_vfs = (() => {
     nextFd: 100,
   };
   const extensionTmpRoot = "/__pi_extension_tmp";
+  const windowsPaths = globalThis.process && globalThis.process.platform === "win32";
+
+  function childPrefix(path) {
+    return path.endsWith("/") ? path : `${path}/`;
+  }
+
+  function toHostPath(path) {
+    // Windows verbatim/device prefixes do not accept '/' separators. Keep
+    // slash-separated VFS keys, but preserve the native namespace at every
+    // authorization and host-I/O boundary.
+    return windowsPaths && /^\/\/[?.]\//.test(path) ? path.replace(/\//g, "\\") : path;
+  }
 
   function checkWriteAccess(resolved) {
     const normalized = normalizePath(resolved);
@@ -11895,7 +12173,7 @@ const __pi_vfs = (() => {
       return;
     }
     if (typeof globalThis.__pi_host_check_write_access === "function") {
-      globalThis.__pi_host_check_write_access(normalized);
+      globalThis.__pi_host_check_write_access(toHostPath(normalized));
     }
   }
 
@@ -11905,7 +12183,7 @@ const __pi_vfs = (() => {
       return;
     }
     if (typeof globalThis.__pi_host_check_read_access === "function") {
-      globalThis.__pi_host_check_read_access(normalized);
+      globalThis.__pi_host_check_read_access(toHostPath(normalized));
     }
   }
 
@@ -11919,7 +12197,7 @@ const __pi_vfs = (() => {
         ? globalThis.process.cwd()
         : "/"
     );
-    if (normalized !== cwd && !normalized.startsWith(`${cwd}/`)) {
+    if (normalized !== cwd && !normalized.startsWith(childPrefix(cwd))) {
       throw new Error("host write denied: path outside extension root");
     }
     checkWriteAccess(normalized);
@@ -11974,7 +12252,7 @@ const __pi_vfs = (() => {
   function pathIsWithin(path, root) {
     const candidate = comparablePath(path);
     const base = comparablePath(root);
-    return candidate === base || candidate.startsWith(`${base}/`);
+    return candidate === base || candidate.startsWith(childPrefix(base));
   }
 
   function isAbsolutePathInput(input) {
@@ -11996,12 +12274,13 @@ const __pi_vfs = (() => {
     }
     if (
       typeof globalThis.__pi_host_is_registered_fs_path === "function" &&
-      globalThis.__pi_host_is_registered_fs_path(normalized)
+      globalThis.__pi_host_is_registered_fs_path(toHostPath(normalized))
     ) {
       return normalized;
     }
     const root = currentExtensionTempRoot(tempBase);
-    return `${root}${normalized.slice(tempBase.length)}`;
+    const relative = normalized.slice(tempBase.length).replace(/^\/+/, "");
+    return relative ? `${childPrefix(root)}${relative}` : root;
   }
 
   function unmapExtensionTempPath(normalized) {
@@ -12014,7 +12293,7 @@ const __pi_vfs = (() => {
         return tempBase;
       }
       if (normalized.startsWith(`${root}/`)) {
-        return `${tempBase}${normalized.slice(root.length)}`;
+        return `${childPrefix(tempBase)}${normalized.slice(root.length + 1)}`;
       }
     }
     return normalized;
@@ -12027,21 +12306,39 @@ const __pi_vfs = (() => {
     });
   }
 
-  function normalizePath(input) {
-    let raw = String(input ?? "").replace(/\\/g, "/");
-    // Strip Windows UNC verbatim prefix that canonicalize() produces.
-    // \\?\C:\... becomes /?/C:/... after separator normalization.
-    if (raw.startsWith("/?/") && raw.length > 5 && /^[A-Za-z]:/.test(raw.substring(3, 5))) {
-      raw = raw.slice(3);
+  function splitRoot(path) {
+    const drive = /^[A-Za-z]:\//.exec(path);
+    if (drive) return { root: drive[0], tail: path.slice(3) };
+    if (windowsPaths) {
+      // A UNC share is one filesystem root. A verbatim UNC path additionally
+      // carries its namespace prefix; neither may be consumed by '..'.
+      const unc = /^\/\/([?.]\/UNC\/)?([^/]+)\/+([^/]+)(?=\/|$)/i.exec(path);
+      if (unc && (!/^\/\/[?.]\//.test(path) || unc[1])) {
+        return { root: `//${unc[1] || ""}${unc[2]}/${unc[3]}`, tail: path.slice(unc[0].length) };
+      }
+      const device = /^\/\/([?.])\/([^/]+)(?=\/|$)/.exec(path);
+      if (device) {
+        const root = `//${device[1]}/${device[2]}`;
+        return {
+          root: /^[A-Za-z]:$/.test(device[2]) ? `${root}/` : root,
+          tail: path.slice(device[0].length),
+        };
+      }
     }
+    return { root: path.startsWith("/") ? "/" : "", tail: path.startsWith("/") ? path.slice(1) : path };
+  }
+
+  function normalizePath(input) {
+    const raw = String(input ?? "").replace(/\\/g, "/");
     // Detect Windows drive-letter absolute paths (e.g. "C:/Users/...")
     const hasDriveLetter = raw.length >= 3 && /^[A-Za-z]:\//.test(raw);
     const isAbsolute = raw.startsWith("/") || hasDriveLetter;
     const base = isAbsolute
       ? raw
       : `${(globalThis.process && typeof globalThis.process.cwd === "function" ? globalThis.process.cwd() : "/").replace(/\\/g, "/")}/${raw}`;
+    const { root, tail } = splitRoot(base);
     const parts = [];
-    for (const part of base.split("/")) {
+    for (const part of tail.split("/")) {
       if (!part || part === ".") continue;
       if (part === "..") {
         if (parts.length > 0) parts.pop();
@@ -12049,31 +12346,25 @@ const __pi_vfs = (() => {
       }
       parts.push(part);
     }
-    // Preserve drive letter prefix on Windows (D:/...) instead of /D:/...
-    if (parts.length > 0 && /^[A-Za-z]:$/.test(parts[0])) {
-      return `${parts[0]}/${parts.slice(1).join("/")}`;
-    }
-    return `/${parts.join("/")}`;
+    return parts.length ? `${childPrefix(root || "/")}${parts.join("/")}` : root || "/";
   }
 
   function dirname(path) {
     const normalized = normalizePath(path);
-    if (normalized === "/") return "/";
-    if (/^[A-Za-z]:\/$/.test(normalized)) return normalized;
+    const { root } = splitRoot(normalized);
+    if (normalized === root) return root;
     const idx = normalized.lastIndexOf("/");
-    if (idx === 2 && /^[A-Za-z]:/.test(normalized)) return `${normalized.slice(0, 2)}/`;
-    return idx <= 0 ? "/" : normalized.slice(0, idx);
+    return idx < root.length ? root : normalized.slice(0, idx);
   }
 
   function ensureDir(path) {
     const normalized = normalizePath(path);
-    if (normalized === "/") return "/";
-    const driveRoot = /^[A-Za-z]:\//.test(normalized) ? normalized.slice(0, 3) : "";
-    const parts = (driveRoot ? normalized.slice(3) : normalized.slice(1)).split("/").filter(Boolean);
-    let current = driveRoot ? driveRoot.slice(0, 2) : "";
-    if (driveRoot) state.dirs.add(driveRoot);
+    const { root, tail } = splitRoot(normalized);
+    const parts = tail.split("/").filter(Boolean);
+    let current = root;
+    state.dirs.add(root);
     for (const part of parts) {
-      current = current ? `${current}/${part}` : `/${part}`;
+      current = `${childPrefix(current)}${part}`;
       if (state.files.has(current) || state.symlinks.has(current)) {
         throw new Error(`ENOTDIR: not a directory, mkdir '${String(path ?? "")}'`);
       }
@@ -12204,7 +12495,7 @@ const __pi_vfs = (() => {
       return { bytes: undefined, error: "" };
     }
     try {
-      const content = globalThis.__pi_host_read_file_sync(resolved);
+      const content = globalThis.__pi_host_read_file_sync(toHostPath(resolved));
       return { bytes: toBytes(content, "base64"), error: "" };
     } catch (error) {
       const message = String((error && error.message) ? error.message : error);
@@ -12227,7 +12518,7 @@ const __pi_vfs = (() => {
       return undefined;
     }
     try {
-      return JSON.parse(globalThis.__pi_host_stat_sync(resolved, !!followSymlinks));
+      return JSON.parse(globalThis.__pi_host_stat_sync(toHostPath(resolved), !!followSymlinks));
     } catch (error) {
       const message = String((error && error.message) ? error.message : error);
       // Standalone harness realms have no extension identity. Their virtual
@@ -12249,11 +12540,11 @@ const __pi_vfs = (() => {
   }
 
   function firstSymlinkComponent(path) {
-    const driveRoot = /^[A-Za-z]:\//.test(path) ? path.slice(0, 3) : "";
-    const parts = (driveRoot ? path.slice(3) : path.slice(1)).split("/").filter(Boolean);
-    let candidate = driveRoot ? driveRoot.slice(0, 2) : "";
+    const { root, tail } = splitRoot(path);
+    const parts = tail.split("/").filter(Boolean);
+    let candidate = root;
     for (let index = 0; index < parts.length; index += 1) {
-      candidate = candidate ? `${candidate}/${parts[index]}` : `/${parts[index]}`;
+      candidate = `${childPrefix(candidate)}${parts[index]}`;
       if (state.symlinks.has(candidate)) {
         return { linkPath: candidate, remaining: parts.slice(index + 1) };
       }
@@ -12406,7 +12697,7 @@ const __pi_vfs = (() => {
 
   function listChildren(path, withFileTypes) {
     const normalized = normalizePath(path);
-    const prefix = normalized === "/" ? "/" : `${normalized}/`;
+    const prefix = childPrefix(normalized);
     const children = new Map();
 
     for (const dir of state.dirs) {
@@ -12484,7 +12775,7 @@ const __pi_vfs = (() => {
     let hostStat = null;
     if (!isDir && bytes === undefined && !isCurrentExtensionTempPath(normalized) && typeof globalThis.__pi_host_stat_sync === "function") {
       try {
-        hostStat = JSON.parse(globalThis.__pi_host_stat_sync(normalized, !!followSymlinks));
+        hostStat = JSON.parse(globalThis.__pi_host_stat_sync(toHostPath(normalized), !!followSymlinks));
       } catch (e) {
         /* not on host FS */
       }
@@ -12554,15 +12845,16 @@ const __pi_vfs = (() => {
 
   function authorizeTreeWrite(path) {
     const normalized = normalizePath(path);
+    const prefix = childPrefix(normalized);
     const descendants = [normalized];
     for (const candidate of state.files.keys()) {
-      if (candidate.startsWith(`${normalized}/`)) descendants.push(candidate);
+      if (candidate.startsWith(prefix)) descendants.push(candidate);
     }
     for (const candidate of state.dirs) {
-      if (candidate.startsWith(`${normalized}/`)) descendants.push(candidate);
+      if (candidate.startsWith(prefix)) descendants.push(candidate);
     }
     for (const candidate of state.symlinks.keys()) {
-      if (candidate.startsWith(`${normalized}/`)) descendants.push(candidate);
+      if (candidate.startsWith(prefix)) descendants.push(candidate);
     }
     for (const candidate of new Set(descendants)) {
       authorizeWriteResolution(resolvePathDetails(candidate, false));
@@ -12588,6 +12880,8 @@ const __pi_vfs = (() => {
   }
 
   state.normalizePath = normalizePath;
+  state.toHostPath = toHostPath;
+  state.childPrefix = childPrefix;
   state.dirname = dirname;
   state.ensureDir = ensureDir;
   state.toBytes = toBytes;
@@ -12729,7 +13023,7 @@ export function readdirSync(path, opts) {
   let hostError;
   if (!__pi_vfs.isCurrentExtensionTempPath(resolved) && typeof globalThis.__pi_host_read_dir_sync === "function") {
     try {
-      const hostEntries = JSON.parse(globalThis.__pi_host_read_dir_sync(resolved));
+      const hostEntries = JSON.parse(globalThis.__pi_host_read_dir_sync(__pi_vfs.toHostPath(resolved)));
       foundDir = true;
       for (const entry of hostEntries) {
         if (!entry || typeof entry.name !== "string") continue;
@@ -12797,6 +13091,7 @@ export function unlinkSync(path) {
 }
 export function rmdirSync(path, _opts) {
   const normalized = __pi_vfs.resolvePathForWrite(path, false);
+  const prefix = __pi_vfs.childPrefix(normalized);
   if (normalized === "/") {
     throw new Error("EBUSY: resource busy or locked, rmdir '/'");
   }
@@ -12805,17 +13100,17 @@ export function rmdirSync(path, _opts) {
   }
   __pi_vfs.authorizeTreeWrite(normalized);
   for (const filePath of __pi_vfs.files.keys()) {
-    if (filePath.startsWith(`${normalized}/`)) {
+    if (filePath.startsWith(prefix)) {
       throw new Error(`ENOTEMPTY: directory not empty, rmdir '${String(path ?? "")}'`);
     }
   }
   for (const dirPath of __pi_vfs.dirs) {
-    if (dirPath.startsWith(`${normalized}/`)) {
+    if (dirPath !== normalized && dirPath.startsWith(prefix)) {
       throw new Error(`ENOTEMPTY: directory not empty, rmdir '${String(path ?? "")}'`);
     }
   }
   for (const linkPath of __pi_vfs.symlinks.keys()) {
-    if (linkPath.startsWith(`${normalized}/`)) {
+    if (linkPath.startsWith(prefix)) {
       throw new Error(`ENOTEMPTY: directory not empty, rmdir '${String(path ?? "")}'`);
     }
   }
@@ -12825,6 +13120,7 @@ export function rmdirSync(path, _opts) {
 }
 export function rmSync(path, opts) {
   const normalized = __pi_vfs.resolvePathForWrite(path, false);
+  const prefix = __pi_vfs.childPrefix(normalized);
   if (__pi_vfs.files.has(normalized)) {
     __pi_vfs.files.delete(normalized);
     return;
@@ -12841,17 +13137,17 @@ export function rmSync(path, opts) {
     }
     __pi_vfs.authorizeTreeWrite(normalized);
     for (const filePath of Array.from(__pi_vfs.files.keys())) {
-      if (filePath === normalized || filePath.startsWith(`${normalized}/`)) {
+      if (filePath === normalized || filePath.startsWith(prefix)) {
         __pi_vfs.files.delete(filePath);
       }
     }
     for (const dirPath of Array.from(__pi_vfs.dirs)) {
-      if (dirPath === normalized || dirPath.startsWith(`${normalized}/`)) {
+      if (dirPath === normalized || dirPath.startsWith(prefix)) {
         __pi_vfs.dirs.delete(dirPath);
       }
     }
     for (const linkPath of Array.from(__pi_vfs.symlinks.keys())) {
-      if (linkPath === normalized || linkPath.startsWith(`${normalized}/`)) {
+      if (linkPath === normalized || linkPath.startsWith(prefix)) {
         __pi_vfs.symlinks.delete(linkPath);
       }
     }
@@ -18448,6 +18744,14 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
         let default_hostcall_timeout_ms = self.config.limits.hostcall_timeout_ms;
         let process_cwd = self.config.cwd.clone();
         let process_args = self.config.args.clone();
+        // Platform is runtime metadata, independent of permission to read env.
+        // PI_PLATFORM was supplied by the host at runtime construction above.
+        let process_platform = self
+            .config
+            .env
+            .get("PI_PLATFORM")
+            .cloned()
+            .unwrap_or_else(|| std::env::consts::OS.to_string());
         let env = self.config.env.clone();
         let deny_env = self.config.deny_env;
         let repair_mode = self.config.repair_mode;
@@ -18930,6 +19234,11 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                         let process_cwd = process_cwd.clone();
                         move |_ctx: Ctx<'_>| -> rquickjs::Result<String> { Ok(process_cwd.clone()) }
                     }),
+                )?;
+
+                global.set(
+                    "__pi_process_platform_native",
+                    Func::from(move || process_platform.clone()),
                 )?;
 
                 // __pi_process_args_native() -> string[]
@@ -19961,14 +20270,19 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                     .stderr(Stdio::piped());
                                 crate::tools::isolate_command_process_group(&mut command);
 
-                                let mut child = command.spawn().map_err(|e| e.to_string())?;
-                                crate::tools::attach_child_job_discipline(&child);
+                                let child =
+                                    crate::tools::spawn_command_with_job_discipline(&mut command)
+                                        .map_err(|e| e.to_string())?;
                                 let pid = child.id();
+                                let mut child = crate::tools::ProcessGuard::new(
+                                    child,
+                                    crate::tools::ProcessCleanupMode::ProcessGroupTree,
+                                );
 
                                 let stdout_pipe =
-                                    child.stdout.take().ok_or("Missing stdout pipe")?;
+                                    child.take_stdout().ok_or("Missing stdout pipe")?;
                                 let stderr_pipe =
-                                    child.stderr.take().ok_or("Missing stderr pipe")?;
+                                    child.take_stderr().ok_or("Missing stderr pipe")?;
 
                                 let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(128);
                                 let tx_stdout = tx.clone();
@@ -20017,23 +20331,25 @@ impl<C: SchedulerClock + 'static> PiJsRuntime<C> {
                                         ingest_chunk!(chunk.kind, chunk.bytes);
                                     }
 
-                                    if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+                                    if let Some(st) =
+                                        child.try_wait_child().map_err(|e| e.to_string())?
+                                    {
                                         break st;
                                     }
                                     if !killed && limit_exceeded {
                                         killed = true;
-                                        crate::tools::kill_process_group_tree(Some(pid));
-                                        let _ = child.kill();
-                                        break child.wait().map_err(|e| e.to_string())?;
+                                        break child
+                                            .terminate_and_wait()
+                                            .map_err(|e| e.to_string())?;
                                     }
                                     if let Some(t) = timeout
                                         && !killed
                                         && start.elapsed() >= t
                                     {
                                         killed = true;
-                                        crate::tools::kill_process_group_tree(Some(pid));
-                                        let _ = child.kill();
-                                        break child.wait().map_err(|e| e.to_string())?;
+                                        break child
+                                            .terminate_and_wait()
+                                            .map_err(|e| e.to_string())?;
                                     }
                                     if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(5)) {
                                         ingest_chunk!(chunk.kind, chunk.bytes);
@@ -20981,6 +21297,7 @@ function __pi_register_provider(provider_id, spec) {
         if (m && m.cost) out.cost = m.cost;
         if (m && m.contextWindow !== undefined) out.contextWindow = m.contextWindow;
         if (m && m.maxTokens !== undefined) out.maxTokens = m.maxTokens;
+        if (m && m.headers && typeof m.headers === 'object') out.headers = Object.assign({}, m.headers);
         return out;
     }) : [];
 
@@ -21021,6 +21338,9 @@ function __pi_register_provider(provider_id, spec) {
         models: models,
         hasStreamSimple: effectiveHasStreamSimple,
     };
+    if (spec.headers && typeof spec.headers === 'object') {
+        providerSpec.headers = Object.assign({}, spec.headers);
+    }
     if (spec.oauth && typeof spec.oauth === 'object') {
         const oauth = {};
         if (spec.oauth.authUrl !== undefined && spec.oauth.authUrl !== null) {
@@ -22140,22 +22460,13 @@ function __pi_make_extension_ctx(ctx_payload) {
             // pi-better-compaction feature-detects the absence and fails
             // open to normal compaction.
         },
-        // Host-side compaction bridge (gh #167 / bd-i28yz): summarizes the
-        // given preparation with the SESSION's own provider, model, and
-        // credentials. Rejects on malformed preparation or provider failure;
-        // no fabricated summary is ever returned. With an options object
-        // ({ strategy: 'openai-responses-native', request }) the host runs
-        // the provider's native compact endpoint instead and returns
-        // details.compactedWindow (still host-credentialed; the request is
-        // sanitized host-side and the model pinned to the session's own).
-        compact: async (preparation, options) =>
-            options && typeof options === 'object' && typeof options.strategy === 'string'
-                ? pi.events('compact', {
-                      preparation: preparation ?? null,
-                      strategy: options.strategy,
-                      request: options.request ?? null,
-                  })
-                : pi.events('compact', { preparation: preparation ?? null }),
+        // Share the public summary options, credential checks and pre-abort
+        // behavior with the exported API. Native strategy requests remain
+        // host-sanitized and pinned to the current session model.
+        compact: async (preparation, options) => {
+            const codingAgent = await import('@mariozechner/pi-coding-agent');
+            return codingAgent.compact(preparation, options);
+        },
     };
 }
 
@@ -24192,17 +24503,14 @@ if (typeof globalThis.crypto.randomUUID !== 'function') {
 }
 
 if (typeof globalThis.process === 'undefined') {
-    const rawPlatform =
-        __pi_env_get_native('PI_PLATFORM') ||
-        __pi_env_get_native('OSTYPE') ||
-        __pi_env_get_native('OS') ||
-        'linux';
+    const rawPlatform = __pi_process_platform_native();
     // Normalize to Node.js conventions: strip version suffix from OSTYPE
     // (e.g. darwin24.0 -> darwin, linux-gnu -> linux, msys -> win32)
     const platform = (() => {
-        const s = String(rawPlatform).replace(/[0-9].*$/, '').split('-')[0].toLowerCase();
+        const raw = String(rawPlatform).toLowerCase();
+        if (raw === 'win32' || raw === 'windows' || raw === 'windows_nt' || raw === 'msys' || raw === 'cygwin') return 'win32';
+        const s = raw.replace(/[0-9].*$/, '').split('-')[0];
         if (s === 'darwin') return 'darwin';
-        if (s === 'msys' || s === 'cygwin' || s === 'windows_nt') return 'win32';
         return s || 'linux';
     })();
     const detHome = __pi_env_get_native('PI_DETERMINISTIC_HOME');
@@ -25156,13 +25464,15 @@ if (typeof globalThis.fetch !== 'function') {
 
     // AbortController / AbortSignal polyfill — many npm packages check for these
     if (typeof globalThis.AbortController === 'undefined') {
+        // Web semantics: aborting without an explicit reason yields an AbortError.
+        const abortError = () => { const e = new Error('This operation was aborted'); e.name = 'AbortError'; return e; };
         class AbortSignal {
             constructor() { this.aborted = false; this._listeners = []; }
-            get reason() { return this.aborted ? (this._reason !== undefined ? this._reason : new Error('This operation was aborted')) : undefined; }
+            get reason() { return this.aborted ? (this._reason !== undefined ? this._reason : abortError()) : undefined; }
             addEventListener(type, fn) { if (type === 'abort') this._listeners.push(fn); }
             removeEventListener(type, fn) { if (type === 'abort') this._listeners = this._listeners.filter(f => f !== fn); }
             throwIfAborted() { if (this.aborted) throw this.reason; }
-            static abort(reason) { const s = new AbortSignal(); s.aborted = true; s._reason = reason !== undefined ? reason : new Error('This operation was aborted'); return s; }
+            static abort(reason) { const s = new AbortSignal(); s.aborted = true; s._reason = reason !== undefined ? reason : abortError(); return s; }
             static timeout(ms) { const s = new AbortSignal(); setTimeout(() => { s.aborted = true; s._reason = new Error('The operation was aborted due to timeout'); s._listeners.forEach(fn => fn()); }, ms); return s; }
         }
         class AbortController {
@@ -25326,6 +25636,61 @@ mod tests {
         hex_lower(&Sha256::digest(bytes))
     }
 
+    /// gh #238: QuickJS stores integers above `i32` as float64. `js_to_json`
+    /// used to surface the storage tag, so a `Date.now()` timestamp became
+    /// `2147483648.0` and every `i64` field on the Rust side rejected it.
+    #[test]
+    fn js_to_json_renders_integral_floats_as_json_integers() {
+        /// The field shape that failed in the wild: an `i64` timestamp.
+        #[derive(serde::Deserialize)]
+        struct Stamped {
+            timestamp: i64,
+        }
+
+        let runtime = rquickjs::Runtime::new().expect("quickjs runtime");
+        let context = rquickjs::Context::full(&runtime).expect("quickjs context");
+        let converted = context.with(|ctx| {
+            let value: Value<'_> = ctx
+                .eval(
+                    r"({
+                        i32Max: 2147483647,
+                        i32MaxPlusOne: 2147483648,
+                        negative: -2147483649,
+                        epochMs: 1758556800123,
+                        maxSafe: 9007199254740991,
+                        beyondSafe: 9007199254740992,
+                        fraction: 1.5,
+                        negZero: -0,
+                        inf: Infinity,
+                        nan: NaN,
+                        nested: [4294967296, { ts: 3000000000 }],
+                    })",
+                )
+                .expect("eval literal");
+            js_to_json(&value).expect("convert")
+        });
+
+        assert_eq!(converted["i32Max"], json!(2_147_483_647_i64));
+        assert!(converted["i32MaxPlusOne"].is_i64(), "{converted}");
+        assert_eq!(converted["i32MaxPlusOne"], json!(2_147_483_648_i64));
+        assert_eq!(converted["negative"], json!(-2_147_483_649_i64));
+        assert!(converted["epochMs"].is_i64(), "{converted}");
+        assert_eq!(converted["epochMs"], json!(1_758_556_800_123_i64));
+        assert_eq!(converted["maxSafe"], json!(9_007_199_254_740_991_i64));
+        // Past 2^53 integers are no longer exact; keep the float rendering.
+        assert!(converted["beyondSafe"].is_f64(), "{converted}");
+        assert_eq!(converted["fraction"], json!(1.5));
+        assert_eq!(converted["negZero"], json!(0_i64));
+        assert!(converted["inf"].is_null(), "{converted}");
+        assert!(converted["nan"].is_null(), "{converted}");
+        assert_eq!(converted["nested"][0], json!(4_294_967_296_i64));
+        assert_eq!(converted["nested"][1]["ts"], json!(3_000_000_000_i64));
+
+        let stamped: Stamped = serde_json::from_value(json!({ "timestamp": converted["epochMs"] }))
+            .expect("integral float deserializes as i64");
+        assert_eq!(stamped.timestamp, 1_758_556_800_123);
+    }
+
     /// Receipt name for `pi_bridge_js()`, which is not a virtual module.
     const BRIDGE_RECEIPT: &str = "<bridge>";
 
@@ -25362,16 +25727,21 @@ mod tests {
     /// sha `f74b473e…` -> `61463384…`), from adding the `DefaultPackageManager`
     /// shim export that gh #223 hits. Re-pinned in the same commit as the edit,
     /// which is what this table exists to force.
+    ///
+    /// Re-pinned 2026-10-12 (bridge): only `<bridge>` moved, 204_644 ->
+    /// 204_796 (+152 bytes, sha `604f528a…` -> `68c0c0e6…`). The
+    /// `AbortSignal` polyfill now gives a reasonless abort an `AbortError`
+    /// (Web semantics), which `ctx.compact()` pre-abort rejection relies on.
     const JS_SOURCE_RECEIPTS: &[(&str, usize, &str)] = &[
         (
             BRIDGE_RECEIPT,
-            205_065,
-            "992b7def6f53d7d18690bd748f0df0b4f73b31058bc9676ce6c6aa107deaf17b",
+            204_796,
+            "68c0c0e6f90a6a671128024f17bf1e39dff877c100cfd3390fa4846cbc7e52eb",
         ),
         (
             "node:fs",
-            56_916,
-            "5007b4eba74659801fff93fdb60da9b6b83457049459cdb9882ee93550b0be48",
+            57_930,
+            "9180ce100adb7cf8e951b1f4d2e712a6ae3b72bd2720f9ad65e7eb1d5250cdb0",
         ),
         (
             "@mariozechner/pi-ai",
@@ -25388,10 +25758,11 @@ mod tests {
             17_837,
             "86032256b40f9ffac34e111ec9246e317884bfdba49249198e9ef18edda29782",
         ),
+        // Re-pinned with public compaction options and the nine-argument API.
         (
             "@mariozechner/pi-coding-agent",
-            27_280,
-            "61463384323e22fac7f3a736c03346cbc177c70177f131190688c8a65773ce65",
+            29_603,
+            "90cd8ffeb6ad50922ad4e5923efe2ede8e5d68f8d8507655fdc3ae989704968e",
         ),
         (
             "@mariozechner/pi-tui",
@@ -25814,10 +26185,65 @@ mod tests {
         });
     }
 
-    /// gh #167 / bd-i28yz: the pi-coding-agent `compact()` export bridges to
-    /// the host `compact` events op with only the preparation (extension-
-    /// supplied model/apiKey are dropped host-side by design) and resolves
-    /// with the bridged compaction result shape.
+    /// gh #178: a signal that has already aborted, in either the options form
+    /// or the current sixth argument, rejects `compact()` with the abort reason
+    /// before any host compaction is requested.
+    #[test]
+    fn pi_coding_agent_compact_rejects_a_pre_aborted_signal_without_host_work() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = PiJsRuntime::with_clock(Arc::clone(&clock))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r"
+                    globalThis.abortProbe = { done: 0, errors: [] };
+                    const record = (promise) => promise
+                        .then(() => { globalThis.abortProbe.errors.push('resolved'); })
+                        .catch((error) => {
+                            globalThis.abortProbe.errors.push(String((error && error.message) || error));
+                        })
+                        .finally(() => { globalThis.abortProbe.done += 1; });
+                    import('@mariozechner/pi-coding-agent').then((mod) => {
+                        const controller = new AbortController();
+                        controller.abort(new Error('stopped by caller'));
+                        record(mod.compact(
+                            { firstKeptEntryId: 'entry-1', tokensBefore: 10 },
+                            { strategy: 'openai-responses-native', request: {}, signal: controller.signal }));
+                        record(mod.compact(
+                            { firstKeptEntryId: 'entry-1', tokensBefore: 10 },
+                            undefined, undefined, undefined, undefined, AbortSignal.abort()));
+                    });
+                    ",
+                )
+                .await
+                .expect("invoke compact with aborted signals");
+
+            for _ in 0..32 {
+                drain_until_idle(&runtime, &clock).await;
+                assert!(
+                    runtime.drain_hostcall_requests().is_empty(),
+                    "an aborted compact() must not reach the host"
+                );
+                let probe = get_global_json(&runtime, "abortProbe").await;
+                if probe["done"] == json!(2) {
+                    break;
+                }
+            }
+            let probe = get_global_json(&runtime, "abortProbe").await;
+            assert_eq!(probe["done"], json!(2), "probe incomplete: {probe}");
+            assert_eq!(
+                probe["errors"],
+                json!(["stopped by caller", "This operation was aborted"]),
+                "probe: {probe}"
+            );
+        });
+    }
+
+    /// The current positional API forwards public model identity, guidance
+    /// and thinking level without trusting model endpoint/header metadata.
     #[test]
     fn pi_coding_agent_compact_bridges_to_host_compaction_op() {
         futures::executor::block_on(async {
@@ -25833,8 +26259,12 @@ mod tests {
                     import('@mariozechner/pi-coding-agent')
                         .then((mod) => mod.compact(
                             { firstKeptEntryId: 'entry-9', tokensBefore: 4200 },
-                            { id: 'attacker-model' },
-                            'attacker-key',
+                            { provider: 'summary-provider', id: 'summary-model', baseUrl: 'https://untrusted.invalid', headers: { authorization: 'untrusted' } },
+                            undefined,
+                            undefined,
+                            'Preserve decisions',
+                            undefined,
+                            'low',
                             undefined,
                             undefined))
                         .then((value) => { globalThis.compactProbe.value = value; })
@@ -25859,8 +26289,6 @@ mod tests {
                         panic!("expected events hostcall, got {:?}", request.kind);
                     };
                     assert_eq!(op.as_str(), "compact", "unexpected events op");
-                    // Only the preparation crosses the bridge; the
-                    // extension-chosen model/apiKey never do.
                     assert_eq!(
                         request.payload["preparation"]["firstKeptEntryId"],
                         json!("entry-9")
@@ -25868,6 +26296,14 @@ mod tests {
                     assert_eq!(request.payload["preparation"]["tokensBefore"], json!(4200));
                     assert_eq!(request.payload.get("model"), None);
                     assert_eq!(request.payload.get("apiKey"), None);
+                    assert_eq!(
+                        request.payload["options"],
+                        json!({
+                            "model": { "provider": "summary-provider", "id": "summary-model" },
+                            "customInstructions": "Preserve decisions",
+                            "thinkingLevel": "low"
+                        })
+                    );
                     runtime.complete_hostcall(
                         request.call_id,
                         HostcallOutcome::Success(json!({
@@ -25889,6 +26325,127 @@ mod tests {
             assert_eq!(probe["value"]["summary"], json!("bridged summary"));
             assert_eq!(probe["value"]["firstKeptEntryId"], json!("entry-9"));
             assert_eq!(probe["value"]["tokensBefore"], json!(4200));
+        });
+    }
+
+    #[test]
+    fn pi_coding_agent_compact_rejects_credentials_and_invalid_options_before_host_work() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = PiJsRuntime::with_clock(Arc::clone(&clock))
+                .await
+                .expect("runtime");
+            runtime
+                .eval(
+                    r"
+                globalThis.compactInvalid = { done: false, errors: [] };
+                import('@mariozechner/pi-coding-agent').then(async (mod) => {
+                    const preparation = { firstKeptEntryId: 'keep' };
+                    const model = { provider: 'p', id: 'm' };
+                    const calls = [
+                        () => mod.compact(preparation, model, 'caller-key'),
+                        () => mod.compact(preparation, model, undefined, { authorization: 'caller-header' }),
+                        () => mod.compact(preparation, model, undefined, undefined, undefined, undefined, undefined, () => {}),
+                        () => mod.compact(preparation, model, undefined, undefined, undefined, undefined, undefined, undefined, { TOKEN: 'caller-env' }),
+                        () => mod.compact(preparation, { model, headers: {} }),
+                        () => mod.compact(preparation, { model: { id: 'missing-provider' } }),
+                    ];
+                    for (const call of calls) {
+                        try { await call(); compactInvalid.errors.push('resolved'); }
+                        catch (error) { compactInvalid.errors.push(error.name); }
+                    }
+                    compactInvalid.done = true;
+                });
+                    ",
+                )
+                .await
+                .expect("invoke invalid compactions");
+            for _ in 0..32 {
+                drain_until_idle(&runtime, &clock).await;
+                assert!(runtime.drain_hostcall_requests().is_empty());
+                if get_global_json(&runtime, "compactInvalid").await["done"] == json!(true) {
+                    break;
+                }
+            }
+            let probe = get_global_json(&runtime, "compactInvalid").await;
+            assert_eq!(probe["done"], json!(true), "probe: {probe}");
+            assert_eq!(
+                probe["errors"],
+                json!([
+                    "TypeError",
+                    "TypeError",
+                    "TypeError",
+                    "TypeError",
+                    "TypeError",
+                    "TypeError"
+                ])
+            );
+        });
+    }
+
+    #[test]
+    fn extension_context_compact_forwards_options_and_checks_pre_abort() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = PiJsRuntime::with_clock(Arc::clone(&clock))
+                .await
+                .expect("runtime");
+            runtime
+                .eval(&privileged_test_script(
+                    &runtime,
+                    r"
+                __pi_begin_extension(__pi_test_secret, 'ext.compact-options', { name: 'ext.compact-options' });
+                globalThis.ctxCompactProbe = { done: false };
+                pi.on('session_before_compact', async (event, ctx) => {
+                    try { await ctx.compact(event.preparation, { signal: AbortSignal.abort() }); }
+                    catch (error) { ctxCompactProbe.aborted = error.name; }
+                    ctxCompactProbe.result = await ctx.compact(event.preparation, {
+                        model: { provider: 'p', id: 'm' },
+                        customInstructions: 'Keep open blockers',
+                        thinkingLevel: 'medium',
+                    });
+                });
+                __pi_end_extension(__pi_test_secret);
+                __pi_dispatch_extension_event(__pi_test_secret, 'session_before_compact', {
+                    preparation: { firstKeptEntryId: 'keep', tokensBefore: 1234 },
+                }, { hasUI: false, cwd: '/workspace' })
+                    .catch((error) => { ctxCompactProbe.error = String(error); })
+                    .finally(() => { ctxCompactProbe.done = true; });
+                    ",
+                ))
+                .await
+                .expect("dispatch compaction extension");
+            let mut calls = 0;
+            for _ in 0..32 {
+                drain_until_idle(&runtime, &clock).await;
+                for request in runtime.drain_hostcall_requests() {
+                    assert!(
+                        matches!(&request.kind, HostcallKind::Events { op } if op == "compact")
+                    );
+                    calls += 1;
+                    assert_eq!(
+                        request.payload["options"],
+                        json!({
+                            "model": { "provider": "p", "id": "m" },
+                            "customInstructions": "Keep open blockers",
+                            "thinkingLevel": "medium"
+                        })
+                    );
+                    runtime.complete_hostcall(
+                        request.call_id,
+                        HostcallOutcome::Success(json!({ "summary": "ctx summary" })),
+                    );
+                }
+                if get_global_json(&runtime, "ctxCompactProbe").await["done"] == json!(true) {
+                    break;
+                }
+            }
+            let probe = get_global_json(&runtime, "ctxCompactProbe").await;
+            assert_eq!(calls, 1, "pre-aborted context call must not reach the host");
+            assert_eq!(probe["done"], json!(true), "probe: {probe}");
+            assert_eq!(probe["aborted"], json!("AbortError"));
+            assert_eq!(probe["result"]["summary"], json!("ctx summary"));
+            assert_eq!(probe["error"], serde_json::Value::Null);
         });
     }
 
@@ -26005,7 +26562,7 @@ mod tests {
                     r"
                     globalThis.compactProbe = { done: false };
                     import('@mariozechner/pi-coding-agent')
-                        .then((mod) => mod.compact({}, {}, 'api-key', undefined, undefined))
+                        .then((mod) => mod.compact({}, {}))
                         .then((value) => { globalThis.compactProbe.value = value; })
                         .catch((error) => {
                             globalThis.compactProbe.error = String((error && error.message) || error);
@@ -26016,6 +26573,7 @@ mod tests {
                 .await
                 .expect("invoke compact bridge");
 
+            let mut dispatched = 0;
             for _ in 0..32 {
                 drain_until_idle(&runtime, &clock).await;
                 let state = get_global_json(&runtime, "compactProbe").await;
@@ -26027,6 +26585,7 @@ mod tests {
                         panic!("expected events hostcall, got {:?}", request.kind);
                     };
                     assert_eq!(op.as_str(), "compact", "unexpected events op");
+                    dispatched += 1;
                     runtime.complete_hostcall(
                         request.call_id,
                         HostcallOutcome::Error {
@@ -26039,6 +26598,7 @@ mod tests {
                 }
             }
 
+            assert_eq!(dispatched, 1, "rejection must come from the host bridge");
             drain_until_idle(&runtime, &clock).await;
             let probe = get_global_json(&runtime, "compactProbe").await;
             assert_eq!(probe["done"], json!(true), "probe incomplete: {probe}");
@@ -26481,6 +27041,102 @@ mod tests {
 
             // Corrupted parent chains terminate instead of hanging.
             assert_eq!(probe["cycleLen"], json!(2));
+        });
+    }
+
+    /// gh #223 / bd-fpaso: pin that an extension importing `DefaultPackageManager`
+    /// from `@mariozechner/pi-coding-agent` loads without export errors, read methods
+    /// are inert, and mutating methods (install/remove/update) throw named errors.
+    #[test]
+    fn default_package_manager_shim_exports_and_behavior() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let runtime = PiJsRuntime::with_clock(Arc::clone(&clock))
+                .await
+                .expect("create runtime");
+
+            runtime
+                .eval(
+                    r"
+                    globalThis.pmProbe = { done: false };
+                    (async () => {
+                        const mod = await import('@mariozechner/pi-coding-agent');
+                        if (typeof mod.DefaultPackageManager !== 'function') {
+                            throw new Error('DefaultPackageManager is not exported');
+                        }
+                        const pm = new mod.DefaultPackageManager({ cwd: '/test/cwd', agentDir: '/test/agent' });
+                        if (pm.cwd !== '/test/cwd' || pm.agentDir !== '/test/agent') {
+                            throw new Error('Constructor options not retained');
+                        }
+                        if (pm.getInstalledPath('foo', 'user') !== undefined) {
+                            throw new Error('getInstalledPath should return undefined');
+                        }
+                        const resolved = await pm.resolve();
+                        if (!Array.isArray(resolved.extensions) || !Array.isArray(resolved.skills)) {
+                            throw new Error('resolve should return empty arrays');
+                        }
+                        const resolvedExt = await pm.resolveExtensionSources(['foo']);
+                        if (!Array.isArray(resolvedExt.extensions) || !Array.isArray(resolvedExt.skills)) {
+                            throw new Error('resolveExtensionSources should return empty arrays');
+                        }
+                        let installThrew = false;
+                        try {
+                            await pm.install('test-pkg');
+                        } catch (err) {
+                            installThrew = true;
+                            if (!err.message.includes('DefaultPackageManager.install()')) {
+                                throw new Error('Unexpected install error message: ' + err.message);
+                            }
+                        }
+                        if (!installThrew) {
+                            throw new Error('install did not throw');
+                        }
+                        let removeThrew = false;
+                        try {
+                            await pm.remove('test-pkg');
+                        } catch (err) {
+                            removeThrew = true;
+                            if (!err.message.includes('DefaultPackageManager.remove()')) {
+                                throw new Error('Unexpected remove error message: ' + err.message);
+                            }
+                        }
+                        if (!removeThrew) {
+                            throw new Error('remove did not throw');
+                        }
+                        let updateThrew = false;
+                        try {
+                            await pm.update('test-pkg');
+                        } catch (err) {
+                            updateThrew = true;
+                            if (!err.message.includes('DefaultPackageManager.update()')) {
+                                throw new Error('Unexpected update error message: ' + err.message);
+                            }
+                        }
+                        if (!updateThrew) {
+                            throw new Error('update did not throw');
+                        }
+                        globalThis.pmProbe.ok = true;
+                    })()
+                    .catch((error) => {
+                        globalThis.pmProbe.error = String((error && error.stack) || error);
+                    })
+                    .finally(() => {
+                        globalThis.pmProbe.done = true;
+                    });
+                    ",
+                )
+                .await
+                .expect("eval DefaultPackageManager probe");
+
+            drain_until_idle(&runtime, &clock).await;
+            let probe = get_global_json(&runtime, "pmProbe").await;
+            assert_eq!(probe["done"], json!(true), "probe incomplete: {probe}");
+            assert_eq!(
+                probe["error"],
+                serde_json::Value::Null,
+                "probe error: {probe}"
+            );
+            assert_eq!(probe["ok"], json!(true));
         });
     }
 
@@ -31797,7 +32453,7 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
                 .eval(
                     r"
                     globalThis.pathResults = {};
-                    import('node:path').then((path) => {
+                    import('node:path').then(({ posix: path }) => {
                         globalThis.pathResults.isAbsRoot = path.isAbsolute('/foo/bar');
                         globalThis.pathResults.isAbsRel = path.isAbsolute('foo/bar');
                         globalThis.pathResults.extJs = path.extname('/a/b/file.js');
@@ -33738,7 +34394,7 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
                 .eval(
                     r"
                     globalThis.pathResults2 = {};
-                    import('node:path').then((path) => {
+                    import('node:path').then(({ posix: path }) => {
                         // relative
                         globalThis.pathResults2.relSameDir = path.relative('/a/b/c', '/a/b/c/d');
                         globalThis.pathResults2.relUp = path.relative('/a/b/c', '/a/b');
@@ -33789,6 +34445,486 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
             // join doesn't normalize; normalize is separate
             let join_dots = r["joinDots"].as_str().unwrap();
             assert!(join_dots == "b" || join_dots == "a/../b");
+        });
+    }
+
+    #[test]
+    fn pijs_windows_path_defaults_survive_denied_environment_access() {
+        futures::executor::block_on(async {
+            for deny_env in [true, false] {
+                let clock = Arc::new(DeterministicClock::new(0));
+                let config = PiJsRuntimeConfig {
+                    cwd: r"C:\work\project".to_string(),
+                    env: HashMap::from([
+                        ("PI_PLATFORM".to_string(), "win32".to_string()),
+                        ("=D:".to_string(), r"D:\saved".to_string()),
+                    ]),
+                    deny_env,
+                    disk_cache_dir: None,
+                    ..PiJsRuntimeConfig::default()
+                };
+                let runtime = PiJsRuntime::with_clock_and_config_with_policy(
+                    Arc::clone(&clock),
+                    config,
+                    None,
+                )
+                .await
+                .expect("create Windows-path runtime");
+                runtime
+                    .eval(
+                        r"
+                        Promise.all([import('node:path'), import('node:fs')]).then(([mod, fs]) => {
+                            const path = mod.default;
+                            const file = path.resolve('note.txt');
+                            fs.writeFileSync(file, 'windows path content');
+                            globalThis.windowsPathDefaults = {
+                                platform: process.platform,
+                                envPlatform: process.env.PI_PLATFORM ?? null,
+                                native: path === mod.win32 && mod.join === path.join,
+                                namespaces: path.posix === mod.posix && path.win32 === mod.win32,
+                                sep: mod.sep,
+                                delimiter: mod.delimiter,
+                                cwd: path.resolve(),
+                                currentDrive: path.resolve('c:src', '..', 'file.rs'),
+                                savedDrive: path.resolve('D:next'),
+                                otherDrive: path.resolve('E:next'),
+                                rooted: path.resolve('C:\\previous', '\\rooted'),
+                                read: fs.readFileSync(path.join(process.cwd(), '.', 'note.txt'), 'utf8'),
+                                done: true,
+                            };
+                        }).catch((error) => {
+                            globalThis.windowsPathDefaults = { error: String(error) };
+                        });
+                        ",
+                    )
+                    .await
+                    .expect("eval Windows default path workflow");
+                drain_until_idle(&runtime, &clock).await;
+                let actual = get_global_json(&runtime, "windowsPathDefaults").await;
+                let saved_drive = if deny_env {
+                    r"D:\next"
+                } else {
+                    r"D:\saved\next"
+                };
+                assert_eq!(
+                    actual,
+                    serde_json::json!({
+                        "platform": "win32",
+                        "envPlatform": if deny_env { serde_json::Value::Null } else { serde_json::json!("win32") },
+                        "native": true,
+                        "namespaces": true,
+                        "sep": "\\",
+                        "delimiter": ";",
+                        "cwd": r"C:\work\project",
+                        "currentDrive": r"c:\work\project\file.rs",
+                        "savedDrive": saved_drive,
+                        "otherDrive": r"E:\next",
+                        "rooted": r"C:\rooted",
+                        "read": "windows path content",
+                        "done": true,
+                    }),
+                    "Windows metadata and path behavior, deny_env={deny_env}"
+                );
+                assert!(runtime.drain_hostcall_requests().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn pijs_windows_fs_preserves_paths_at_host_boundaries() {
+        // Probe the actual built-in modules in an isolated context. The full
+        // runtime seals its native hooks; this fixture leaves production
+        // authorization untouched and performs no host filesystem I/O.
+        let runtime = rquickjs::Runtime::new().expect("quickjs runtime");
+        let state = Rc::new(RefCell::new(
+            PiJsModuleState::new().with_disk_cache_dir(None),
+        ));
+        runtime.set_loader(
+            PiJsResolver {
+                state: Rc::clone(&state),
+            },
+            PiJsLoader { state },
+        );
+        let context = rquickjs::Context::full(&runtime).expect("quickjs context");
+        context.with(|ctx| {
+            ctx.eval::<(), _>(
+                r"
+                const cwd = '\\\\server\\share\\project';
+                globalThis.pi = { process: { cwd } };
+                globalThis.process = { platform: 'win32', cwd: () => cwd, env: {} };
+                globalThis.windowsFsHostPaths = {};
+                let extensionId = 'ext.one';
+                const calls = [];
+                globalThis.__pi_get_current_extension_id = () => extensionId;
+                globalThis.__pi_host_temp_roots_json = () =>
+                    JSON.stringify(['T:/', '//?/Z:/', '//temp/share']);
+                globalThis.__pi_host_is_registered_fs_path = (path) => {
+                    calls.push(['registered', path]);
+                    return false;
+                };
+                globalThis.__pi_host_check_read_access = (path) => calls.push(['checkRead', path]);
+                globalThis.__pi_host_check_write_access = (path) => calls.push(['checkWrite', path]);
+                globalThis.__pi_host_read_file_sync = (path) => {
+                    calls.push(['read', path]);
+                    throw new Error('fixture read probe');
+                };
+                globalThis.__pi_host_stat_sync = (path, follow) => {
+                    calls.push(['stat', path, follow]);
+                    return JSON.stringify({ kind: 'file', size: 7 });
+                };
+                globalThis.__pi_host_read_dir_sync = (path) => {
+                    calls.push(['readdir', path]);
+                    return JSON.stringify([{ name: 'child.txt', kind: 'file' }]);
+                };
+                Promise.all([import('node:path'), import('node:fs')]).then(([mod, fs]) => {
+                    const path = mod.default;
+                    const inputs = [
+                        path.join('C:\\work', 'file.txt'),
+                        path.resolve('file.txt'),
+                        path.toNamespacedPath('C:\\work\\file.txt'),
+                        path.toNamespacedPath(path.resolve('file.txt')),
+                        path.join('\\\\.\\pipe', 'file.txt'),
+                    ];
+                    windowsFsHostPaths.rows = inputs.map((input) => {
+                        calls.length = 0;
+                        let readProbed = false;
+                        try { fs.readFileSync(input); } catch (error) {
+                            readProbed = String(error).includes('fixture read probe');
+                        }
+                        fs.statSync(input);
+                        fs.lstatSync(input);
+                        fs.readdirSync(path.dirname(input));
+                        fs.writeFileSync(input, new Uint8Array([1]));
+                        const normalized = __pi_vfs_api.normalizePath(input);
+                        return {
+                            readProbed,
+                            normalized,
+                            repeated: __pi_vfs_api.normalizePath(normalized),
+                            calls: calls.slice(),
+                        };
+                    });
+                    windowsFsHostPaths.temp = ['T:\\private.txt', '\\\\?\\Z:\\private.txt', '\\\\temp\\share\\private.txt'].map((input) => {
+                        calls.length = 0;
+                        fs.writeFileSync(input, new Uint8Array([1, 2]));
+                        const canonical = fs.realpathSync(input);
+                        extensionId = 'ext.two';
+                        const visibleToOther = fs.existsSync(input);
+                        extensionId = 'ext.one';
+                        const size = fs.statSync(input).size;
+                        return { canonical, visibleToOther, size, calls: calls.slice() };
+                    });
+                    windowsFsHostPaths.roots = [
+                        'C:\\..\\..', '\\\\server\\share\\..\\..',
+                        '\\\\?\\C:\\..\\..', '\\\\?\\UNC\\server\\share\\..\\..',
+                    ].map((input) => fs.realpathSync(input));
+                    windowsFsHostPaths.done = true;
+                }).catch((error) => {
+                    windowsFsHostPaths.error = String(error);
+                });
+                ",
+            )
+            .expect("evaluate Windows host-boundary fixture");
+        });
+        for _ in 0..64 {
+            if !runtime.execute_pending_job().expect("run import job") {
+                break;
+            }
+        }
+        let actual = context.with(|ctx| {
+            let value: Value<'_> = ctx.globals().get("windowsFsHostPaths").expect("result");
+            js_to_json(&value).expect("convert result")
+        });
+        assert_eq!(actual["done"], json!(true), "{actual}");
+        let expected_paths = [
+            (
+                "C:/work/file.txt",
+                "C:/work/file.txt",
+                "C:/work",
+                "C:/work/child.txt",
+            ),
+            (
+                "//server/share/project/file.txt",
+                "//server/share/project/file.txt",
+                "//server/share/project",
+                "//server/share/project/child.txt",
+            ),
+            (
+                "//?/C:/work/file.txt",
+                r"\\?\C:\work\file.txt",
+                r"\\?\C:\work",
+                r"\\?\C:\work\child.txt",
+            ),
+            (
+                "//?/UNC/server/share/project/file.txt",
+                r"\\?\UNC\server\share\project\file.txt",
+                r"\\?\UNC\server\share\project",
+                r"\\?\UNC\server\share\project\child.txt",
+            ),
+            (
+                "//./pipe/file.txt",
+                r"\\.\pipe\file.txt",
+                r"\\.\pipe",
+                r"\\.\pipe\child.txt",
+            ),
+        ];
+        assert_eq!(
+            actual["rows"].as_array().expect("rows").len(),
+            expected_paths.len()
+        );
+        for (row, (normalized, file, dir, child)) in actual["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .zip(expected_paths)
+        {
+            assert_eq!(
+                row,
+                &json!({
+                    "readProbed": true,
+                    "normalized": normalized,
+                    "repeated": normalized,
+                    "calls": [
+                        ["checkRead", file], ["read", file],
+                        ["checkRead", file], ["stat", file, true],
+                        ["checkRead", file], ["stat", file, false],
+                        ["checkRead", dir], ["readdir", dir], ["checkRead", child],
+                        ["checkWrite", file], ["stat", file, true],
+                    ],
+                }),
+                "host boundary for {normalized}"
+            );
+        }
+        let temp_paths = [
+            ("T:/private.txt", "T:/private.txt"),
+            ("//?/Z:/private.txt", r"\\?\Z:\private.txt"),
+            ("//temp/share/private.txt", "//temp/share/private.txt"),
+        ];
+        assert_eq!(
+            actual["temp"].as_array().expect("temp results").len(),
+            temp_paths.len()
+        );
+        for (row, (canonical, native)) in actual["temp"]
+            .as_array()
+            .expect("temp results")
+            .iter()
+            .zip(temp_paths)
+        {
+            assert_eq!(
+                row,
+                &json!({
+                    "canonical": canonical,
+                    "visibleToOther": false,
+                    "size": 2,
+                    "calls": [["registered", native], ["registered", native], ["registered", native], ["registered", native]],
+                }),
+                "private temp namespace for {canonical}"
+            );
+        }
+        assert_eq!(
+            actual["roots"],
+            json!(["C:/", "//server/share", "//?/C:/", "//?/UNC/server/share"])
+        );
+    }
+
+    #[test]
+    fn pijs_windows_fs_workflows_keep_drive_and_share_roots() {
+        futures::executor::block_on(async {
+            for (cwd, root, uses_unc) in [
+                (r"C:\", "C:/", false),
+                (r"\\server\share", "//server/share", true),
+                (r"\\?\C:\", "//?/C:/", false),
+                (r"\\?\UNC\server\share", "//?/UNC/server/share", true),
+            ] {
+                // UNC boundary and root behavior is covered without I/O by
+                // the probe fixture above. Do not contact an arbitrary live
+                // network share when this test runs on Windows.
+                if cfg!(windows) && uses_unc {
+                    continue;
+                }
+                let clock = Arc::new(DeterministicClock::new(0));
+                let config = PiJsRuntimeConfig {
+                    cwd: cwd.to_string(),
+                    env: HashMap::from([("PI_PLATFORM".to_string(), "win32".to_string())]),
+                    deny_env: true,
+                    disk_cache_dir: None,
+                    ..PiJsRuntimeConfig::default()
+                };
+                let runtime = PiJsRuntime::with_clock_and_config_with_policy(
+                    Arc::clone(&clock),
+                    config,
+                    None,
+                )
+                .await
+                .expect("create Windows filesystem runtime");
+                let fixture = format!("pijs-roots-{}", uuid::Uuid::new_v4().simple());
+                runtime
+                    .context
+                    .with(|ctx| ctx.globals().set("windowsFsFixture", fixture))
+                    .await
+                    .expect("set unique fixture prefix");
+                runtime
+                    .eval(
+                        r"
+                        Promise.all([import('node:path'), import('node:fs')]).then(([mod, fs]) => {
+                            const path = mod.default;
+                            const fileName = windowsFsFixture + '-file.txt';
+                            const projectName = windowsFsFixture + '-project';
+                            const aliasName = windowsFsFixture + '-alias';
+                            const owned = new Map([[aliasName, 'alias'], [fileName, 'file.txt'], [projectName, 'project']]);
+                            const file = path.resolve(fileName);
+                            fs.writeFileSync(file, 'root file');
+                            fs.mkdirSync(path.resolve(projectName, 'links'));
+                            fs.symlinkSync('..\\..\\' + fileName, path.resolve(projectName, 'links', 'file-link'));
+                            fs.symlinkSync(path.resolve(projectName), path.resolve(aliasName));
+                            const clamped = process.cwd() + '\\..\\..\\' + fileName;
+                            globalThis.windowsFsRoots = {
+                                native: path === mod.win32,
+                                root: fs.realpathSync(process.cwd()),
+                                clamped: fs.readFileSync(clamped, 'utf8'),
+                                linked: fs.readFileSync(path.resolve(aliasName, 'links', 'file-link'), 'utf8'),
+                                entries: fs.readdirSync(process.cwd()).filter((name) => owned.has(name)).map((name) => owned.get(name)),
+                                aliasEntries: fs.readdirSync(path.resolve(aliasName)).filter((name) => name === 'links'),
+                                done: true,
+                            };
+                        }).catch((error) => {
+                            globalThis.windowsFsRoots = { error: String(error) };
+                        });
+                        ",
+                    )
+                    .await
+                    .expect("evaluate Windows filesystem workflow");
+                drain_until_idle(&runtime, &clock).await;
+                let actual = get_global_json(&runtime, "windowsFsRoots").await;
+                assert_eq!(
+                    actual,
+                    json!({
+                        "native": true,
+                        "root": root,
+                        "clamped": "root file",
+                        "linked": "root file",
+                        "entries": ["alias", "file.txt", "project"],
+                        "aliasEntries": ["links"],
+                        "done": true,
+                    }),
+                    "filesystem workflow at {cwd}"
+                );
+                assert!(runtime.drain_hostcall_requests().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn pijs_explicit_windows_paths_preserve_drives_and_unc_roots_on_unix() {
+        futures::executor::block_on(async {
+            let clock = Arc::new(DeterministicClock::new(0));
+            let config = PiJsRuntimeConfig {
+                cwd: "/virtual/project".to_string(),
+                env: HashMap::from([("PI_PLATFORM".to_string(), "linux".to_string())]),
+                deny_env: true,
+                disk_cache_dir: None,
+                ..PiJsRuntimeConfig::default()
+            };
+            let runtime =
+                PiJsRuntime::with_clock_and_config_with_policy(Arc::clone(&clock), config, None)
+                    .await
+                    .expect("create Unix-path runtime");
+            runtime
+                .eval(
+                    r"
+                    import('node:path').then((mod) => {
+                        const path = mod.win32;
+                        const invalid = [
+                            () => path.join('C:\\work', {}),
+                            () => path.resolve('C:\\work', null),
+                            () => path.basename('file.txt', 1),
+                            () => path.normalize(undefined),
+                            () => path.parse([]),
+                            () => path.format(null),
+                            () => path.relative('C:\\work', false),
+                        ];
+                        globalThis.windowsPathRoots = {
+                            nativePosix: mod.default === mod.posix && mod.sep === '/',
+                            posixUnchanged: mod.posix.normalize('/a/b/../c') === '/a/c',
+                            driveRoot: path.normalize('C:/../project'),
+                            driveRelative: path.normalize('C:../project'),
+                            uncRoot: path.normalize('\\\\server\\share\\dir\\..\\..\\file'),
+                            bareShare: path.normalize('\\\\server\\share'),
+                            joinShare: path.join('\\\\server', 'share', 'dir', '..', 'file'),
+                            ordinaryRoot: path.join('//', 'server', 'share'),
+                            relativeDrive: path.join('folder', 'C:', 'file'),
+                            exposedDrive: path.normalize('folder\\..\\C:\\file'),
+                            trailing: path.normalize('C:/temp//foo/../'),
+                            caseRelative: path.relative('C:\\Work\\src', 'c:\\work\\tests\\case.rs'),
+                            sameRelative: path.relative('C:\\Work', 'c:\\work'),
+                            differentDrive: path.relative('C:\\work', 'D:\\source\\file'),
+                            sharedServer: path.relative('\\\\srv\\one\\dir', '\\\\srv\\two\\file'),
+                            differentServer: path.relative('\\\\a\\share', '\\\\b\\share\\file'),
+                            resolveSequence: path.resolve('C:\\base', 'C:src', '..', 'out'),
+                            parseDrive: path.parse('C:/source/file.test.rs'),
+                            parseShare: path.parse('\\\\server\\share\\file.txt'),
+                            dirname: path.dirname('C:\\source\\child\\'),
+                            suffix: path.basename('C:\\source\\FILE.TXT', '.txt'),
+                            hiddenExtension: path.extname('C:\\source\\.env'),
+                            parentExtension: path.extname('..'),
+                            extension: path.extname('C:\\source\\file.rs\\'),
+                            format: path.format({ root: 'C:\\', name: 'file', ext: 'rs' }),
+                            absolute: [path.isAbsolute('C:relative'), path.isAbsolute('C:/root'), path.isAbsolute('\\root')],
+                            namespace: path.toNamespacedPath('\\\\server\\share\\file'),
+                            namespaceNormalize: path.normalize('\\\\?\\C:\\path\\..'),
+                            namespaceResolve: path.resolve('\\\\?\\C:\\path', '\\file'),
+                            invalid: invalid.map((call) => {
+                                try { call(); return false; } catch (error) { return error instanceof TypeError; }
+                            }),
+                            done: true,
+                        };
+                    }).catch((error) => {
+                        globalThis.windowsPathRoots = { error: String(error) };
+                    });
+                    ",
+                )
+                .await
+                .expect("eval Windows drive and share workflows");
+            drain_until_idle(&runtime, &clock).await;
+            let actual = get_global_json(&runtime, "windowsPathRoots").await;
+            assert_eq!(
+                actual,
+                serde_json::json!({
+                    "nativePosix": true,
+                    "posixUnchanged": true,
+                    "driveRoot": r"C:\project",
+                    "driveRelative": r"C:..\project",
+                    "uncRoot": r"\\server\share\file",
+                    "bareShare": "\\\\server\\share\\",
+                    "joinShare": r"\\server\share\file",
+                    "ordinaryRoot": r"\server\share",
+                    "relativeDrive": r".\folder\C:\file",
+                    "exposedDrive": r".\C:\file",
+                    "trailing": "C:\\temp\\",
+                    "caseRelative": r"..\tests\case.rs",
+                    "sameRelative": "",
+                    "differentDrive": r"D:\source\file",
+                    "sharedServer": r"..\..\two\file",
+                    "differentServer": r"\\b\share\file",
+                    "resolveSequence": r"C:\base\out",
+                    "parseDrive": { "root": "C:/", "dir": "C:/source", "base": "file.test.rs", "ext": ".rs", "name": "file.test" },
+                    "parseShare": { "root": "\\\\server\\share\\", "dir": "\\\\server\\share\\", "base": "file.txt", "ext": ".txt", "name": "file" },
+                    "dirname": r"C:\source",
+                    "suffix": "FILE.TXT",
+                    "hiddenExtension": "",
+                    "parentExtension": "",
+                    "extension": ".rs",
+                    "format": r"C:\file.rs",
+                    "absolute": [false, true, true],
+                    "namespace": r"\\?\UNC\server\share\file",
+                    "namespaceNormalize": r"\\?\C:",
+                    "namespaceResolve": r"\\?\file",
+                    "invalid": [true, true, true, true, true, true, true],
+                    "done": true,
+                })
+            );
+            assert!(runtime.drain_hostcall_requests().is_empty());
         });
     }
 
@@ -35640,6 +36776,7 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn pijs_exec_sync_throws_when_stdout_exceeds_max_buffer() {
         futures::executor::block_on(async {
@@ -35871,6 +37008,7 @@ export const bundled = globalThis.__doomWadFinderProbe.bundled;
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn pijs_exec_file_sync_throws_when_stdout_exceeds_max_buffer() {
         futures::executor::block_on(async {

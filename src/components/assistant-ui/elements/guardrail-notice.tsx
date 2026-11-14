@@ -36,7 +36,7 @@ export function GuardrailNotice({
     >
       <div className="flex items-center gap-2.5">
         <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/12 text-amber-600 dark:text-amber-400">
-          <ShieldIcon className="size-3.5" />
+          <ShieldIcon className="size-[var(--size-icon-md)]" />
         </span>
         <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium">
           {title}

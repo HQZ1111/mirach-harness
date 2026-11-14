@@ -15,16 +15,24 @@ import { Tooltip } from '@/components/motion/tooltip'
 export const RailLogoLeading = ({
   onWordClick,
   wordTitle,
+  wordActive,
 }: {
   onWordClick?: () => void
   wordTitle?: string
+  /** 点击语义的"在场"态（机器人弹出栏开着 = 高亮）——无 onWordClick 时忽略。 */
+  wordActive?: boolean
 }) => (
   <div className="rail-logo-leading">
     <img alt="" className="rail-logo-mark" src="/brand/logo.png" />
     {onWordClick ? (
       <Tooltip content={wordTitle ?? ''} side="bottom">
         <button
-          className="rail-logo-word rail-logo-word-btn pressable-sm"
+          aria-pressed={wordActive}
+          className={
+            wordActive
+              ? 'rail-logo-word rail-logo-word-btn rail-logo-word-active pressable-sm'
+              : 'rail-logo-word rail-logo-word-btn pressable-sm'
+          }
           onClick={onWordClick}
           type="button"
         >

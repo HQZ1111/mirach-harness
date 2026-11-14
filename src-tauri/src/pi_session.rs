@@ -102,6 +102,11 @@ struct EngineShared {
     /// ask 工具问题注册表（交互卡）——同款共享：channel UI 的请求经
     /// 本表登记 + 进 AG-UI 流，前端应答经 `pi_ask_response` 回灌。
     asks: Arc<AskRegistry>,
+    /// 工具审批策略（pi `ApprovalState`，进程级共享；SessionOptions.
+    /// approval_state 挂同一 Arc——`set_mode` 即时作用于运行中的会话）。
+    /// 模式切换钮（2026-11-01）的数据面：计划模式 = plan gate、
+    /// 文件内修改 = Write、完全访问 = Yolo（语义见 approval.rs 头注）。
+    approval: Arc<pi::approval::ApprovalState>,
 }
 
 /// prompt 期间的清场守卫。Drop 无法传播错误——这里的锁失败只能忽略：
@@ -210,6 +215,7 @@ impl PiEngine {
                 run_counter: AtomicU64::new(0),
                 approvals: Arc::new(ApprovalRegistry::default()),
                 asks: Arc::new(AskRegistry::default()),
+                approval: Arc::new(pi::approval::ApprovalState::default()),
             }),
             side_engines: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -224,6 +230,149 @@ impl PiEngine {
     /// ask 问题注册表共享柄（AguiState 与 PiEngine 同一份真相）。
     pub fn asks(&self) -> Arc<AskRegistry> {
         Arc::clone(&self.shared.asks)
+    }
+
+    // ── 模式切换（2026-11-01 用户："输入框的加号右边加个zcode的切换模式
+    //    按钮，计划模式，文件内修改，完全访问"）──
+    // 三态全部映射 pi 原生能力，零自创语义：
+    // - 计划模式 = plan gate（plan.rs：Planning 态下工具执行器拒绝
+    //   变更/进程类工具，模型经 submit_plan 提交、宿主审批后放行）；
+    // - 文件内修改 = ApprovalMode::Write（写文件自动批、其余照问——
+    //   approval.rs evaluate 的 Write 分支）；
+    // - 完全访问 = Yolo（全部自动批，硬策略闸/双确认类除外）。
+    // 审批卡经 approval_handler_via_ask 自动桥到 ask 面 = 宿主现有
+    // AskRegistry → AskCards，无需新卡通道。
+
+    /// 模式快照（切换钮初装 + 轮询；planPending 非空 = 有待审计划卡片）。
+    pub fn mode_state(&self) -> Result<serde_json::Value, String> {
+        let approval_mode = self.shared.approval.mode().as_str().to_string();
+        let guard = self
+            .shared
+            .handle
+            .lock()
+            .map_err(|_| "pi handle mutex poisoned".to_string())?;
+        let Some(handle) = guard.as_ref() else {
+            return Ok(serde_json::json!({
+                "approvalMode": approval_mode,
+                "planMode": pi::plan::PlanMode::Off.as_str(),
+                "planPending": serde_json::Value::Null,
+            }));
+        };
+        let plan = handle.session().agent.plan_state();
+        let pending = plan.pending_review().map(|r| r.text().to_string());
+        Ok(serde_json::json!({
+            "approvalMode": approval_mode,
+            "planMode": plan.mode().as_str(),
+            "planPending": pending,
+        }))
+    }
+
+    /// 切工具审批模式（"always-ask" | "write" | "yolo"；未知值 Err——不猜）。
+    /// 会话在场时按上游 CLI `/approval` 同款落审计条目（重放可见）。
+    ///
+    /// **持久化必须走 `save_and_index()`**（引擎统一的官方通道）：直接对
+    /// store 调 `Session::save()` 会绕过 generation 协议，实测把 append 句柄
+    /// 打进坏态——此后所有 flush 永败 `os error 1`（ERROR_INVALID_FUNCTION），
+    /// 会话列表随之清空（2026-11-01 实锤，4 个会话集体消失）。条目只 append
+    /// 不就地 save，落盘交给下方统一通道。
+    pub fn set_approval_mode(&self, mode: &str) -> Result<(), String> {
+        let m = match mode {
+            "always-ask" => pi::approval::ApprovalMode::AlwaysAsk,
+            "write" => pi::approval::ApprovalMode::Write,
+            "yolo" => pi::approval::ApprovalMode::Yolo,
+            other => return Err(format!("未知审批模式：{other}")),
+        };
+        self.shared.approval.set_mode(m);
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                let Some(handle) = guard.as_mut() else {
+                    return Ok(());
+                };
+                {
+                    let agent_session = handle.session_mut();
+                    let store = Arc::clone(&agent_session.session);
+                    let mut inner = store
+                        .lock(cx.cx())
+                        .await
+                        .map_err(|e| format!("session lock failed: {e}"))?;
+                    inner.append_custom_entry(
+                        "approval_mode".to_string(),
+                        Some(serde_json::json!({ "mode": m.as_str() })),
+                    );
+                }
+                handle
+                    .session_mut()
+                    .save_and_index()
+                    .await
+                    .map_err(|e| format!("审批模式审计条目落盘失败: {e}"))?;
+                Ok(())
+            })
+        })?
+    }
+
+    /// 进入/退出计划模式（plan gate；会话忙时上游返回 PLAN_SESSION_BUSY，
+    /// 错误原样传播给前端展示）。
+    pub fn set_plan_mode(&self, enabled: bool) -> Result<(), String> {
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                let handle = guard.as_mut().ok_or_else(|| "no active session".to_string())?;
+                let change = if enabled {
+                    handle
+                        .enter_plan_mode(&cx)
+                        .await
+                        .map_err(|e| e.to_string())?
+                } else {
+                    handle.exit_plan_mode(&cx).await.map_err(|e| e.to_string())?
+                };
+                let _ = change;
+                Ok(())
+            })
+        })?
+    }
+
+    /// 计划裁决（模型 submit_plan 后宿主批准/驳回；无待审计划 Err）。
+    pub fn decide_plan(&self, approve: bool) -> Result<(), String> {
+        let shared = Arc::clone(&self.shared);
+        on_big_stack(move || {
+            shared.runtime.block_on(async {
+                let cx = pi::agent_cx::AgentCx::for_request();
+                let mut guard = shared
+                    .handle
+                    .lock()
+                    .map_err(|_| "pi handle mutex poisoned".to_string())?;
+                let handle = guard.as_mut().ok_or_else(|| "no active session".to_string())?;
+                let review = handle
+                    .pending_plan_review()
+                    .map_err(|e| e.to_string())?;
+                let Some(review) = review else {
+                    return Err("no pending plan review".to_string());
+                };
+                if approve {
+                    handle
+                        .approve_plan_review(&cx, &review)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    handle
+                        .reject_plan_review(&cx, &review)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+        })?
     }
 
     /// 创建/打开进程内会话（provider/model 缺省读 ~/.pi settings；
@@ -246,16 +395,62 @@ impl PiEngine {
         ui_bridge: Option<UiBridgeHandle>,
         session_path: Option<std::path::PathBuf>,
         working_directory: Option<std::path::PathBuf>,
+        bot_enabled_tools: Option<Vec<String>>,
     ) -> Result<String, String> {
         // 先 flush 旧会话（失败即中止——handle 未换、消息不丢，用户可重试；
         // 也避免 flush 失败后重试堆积空会话文件）
         self.flush_active_session()?;
         let shared = Arc::clone(&self.shared);
+        // 个性（SOUL.md）注入：用户在「设置 → 个性」写的内容作为
+        // append_system_prompt 拼在 pi 的内置系统提示之后（不覆盖内置——
+        // 覆盖会丢掉工具使用契约，模型会开始"只说话不干活"）。
+        //
+        // 读失败必须传播（规矩 12）：用户以为个性生效了、实际没生效，
+        // 比报错难查得多。文件不存在是正常态（从没打开过个性页）→ None。
+        let persona_prompt = crate::pi_persona::persona_prompt_for_session()?;
+        // 技能提示（2026-10-26）：pi 的 `SessionOptions.skills_prompt` 是
+        // **宿主提供的字符串**——pi 自己不扫 skills 目录（`sdk.rs:399`；
+        // ACP 路径同样由调用方渲染，`acp.rs:1825`）。所以"技能开关"只能
+        // 在宿主侧实现：装载 → 按禁用集过滤 → 渲染 `<available_skills>`。
+        let skills_prompt = crate::pi_capabilities::skills_prompt_for_session()?;
+        // 工具集开关 → enabled_tools。bot 级显式传入优先（per-bot 能力面，
+        // 2026-11-10：机器人预设的工具集选择经 pi_create_bot_session 传入）；
+        // `None` = 走全局偏好，用户没动过任何开关时是 pi 默认集（升级加了
+        // 新默认工具时能自动拿到）。
+        let enabled_tools = match bot_enabled_tools {
+            Some(tools) => Some(tools),
+            None => crate::pi_capabilities::enabled_tools_for_session()?,
+        };
+        // 扩展（2026-11-02）：**照 pi CLI 的做法**取 ResourceLoader 的
+        // 扩展集合（main.rs:2326 `extension_paths: resources.extensions()`）。
+        // 宿主此前恒空——`pi::extensions` 的整套能力在宿主里等于不存在，
+        // RPi 之类的社区插件装上跑不起来。发现失败必须传播（规矩 12）：
+        // 静默吞成空列表会让用户以为插件生效了、实际没生效。
+        //
+        // cwd / 信任决定与 workspace_trusted 同源（同一个用户选择）。
+        let workspace_trusted = working_directory.is_some();
+        let extension_paths = {
+            let cwd = working_directory
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            crate::pi_extensions::resolve_extension_paths(&cwd, workspace_trusted)?
+        };
         let options = SessionOptions {
             provider,
             model,
             // 机器人预设的系统提示（sdk.rs:308 SessionOptions.system_prompt）
             system_prompt,
+            // 个性（SOUL.md）→ 追加段（sdk.rs:369 append_system_prompt）
+            append_system_prompt: persona_prompt,
+            // 技能目录（sdk.rs:399）——宿主渲染的 `<available_skills>` 块
+            skills_prompt,
+            // 工具集开关（sdk.rs:378）——None 保持 pi 默认
+            enabled_tools,
+            // 工具审批策略（sdk.rs「SessionOptions.approval_state」）：进程级
+            // 共享态挂进会话——模式切换钮（mode-store）经 `set_mode` 即时生效。
+            // 默认 AlwaysAsk（变更前确认）＝ ZCode build 的默认语义。
+            // ApprovalState 内部全是 Arc 字段（Clone 便宜），直接给值。
+            approval_state: Some((*Arc::clone(&self.shared.approval)).clone()),
             // 会话持久化（对话真相在 pi，§5）；session_path 打开历史会话时
             // 上游自动装填该文件。
             // 【2026-10-01 修复记录】此前 no_session:false 实测"flush 永败
@@ -271,8 +466,10 @@ impl PiEngine {
             // 本宿主的信任决定 = 用户在目录对话框里显式选了这个文件夹——
             // 有 working_directory 即 trusted；未选（cwd 继承进程目录）维持
             // 上游默认 false，项目本地配置不加载。
-            workspace_trusted: working_directory.is_some(),
+            workspace_trusted,
             working_directory,
+            // 扩展路径（与 pi CLI 同源；见上方 resolve_extension_paths）
+            extension_paths,
             // handler 仅在加载了扩展时被咨询；挂上桥后能力提示/扩展 UI
             // 请求经 CUSTOM 事件到前端卡片（§4.4）
             extension_ui_handler: ui_bridge.map(|h| {
@@ -342,7 +539,7 @@ impl PiEngine {
         model: Option<String>,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        self.create_session_opts(provider, model, None, ui_bridge, None, None)
+        self.create_session_opts(provider, model, None, ui_bridge, None, None, None)
     }
 
     /// 在指定工作区新建（空）会话（前端「选择工作区」入口）：working_directory
@@ -362,21 +559,24 @@ impl PiEngine {
             ui_bridge,
             None,
             Some(std::path::PathBuf::from(cwd)),
+            None,
         )
     }
 
     /// 机器人预设会话（左栏「机器人」窗格启动钮）：system_prompt + model +
     /// working_directory 一次性给足（SessionOptions.system_prompt sdk.rs:308 /
-    /// model :305 / working_directory :311）。workspace_trusted = 选了工作区
-    /// 即信任（new_session_with_cwd 同款语义）。调用方（pi_create_bot_session）
-    /// 随后以 bot 名重命名该会话（rename_session 只作用当前会话——刚建即当前）。
-    /// 返回 "provider/model"。
+    /// model :305 / working_directory :311）。enabled_tools = per-bot 工具集
+    /// 选择（2026-11-10；None = 全局偏好/默认集）。workspace_trusted = 选了
+    /// 工作区即信任（new_session_with_cwd 同款语义）。调用方
+    /// （pi_create_bot_session）随后以 bot 名重命名该会话（rename_session
+    /// 只作用当前会话——刚建即当前）。返回 "provider/model"。
     pub fn create_bot_session(
         &self,
         provider: Option<String>,
         model: Option<String>,
         system_prompt: Option<String>,
         cwd: Option<String>,
+        enabled_tools: Option<Vec<String>>,
         ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
         self.create_session_opts(
@@ -386,6 +586,7 @@ impl PiEngine {
             ui_bridge,
             None,
             cwd.map(std::path::PathBuf::from),
+            enabled_tools,
         )
     }
 
@@ -460,6 +661,7 @@ impl PiEngine {
             None,
             ui_bridge,
             Some(std::path::PathBuf::from(path)),
+            None,
             None,
         )
     }
@@ -1291,19 +1493,16 @@ pub fn side_prompt(
                     }));
                 }
                 let provider = agent_session.agent.provider();
-                // 无凭据 provider（replay/test/local）摘要不需要 key；
-                // 有凭据的带自己的（rpc rewind 同源写法）。
-                let api_key = agent_session
-                    .agent
-                    .stream_options()
-                    .api_key
-                    .clone()
-                    .unwrap_or_default();
+                // pi 0.8.0：summarize_span 第三参从 &api_key 变为 &StreamOptions
+                // （秘钥筛选覆盖整个 provider 请求），并新增第五参
+                // &CompactionPrivacy（写法照抄上游 sdk.rs rewind 路径）。
+                let privacy = agent_session.agent.compaction_privacy();
                 let summary = pi::checkpoint::summarize_span(
                     &span,
                     provider,
-                    &api_key,
+                    agent_session.agent.stream_options(),
                     agent_session.compaction_settings(),
+                    &privacy,
                 )
                 .await
                 .map_err(|e| format!("rewind 摘要失败: {e}"))?;
@@ -1687,24 +1886,30 @@ pub fn side_prompt(
     /// 会话状态快照（session_id/provider/model/thinking/message_count）。
     pub fn state(&self) -> Result<serde_json::Value, String> {
         let shared = Arc::clone(&self.shared);
-        let state = on_big_stack(move || {
+        on_big_stack(move || {
             let mut guard = shared
                 .handle
                 .lock()
                 .map_err(|_| "pi handle mutex poisoned".to_string())?;
             let handle = guard.as_mut().ok_or("no active session")?;
-            shared
+            // 扩展是否真的注册进了**这个**会话（`sdk.rs:2466` pub const
+            // fn has_extensions = session.extensions.is_some()）。
+            // `pi_extensions` 只证明"发现到了什么"，不证明"会话加载了什么"
+            // ——两者的差别正是本字段存在的理由。
+            let has_extensions = handle.has_extensions();
+            let state = shared
                 .runtime
                 .block_on(handle.state())
-                .map_err(|e| e.to_string())
-        })??;
-        Ok(serde_json::json!({
-            "sessionId": state.session_id,
-            "provider": state.provider,
-            "modelId": state.model_id,
-            "thinkingLevel": state.thinking_level.map(|l| l.to_string()),
-            "messageCount": state.message_count,
-        }))
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({
+                "sessionId": state.session_id,
+                "provider": state.provider,
+                "modelId": state.model_id,
+                "thinkingLevel": state.thinking_level.map(|l| l.to_string()),
+                "messageCount": state.message_count,
+                "hasExtensions": has_extensions,
+            }))
+        })?
     }
 
     /// 子代理名册（活动面板 Agent 分区数据面）：读 pi 进程级
@@ -1774,22 +1979,135 @@ pub fn side_prompt(
         serde_json::to_value(&msgs).map_err(|e| e.to_string())
     }
 
+    /// 会话时间线标记（ZCode `timelineMarkerRow` 的宿主投影，2026-11-02）。
+    ///
+    /// 返回当前分支上的 `model_change` / `compaction` 条目，附带**它们出现
+    /// 在第几条消息之前**（`beforeMessageIndex`）——渲染层据此把分隔线插进
+    /// 消息流，而不是自造一个"切换发生在哪一轮"的判断。
+    ///
+    /// ## 为什么必须从会话条目取
+    ///
+    /// 模型切换的真相是 pi 的 `SessionEntry::ModelChange`（session.rs:6963，
+    /// `append_model_change` 写入）。`pi_get_messages` 只投影 message 条目，
+    /// 拿不到切换点；从设置页的"当前模型"反推则会漏掉历史切换（旧会话里
+    /// 换过好几次模型）。**读条目是唯一准确来源。**
+    ///
+    /// ## 索引语义
+    ///
+    /// 沿 `entries_for_current_path()` 顺序扫描，每遇到一条 message 条目
+    /// 就把计数器 +1；标记的 `beforeMessageIndex` = 扫到它时的计数器值。
+    /// 于是 `beforeMessageIndex === 0` 表示"在第一条消息之前"（会话开头
+    /// 的模型选择），等于 N 表示"在第 N 条消息之后、第 N+1 条之前"。
+    ///
+    /// 消息索引与前端 `pi_get_messages` 的顺序一致（同一个
+    /// `entries_for_current_path()` + 同一条 message 过滤），所以前端可以
+    /// 直接拿它跟 `thread.messages` 下标对齐。
+    ///
+    /// **计数口径（2026-11-03 修）**：只数 `role == user | assistant` 的
+    /// message 条目。前端的 `hydratePiMessages` 把 `toolResult` **并进前一条
+    /// assistant 的部件**（不产生独立消息），若按"全部 message 条目"计数，
+    /// 标记索引会系统性偏大，尾部标记永远挂不上。与本水合逻辑同口径计数，
+    /// 两边才能对齐。
+    pub fn timeline_markers(&self) -> Result<serde_json::Value, String> {
+        let shared = Arc::clone(&self.shared);
+        let markers = on_big_stack(move || {
+            let guard = shared
+                .handle
+                .lock()
+                .map_err(|_| "pi handle mutex poisoned".to_string())?;
+            let handle = guard.as_ref().ok_or("no active session")?;
+            shared
+                .runtime
+                .block_on(handle.with_session(|session| {
+                    let mut out: Vec<serde_json::Value> = Vec::new();
+                    let mut message_index: usize = 0;
+                    for entry in session.entries_for_current_path() {
+                        match entry {
+                            pi::session::SessionEntry::Message(msg) => {
+                                // **与前端的 hydrate 同口径计数**：只有
+                                // user / assistant 产生独立消息。toolResult
+                                // 并进 assistant 部件；custom /
+                                // bash_execution / branch_summary 前端直接
+                                // 跳过——计进去索引就系统性偏大。
+                                if matches!(
+                                    msg.message,
+                                    pi::session::SessionMessage::User { .. }
+                                        | pi::session::SessionMessage::Assistant { .. }
+                                ) {
+                                    message_index += 1;
+                                }
+                            }
+                            pi::session::SessionEntry::ModelChange(change) => {
+                                // failover 角色是引擎自动降级，不是用户切换
+                                // ——ZCode 的 modelChange 只表达用户可见的
+                                // 模型身份变化，降级另有渠道。这里如实跳过，
+                                // 避免把自动降级画成"你换了模型"。
+                                if change.role.as_deref() == Some("failover") {
+                                    continue;
+                                }
+                                out.push(serde_json::json!({
+                                    "kind": "modelChange",
+                                    "beforeMessageIndex": message_index,
+                                    "provider": change.provider,
+                                    "modelId": change.model_id,
+                                }));
+                            }
+                            pi::session::SessionEntry::Compaction(_) => {
+                                out.push(serde_json::json!({
+                                    "kind": "compact",
+                                    "beforeMessageIndex": message_index,
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    out
+                }))
+                .map_err(|e| e.to_string())
+        })??;
+        Ok(serde_json::Value::Array(markers))
+    }
+
     /// 切换 provider/model（ModelSelector 数据面）。
+    ///
+    /// **同时写回 settings.json 的默认值**（2026-10-26 用户报："模型选择是
+    /// 假的，无论选哪个用的都是之前设置的，甚至不在模型选择器里的模型"）。
+    ///
+    /// 根因：上游 `AgentSession::set_provider_model` 只换**当前会话**的
+    /// provider 实现 + 会话头元数据。新建会话走 `create_agent_session`，
+    /// 它按 `settings.json` 的 `default_provider/default_model` 选模型——
+    /// 不写回的话，用户选的模型只活到这次会话结束，下一条新会话又回到
+    /// 那个（可能已失效的）默认值，而失效默认值会被 pi 回落到内置目录第一
+    /// 项——于是"选哪个都用之前那个，甚至不在选择器里"。
+    ///
+    /// 写回用 pi 自己的 Config 类型（不手拼 JSON：别名/未知键/字段顺序都
+    /// 由上游 serde 决定），写完原子替换，失败**传播**（规矩 12）——
+    /// 会话内切换已成功时不回滚（会话状态已变），但错误必须让调用方看到。
     pub fn set_model(&self, provider: &str, model_id: &str) -> Result<(), String> {
         let shared = Arc::clone(&self.shared);
         let provider = provider.to_string();
         let model_id = model_id.to_string();
-        on_big_stack(move || {
+        let (p, m) = (provider.clone(), model_id.clone());
+        let switched = on_big_stack(move || {
             let mut guard = shared
                 .handle
                 .lock()
                 .map_err(|_| "pi handle mutex poisoned".to_string())?;
-            let handle = guard.as_mut().ok_or("no active session")?;
+            // **无活动会话不是错误**（首条消息前是正常态）：此时没有运行时
+            // 可切换，但用户的意图仍然有效——写回默认值，下一次建会话就按
+            // 它起跑。这里不是兜底：切换失败（有会话但切不动）照样 Err。
+            let Some(handle) = guard.as_mut() else {
+                return Ok::<bool, String>(false);
+            };
             shared
                 .runtime
-                .block_on(handle.set_model(&provider, &model_id))
-                .map_err(|e| e.to_string())
-        })?
+                .block_on(handle.set_model(&p, &m))
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        })??;
+        let _ = switched;
+        // 会话已切成功（或无会话待建）→ 同步默认值（新会话从这里起跑）
+        crate::pi_settings::persist_default_model(&provider, &model_id)
     }
 
     /// 设置思考预算档位（off/minimal/low/medium/high/xhigh/max）。
@@ -1823,7 +2141,14 @@ pub fn side_prompt(
             // 错误即错误：auth.json 读取失败直接报错，不降级为空凭据目录。
             let auth = pi::auth::AuthStorage::load(pi::config::Config::auth_path())
                 .map_err(|e| format!("auth.json 读取失败: {e}"))?;
-            let registry = pi::sdk::ModelRegistry::load_for_listing(&auth, None);
+            // **必须把 models.json 路径喂进去**（2026-10-26 修复）：此前传
+            // None = 只列内置目录，用户在设置页自定义的 provider（写进
+            // models.json 的 providers 表）在模型选择器里根本看不到——用户
+            // 报"选的模型甚至不在模型选择器里"的一半成因在这里。
+            // 路径与 pi_settings 同源（default_models_path(&global_dir)，
+            // 上游 models.rs:3994 / pi main.rs:887 同款）。
+            let models_path = pi::models::default_models_path(&pi::config::Config::global_dir());
+            let registry = pi::sdk::ModelRegistry::load_for_listing(&auth, Some(models_path));
             let models: Vec<serde_json::Value> = registry
                 .get_available()
                 .iter()

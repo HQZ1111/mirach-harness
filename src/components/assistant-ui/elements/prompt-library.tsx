@@ -85,7 +85,7 @@ export function PromptLibrary({
           "flex items-center gap-2 rounded-xl px-2.5 py-1.5",
         )}
       >
-        <BookmarkIcon className="text-foreground/30 size-3.5 shrink-0" />
+        <BookmarkIcon className="text-foreground/30 size-[var(--size-icon-md)] shrink-0" />
         <input
           value={query}
           onChange={(event) => onQueryChange?.(event.target.value)}

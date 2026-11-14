@@ -1099,6 +1099,28 @@ pub struct ExtensionAiCompletionRequest {
     pub simple: bool,
 }
 
+/// Public model identity for a host-resolved compaction request. Endpoints,
+/// headers and credentials are deliberately absent from this contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionCompactionModel {
+    pub provider: String,
+    pub id: String,
+}
+
+/// Per-operation controls for summary compaction. The host resolves the
+/// model against its own registry and applies its own credential boundary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionCompactionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ExtensionCompactionModel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<crate::model::ThinkingLevel>,
+}
+
 #[async_trait]
 pub trait ExtensionHostActions: Send + Sync {
     async fn send_message(
@@ -1124,12 +1146,14 @@ pub trait ExtensionHostActions: Send + Sync {
         ))
     }
 
-    /// Host-side compaction bridge (gh #167 / bd-i28yz): run the native
-    /// compaction engine over `preparation` using the SESSION's own provider,
-    /// model, and credentials. Sandboxed extensions can neither choose the
-    /// endpoint nor observe the credential; malformed preparation or provider
-    /// failure must surface as an `Err` (never a fabricated summary).
-    async fn compact_session(&self, _preparation: Value) -> Result<Value> {
+    /// Run summary compaction using the session provider or a registered
+    /// public model identity. The host owns endpoint and credential resolution;
+    /// extensions can supply summary guidance and a requested thinking level.
+    async fn compact_session(
+        &self,
+        _preparation: Value,
+        _options: ExtensionCompactionOptions,
+    ) -> Result<Value> {
         Err(Error::extension(
             "@mariozechner/pi-coding-agent compact host bridge is not configured".to_string(),
         ))
@@ -13463,12 +13487,27 @@ fn collect_extension_roots_from_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
             roots.push(root);
         }
 
+        // An ancestor package donates its directory tree only when its
+        // `pi.extensions` declaration actually resolves to this entry, the
+        // same test co-entry discovery applies. An unrelated package.json
+        // anywhere above (in $HOME, a projects folder, ...) grants nothing
+        // (bd-2rthm); an unreadable or malformed one grants nothing either.
+        let canonical_entry = safe_canonicalize(entry_path);
         for package_json in find_package_json_ancestors(Some(parent)) {
-            if let Some(package_dir) = package_json.parent() {
-                let root = safe_canonicalize(package_dir);
-                if seen.insert(root.clone()) {
-                    roots.push(root);
-                }
+            let Some(package_dir) = package_json.parent() else {
+                continue;
+            };
+            let Ok(Some(package_entries)) = read_pi_extensions_from_package(&package_json) else {
+                continue;
+            };
+            if !resolve_package_declared_entries(package_dir, &package_entries)
+                .contains(&canonical_entry)
+            {
+                continue;
+            }
+            let root = safe_canonicalize(package_dir);
+            if seen.insert(root.clone()) {
+                roots.push(root);
             }
         }
     }
@@ -18276,12 +18315,15 @@ async fn dispatch_hostcall_exec_ref_with_limit(
                 }
                 crate::tools::isolate_command_process_group(&mut command);
 
-                let mut child = command.spawn().map_err(|err| err.to_string())?;
-                crate::tools::attach_child_job_discipline(&child);
-                let pid = child.id();
+                let child = crate::tools::spawn_command_with_job_discipline(&mut command)
+                    .map_err(|err| err.to_string())?;
+                let mut child = crate::tools::ProcessGuard::new(
+                    child,
+                    crate::tools::ProcessCleanupMode::ProcessGroupTree,
+                );
 
-                let stdout = child.stdout.take().ok_or("Missing stdout pipe")?;
-                let stderr = child.stderr.take().ok_or("Missing stderr pipe")?;
+                let stdout = child.take_stdout().ok_or("Missing stdout pipe")?;
+                let stderr = child.take_stderr().ok_or("Missing stderr pipe")?;
 
                 let stdout_tx = tx.clone();
                 let stderr_tx = tx.clone();
@@ -18291,15 +18333,13 @@ async fn dispatch_hostcall_exec_ref_with_limit(
                 let start = Instant::now();
                 let mut killed = false;
                 let status = loop {
-                    if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
+                    if let Some(status) = child.try_wait_child().map_err(|err| err.to_string())? {
                         break status;
                     }
 
                     if !killed && cancel_worker.load(AtomicOrdering::SeqCst) {
                         killed = true;
-                        crate::tools::kill_process_group_tree(Some(pid));
-                        let _ = child.kill();
-                        break child.wait().map_err(|err| err.to_string())?;
+                        break child.terminate_and_wait().map_err(|err| err.to_string())?;
                     }
 
                     if let Some(timeout_ms) = timeout_ms
@@ -18307,9 +18347,7 @@ async fn dispatch_hostcall_exec_ref_with_limit(
                         && start.elapsed() >= Duration::from_millis(timeout_ms)
                     {
                         killed = true;
-                        crate::tools::kill_process_group_tree(Some(pid));
-                        let _ = child.kill();
-                        break child.wait().map_err(|err| err.to_string())?;
+                        break child.terminate_and_wait().map_err(|err| err.to_string())?;
                     }
 
                     thread::sleep(Duration::from_millis(10));
@@ -18446,12 +18484,15 @@ async fn dispatch_hostcall_exec_ref_with_limit(
             }
             crate::tools::isolate_command_process_group(&mut command);
 
-            let mut child = command.spawn().map_err(|err| err.to_string())?;
-            crate::tools::attach_child_job_discipline(&child);
-            let pid = child.id();
+            let child = crate::tools::spawn_command_with_job_discipline(&mut command)
+                .map_err(|err| err.to_string())?;
+            let mut child = crate::tools::ProcessGuard::new(
+                child,
+                crate::tools::ProcessCleanupMode::ProcessGroupTree,
+            );
 
-            let stdout = child.stdout.take().ok_or("Missing stdout pipe")?;
-            let stderr = child.stderr.take().ok_or("Missing stderr pipe")?;
+            let stdout = child.take_stdout().ok_or("Missing stdout pipe")?;
+            let stderr = child.take_stderr().ok_or("Missing stderr pipe")?;
 
             let (tx_stream, rx_stream) = mpsc::sync_channel::<ExecStreamFrame>(1024);
             let stdout_tx = tx_stream.clone();
@@ -18479,15 +18520,13 @@ async fn dispatch_hostcall_exec_ref_with_limit(
                     ingest_frame(frame);
                 }
 
-                if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
+                if let Some(status) = child.try_wait_child().map_err(|err| err.to_string())? {
                     break status;
                 }
 
                 if !killed && cancel_worker.load(AtomicOrdering::SeqCst) {
                     killed = true;
-                    crate::tools::kill_process_group_tree(Some(pid));
-                    let _ = child.kill();
-                    break child.wait().map_err(|err| err.to_string())?;
+                    break child.terminate_and_wait().map_err(|err| err.to_string())?;
                 }
 
                 if let Some(timeout_ms) = timeout_ms
@@ -18495,9 +18534,7 @@ async fn dispatch_hostcall_exec_ref_with_limit(
                     && start.elapsed() >= Duration::from_millis(timeout_ms)
                 {
                     killed = true;
-                    crate::tools::kill_process_group_tree(Some(pid));
-                    let _ = child.kill();
-                    break child.wait().map_err(|err| err.to_string())?;
+                    break child.terminate_and_wait().map_err(|err| err.to_string())?;
                 }
 
                 if let Ok(frame) = rx_stream.recv_timeout(Duration::from_millis(10)) {
@@ -19415,11 +19452,22 @@ async fn dispatch_hostcall_events_ref(
             }
         }
         EventsHostcallOp::Compact => {
-            // gh #167 / bd-i28yz: host-side compaction with the session's own
-            // provider/model/credentials. The payload carries only the
-            // preparation; extensions cannot pick a model or supply an API
-            // key, and validation/deserialization of the untrusted
-            // preparation happens inside the host action.
+            if !payload.is_object()
+                || payload.as_object().is_some_and(|fields| {
+                    fields.keys().any(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "preparation" | "options" | "strategy" | "request"
+                        )
+                    })
+                })
+            {
+                return HostcallOutcome::Error {
+                    code: "invalid_request".to_string(),
+                    message: "compact: expected preparation and optional options/strategy/request; credentials and endpoint fields are not accepted"
+                        .to_string(),
+                };
+            }
             let Some(actions) = manager.host_actions() else {
                 return HostcallOutcome::Error {
                     code: "denied".to_string(),
@@ -19428,19 +19476,73 @@ async fn dispatch_hostcall_events_ref(
             };
 
             let preparation = payload.get("preparation").cloned().unwrap_or(Value::Null);
+            let options = match payload.get("options") {
+                None | Some(Value::Null) => ExtensionCompactionOptions::default(),
+                // serde deserializes a JSON array positionally into these
+                // structs (`[]` becomes default options), so require objects.
+                Some(value)
+                    if !value.is_object()
+                        || value
+                            .get("model")
+                            .is_some_and(|model| !model.is_null() && !model.is_object()) =>
+                {
+                    return HostcallOutcome::Error {
+                        code: "invalid_request".to_string(),
+                        message: "compact: options and options.model must be objects".to_string(),
+                    };
+                }
+                Some(value) => {
+                    match serde_json::from_value::<ExtensionCompactionOptions>(value.clone()) {
+                        Ok(options) => options,
+                        Err(err) => {
+                            return HostcallOutcome::Error {
+                                code: "invalid_request".to_string(),
+                                message: format!("compact: invalid options: {err}"),
+                            };
+                        }
+                    }
+                }
+            };
+            if let Some(model) = &options.model {
+                if model.provider.trim().is_empty() || model.id.trim().is_empty() {
+                    return HostcallOutcome::Error {
+                        code: "invalid_request".to_string(),
+                        message: "compact: model provider and id must be non-empty strings"
+                            .to_string(),
+                    };
+                }
+                if manager.provider_has_stream_simple(model.provider.trim()) {
+                    return HostcallOutcome::Error {
+                        code: "invalid_request".to_string(),
+                        message: "compact: extension streamSimple model overrides are unsupported"
+                            .to_string(),
+                    };
+                }
+            }
             // Optional native strategy (gh #167): `strategy` +
             // extension-composed `request` route to the host-mediated
             // native compact bridge; absent/null keeps the summary bridge.
             // Unknown strategies error loudly so callers fail open instead
             // of silently getting the wrong compaction kind.
             match payload.get("strategy") {
-                None | Some(Value::Null) => match actions.compact_session(preparation).await {
-                    Ok(value) => HostcallOutcome::Success(value),
-                    Err(err) => HostcallOutcome::Error {
-                        code: "provider".to_string(),
-                        message: err.to_string(),
-                    },
-                },
+                None | Some(Value::Null) => {
+                    if payload
+                        .get("request")
+                        .is_some_and(|request| !request.is_null())
+                    {
+                        return HostcallOutcome::Error {
+                            code: "invalid_request".to_string(),
+                            message: "compact: request requires a native strategy".to_string(),
+                        };
+                    }
+                    match actions.compact_session(preparation, options).await {
+                        Ok(value) => HostcallOutcome::Success(value),
+                        Err(err) => HostcallOutcome::Error {
+                            code: "provider".to_string(),
+                            message: err.to_string(),
+                        },
+                    }
+                }
                 // A non-string strategy is a caller bug: error loudly rather
                 // than silently running the wrong compaction kind.
                 Some(other) if !other.is_string() => HostcallOutcome::Error {
@@ -19450,6 +19552,16 @@ async fn dispatch_hostcall_events_ref(
                     ),
                 },
                 Some(Value::String(strategy)) if strategy == "openai-responses-native" => {
+                    if options.model.is_some()
+                        || options.custom_instructions.is_some()
+                        || options.thinking_level.is_some()
+                    {
+                        return HostcallOutcome::Error {
+                            code: "invalid_request".to_string(),
+                            message: "compact: native strategy uses the current model and request.instructions/request.reasoning; summary options are unsupported"
+                                .to_string(),
+                        };
+                    }
                     let request = payload.get("request").cloned().unwrap_or(Value::Null);
                     match actions.compact_session_native(preparation, request).await {
                         Ok(value) => HostcallOutcome::Success(value),

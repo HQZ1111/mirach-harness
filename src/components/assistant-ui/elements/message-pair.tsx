@@ -79,14 +79,14 @@ export function MessagePair({
             aria-label="Copy response"
             className={cn(ghostButton, "size-7")}
           >
-            <CopyIcon className="size-3.5" />
+            <CopyIcon className="size-[var(--size-icon-md)]" />
           </button>
           <button
             type="button"
             aria-label="Regenerate response"
             className={cn(ghostButton, "size-7")}
           >
-            <RefreshCwIcon className="size-3.5" />
+            <RefreshCwIcon className="size-[var(--size-icon-md)]" />
           </button>
         </div>
       </div>

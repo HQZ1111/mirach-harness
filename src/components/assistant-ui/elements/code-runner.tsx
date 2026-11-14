@@ -60,9 +60,9 @@ export function CodeRunner({
           )}
         >
           {state === "running" ? (
-            <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
+            <Loader2Icon className="size-[var(--size-icon-md)] animate-spin motion-reduce:animate-none" />
           ) : (
-            <PlayIcon className="size-3.5 translate-x-px" />
+            <PlayIcon className="size-[var(--size-icon-md)] translate-x-px" />
           )}
         </button>
       </div>

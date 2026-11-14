@@ -41,7 +41,7 @@ export const RailUserZone: FC = () => (
         onClick={() => openSettingsOverlay()}
         type="button"
       >
-        <SettingsIcon aria-hidden className="size-4" />
+        <SettingsIcon aria-hidden className="size-[var(--size-icon-lg)]" />
       </button>
     </Tooltip>
   </div>

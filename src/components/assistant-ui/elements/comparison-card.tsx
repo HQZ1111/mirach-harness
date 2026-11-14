@@ -81,9 +81,9 @@ export function ComparisonCard({
                       className="flex items-center gap-1.5 text-xs"
                     >
                       {absent ? (
-                        <MinusIcon className="text-foreground/20 size-3 shrink-0" />
+                        <MinusIcon className="text-foreground/20 size-[var(--size-icon-sm)] shrink-0" />
                       ) : (
-                        <CheckIcon className="size-3 shrink-0 text-emerald-500" />
+                        <CheckIcon className="size-[var(--size-icon-sm)] shrink-0 text-emerald-500" />
                       )}
                       <span
                         className={cn(

@@ -8,15 +8,14 @@
  * 复制绝对路径/复制相对路径）。文件图标 = FileTypeBadge（hermes FileGlyph 迁入）。 */
 import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
 import { AlertCircle, ChevronRight, LoaderCircle } from "lucide-react";
-import { ContextMenu } from "radix-ui";
-
-const ContextMenuRoot = ContextMenu.Root
-const ContextMenuTrigger = ContextMenu.Trigger
-const ContextMenuPortal = ContextMenu.Portal
-const ContextMenuContent = ContextMenu.Content
-const ContextMenuItem = ContextMenu.Item
 
 import { cn } from "@/lib/utils";
+import {
+  ContextMenu,
+  ContextMenuAnchor,
+  ContextMenuContent,
+  ContextMenuItem,
+} from "@/components/motion/context-menu";
 import {
   getWorkspaceFileRelativePath,
   type WorkspaceFileTreeRow,
@@ -166,31 +165,18 @@ export function WorkspaceFileTreeRowView({
       className={cn(layout === "absolute" ? "absolute left-0 top-0 w-full" : "w-full")}
       style={rowStyle}
     >
-      <ContextMenuRoot>
-        <ContextMenuTrigger asChild>{rowElement}</ContextMenuTrigger>
-        <ContextMenuPortal>
-          <ContextMenuContent className="z-50 w-52 rounded-lg bg-(--surface) p-1 shadow-(--shadow-pop)">
-            <ContextMenuItem
-              className="cursor-pointer rounded-md px-2 py-1.5 text-(--filetree-row-font-size) text-(--text) outline-none data-[highlighted]:bg-(--hover-wash)"
-              onSelect={handleOpenPrimary}
-            >
-              打开
-            </ContextMenuItem>
-            <ContextMenuItem
-              className="cursor-pointer rounded-md px-2 py-1.5 text-(--filetree-row-font-size) text-(--text) outline-none data-[highlighted]:bg-(--hover-wash)"
-              onSelect={() => void handleCopyAbsolutePath()}
-            >
-              复制绝对路径
-            </ContextMenuItem>
-            <ContextMenuItem
-              className="cursor-pointer rounded-md px-2 py-1.5 text-(--filetree-row-font-size) text-(--text) outline-none data-[highlighted]:bg-(--hover-wash)"
-              onSelect={() => void handleCopyRelativePath()}
-            >
-              复制相对路径
-            </ContextMenuItem>
-          </ContextMenuContent>
-        </ContextMenuPortal>
-      </ContextMenuRoot>
+      <ContextMenu anchor="trigger" side="bottom" sideOffset={4}>
+        <ContextMenuAnchor>{rowElement}</ContextMenuAnchor>
+        <ContextMenuContent ariaLabel="文件操作" className="w-52">
+          <ContextMenuItem onSelect={handleOpenPrimary}>打开</ContextMenuItem>
+          <ContextMenuItem onSelect={() => void handleCopyAbsolutePath()}>
+            复制绝对路径
+          </ContextMenuItem>
+          <ContextMenuItem onSelect={() => void handleCopyRelativePath()}>
+            复制相对路径
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
     </div>
   );
 }

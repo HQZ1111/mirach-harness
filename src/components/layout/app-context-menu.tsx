@@ -36,13 +36,25 @@
  * - 布局段图标 = @vscode/codicons src/icons/*.svg path 逐字（raw 下载，
  *   layout-sidebar-left/right、arrow-both、layout-panel）。
  */
-import { DropdownMenu as DropdownMenuPrimitive } from 'radix-ui'
 import { useEffect, useState, type FC } from 'react'
 import { createPortal } from 'react-dom'
+import { invoke } from '@tauri-apps/api/core'
+import { supportsMultipleWindows } from '@tauri-apps/api/app'
 import { createStore, useStore } from 'zustand'
 
+// beui ContextMenu（2026-10-26 统一弹层）：右键菜单不再用 Radix DropdownMenu
+// + CSS 缩放，改用与模型选择器同源的 beui 组件族（goo morph 观感一致）。
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from '@/components/motion/context-menu'
+
+import { inTauri } from '@/lib/tauri-window'
+import { isMobilePlatform } from '@/lib/platform'
+import { settingsShellFor, settingsShellFromProbe } from '@/lib/settings-shell'
 import { SettingsOverlay } from '@/app/overlays/settings-overlay'
-import { toggleStatusbarVisible } from '@/app/shell/statusbar'
 import { CommandPalette, type PaletteCommand } from '@/components/assistant-ui/elements/command-palette'
 
 import {
@@ -100,12 +112,6 @@ export const CODICON_GLYPHS: Record<string, { viewBox: string; d: readonly strin
     viewBox: '0 0 16 16',
     d: [
       'M10.0195 10.7266C9.06578 11.5217 7.83875 12 6.5 12C3.46243 12 1 9.53757 1 6.5C1 3.46243 3.46243 1 6.5 1C9.53757 1 12 3.46243 12 6.5C12 7.83875 11.5217 9.06578 10.7266 10.0195L13.8535 13.1464C14.0488 13.3417 14.0488 13.6583 13.8535 13.8536C13.6583 14.0488 13.3417 14.0488 13.1464 13.8536L10.0195 10.7266ZM11 6.5C11 4.01472 8.98528 2 6.5 2C4.01472 2 2 4.01472 2 6.5C2 8.98528 4.01472 11 6.5 11C8.98528 11 11 8.98528 11 6.5Z',
-    ],
-  },
-  'layout-statusbar': {
-    viewBox: '0 0 16 16',
-    d: [
-      'M1 3.5V12.5C1 13.881 2.119 15 3.5 15H12.5C13.881 15 15 13.881 15 12.5V3.5C15 2.119 13.881 1 12.5 1H3.5C2.119 1 1 2.119 1 3.5ZM14 12H2V3.5C2 2.672 2.672 2 3.5 2H12.5C13.328 2 14 2.672 14 3.5V12Z',
     ],
   },
   'layout-menubar': {
@@ -198,7 +204,7 @@ export interface AppMenuContext {
  *        （2026-10-06 v7.2：互换废除，独立双位置切换——左栏占端位、面板栏
  *        内/外位让位；v8.0 dockview：「隐藏标签」行废除——左/主栏组
  *        hideHeader 恒无条，面板栏组唯一条恒显）
- *   段3 [切换状态栏, 设置]
+ *   段3 [设置]（2026-10-19 底栏撤除，「切换状态栏」行随之删）
  */
 export const buildShellMenuSections = (_ctx: AppMenuContext = {}): readonly AppMenuSection[] => {
   // 栏显隐/位置的行文案来自栏旗标（localStorage），不需要布局 api。
@@ -219,9 +225,9 @@ export const buildShellMenuSections = (_ctx: AppMenuContext = {}): readonly AppM
     // 切换且永不跨到左栏的端（让位）；chat 自由填补剩余跨度
     { icon: 'arrow-both', id: 'shell-left-pos', label: leftPosLabel() },
     { icon: 'layout-panel', id: 'shell-panels-pos', label: panelsPosLabel() },
-    // 「默认布局」（用户 2026-10-16）：布局回出厂三栏 + 窗口 1800×1000
-    // 居中——一键从任何拖乱/隐藏/移位形态复位。图标 = codicons refresh
-    // （上游 src/icons/refresh.svg path 逐字）。
+    // 「默认布局」（用户 2026-10-16）：布局回出厂三栏（栏宽按当前容器宽
+    // 的比例重算，见 rail-metrics.ts）——一键从任何拖乱/隐藏/移位形态复位。
+    // 图标 = codicons refresh（上游 src/icons/refresh.svg path 逐字）。
     { icon: 'refresh', id: 'shell-reset-layout', label: '默认布局' },
   )
   return [
@@ -242,13 +248,6 @@ export const buildShellMenuSections = (_ctx: AppMenuContext = {}): readonly AppM
     ],
     layout,
     [
-      {
-        // t.keybinds.actions['view.toggleStatusbar'] → hermes
-        // toggleStatusbarVisible（store/statusbar-prefs）
-        icon: 'layout-statusbar',
-        id: 'shell-statusbar',
-        label: '切换状态栏',
-      },
       {
         // t.commandCenter.settings → hermes openSettings（浮层开关）
         icon: 'layout-menubar',
@@ -281,9 +280,6 @@ export const runShellAction = (id: string, _ctx: AppMenuContext = {}): void => {
     case 'shell-palette':
       openCommandPalette()
       return
-    case 'shell-statusbar':
-      toggleStatusbarVisible()
-      return
     case 'shell-settings':
       openSettingsOverlay()
       return
@@ -300,9 +296,12 @@ export const runShellAction = (id: string, _ctx: AppMenuContext = {}): void => {
       panelsPosToggle()
       return
     case 'shell-reset-layout':
-      // 布局回出厂 + 窗口 1800×1000 居中（两半各自错误可见——失败不吞）
-      resetLayoutToFactory()
-      void resetWindowToFactory()
+      // **顺序即正确性**（2026-10-22 实锤）：先复位窗口、等尺寸落地，再复位
+      // 布局——布局的栏宽按 dockview 的**当前**容器宽算比例。反过来会在旧
+      // 窗口宽下算出 min 宽的栏（900 宽窗口 → 两轨各 240），窗口随后放大时
+      // dockview 按存档比例把 240 摊成 420（撞 max），三栏全乱。
+      // 两半各自错误可见（失败不吞）；窗口尺寸不再写死，见 lib/window-metrics.ts。
+      void resetWindowToFactory().then(() => resetLayoutToFactory())
       return
     default:
       console.error('[app-context-menu] unknown menu item', id)
@@ -334,7 +333,6 @@ export function openCommandPalette(): void {
 /** 命令清单：id 与菜单动作同源（runShellAction 直接执行），文案逐字同菜单。 */
 export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: 'shell-new-chat', label: '新建会话', group: '命令', keys: [] },
-  { id: 'shell-statusbar', label: '切换状态栏', group: '命令', keys: [] },
   { id: 'shell-settings', label: '设置', group: '命令', keys: [] },
 ]
 
@@ -396,9 +394,15 @@ const CommandPaletteHost: FC = () => {
   )
 }
 
-// ── 设置浮层最小开关（hermes SETTINGS_ROUTE 导航的等价物：设置浮层
-//    settings-overlay.tsx 已落位但无挂载开关——本菜单项触发挂载显示，
-//    关闭走浮层自己的 onClose） ────────────────────────────────────────────
+// ── 设置入口（两形态：独立窗口 / 壳内浮层）─────────────────────────────
+//
+// 桌面（Windows/Linux/macOS）→ **独立窗口**：能拖出壳、alt-tab、独立缩放。
+// 其余（浏览器直开 / 移动端）→ **壳内浮层**：那些环境没有多窗口。
+//
+// 分叉依据用 tauri 的 `supportsMultipleWindows()` 而不是硬编码平台判断——
+// 它是**运行时探测**（官方文档：Windows/Linux/macOS 恒 true；Android 12L+
+// true；iOS 反映 `supportsMultipleScenes`，iPhone 为 false）。硬编码
+// `platform() === 'windows'` 会在 Android 平板上判错。
 
 interface AppSettingsState {
   open: boolean
@@ -412,14 +416,68 @@ export const appSettingsStore = createStore<AppSettingsState>((set) => ({
   closeSettings: () => set({ open: false }),
 }))
 
+/**
+ * 打开设置。
+ *
+ * 三条路径，全部有明确归属（不留"点了没反应"）：
+ *   ① **浏览器直开**（`inTauri === false`）→ 浮层。**不能 invoke**：
+ *      `@tauri-apps/api/core.js:328` 直接读 `window.__TAURI_INTERNALS__`，
+ *      浏览器里它是 undefined → TypeError。此前这里无脑 invoke，被 .catch
+ *      吞成一行 console，用户点齿轮**什么都不会发生**（真缺陷）。
+ *   ② **桌面 Tauri** → `pi_open_settings_window`（Rust 顶层窗口；已存在则
+ *      聚焦，幂等）。
+ *   ③ **移动端 Tauri** → 先问 `supportsMultipleWindows()`：Android 12L+ 与
+ *      iPad 支持则开窗口，iPhone / 旧 Android 退回浮层。探测本身失败
+ *      （权限没放行等）→ 按"不支持"处理走浮层，并打日志（不静默降级成
+ *      "什么都不做"）。
+ */
 export function openSettingsOverlay(): void {
-  appSettingsStore.getState().openSettings()
+  const shell = settingsShellFor({ inTauri, isMobile: isMobilePlatform() })
+
+  const openWindow = () => {
+    void invoke('pi_open_settings_window').catch((e) => {
+      console.error('[settings] 打开设置窗口失败', e)
+    })
+  }
+  const openOverlay = () => appSettingsStore.getState().openSettings()
+
+  if (shell === 'window') {
+    openWindow()
+    return
+  }
+  if (shell === 'overlay') {
+    openOverlay()
+    return
+  }
+
+  // shell === 'probe'：移动端，问运行时能力
+  void supportsMultipleWindows()
+    .then((supported) => {
+      if (settingsShellFromProbe(supported) === 'window') openWindow()
+      else openOverlay()
+    })
+    .catch((e) => {
+      // 探测失败按"不支持"处理（走浮层，用户至少能打开设置），原因可见
+      console.error('[settings] 多窗口能力探测失败——退回壳内浮层', e)
+      openOverlay()
+    })
 }
 
+/**
+ * 壳内设置浮层的挂载点。
+ *
+ * 只在 `appSettingsStore.open === true` 时渲染 `SettingsOverlay`
+ * （`variant` 用默认的 `overlay`：遮罩 + 居中卡片 + 退场动画）。
+ * 桌面端这个 store 永远是 false（走独立窗口），故对桌面无影响。
+ */
 const SettingsHost: FC = () => {
   const open = useStore(appSettingsStore, (s) => s.open)
   if (!open) return null
-  return <SettingsOverlay onClose={() => appSettingsStore.getState().closeSettings()} />
+  return (
+    <SettingsOverlay
+      onClose={() => appSettingsStore.getState().closeSettings()}
+    />
+  )
 }
 
 // ── 菜单渲染（hermes AppContextMenu 组件逐形制：受控 DropdownMenu +
@@ -428,65 +486,65 @@ const SettingsHost: FC = () => {
 // 视觉 = 工程现役菜单族（thread-list.aui.tsx VIEW_MENU_* 同令牌）：w-56 是
 // hermes app 菜单的内容宽（app-context-menu.tsx:704）。
 // 去描边（用户 2026-10-14 全局去描边）：菜单不留描边线，层次由 shadow-(--shadow-pop) 承担。
-// 进出场动画（2026-10-16 用户："悬停显示的窗口动画怎么没有"）：补 animate-in/out
-// （曲线/时长走 tw-animate-css 的 beUI 令牌覆盖，tailwind.css 在案）。
-const APP_MENU_CONTENT_CLASS =
-  'bg-popover text-popover-foreground z-50 w-56 overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop) origin-(--radix-dropdown-menu-content-transform-origin) data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95'
-const APP_MENU_ITEM_CLASS =
-  'flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-(--hover-wash)'
-const APP_MENU_SEPARATOR_CLASS = 'bg-(--stroke-soft) mx-1 my-1 h-px'
-const APP_MENU_ICON_CLASS = 'text-(--text-3) size-3.5 shrink-0'
+// **进出场动画由 beui ContextMenu 自带**（goo morph，2026-10-26 换组件后
+// 这里不再需要 tw-animate 的 animate-in/zoom-in 类——那套只是 CSS 缩放，
+// 与输入框模型选择器的观感不一致，用户："右键弹窗的效果完全不一样"）。
+const APP_MENU_CONTENT_CLASS = 'w-56'
+const APP_MENU_ITEM_CLASS = 'gap-2'
+const APP_MENU_ICON_CLASS = 'text-(--text-3) size-[var(--size-icon-md)] shrink-0'
 
 export function AppContextMenu() {
   const open = useStore(appContextMenuStore, (s) => s.open)
   const ctx: AppMenuContext = open ? { tabsetId: open.tabsetId } : {}
 
+  // ── beui ContextMenu（2026-10-26）────────────────────────────────
+  //
+  // 用户："为什么不能用 beui 的组件，做成令牌，统一调用，而是要一个一个的改"。
+  // 正确做法 = **用树里已有的 beui ContextMenu**
+  // （`@/components/motion/context-menu`，含 Trigger/Content/Item/Separator
+  // 全套），它天生为右键设计：`openAt(point, modality)` 直接接受鼠标坐标，
+  // 自带 goo morph、viewport 钳制、键盘导航与 typeahead——与模型选择器
+  // （beui Popover）同一套观感。
+  //
+  // 受控语义：`open` 由 store 驱动；关闭走 `onOpenChange(false)`。
+  // 落点由 store 的 x/y 提供（main.tsx 的 capture 监听解析后写入）。
   return (
     <>
       {open && (
-        <DropdownMenuPrimitive.Root
-          onOpenChange={(openState) => {
-            if (!openState) {
-              closeAppContextMenu()
-            }
+        <ContextMenu
+          onOpenChange={(next) => {
+            if (!next) closeAppContextMenu()
           }}
           open
+          point={{ x: open.x, y: open.y }}
         >
-          <DropdownMenuPrimitive.Trigger asChild>
-            {/* hermes 同款：点击点上的零尺寸锚点——菜单像真 Trigger 一样对它定位 */}
-            <span aria-hidden style={{ left: open.x, position: 'fixed', top: open.y }} />
-          </DropdownMenuPrimitive.Trigger>
-          <DropdownMenuPrimitive.Portal>
-            <DropdownMenuPrimitive.Content
-              align="start"
-              className={APP_MENU_CONTENT_CLASS}
-              onCloseAutoFocus={(event) => event.preventDefault()}
-              side="bottom"
-            >
-              {buildShellMenuSections(ctx)
-                .filter((section) => section.length > 0)
-                .map((section, index) => (
-                  // 段按位置构造，index 即 key（hermes 同款注释）
-                  <div className="contents" key={index}>
-                    {index > 0 && <DropdownMenuPrimitive.Separator className={APP_MENU_SEPARATOR_CLASS} />}
-                    {section.map((item) => (
-                      <DropdownMenuPrimitive.Item
-                        className={APP_MENU_ITEM_CLASS}
-                        disabled={item.disabled}
-                        key={item.id}
-                        onSelect={() => runShellAction(item.id, ctx)}
-                      >
-                        <CodiconGlyph className={APP_MENU_ICON_CLASS} name={item.icon} />
-                        <span>{item.label}</span>
-                      </DropdownMenuPrimitive.Item>
-                    ))}
-                  </div>
-                ))}
-            </DropdownMenuPrimitive.Content>
-          </DropdownMenuPrimitive.Portal>
-        </DropdownMenuPrimitive.Root>
+          <ContextMenuContent ariaLabel="应用菜单" className={APP_MENU_CONTENT_CLASS}>
+            {buildShellMenuSections(ctx)
+              .filter((section) => section.length > 0)
+              .map((section, index) => (
+                <div className="contents" key={index}>
+                  {index > 0 && <ContextMenuSeparator />}
+                  {section.map((item) => (
+                    <ContextMenuItem
+                      className={APP_MENU_ITEM_CLASS}
+                      disabled={item.disabled}
+                      key={item.id}
+                      onSelect={() => runShellAction(item.id, ctx)}
+                    >
+                      <CodiconGlyph className={APP_MENU_ICON_CLASS} name={item.icon} />
+                      <span>{item.label}</span>
+                    </ContextMenuItem>
+                  ))}
+                </div>
+              ))}
+          </ContextMenuContent>
+        </ContextMenu>
       )}
       <CommandPaletteHost />
+      {/* 壳内设置浮层（2026-10-23）：**只有非桌面路径才会打开它**
+          （浏览器直开 / 不支持多窗口的移动端，见 openSettingsOverlay）。
+          桌面端走独立窗口，这个 host 恒不渲染（open 恒 false）——留着是因为
+          它是移动端与 web 端的唯一设置形态，不是死代码。 */}
       <SettingsHost />
     </>
   )

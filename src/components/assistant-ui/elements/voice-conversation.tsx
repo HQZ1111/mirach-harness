@@ -175,9 +175,9 @@ export function VoiceConversation({
           )}
         >
           {muted ? (
-            <MicOffIcon className="size-4" />
+            <MicOffIcon className="size-[var(--size-icon-lg)]" />
           ) : (
-            <MicIcon className="size-4" />
+            <MicIcon className="size-[var(--size-icon-lg)]" />
           )}
         </button>
         <button
@@ -187,7 +187,7 @@ export function VoiceConversation({
           disabled={!onEnd}
           className="flex size-10 items-center justify-center rounded-full bg-red-500/90 text-white transition-[opacity,scale] duration-150 hover:opacity-90 active:scale-[0.96] disabled:pointer-events-none disabled:opacity-30 motion-reduce:transition-none"
         >
-          <PhoneOffIcon className="size-4" />
+          <PhoneOffIcon className="size-[var(--size-icon-lg)]" />
         </button>
       </div>
     </div>

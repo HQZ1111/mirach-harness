@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useRef } from "react";
+import { memo, useCallback, useMemo, useRef } from "react";
 import {
   useScrollLock,
   useAuiState,
@@ -71,9 +71,28 @@ const ReasoningGroupImpl: ReasoningGroupComponent = ({
     return false;
   });
 
+  // 折叠态单行流式摘要需要思考原文（ZCode 从 `row.text` 派生）。选择器只
+  // 取引用稳定的原始值，派生放 useMemo——不得在选择器里造字符串。
+  const parts = useAuiState((s) => s.message.parts);
+  const streamingText = useMemo(() => {
+    let out = "";
+    for (let index = startIndex; index <= endIndex; index++) {
+      const part = parts[index];
+      if (part?.type === "reasoning") out += part.text;
+    }
+    return out;
+  }, [parts, startIndex, endIndex]);
+
+  // ZCode：流式但还没有任何思考文本时整块不渲染（此时由底部「正在思考」
+  // 指示器表达，避免一个只有图标和标签的空行）。
+  if (isReasoningStreaming && streamingText.length === 0) return null;
+
   return (
     <ReasoningRoot streaming={isReasoningStreaming}>
-      <ReasoningTrigger active={isReasoningStreaming} />
+      <ReasoningTrigger
+        active={isReasoningStreaming}
+        streamingText={streamingText}
+      />
       <ReasoningContent aria-busy={isReasoningStreaming}>
         <ReasoningText>{children}</ReasoningText>
       </ReasoningContent>

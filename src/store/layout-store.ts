@@ -27,7 +27,7 @@ export interface LayoutStore {
    * 壳/菜单依赖模型派生状态（徽标）时订阅它，onModelChange/adopt 后 bump */
   layoutRev: number
   /** 拖拽帧版本号：分隔条拖拽的 adjusting 帧 flexlayout 直写 DOM、模型
-   * 不变（layoutRev 不动）——宿主层量测叠片（MainTint/双行块）订阅它
+   * 不变（layoutRev 不动）——宿主层量测叠片（双行块）订阅它
    * 逐帧跟随容器。轻消费者专用，壳不订阅（churn 隔离契约）。 */
   dragRev: number
   /** 拖拽高亮提示（overlay 订阅；壳不订阅——per-move churn 隔离契约） */

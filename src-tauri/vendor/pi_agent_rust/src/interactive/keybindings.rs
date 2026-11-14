@@ -25,49 +25,7 @@ impl PiApp {
     ///
     /// Groups actions by category and shows their key bindings.
     pub(super) fn format_hotkeys(&self) -> String {
-        use crate::keybindings::ActionCategory;
-        use std::fmt::Write;
-
-        let mut output = String::new();
-        let _ = writeln!(output, "Keyboard Shortcuts");
-        let _ = writeln!(output, "==================");
-        let _ = writeln!(output);
-        let _ = writeln!(
-            output,
-            "Config: {}",
-            KeyBindings::user_config_path().display()
-        );
-        let _ = writeln!(output);
-
-        for category in ActionCategory::all() {
-            let actions: Vec<_> = self.keybindings.iter_category(*category).collect();
-
-            // Skip empty categories
-            if actions.iter().all(|(_, bindings)| bindings.is_empty()) {
-                continue;
-            }
-
-            let _ = writeln!(output, "## {}", category.display_name());
-            let _ = writeln!(output);
-
-            for (action, bindings) in actions {
-                if bindings.is_empty() {
-                    continue;
-                }
-
-                // Format bindings as comma-separated list
-                let keys: Vec<_> = bindings
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect();
-                let keys_str = keys.join(", ");
-
-                let _ = writeln!(output, "  {:20} {}", keys_str, action.display_name());
-            }
-            let _ = writeln!(output);
-        }
-
-        output
+        crate::keybindings::format_hotkeys(&self.keybindings)
     }
 
     pub(super) fn resolve_action(&self, candidates: &[AppAction]) -> Option<AppAction> {
@@ -213,6 +171,13 @@ impl PiApp {
 
     #[allow(clippy::missing_const_for_fn)]
     pub(super) fn paste_image_from_clipboard() -> Option<PathBuf> {
+        // GH #242: WSL has no display for arboard; ask Windows for the image.
+        if super::commands::running_under_wsl()
+            && let Some(path) = paste_image_via_powershell()
+        {
+            return Some(path);
+        }
+
         #[cfg(all(feature = "clipboard", feature = "image-resize"))]
         {
             use image::ImageEncoder;
@@ -230,10 +195,15 @@ impl PiApp {
                 return None;
             }
 
+            // Under the agent dir, not the system temp dir: `@file` reading
+            // is confined to the cwd and the agent dir, so a pasted image
+            // saved to /tmp could never be attached.
+            let dir = crate::config::Config::global_dir().join("pastes");
+            std::fs::create_dir_all(&dir).ok()?;
             let mut temp_file = tempfile::Builder::new()
                 .prefix("pi-paste-")
                 .suffix(".png")
-                .tempfile()
+                .tempfile_in(&dir)
                 .ok()?;
             let encoder = image::codecs::png::PngEncoder::new(&mut temp_file);
             if encoder
@@ -448,14 +418,19 @@ impl PiApp {
             return;
         }
 
-        let provider_impl = match providers::create_provider(&next, self.extensions.as_ref()) {
+        let provider_impl = match super::commands::create_runtime_provider(
+            &next,
+            self.extensions.as_ref(),
+            &self.cwd,
+        ) {
             Ok(provider_impl) => provider_impl,
             Err(err) => {
                 self.status_message = Some(err.to_string());
                 return;
             }
         };
-        let resolved_key_opt = super::commands::resolve_model_key_from_default_auth(&next);
+        let resolved_key_opt =
+            super::commands::resolve_model_key_from_default_auth(&next, &self.cwd);
         if crate::models::model_requires_configured_credential(&next) && resolved_key_opt.is_none()
         {
             self.status_message = Some(format!(
@@ -471,13 +446,13 @@ impl PiApp {
             self.status_message = Some(message);
             return;
         }
+        let label = next.model.display_label();
         self.status_message = Some(if fell_back_to_available {
             format!(
-                "No scoped models matched; cycling all available models. Switched model: {}",
-                self.model
+                "No scoped models matched; cycling all available models. Switched model: {label}"
             )
         } else {
-            format!("Switched model: {}", self.model)
+            format!("Switched model: {label}")
         });
     }
 
@@ -1066,6 +1041,52 @@ fn encode_custom_ui_key(key: &KeyMsg) -> Option<String> {
     }
 }
 
+/// The PowerShell that saves Windows' clipboard image as a PNG at
+/// `windows_path` (exit 1 when the clipboard holds no image).
+fn powershell_save_clipboard_png(windows_path: &str) -> String {
+    let quoted = windows_path.replace('\'', "''");
+    format!(
+        "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; \
+         $img = [System.Windows.Forms.Clipboard]::GetImage(); \
+         if ($null -eq $img) {{ exit 1 }}; \
+         $img.Save('{quoted}', [System.Drawing.Imaging.ImageFormat]::Png)"
+    )
+}
+
+/// GH #242: under WSL, have `powershell.exe` save the Windows clipboard's
+/// image into the agent dir (where `@file` may read it), through the path
+/// `wslpath -w` gives for it. `None` when there is no image or either
+/// interop binary is missing. Interop output is discarded so it cannot
+/// reach the TUI.
+fn paste_image_via_powershell() -> Option<PathBuf> {
+    use std::process::{Command, Stdio};
+    let dir = crate::config::Config::global_dir().join("pastes");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("pi-paste-{}.png", uuid::Uuid::new_v4().simple()));
+    let windows_path = Command::new("wslpath")
+        .arg("-w")
+        .arg(&path)
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())?;
+    let saved = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg(powershell_save_clipboard_png(windows_path.trim()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if saved && std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0) {
+        return Some(path);
+    }
+    // A save that failed part-way can leave an empty or partial PNG behind.
+    let _ = std::fs::remove_file(&path);
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1217,6 +1238,19 @@ mod tests {
     fn build_test_app(current: ModelEntry, available: Vec<ModelEntry>) -> PiApp {
         let (app, _event_rx) = build_test_app_with_event_rx(current, available);
         app
+    }
+
+    /// GH #242: the PowerShell that saves a WSL paste targets the given
+    /// Windows path, single-quoted with embedded quotes doubled, and exits
+    /// non-zero when the clipboard holds no image.
+    #[test]
+    fn powershell_paste_script_quotes_the_target_path() {
+        let script = super::powershell_save_clipboard_png(
+            r"\\wsl.localhost\Ubuntu\home\o'neil\.pi\agent\pastes\p.png",
+        );
+        assert!(script.contains(r"$img.Save('\\wsl.localhost\Ubuntu\home\o''neil\"));
+        assert!(script.contains("[System.Drawing.Imaging.ImageFormat]::Png"));
+        assert!(script.contains("if ($null -eq $img) { exit 1 }"));
     }
 
     #[test]

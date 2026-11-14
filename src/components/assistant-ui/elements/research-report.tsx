@@ -58,9 +58,9 @@ export function ResearchReport({
             <div className="flex items-center gap-2">
               <span className="flex size-3.5 shrink-0 items-center justify-center">
                 {section.state === "done" ? (
-                  <CheckIcon className="text-foreground/35 size-3" />
+                  <CheckIcon className="text-foreground/35 size-[var(--size-icon-sm)]" />
                 ) : section.state === "writing" ? (
-                  <Loader2Icon className="size-3 animate-spin text-blue-500 motion-reduce:animate-none dark:text-blue-400" />
+                  <Loader2Icon className="size-[var(--size-icon-sm)] animate-spin text-blue-500 motion-reduce:animate-none dark:text-blue-400" />
                 ) : (
                   <span
                     aria-hidden

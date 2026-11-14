@@ -3,7 +3,7 @@
  * ============================================================
  * 架构（src/styles/）：
  *   tokens.css      本文件：全部自定义属性（令牌）定义，禁止写规则
- *   base.css        窗体/壳/标题栏/状态栏/窗口控制钮（应用壳层）
+ *   base.css        窗体/壳/标题栏/窗口控制钮（应用壳层）
  *   flexlayout.css  flexlayout 覆写：页签（横向/拉伸头栏/轨道/竖轨）+ 分隔条
  *   panes.css       窗格内容（占位窗格）
  *   editor.css      布局编辑面板 + Zone 编辑器（.ep-* / .ze-*）
@@ -68,6 +68,18 @@
   --stroke: var(--scale-gray-a4);             /* 常规描边（原 0.10） */
   --stroke-soft: var(--scale-gray-a3);        /* 弱分隔线（原 0.06） */
   --hover-wash: var(--scale-gray-a2);         /* 悬停洗底（原 0.07） */
+  /* 列表选中洗底（2026-10-23 用户："选项的高亮颜色不对，不要做好几种样式，
+     只要一种，全部从令牌中调用"）。
+
+     全工程的列表项——设置页左导航、会话行、入口条、文件树——**只认这一个
+     令牌**：悬停 = --hover-wash，选中 = 本令牌。不要再在组件里写
+     `bg-muted` / `bg-muted/70` / `bg-[var(--scale-gray-a4)]` 这类一次性
+     取值：那会同时出现"悬停比选中还深"或"两者差 1% 亮度"的怪状（历史上
+     两种都出现过）。
+
+     取 a4(0.12)：比悬停 a2(0.05) 明显深一档，白底上 ≈ #e0e0e0，与
+     `--stroke`(a4) 同重量级——选中行读作"压实的块"，不是"描了一圈边"。 */
+  --select-wash: var(--scale-gray-a4);
   --surface: #ffffff;
   /* 品牌色块上的文字（2026-10-18 收口）：页签选中/悬停的胶囊是品牌色底，
      白字此前在 flexlayout.css 里写了两次裸 #fff。 */
@@ -83,6 +95,41 @@
                                    --ui-success 的基色 #10b981——hermes
                                    主题经 harmonize 向中景旋转 25%，浅色
                                    主题下取基色） */
+  /* ── hermes --ui-* 令牌别名（2026-10-27）──
+     hermes 桌面版组件（master-detail / CapRow / ToolChip 等）的 tailwind
+     类写的是 --ui-* 令牌（--ui-bg-quinary / --ui-row-active-background /
+     --ui-text-* / --ui-stroke-* 等）。照抄她的 JSX 时这些类直通，别名映射
+     到宿主自己的灰阶/文字/描边刻度——不再为桌面组件自造 .set-cap-* CSS。 */
+  --ui-bg-quinary: var(--hover-wash);
+  --ui-bg-tertiary: var(--scale-gray-a1);      /* SegmentedControl 轨道底 */
+  --ui-bg-quaternary: var(--scale-gray-a2);
+  --ui-row-active-background: var(--select-wash);
+  --ui-row-hover-background: var(--hover-wash);
+  --ui-text-secondary: var(--text-2);
+  --ui-text-tertiary: var(--text-3);
+  --ui-text-quaternary: var(--text-4);
+  --ui-stroke-secondary: var(--stroke);
+  --ui-stroke-tertiary: var(--stroke-soft);
+  --ui-control-active-background: var(--hover-wash);
+  --ui-chat-surface-background: var(--surface);
+  --ui-chat-bubble-background: var(--surface);   /* catalog 卡片底 */
+  --ui-text-primary: var(--text);                /* catalog 主文字 */
+  --ui-sidebar-surface-background: var(--surface);
+  --ui-editor-surface-background: var(--surface);
+  --ui-success: var(--success);
+  /* 绿/红 = hermes 主题的 diff 语义色。宿主没有独立绿阶 → 成功绿取
+     --success；删除红取 shadcn 的 --destructive（tailwind.css:39 定义，
+     自定义属性在计算值阶段解析，跨文件导入顺序不影响）。 */
+  --ui-green: var(--success);
+  --ui-red: var(--destructive);
+  /* diff 行高亮（审查面板 FileDiffPanel 的加/删行底与左侧 2px 描边）。
+     hermes 由主题 color-mix 生成，宿主用同色系低透明度直通。 */
+  --ui-diff-add-background: color-mix(in srgb, var(--success) 12%, transparent);
+  --ui-diff-add-border: color-mix(in srgb, var(--success) 55%, transparent);
+  --ui-diff-add-foreground: color-mix(in srgb, var(--success) 78%, black);
+  --ui-diff-remove-background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  --ui-diff-remove-border: color-mix(in srgb, var(--destructive) 50%, transparent);
+  --ui-diff-remove-foreground: color-mix(in srgb, var(--destructive) 78%, black);
   --fl-accent: var(--brand);                   /* hermes --theme-primary。原 --accent
                                    被 tailwind.css（shadcn 主题，import 在后）的
                                    近白 --accent 覆盖——落点预览/veil/分隔条
@@ -114,14 +161,9 @@
   --strip-low-height: 36px;                   /* 上下分栏的非顶部分栏条高
     （100 高的双重身份=标题栏区只属于窗口顶带；普通条高 36，用户 2026-09-27） */
 
-  /* ── 主对话栏调色层（MainTint，用户 2026-09-27 写进令牌） ──
-     垫在窗格文字组件下面（z -1）、顶部避开 85 页签带、30 圆角（用户 2026-10-05） */
-  --main-tint-color: rgba(233, 238, 239, 0.4);
-  --main-tint-radius: 30px;                   /* 主对话颜色层圆角（用户
-                                   2026-10-05 定稿 30；原 40） */
-  --chat-edge-inset: 20px;                    /* 对话栏贴软件边缘时颜色层/列头的
-                                   内缩（v7.3.4 旧语义：仅该侧无相邻栏的贴边
-                                   侧内缩 20；两侧有栏 = 0 撑满） */
+  /* 主对话栏调色层（--main-tint-* / --z-tint）已于 2026-10-21 整体删除
+     （用户："颜色层不要了，直接删除"）——组件 main-tint.tsx、`.main-tint`
+     规则、三项令牌一并撤除。对话栏现在就是一张纯白卡。 */
 
   /* ── 页签系统（用户定稿：14/regular，非选中 #242424，选中 #006fff） ──
      横向页签 / 拉伸头栏 / 左右轨道 / 主栏竖轨共用这一套——
@@ -161,17 +203,17 @@
   --overlay-mask: rgba(0, 0, 0, 0.32);        /* 遮罩 scrim（.ze-backdrop 同系） */
 
   /* ── z 层级表（审查 D-2 归位：ui-primitives 私设令牌迁入唯一取值处）──
-     宿主内（.flexlayout-host isolation:isolate）：main-tint -1 < 锚层 30
+     宿主内（.flexlayout-host isolation:isolate）：锚层 30
      （chat-tab-label-anchor/strip-hidden-title）< 编辑 veil 55 < 投放
      overlay 60 < 编辑面板 70 <「+」菜单 90 < Zone 编辑器遮罩 120（portal
      根）。根上下文：app-titlebar 50 < 弹出面板 70 < modal 130。
-     **宿主内 z 永远压不过 app-titlebar**——模态必须 portal 到 body。 */
+     **宿主内 z 永远压不过 app-titlebar**——模态必须 portal 到 body。
+     --z-tint 随 MainTint 于 2026-10-21 删除。 */
   --z-modal-backdrop: 120;
   --z-modal: 130;
-  /* 以下四项此前只在规则文件里写字面值（2026-10-18 收口，值与注释层级表
-     对齐）：标题栏浮层 / 主区调色层 / 对话宽度手柄 / 弹层内局部层。 */
+  /* 以下三项此前只在规则文件里写字面值（2026-10-18 收口，值与注释层级表
+     对齐）：标题栏浮层 / 对话宽度手柄 / 弹层内局部层。 */
   --z-titlebar: 50;
-  --z-tint: -1;
   --z-width-handle: 8;
   --z-local: 1;
 
@@ -281,10 +323,16 @@
   --win-dot-size: var(--scale-size-icon-1);   /* 圆点直径（2026-10-16 阶段 3：
                                    15 → 16 接图标钮刻度最小档） */
   --win-dot-gap: 20px;                        /* 圆点间距 */
-  --win-dot-top: 25px;                        /* 圆点行距窗上边缘 */
-  --win-dot-right: calc(var(--scale-shell-inset) + 42px); /* 距窗右边缘：8(壳内缩)
-                                   + 42 —— 壳圆角 56 时（原 40 圆角对 50） */
-  --win-dot-left: calc(var(--scale-shell-inset) + 27px);  /* 侧栏圆点距左边缘（8+27） */
+  --win-dot-top: 15px;                        /* 圆点行距窗上边缘（2026-10-23 用户：
+                                                 10 → 15，下移 5。此前累计 35 → 20 → 15
+                                                 → 10 是三钮上移；本轮反向。注意这里
+                                                 距的是**壳上边缘**，壳外还有
+                                                 --shell-shadow-margin 的透明带） */
+  /* 避圆角留白（2026-10-19 方案 B）：壳内缩取消后，这两个值不再派生自
+     --scale-shell-inset，直接写固定值。DWM 圆角约 8px，42/27 的留白足够
+     远离弧线（原 8+42=50 是给 56px 大圆角留的，现在偏多）。 */
+  --win-dot-right: 42px;                      /* 距窗右边缘 */
+  --win-dot-left: 27px;                       /* 侧栏圆点距左边缘 */
   --win-dot-close: #DC6E6E;                   /* 关闭 */
   --win-dot-maximize: #CBDC6E;                /* 最大化 */
   --win-dot-minimize: #6E97DC;                /* 最小化 */
@@ -341,30 +389,31 @@
 
 /* ── 左侧栏（left-rail-pane，v6.0 §3）+ Mirach 文字切换钮 ── */
 :root {
-  /* 左右栏贴边留白（用户 2026-10-14 定稿：左栏/右栏的内容到栏边**左右均
-     30px**）——内容线（logo/图标/圆点/文字）对准 --rail-gutter；
+  /* 左右栏贴边留白 —— 内容线（logo/图标/圆点/文字）对准 --rail-gutter；
      洗底槽位/列表容器 = 内容线 − 行内距（洗底比内容线宽出是常规）。
-     2026-10-18 用户口径：30 径感偏大 → **26**（-4px）。所有派生槽位都是
-     `calc(var(--rail-gutter) ± N)`，改本值即全链路跟随（含文件树/打开页）。 */
-  --rail-gutter: 26px;                        /* 内容线到栏缘（左右对称） */
+     沿革：2026-10-14 定 30（到**窗边**）→ 2026-10-18 收 26 → 2026-10-19
+     三栏卡片化后语义变为"到**卡片**边缘"，用户定 20（卡再内缩 10 到窗边，
+     窗边视觉仍 30）。所有派生槽位都是 `calc(var(--rail-gutter) ± N)`。 */
+  --rail-gutter: 20px;                        /* 内容线到卡片边缘（左右对称） */
+
   /* ── 左栏「文字列」与图标列（2026-10-16 方案 A：三栏内容线统一）──
      实测问题：有图标行文字左缘 54、无图标行（组头）只有 21 —— 不在同一列。
      本组令牌定义两列，所有左栏文字必须落在 --rail-text-col：
-       图标列左缘 = --rail-gutter (26)
+       图标列左缘 = --rail-gutter (20)
        图标列宽   = --rail-icon (16)
        图标↔文字  = --rail-icon-gap (8)
-       文字列左缘 = 26 + 16 + 8 = 50 */
+       文字列左缘 = 20 + 16 + 8 = 44 */
   --rail-icon: 16px;                          /* 图标盒宽（图标列） */
   --rail-icon-gap: 8px;                       /* 图标↔文字间距 */
-  --rail-text-col: calc(var(--rail-gutter) + var(--rail-icon) + var(--rail-icon-gap)); /* 50 */
+  --rail-text-col: calc(var(--rail-gutter) + var(--rail-icon) + var(--rail-icon-gap)); /* 44 */
   /* 行槽位（洗底容器）：比内容线外扩行内距，令洗底比内容宽出（常规）。
      **注意 9 不是笔误**：= 1px 透明边 + 8px 行内距（--hub-row-pad-x）——
-     容器 26−9=17 + 行内距 8 + 透明边 1 = 图标线正好落在 26（--rail-gutter）。
+     容器 20−9=11 + 行内距 8 + 透明边 1 = 图标线正好落在 20（--rail-gutter）。
      改这一个值会连带移动图标线（2026-10-16 实测：误改 −8 → 图标线跑到 31）。 */
-  --rail-row-inset: calc(var(--rail-gutter) - 9px);   /* 17 */
+  --rail-row-inset: calc(var(--rail-gutter) - 9px);   /* 11 */
   /* 列表/搜索槽位：无透明边的面，外扩行内距即可（全部整数，无半像素） */
-  --rail-list-inset: calc(var(--rail-gutter) - 8px);  /* 18 */
-  --rail-search-inset: calc(var(--rail-gutter) - 2px);/* 24 */
+  --rail-list-inset: calc(var(--rail-gutter) - 8px);  /* 12 */
+  --rail-search-inset: calc(var(--rail-gutter) - 2px);/* 18 */
   /* ── 左栏垂直节奏（2026-10-18 补齐）─────────────────────────────
      实测病根：logo 带 → 入口条 → 列表 三段的间距**全是 0**（各段自己
      `flex: none` 且无 margin，只靠内部 padding 撑开）——视觉上"有缝"是
@@ -387,18 +436,9 @@
   --logo-word-btn-active-opacity: 0.55;       /* Mirach 文字按压透明度 */
 }
 
-/* ── 打开页（open-page，v6.0 §7；ZCode home 按钮范式） ── */
-:root {
-  --openpage-pad-x: var(--rail-gutter);       /* 页内左右边距（与左栏内容线同源，现 26） */
-  --openpage-title-gap: 18px;                 /* 标题与按钮列表间距 */
-  --openpage-btn-radius: 10px;                /* 按钮圆角 */
-  --openpage-btn-pad-y: 12px;                 /* 按钮上下内边距 */
-  --openpage-btn-pad-x: 14px;                 /* 按钮左右内边距 */
-  --openpage-btn-gap: 12px;                   /* 图标-文字间距 */
-  --openpage-btn-row-gap: 8px;                /* 按钮行间距 */
-  --openpage-btn-icon-size: 20px;             /* 图标盒 */
-  --openpage-hint-size: 12px;                 /* 提示文字字号 */
-}
+/* 打开页令牌已删除（2026-11-01）：open-page 组件改为 ZCode open-tab
+   launcher 的 Tailwind 排列（panes/open-page.tsx），--openpage-* 九个
+   令牌无消费方。 */
 
 /* ── beUI 动效令牌（2026-10-14；来源 beui.dev motion 组件样式值）──
    **唯一源头原则**：beUI 组件的 JS 动效常量（src/lib/ease.ts）改为从
@@ -430,6 +470,22 @@
   --beui-spring-tabs-s: 245;     --beui-spring-tabs-d: 36;     --beui-spring-tabs-m: 1.2;   /* 刻意无过冲 */
   --beui-spring-toast-s: 420;    --beui-spring-toast-d: 34;    --beui-spring-toast-m: 0.75;
   --beui-spring-loupe-s: 520;    --beui-spring-loupe-d: 24;    --beui-spring-loupe-m: 0.6;  /* 放大镜升起 */
+
+  /* ── 弹层液滴粘性合并（goo）总开关（2026-11-01 用户定稿）──
+     用户："调用点没传，直接在令牌中统一开关不行吗"。
+
+     **这是唯一开关**：`Popover` / `ContextMenu` / `GooSurface` 的 `goo`
+     默认值全部来自本变量（ease.ts 的 POPOVER_GOO），**调用点不许传
+     `goo`**——散在 15 个调用点的布尔参数就是"有的有脖子有的没有"的成因。
+
+     0 = 关（默认）：面板是独立圆角矩形 + 投影，与触发钮之间**没有液滴
+     脖子**，按钮也不会被投影。1 = 开：beui 原设计的粘性合并。
+
+     为什么默认关：beui 的 goo 是通用组件的设计语言（预览页 PopoverPreview
+     就是这效果），但宿主全是"28×28 图标钮 + 288 宽大面板"这种尺寸悬殊的
+     组合，6px 间隙会被滤镜拉成一条明显的脖子；且 drop-shadow 作用在合并
+     形状上 → 按钮也被投了一层影。视觉上是噪声，不是设计。 */
+  --beui-popover-goo: 0;
 
   /* Spring（duration 式：--dur 秒 + --bounce；ease.ts visualOf/durSpringOf 读取。
      2026-10-16 令牌统一新增——goo/morph/unfold/accordion 四组组件弹簧原散落
@@ -579,13 +635,57 @@
   --scale-radius-sm: 8px;      /* 控件：按钮/输入/行/小卡 */
   --scale-radius-md: 12px;     /* 卡片/弹层/分组容器 */
   --scale-radius-lg: 16px;     /* 大面板/抽屉 */
-  --scale-radius-xl: 24px;     /* 特大容器（对话栏 tint/大卡） */
+  --scale-radius-xl: 24px;     /* 特大容器（大卡/对话内卡片） */
   --scale-radius-full: 9999px; /* 胶囊/圆形（正方形盒前提，见 --scale-size-*） */
-  /* 软件外壳圆角独立成档：它不参与"逐级递减"，与内容圆角是**同心**关系
-     （inner ≈ outer − inset，见方案 §8）。56 = 48(内层) + 8(内缩)。 */
-  --scale-radius-shell: 56px;
-  --scale-radius-shell-inner: 48px;
-  --scale-shell-inset: 8px;   /* 壳内缩（同心环宽）；改壳圆角必须同步此值 */
+  /* 软件外壳圆角：**0（直角）**。窗口本身就是直角矩形（Rust 侧
+     `DWMWCP_DONOTROUND` + `shadow: true`，系统投影由 Windows 画在窗口
+     之外），且 `transparent: false` ——CSS 若在这里画 35px 弧，弧外会露出
+     webview 的不透明底色（白块），所以外壳必须跟着窗口方。
+
+     注意区分：**栏卡片**的圆角是 `--radius-pane`（25px，独立视觉值），
+     它决定"容器悬浮感"，与这里无关。 */
+  --scale-radius-shell: 0px;
+  --scale-radius-shell-inner: 0px;
+  --scale-shell-inset: 0px;   /* 无内缩：壳与主区同盒 */
+
+  /* ── 三栏卡片化（2026-10-19 用户定稿；间距 2026-10-21 再调）──────────
+     外壳底色 = 旧主对话颜色层的源色 #E9EEEF（--surface-shell），三栏各是
+     一张白底圆角卡片浮在上面。两个间距是**不同的**（用户 2026-10-21：
+     "边缘保持 10，但是栏和栏之间用 8"）：
+       · 窗边 → 卡片 = --pane-edge (10)
+       · 相邻两卡之间 = --pane-gap (8)
+     落点是两处 padding（内缩只能走 padding，见 flexlayout.css）：
+       .app-main  padding = 10 − 8/2 = 6
+       .dv-view   padding = 8/2     = 4
+     两者相加 10 = 窗边档；相邻两栏的 .dv-view 相加 8 = 栏间档。
+     **卡片圆角与内缩无同心关系**：25 是用户选定的纯视觉值。 */
+  --surface-shell: #e9eeef;                   /* 外壳底色（用户 2026-10-19 定稿：取旧调色层
+                                                 的源色 #E9EEEF 实色——不是叠白后的
+                                                 #f6f8f9。白卡之间的底色带要能读出来。
+                                                 调色层本身已于 2026-10-21 删除，
+                                                 这里只保留它的颜色） */
+  --pane-edge: 10px;                          /* 窗边 → 卡片 */
+  --pane-gap: 8px;                            /* 卡片 ↔ 卡片 */
+  --radius-pane: 25px;                        /* 栏卡片圆角（视觉值，不与 DWM 同心） */
+  /* 卡片投影（用户 2026-10-21："栏的容器加个阴影效果"；2026-10-25 二次定稿：
+     "容器的悬浮感可以增强一点，阴影稍微重一点点"）。
+     两段叠加：①1px 的贴边接触影——白卡与 #e9eeef 底之间没有它，边缘会
+     读成"色块拼接"而不是"浮起"；②大范围环境影——给厚度感。
+     2026-10-25 把两段各加重一档（0.06→0.08 / 0.04→0.06，模糊 12→16）：
+     外壳改成直角矩形后，卡片的浮起全靠这条影，太淡会读成平铺色块。
+     仍刻意克制（峰值 ~0.14 alpha）：三张卡并排，影太重会让中间的 8px 缝隙
+     发灰、比窗边 10px 还显眼，反而破坏"间距一致"的观感。 */
+  --shadow-pane: 0 1px 3px rgba(16, 24, 40, 0.08), 0 6px 16px rgba(16, 24, 40, 0.06);
+
+  /* ── 窗口投影：**已移出 CSS**（2026-10-25）────────────────────────
+     阴影改由 Rust 的独立 layered 层绘制（src-tauri/src/win_shadow.rs）：
+     `SetWindowRgn` 把 40px 边距裁出了窗口区域（鼠标穿透的代价），CSS
+     `box-shadow` 画在边距里会被一起裁掉。那条层位于宿主窗口**下方**、
+     外扩 40px、`WS_EX_TRANSPARENT` 不接收输入——阴影回来了，穿透不变。
+     CSS 这边只保留边距宽度（`--shell-shadow-margin`，`#root` 的 padding），
+     它同时是 win_shadow 的 `SHADOW_PAD_CSS` 与 win_shape 的
+     `SHELL_MARGIN_CSS` 的对应值（三处必须一致，改一处要改三处）。 */
+  --shell-shadow-margin: 0px;
 }
 
 /* ── L1 间距刻度（4px 基准） ────────────────────────────────────
@@ -639,6 +739,35 @@
   --scale-size-icon-2: 24px;   /* 常规图标钮（绝大多数） */
   --scale-size-icon-3: 28px;   /* 大图标钮 */
   --scale-size-icon-4: 32px;   /* 特大/主操作 */
+
+  /* ── 图标钮的**两套**尺寸（2026-10-26 用户："按钮大小分几个挡位归拢，
+     按钮的到图标给个空白的间隙，可点击的区域不是大了吗"）─────────────
+     上面那组是**盒子**（命中区），下面这组是**图标**（可见图形）。
+     盒子比图标大一圈，中间那圈透明 = 纯命中余量：视觉不变、更好点。
+
+       盒子 28 ← 图标 16   常规（默认）
+       盒子 32 ← 图标 18   大
+       盒子 36 ← 图标 20   特大
+
+     约束：图标 ≤ 盒子 − 8（每边至少 4px 余量，圆形命中区才不"贴着边"）。
+     组件只认 `--size-icon-btn*` 做盒、`--size-icon-glyph*` 做 svg。
+
+     **图标档位只有四个**（2026-10-26 归拢；此前散落 size-2.5/3/3.5/4/5/8
+     共 208 处硬编码）：
+       xs  10px  行内标记（列表项前的小圆点、状态点）
+       sm  12px  紧凑图标（表格/列表行内）
+       md  14px  默认（绝大多数工具条/按钮图标）
+       lg  16px  图标钮里的图标（--size-icon-glyph）
+     用法：`className="size-[var(--size-icon-md)]"` 或组件内 `--size-icon-*`。
+     **新代码不要再写 `size-3.5` 这类字面值**——改令牌才是一处生效。 */
+  --size-icon-xs: 10px;
+  --size-icon-sm: 12px;
+  --size-icon-md: 14px;
+  --size-icon-lg: 16px;
+
+  --size-icon-glyph: var(--size-icon-lg);   /* 16 */
+  --size-icon-glyph-lg: 18px;
+  --size-icon-glyph-xl: 20px;
 }
 
 /* ── L2 语义别名（组件只认这一层） ─────────────────────────────
@@ -649,8 +778,12 @@
   --radius-surface: var(--scale-radius-md);   /* 卡片/面板 */
   --radius-overlay: var(--scale-radius-md);   /* 浮层/菜单 */
   --radius-panel-lg: var(--scale-radius-lg);  /* 大面板 */
-  --radius-shell: var(--scale-radius-shell);  /* 软件外壳（Rust SetWindowRgn 同步） */
-  --radius-shell-inner: var(--scale-radius-shell-inner); /* 同心内层（= 壳 − 内缩） */
+  /* 软件外壳圆角：**0**（2026-10-25 用户定稿：回到 Tauri 原生壳）。
+     窗口 = 壳，圆角由 Windows 11 的 DWM 画（`decorations: false` +
+     `shadow: true` 时系统给无边框窗口约 8px 圆角 + 系统投影）。CSS 不再
+     画外壳圆角——否则 35px 的 CSS 弧会与 DWM 的 8px 弧互相裁切。 */
+  --radius-shell: 0px;
+  --radius-shell-inner: 0px;
   --shell-inset: var(--scale-shell-inset);    /* 壳内缩（同心环宽，间距族） */
   --radius-pill: var(--scale-radius-full);
   --radius-circle: 50%;
@@ -664,8 +797,8 @@
   --space-panel: var(--scale-space-5);        /* 面板内距（"多留白"主档） */
   --space-panel-lg: var(--scale-space-6);     /* 大面板内距 */
   --space-section: var(--scale-space-7);      /* 大区块分段 */
-  /* 外壳留白（圆角避让：状态栏 padding、窗口圆点右距）——由同心几何派生，
-     阶段 7（方案 B）时与 --radius-shell 一起重算 */
+  /* 外壳留白（圆角避让：窗口圆点右距）——圆点右距已改固定值
+     （见 --win-dot-right），本令牌暂无消费方，保留定义防外部引用。 */
   --space-shell-x: var(--scale-space-8);
 
   /* 字号语义 */
@@ -675,10 +808,12 @@
   --font-body-lg: var(--scale-font-lg);
   --font-title: var(--scale-font-title);
 
-  /* 图标钮语义 */
-  --size-icon-btn: var(--scale-size-icon-2);     /* 24 默认 */
-  --size-icon-btn-sm: var(--scale-size-icon-1);  /* 16 圆点档 */
-  --size-icon-btn-lg: var(--scale-size-icon-3);  /* 28 */
-  --size-icon-btn-xl: var(--scale-size-icon-4);  /* 32 */
+  /* 图标钮语义 —— **盒子档位**（命中区；图标尺寸见 --size-icon-glyph*）。
+     2026-10-26 用户："圆太小了，不好点中" + "给个空白的间隙，可点击的区域
+     不是大了吗" → 盒子统一放大，图标保持原视觉尺寸，差值就是命中余量。 */
+  --size-icon-btn: var(--scale-size-icon-3);     /* 28 默认（图标 16） */
+  --size-icon-btn-sm: var(--scale-size-icon-1);  /* 16 圆点档（纯装饰） */
+  --size-icon-btn-lg: var(--scale-size-icon-4);  /* 32（图标 18） */
+  --size-icon-btn-xl: 36px;                      /* 36（图标 20） */
 }
 

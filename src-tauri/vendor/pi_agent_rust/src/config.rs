@@ -14,6 +14,28 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
+/// The tracing target for diagnostics addressed to the person running pi,
+/// rather than to someone debugging pi.
+///
+/// A message here says the user's own configuration is wrong and pi carried on
+/// without it: a misspelled settings key, an unparseable queue mode, a
+/// `session_store` nobody recognises, a `keybindings.json` naming an action
+/// that does not exist. Nobody sets `RUST_LOG` to find out that their settings
+/// file has a typo in it, so the binary's default filter turns this one target
+/// on at WARN and leaves every module exactly as quiet as it was.
+///
+/// The value is arbitrary; what matters is that the filter and every emitter
+/// share this constant. A filter directive that matches no target is not an
+/// error — it simply never fires — so a written-out string on either side can
+/// take the diagnostics away in silence, which is how the first version of
+/// this went wrong: `pi_agent_rust::config` looks right and matches nothing,
+/// because the library is `[lib] name = "pi"`.
+///
+/// This deliberately does not follow the module path. These messages come from
+/// `config`, `session` and the interactive stacks, and what they have in
+/// common is their audience, not their origin.
+pub const USER_DIAGNOSTIC_TARGET: &str = "pi::settings";
+
 /// Main configuration structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -554,16 +576,24 @@ pub struct ReadSettings {
 /// Bash-tool mediation configuration (bd-cv653.1.7).
 ///
 /// `bash.mediation`: `off` (default) | `warn` | `block-critical` | `block-high`.
-/// `bash.mediationForced`: when true, mediation applies even under yolo-style
-/// approval overrides (forced beats yolo). `bash.mediationDcg`: use a `dcg`
-/// binary on PATH as the authoritative verdict source when present
-/// (default true); the in-tree classifier is the fallback.
+/// `bash.mediationDcg`: use a `dcg` binary on PATH as the authoritative verdict
+/// source when present (default true); the in-tree classifier is the fallback.
+///
+/// `bash.mediationForced` is accepted and has no effect. It was specified to
+/// mean "mediation applies even under yolo-style approval overrides", but
+/// mediation ended up unconditional in both places it runs — as a hard policy
+/// gate in `ApprovalState::evaluate`, ahead of every mode check, and again in
+/// the bash tool before spawn — so there is no weaker behaviour for it to
+/// select. `approval::tests::test_yolo_mode_respects_hard_policy_gates` pins
+/// that guarantee, and it passes with `mediation_forced` unset. Nothing reads
+/// the field; whether to give it meaning or retire it is open (bd-cv653.1.7).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BashSettings {
     /// Mediation mode: off | warn | block-critical | block-high.
     pub mediation: Option<String>,
-    /// Forced mediation: applies regardless of yolo/approval overrides.
+    /// Accepted and unread; mediation is already unconditional. See the type
+    /// doc above.
     #[serde(alias = "mediationForced")]
     pub mediation_forced: Option<bool>,
     /// Prefer the `dcg` binary's verdicts when available (default true).
@@ -579,7 +609,8 @@ pub struct BashSettings {
 /// `off` (default while experimental, omp's setting-gated posture) |
 /// `local` (per-project SQLite+FTS5 bank with
 /// retain/recall/reflect/memory_edit tools and a mental-model block on the
-/// first turn) | `cass` (reserved, not yet implemented).
+/// first turn) | `cass` (the local bank plus optional, read-only CASS
+/// history search scoped to the project).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemorySettings {
@@ -764,6 +795,7 @@ impl Config {
                 path.display()
             ))
         })?;
+        warn_unrecognised_setting_keys(path, &content);
         Ok(config)
     }
 
@@ -1052,7 +1084,7 @@ impl Config {
     }
 
     /// Memory backend (bd-cv653.4.1): `off` (default while experimental) |
-    /// `local` | `cass` (reserved). Unknown values degrade to off.
+    /// `local` | `cass` (local bank plus history). Unknown values degrade to off.
     pub fn memory_backend(&self) -> &str {
         match self
             .memory
@@ -1145,7 +1177,27 @@ impl Config {
     }
 
     /// Whether to check for version updates on startup (default: true).
+    ///
+    /// The check reaches the network, so `PI_SKIP_VERSION_CHECK` can turn it
+    /// off but never on: an environment that wants silence gets silence
+    /// whatever `checkForUpdates` says. That is also pi-mono's order — its
+    /// `checkForNewVersion` returns on the variable before it reads any
+    /// setting — and the variable is the one a migrating user already has in
+    /// their shell profile.
     pub fn should_check_for_updates(&self) -> bool {
+        self.should_check_for_updates_with_lookup(env_lookup)
+    }
+
+    fn should_check_for_updates_with_lookup<F>(&self, get_env: F) -> bool
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        // pi-mono tests the variable for JavaScript truthiness, and
+        // `PI_SKIP_VERSION_CHECK=` is the empty string, which is falsy. An
+        // empty value therefore does not skip the check, here either.
+        if get_env("PI_SKIP_VERSION_CHECK").is_some_and(|value| !value.is_empty()) {
+            return false;
+        }
         self.check_for_updates.unwrap_or(true)
     }
 
@@ -1288,6 +1340,7 @@ impl Config {
         } else {
             // Unknown values fail closed to the safe profile.
             tracing::warn!(
+                target: USER_DIAGNOSTIC_TARGET,
                 requested = %normalized_profile,
                 fallback = "safe",
                 "Unknown extension policy profile; falling back to safe"
@@ -1588,6 +1641,161 @@ pub(crate) fn parse_queue_mode_or_default(mode: Option<&str>) -> QueueMode {
     parse_queue_mode(mode).unwrap_or(QueueMode::OneAtATime)
 }
 
+/// Is this exact settings diagnostic being reported for the first time?
+///
+/// Startup reads the same settings file more than once — the HTTP proxy, the
+/// workspace-trust probe and the main load each call [`Config::load`] — so one
+/// mistake in `settings.json` otherwise produces three identical warnings.
+fn first_report_of(scope: &str, item: &str) -> bool {
+    static REPORTED: OnceLock<Mutex<std::collections::HashSet<(String, String)>>> = OnceLock::new();
+
+    let Ok(mut seen) = REPORTED
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+    else {
+        // A lock poisoned by an unrelated panic must not swallow a diagnostic,
+        // so a lost set warns again rather than going quiet.
+        return true;
+    };
+    seen.insert((scope.to_string(), item.to_string()))
+}
+
+/// Warn once per process for each unrecognised key in a settings file.
+fn warn_unrecognised_setting_keys(path: &Path, content: &str) {
+    let keys = unrecognised_setting_keys(content);
+    if keys.is_empty() {
+        return;
+    }
+
+    let file = path.display().to_string();
+    for key in keys {
+        if first_report_of(&file, &key) {
+            tracing::warn!(
+                target: USER_DIAGNOSTIC_TARGET,
+                setting = key,
+                file = file.as_str(),
+                "Unrecognised setting; it is being ignored"
+            );
+        }
+    }
+}
+
+/// Settings keys this build does not recognise, as dotted paths.
+///
+/// `Config` is `#[serde(default)]` with no `deny_unknown_fields`, so an
+/// unknown key is dropped in silence. That is the right default for forward
+/// compatibility — a settings file written by a newer pi must not stop an older
+/// one from starting — and the wrong outcome for a typo, which is the common
+/// case and otherwise produces no signal at all. `"hide_thinking_blocks"`,
+/// where the field is `hide_thinking_block`, simply does nothing, for ever,
+/// with no message. So does `"bash": { "mediatoin": "block-high" }`, and that
+/// one costs more.
+///
+/// Recognition is asked of serde rather than of a hand-kept list: the name is
+/// placed alone in a `Config`-shaped probe and the round-trip compared against
+/// the same probe with nothing in it. A recognised key moves something; an
+/// unknown one is dropped and leaves the shape untouched. That cannot drift as
+/// fields and their camelCase aliases are added, which a list would — and it
+/// needs no knowledge of the aliases at all, of which there are 73 here.
+///
+/// Every field is an `Option`, so any non-null value differs from the default.
+/// Four things are deliberately not reported:
+///
+///   * an explicit `null`, which is indistinguishable from "not set" by
+///     construction and is not a typo;
+///   * keys beginning with `$`, the convention for editor metadata such as
+///     `$schema`;
+///   * a name serde knows but whose value has the wrong type, because the
+///     caller has already failed the whole file with a parse error and
+///     "unknown key" would be a second, wrong diagnosis;
+///   * the keys of a map-valued setting — `retry.fallbackChains` is keyed by
+///     role, `lsp.servers` by server name, `lsp.servers.<name>.env` by
+///     variable — which are the user's data and cannot be misspelled. Those
+///     need no special case: serde KEEPS them, so they move the shape, which
+///     is the same evidence of being read that a struct field gives.
+pub(crate) fn unrecognised_setting_keys(content: &str) -> Vec<String> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content)
+    else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    collect_unrecognised_keys(&[], &map, &mut found);
+    found
+}
+
+fn collect_unrecognised_keys(
+    path: &[&str],
+    map: &serde_json::Map<String, serde_json::Value>,
+    found: &mut Vec<String>,
+) {
+    let Some(empty) = config_shape_with(path, empty_object()) else {
+        return;
+    };
+
+    for (key, value) in map {
+        if key.starts_with('$') || value.is_null() {
+            continue;
+        }
+        // `None` is a type error, which is serde saying it knows this name and
+        // disliked the value — not an unrecognised key.
+        let recognised =
+            config_shape_with(path, one_key(key, value.clone())).is_none_or(|shape| shape != empty);
+        if !recognised {
+            found.push(dotted(path, key));
+            continue;
+        }
+
+        if let serde_json::Value::Object(nested) = value {
+            let mut deeper: Vec<&str> = path.to_vec();
+            deeper.push(key);
+            collect_unrecognised_keys(&deeper, nested, found);
+        }
+    }
+}
+
+/// Does this build recognise `key` as a top-level settings key, by any spelling?
+///
+/// The same question asked about one name with no value to hand, which is the
+/// shape `pi doctor` needs.
+pub(crate) fn recognises_setting_key(key: &str) -> bool {
+    let Some(empty) = config_shape_with(&[], empty_object()) else {
+        return true;
+    };
+    config_shape_with(&[], one_key(key, serde_json::Value::Bool(true)))
+        .is_none_or(|shape| shape != empty)
+}
+
+/// A whole `Config`, round-tripped, with `value` placed at `path`.
+///
+/// `None` means serde refused the shape, which only happens when it recognises
+/// a name and rejects its value.
+fn config_shape_with(path: &[&str], value: serde_json::Value) -> Option<serde_json::Value> {
+    let mut probe = value;
+    for key in path.iter().rev() {
+        probe = one_key(key, probe);
+    }
+    let parsed: Config = serde_json::from_value(probe).ok()?;
+    serde_json::to_value(parsed).ok()
+}
+
+fn one_key(key: &str, value: serde_json::Value) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert(key.to_string(), value);
+    serde_json::Value::Object(map)
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+fn dotted(path: &[&str], key: &str) -> String {
+    if path.is_empty() {
+        key.to_string()
+    } else {
+        format!("{}.{key}", path.join("."))
+    }
+}
+
 fn emit_queue_mode_diagnostic(setting: &'static str, mode: Option<&str>) {
     let Some(mode) = mode else {
         return;
@@ -1597,8 +1805,13 @@ fn emit_queue_mode_diagnostic(setting: &'static str, mode: Option<&str>) {
     if parse_queue_mode(Some(trimmed)).is_some() {
         return;
     }
+    // Same triple-load as the unrecognised-key warning; see `first_report_of`.
+    if !first_report_of(setting, trimmed) {
+        return;
+    }
 
     tracing::warn!(
+        target: USER_DIAGNOSTIC_TARGET,
         setting,
         value = trimmed,
         "Unknown queue mode; falling back to one-at-a-time"
@@ -1648,6 +1861,7 @@ fn merge_http_settings(
             https_proxy: other.https_proxy.or(base.https_proxy),
             http_proxy: other.http_proxy.or(base.http_proxy),
             no_proxy: other.no_proxy.or(base.no_proxy),
+            proxy_loopback: other.proxy_loopback.or(base.proxy_loopback),
             ignore_env_proxy: other.ignore_env_proxy.or(base.ignore_env_proxy),
         }),
         (None, Some(other)) => Some(other),
@@ -2110,13 +2324,19 @@ fn deep_merge_settings_value(dst: &mut Value, patch: Value) -> Result<()> {
             continue;
         }
 
-        match (dst_obj.get_mut(&key), value) {
-            (Some(Value::Object(dst_child)), Value::Object(patch_child)) => {
-                let mut child = Value::Object(std::mem::take(dst_child));
-                deep_merge_settings_value(&mut child, Value::Object(patch_child))?;
-                dst_obj.insert(key, child);
+        match value {
+            Value::Object(patch_child) => {
+                let child = dst_obj
+                    .entry(key)
+                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                if !child.is_object() {
+                    *child = Value::Object(serde_json::Map::new());
+                }
+                // Null means deletion at every depth, including when the
+                // parent object is newly created or replaces a scalar.
+                deep_merge_settings_value(child, Value::Object(patch_child))?;
             }
-            (_, other) => {
+            other => {
                 dst_obj.insert(key, other);
             }
         }
@@ -2201,10 +2421,10 @@ mod tests {
         BranchSummarySettings, CompactionSettings, Config, ExtensionPolicyConfig,
         ExtensionRiskConfig, ImageSettings, MarkdownSpacing, RepairPolicyConfig, RetrySettings,
         SettingsScope, TerminalSettings, ThinkingBudgets, deep_merge_settings_value,
-        extension_index_path_from_env, global_dir_from_env, merge_branch_summary, merge_compaction,
-        merge_extension_policy, merge_extension_risk, merge_images, merge_repair_policy,
-        merge_retry, merge_terminal, merge_thinking_budgets, package_dir_from_env,
-        sessions_dir_from_env,
+        extension_index_path_from_env, first_report_of, global_dir_from_env, merge_branch_summary,
+        merge_compaction, merge_extension_policy, merge_extension_risk, merge_images,
+        merge_repair_policy, merge_retry, merge_terminal, merge_thinking_budgets,
+        package_dir_from_env, sessions_dir_from_env, unrecognised_setting_keys,
     };
     use crate::agent::QueueMode;
     use proptest::prelude::*;
@@ -2214,6 +2434,91 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
+
+    #[test]
+    fn http_loopback_proxy_setting_accepts_camel_and_snake_case() {
+        for (content, expected) in [
+            (r#"{"http":{"proxyLoopback":true}}"#, true),
+            (r#"{"http":{"proxy_loopback":true}}"#, true),
+            (r#"{"http":{"proxyLoopback":false}}"#, false),
+            (r#"{"http":{"proxy_loopback":false}}"#, false),
+        ] {
+            let config: Config = serde_json::from_str(content).expect("parse HTTP settings");
+            assert_eq!(
+                config.http.expect("HTTP settings").proxy_loopback,
+                Some(expected)
+            );
+            assert!(
+                unrecognised_setting_keys(content).is_empty(),
+                "the settings checker must recognize {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn http_loopback_proxy_setting_survives_partial_merge_and_false_override() {
+        let global: Config = serde_json::from_value(json!({
+            "http": {
+                "proxy": "http://proxy.example:8080",
+                "proxyLoopback": true,
+                "noProxy": ["internal.example"],
+                "ignoreEnvProxy": true
+            }
+        }))
+        .expect("global HTTP settings");
+        let project: Config = serde_json::from_value(json!({
+            "http": {"httpsProxy": "http://secure.example:8443"}
+        }))
+        .expect("partial project HTTP settings");
+        let merged = Config::merge(global, project);
+        let inherited = merged.http.as_ref().expect("merged HTTP settings");
+        assert_eq!(inherited.proxy_loopback, Some(true));
+        assert_eq!(
+            inherited.proxy.as_deref(),
+            Some("http://proxy.example:8080")
+        );
+        assert_eq!(
+            inherited.https_proxy.as_deref(),
+            Some("http://secure.example:8443")
+        );
+
+        let project: Config = serde_json::from_value(json!({
+            "http": {"proxyLoopback": false}
+        }))
+        .expect("project disables loopback proxying");
+        let merged = Config::merge(merged, project);
+        let settings = merged.http.as_ref().expect("merged HTTP settings");
+        assert_eq!(settings.proxy_loopback, Some(false));
+        assert_eq!(settings.ignore_env_proxy, Some(true));
+        assert_eq!(
+            settings.no_proxy.as_deref(),
+            Some(["internal.example".to_string()].as_slice())
+        );
+        let (resolved, warnings) =
+            crate::http::proxy::ProxyConfig::resolve(Some(settings), &|_| None);
+        assert!(warnings.is_empty());
+        assert!(resolved.endpoint_for(false, "127.0.0.1", 11434).is_none());
+        assert!(resolved.endpoint_for(true, "localhost", 443).is_none());
+        assert!(
+            resolved
+                .endpoint_for(true, "internal.example", 443)
+                .is_none()
+        );
+        assert_eq!(
+            resolved
+                .endpoint_for(true, "remote.example", 443)
+                .expect("secure proxy retained")
+                .redacted_url(),
+            "http://secure.example:8443"
+        );
+        assert_eq!(
+            resolved
+                .endpoint_for(false, "remote.example", 80)
+                .expect("generic proxy retained")
+                .redacted_url(),
+            "http://proxy.example:8080"
+        );
+    }
 
     #[test]
     fn failover_settings_parse_chains_cooldown_and_cap() {
@@ -2923,6 +3228,35 @@ mod tests {
     // ── deep_merge_settings_value ──────────────────────────────────────
 
     #[test]
+    fn deep_merge_new_objects_consume_nested_deletions() {
+        for mut settings in [
+            json!({ "preserve": 42 }),
+            json!({ "preserve": 42, "images": false }),
+            json!({ "preserve": 42, "images": null }),
+            json!({ "preserve": 42, "images": [] }),
+        ] {
+            deep_merge_settings_value(
+                &mut settings,
+                json!({
+                    "images": {
+                        "auto_resize": false,
+                        "autoResize": null,
+                        "nested": { "keep": true, "remove": null },
+                    },
+                }),
+            )
+            .expect("merge new object");
+            assert_eq!(
+                settings,
+                json!({
+                    "preserve": 42,
+                    "images": { "auto_resize": false, "nested": { "keep": true } },
+                }),
+            );
+        }
+    }
+
+    #[test]
     fn deep_merge_null_value_removes_key() {
         let temp = TempDir::new().expect("create tempdir");
         let cwd = temp.path().join("cwd");
@@ -3046,6 +3380,200 @@ mod tests {
         assert_eq!(config.autocomplete_max_visible, Some(15));
         assert_eq!(config.session_picker_input, Some(2));
         assert_eq!(config.session_durability.as_deref(), Some("throughput"));
+    }
+
+    #[test]
+    fn a_settings_key_this_build_does_not_know_is_reported() {
+        // The failure worth catching is a name that looks right and does
+        // nothing: `hide_thinking_blocks` is the real field, pluralised.
+        let keys = unrecognised_setting_keys(
+            r#"{ "hide_thinking_block": true, "hide_thinking_blocks": true }"#,
+        );
+        assert_eq!(keys, vec!["hide_thinking_blocks".to_string()]);
+    }
+
+    #[test]
+    fn recognised_camel_case_aliases_are_not_reported() {
+        // None of the 73 aliases in this file are named by the detector, which
+        // is the whole reason it asks serde instead of keeping a list.
+        let keys = unrecognised_setting_keys(
+            r#"{
+                "hideThinkingBlock": true,
+                "editorPaddingX": 5,
+                "sessionDurability": "throughput"
+            }"#,
+        );
+        assert!(keys.is_empty(), "recognised aliases reported: {keys:?}");
+    }
+
+    #[test]
+    fn a_nested_struct_key_is_recognised_by_its_own_name() {
+        let keys = unrecognised_setting_keys(r#"{ "retry": { "maxRetries": 9 } }"#);
+        assert!(keys.is_empty(), "reported: {keys:?}");
+    }
+
+    #[test]
+    fn a_typo_inside_a_settings_object_is_reported_by_its_path() {
+        // The costly version of the same mistake: `bash.mediation` selects a
+        // command-mediation policy, and a misspelling of it is silently no
+        // policy at all.
+        let keys = unrecognised_setting_keys(
+            r#"{ "bash": { "mediation": "block-high", "mediatoin": "block-high" } }"#,
+        );
+        assert_eq!(keys, vec!["bash.mediatoin".to_string()]);
+    }
+
+    #[test]
+    fn nested_aliases_and_nulls_are_as_quiet_as_top_level_ones() {
+        let keys = unrecognised_setting_keys(
+            r#"{
+                "bash": { "mediationDcg": false, "mediation_forced": null },
+                "terminal": { "showImages": true },
+                "thinkingBudgets": { "low": 1024 },
+                "markdown": { "codeBlockIndent": 4 }
+            }"#,
+        );
+        assert!(keys.is_empty(), "reported: {keys:?}");
+    }
+
+    #[test]
+    fn a_map_valued_setting_has_no_typos_below_it() {
+        // `retry.fallbackChains` is keyed by role or `provider/model` spec and
+        // `lsp.servers.<name>.env` by variable, so every name under them is the
+        // user's data. Reporting those would make the warning useless to anyone
+        // who configures failover or a language server. No special case makes
+        // this work: serde keeps these keys, so they move the shape exactly as
+        // a struct field does.
+        let keys = unrecognised_setting_keys(
+            r#"{
+                "retry": {
+                    "fallbackChains": {
+                        "default": ["anthropic/claude-sonnet-5"],
+                        "anything the user likes": ["openai/gpt-5"]
+                    }
+                },
+                "lsp": {
+                    "servers": {
+                        "a server the user named": {
+                            "command": "rust-analyzer",
+                            "rootMarkers": ["Cargo.toml"],
+                            "env": { "RA_LOG": "info", "ANYTHING_AT_ALL": "1" }
+                        }
+                    }
+                }
+            }"#,
+        );
+        assert!(keys.is_empty(), "reported: {keys:?}");
+    }
+
+    #[test]
+    fn the_walk_reaches_a_typo_three_levels_down() {
+        // `lsp.servers.<name>` is a struct inside a map, which is as deep as
+        // the settings schema goes.
+        let keys = unrecognised_setting_keys(
+            r#"{
+                "lsp": {
+                    "servers": {
+                        "rust-analyzer": { "command": "rust-analyzer", "commnad": "typo" }
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(keys, vec!["lsp.servers.rust-analyzer.commnad".to_string()]);
+    }
+
+    #[test]
+    fn a_typo_stops_the_walk_rather_than_raining_paths() {
+        // Everything under an unknown key is equally unread; naming the one
+        // key the user can act on beats naming its whole subtree.
+        let keys = unrecognised_setting_keys(
+            r#"{ "bahs": { "mediation": "block-high", "pty": "always" } }"#,
+        );
+        assert_eq!(keys, vec!["bahs".to_string()]);
+    }
+
+    #[test]
+    fn a_nested_key_with_the_wrong_type_is_left_to_the_parse_error() {
+        let keys = unrecognised_setting_keys(r#"{ "bash": { "mediation": 5 } }"#);
+        assert!(keys.is_empty(), "reported: {keys:?}");
+    }
+
+    #[test]
+    fn editor_metadata_and_explicit_nulls_are_not_typos() {
+        // `$schema` is what an editor writes; `null` is indistinguishable from
+        // "not set" by construction, so neither is a misspelling.
+        let keys = unrecognised_setting_keys(
+            r#"{ "$schema": "https://example.invalid/pi.json", "theme": null }"#,
+        );
+        assert!(keys.is_empty(), "reported: {keys:?}");
+    }
+
+    #[test]
+    fn a_known_key_holding_the_wrong_type_is_not_called_unrecognised() {
+        // The caller has already failed the whole file with a parse error. A
+        // second, wrong diagnosis would send the reader hunting for a spelling
+        // mistake that is not there.
+        let keys = unrecognised_setting_keys(r#"{ "editor_padding_x": "five" }"#);
+        assert!(keys.is_empty(), "reported: {keys:?}");
+    }
+
+    #[test]
+    fn a_diagnostic_is_reported_once_per_process() {
+        // Startup loads settings three times, so without this a single typo
+        // warned three times. The key is unique to this test because the set
+        // is process-global by design.
+        let scope = "test::a_diagnostic_is_reported_once_per_process";
+        assert!(
+            first_report_of(scope, "key"),
+            "the first report was suppressed"
+        );
+        assert!(
+            !first_report_of(scope, "key"),
+            "the second report was not suppressed"
+        );
+        assert!(
+            first_report_of(scope, "another key"),
+            "a different key in the same file was suppressed"
+        );
+        assert!(
+            first_report_of("another scope", "key"),
+            "the same key in a second settings file was suppressed"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_that_is_not_an_object_reports_nothing() {
+        assert!(unrecognised_setting_keys("[1, 2, 3]").is_empty());
+        assert!(unrecognised_setting_keys("not json at all").is_empty());
+        assert!(unrecognised_setting_keys("").is_empty());
+    }
+
+    #[test]
+    fn every_documented_settings_key_survives_the_detector() {
+        // A false positive here is worse than the silence it replaces: it would
+        // tell users their working configuration is misspelled. So the guard is
+        // the canonical name of every field, taken from a serialized Config
+        // rather than typed out, which cannot drift as fields are added.
+        let serialized = serde_json::to_value(Config::default()).expect("serialize config");
+        let object = serialized.as_object().expect("config is an object");
+        assert!(
+            object.len() >= 60,
+            "expected the full field set, got {} keys",
+            object.len()
+        );
+
+        let populated: serde_json::Map<String, serde_json::Value> = object
+            .keys()
+            .map(|key| (key.clone(), serde_json::Value::Bool(true)))
+            .collect();
+        let probe =
+            serde_json::to_string(&serde_json::Value::Object(populated)).expect("serialize probe");
+
+        // Most fields reject `true`, which `moves_config` treats as recognised;
+        // the assertion that matters is that no canonical name is ever reported
+        // as unknown.
+        let reported = unrecognised_setting_keys(&probe);
+        assert!(reported.is_empty(), "canonical keys reported: {reported:?}");
     }
 
     #[test]
@@ -4121,6 +4649,44 @@ mod tests {
         let json = r#"{"check_for_updates": true}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert!(config.should_check_for_updates());
+    }
+
+    #[test]
+    fn pi_skip_version_check_silences_the_startup_network_call() {
+        // The lookup is injected rather than set, because these tests share a
+        // process and `std::env::set_var` would reach every other one.
+        let skip = |value: &'static str| {
+            move |name: &str| (name == "PI_SKIP_VERSION_CHECK").then(|| value.to_string())
+        };
+        let unset = |_: &str| None;
+
+        let asked_for_it: Config = serde_json::from_str(r#"{"checkForUpdates": true}"#).unwrap();
+        assert!(
+            asked_for_it.should_check_for_updates_with_lookup(unset),
+            "the setting should still decide when the variable is unset"
+        );
+        assert!(
+            !asked_for_it.should_check_for_updates_with_lookup(skip("1")),
+            "PI_SKIP_VERSION_CHECK must beat checkForUpdates: true"
+        );
+        assert!(
+            !asked_for_it.should_check_for_updates_with_lookup(skip("anything at all")),
+            "pi-mono tests truthiness, not the value"
+        );
+        assert!(
+            asked_for_it.should_check_for_updates_with_lookup(skip("")),
+            "`PI_SKIP_VERSION_CHECK=` is falsy in pi-mono and must not skip here"
+        );
+
+        // The variable only ever turns the check off.
+        let refused: Config = serde_json::from_str(r#"{"checkForUpdates": false}"#).unwrap();
+        assert!(!refused.should_check_for_updates_with_lookup(unset));
+        assert!(!refused.should_check_for_updates_with_lookup(skip("1")));
+
+        assert!(
+            Config::default().should_check_for_updates_with_lookup(unset),
+            "checking for updates is still the default"
+        );
     }
 
     // ── merge function property tests ──────────────────────────────────
