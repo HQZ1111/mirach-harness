@@ -11,10 +11,12 @@
 //!   2026-11-14 接真，见「模型 / 思考档位面」段）。
 //! - **旧 pi 独有面**：能对上 rpi 公开能力的已接真（2026-11-14 第二轮：
 //!   消息重放 / 手动压缩 / 会话用量 / HTML 导出 / fork·fork 点·兄弟分支·
-//!   分支切换 / retry 编辑 / 时间线标记）；确无对应能力的继续如实降级
-//!   （Err 文案写明缺什么，标红纪律，不静默不造假）：plan-审批模式 /
-//!   会话检查点与 rewind / 文件改动 undo-redo / hub 花名册五面 / todo
-//!   重放 / job 面 / bot 会话。
+//!   分支切换 / retry 编辑 / 时间线标记）；**插件状态投影**（2026-11-15：
+//!   rpi-todo / rpi-plan-mode 的会话条目 → 旧 wire，见 pi_plugin_state.rs）；
+//!   确无对应能力的继续如实降级（Err 文案写明缺什么，标红纪律，不静默不
+//!   造假）：审批模式开关 / plan 审批决定 / 会话检查点与 rewind / 文件改动
+//!   undo-redo / hub 花名册五面（插件只存进程内存）/ job 面（插件未安装且
+//!   快照缺字段）/ bot 会话。
 //! - **AG-UI 协议面不变**：agui.rs 只换 map_agent_event 的变体来源 +
 //!   图片转换，前端零改动。
 //! - **分栏（side_*）暂不支持**：rpi v1 非 main lane 拒绝 run 操作
@@ -385,6 +387,65 @@ impl PiEngine {
                 .await
                 .map_err(|e| format!("会话消息读取失败: {e}"))
         })
+    }
+
+    /// 当前分支上**最新**一条插件自定义条目的 `data`（rpi 插件经
+    /// `runtime_action(AppendEntry)` 落盘的状态快照，见 pi_plugin_state.rs）。
+    ///
+    /// 取法照插件自己的 `restore_state`/`restore_from_branch`：筛
+    /// `entry_type="custom"` + `customType=<type>`，取 **seq 最大**的那条
+    /// （不依赖存储层返回顺序/NewestFirst+limit 的游标细节）。
+    /// 无条目 = `Ok(None)`（诚实空态）；最新条目缺 data / 类型不符 = Err
+    /// （条目损坏，不静默回退到更旧快照——插件对坏快照同样 Blocked）。
+    fn latest_plugin_entry(
+        &self,
+        live: &HarnessLive,
+        custom_type: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let entries = self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .find_entries_on_branch(
+                    &EntryQuery {
+                        entry_type: Some("custom"),
+                        custom_type: Some(custom_type.to_string()),
+                        ..Default::default()
+                    },
+                    &BranchBounds::default(),
+                )
+                .await
+                .map_err(|e| format!("会话条目读取失败（{custom_type}）: {e}"))
+        })?;
+        let mut latest: Option<(u64, serde_json::Value)> = None;
+        for entry in entries {
+            match entry {
+                Entry::Custom(entry) if entry.custom_type == custom_type => {
+                    let data = entry.data.ok_or_else(|| {
+                        format!("{custom_type} 条目缺少 data（条目损坏：{}）", entry.base.id)
+                    })?;
+                    if latest
+                        .as_ref()
+                        .map(|(seq, _)| entry.base.seq > *seq)
+                        .unwrap_or(true)
+                    {
+                        latest = Some((entry.base.seq, data));
+                    }
+                }
+                Entry::Custom(entry) => {
+                    return Err(format!(
+                        "会话条目查询返回了 {}, 期望 {custom_type}",
+                        entry.custom_type
+                    ));
+                }
+                other => {
+                    return Err(format!(
+                        "会话条目查询返回了 {} 类型, 期望 custom",
+                        other.entry_type()
+                    ));
+                }
+            }
+        }
+        Ok(latest.map(|(_, data)| data))
     }
 
     // ── 会话生命周期 ────────────────────────────────────────────────────────
@@ -1034,52 +1095,90 @@ impl PiEngine {
         format!("rpi 引擎待接：{name}（rpi-main v0.24.0 尚无对应能力）")
     }
 
+    /// 模式快照（前端 mode-store 每 2s 拉一次）：**只投影 rpi-plan-mode 的
+    /// 会话条目**（customType `plan-mode`，data `{active, plan}`，见
+    /// pi_plugin_state.rs）。
+    ///
+    /// - `active=true` → `planMode:"planning"`；false / 无条目 → `"off"`；
+    /// - `planPending` 恒 null：rpi 插件没有宿主审批闸（`plan_mode_complete`
+    ///   只存计划并退出），编一个 pending 卡只会得到必被 `pi_decide_plan`
+    ///   Err 打回的按钮；
+    /// - `approvalMode` 恒 null：rpi 没有 always-ask/write/yolo 概念（权限由
+    ///   rpi-permissions 规则 + ask 对话框承担），不冒充任何模式。
+    ///
+    /// 无活动会话 = 默认快照（不是错误：mode-switch 挂载即轮询，首启时没有
+    /// 会话是预期态）。
     pub fn mode_state(&self) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("plan/审批模式"))
+        let Some(live) = self.live_opt()? else {
+            return crate::pi_plugin_state::mode_wire(None);
+        };
+        let data = self.latest_plugin_entry(&live, crate::pi_plugin_state::PLAN_ENTRY)?;
+        crate::pi_plugin_state::mode_wire(data.as_ref())
     }
 
     pub fn set_approval_mode(&self, _mode: &str) -> Result<(), String> {
-        Err(Self::unavailable("审批模式切换"))
+        Err("审批模式切换不可用：rpi 无 always-ask/write/yolo 三态概念（权限由 rpi-permissions / rpi-permission-gate 的规则文件与 ask 对话框承担），插件未暴露切换面".into())
     }
 
     pub fn set_plan_mode(&self, _enabled: bool) -> Result<(), String> {
-        Err(Self::unavailable("plan 模式"))
+        Err("plan 模式切换不可用：rpi-plan-mode 只注册 `/plan` 命令与 plan_mode_start / plan_mode_complete 工具，进入退出由插件自身完成；宿主只有读取面（pi_mode_state）".into())
     }
 
     pub fn decide_plan(&self, _approve: bool) -> Result<(), String> {
-        Err(Self::unavailable("plan 审批决定"))
+        Err("plan 审批决定不可用：rpi-plan-mode 没有宿主审批闸（plan_mode_complete 直接存盘并退出），不存在待审计划".into())
     }
 
+    /// 待办状态（活动面板 Todo 分区拉取面）：重放当前分支上 rpi-todo 的
+    /// 最新 `todo-state` 会话条目（插件每次变更经 AppendEntry 写一条自包含
+    /// 快照），投影成旧 wire `{schema, list, summary}`（前端 todo-store）。
+    ///
+    /// 无活动会话 / 有会话但无条目 = 空态（schema null）；最新条目损坏 = Err
+    /// （不把整表静默当空——与插件自身恢复失败 Blocked 同语义）。
     pub fn todo_state(&self) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("todo 重放"))
+        let Some(live) = self.live_opt()? else {
+            return crate::pi_plugin_state::todo_wire(None);
+        };
+        let data = self.latest_plugin_entry(&live, crate::pi_plugin_state::TODO_ENTRY)?;
+        crate::pi_plugin_state::todo_wire(data.as_ref())
     }
 
+    /// 子代理名册：**不可投影**。rpi-subagents 的子代理是 `ChildAgent`
+    /// runtime action（24）拉起的子进程，rpi-orchestrator 的 DAG 只在本进程
+    /// 内存里；两者都不 AppendEntry、也不写 `SetStatus` 状态邮箱（源码证据
+    /// 见 pi_plugin_state.rs 模块头）。宿主没有读取面——如实 Err，不拿工具
+    /// 事件流拼一个假名册。
     pub fn hub_roster(&self) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("hub 花名册"))
+        Err("hub 花名册不可用：rpi-subagents / rpi-orchestrator 的子代理运行态只存在于插件进程内存（ChildAgent runtime action 24 与进程内 DAG），不写会话条目、不写扩展状态邮箱——宿主无读取面".into())
     }
 
     pub fn hub_kill(&self, _agent_id: &str) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("hub 终止子代理"))
+        Err("hub 终止子代理不可用：rpi-subagents 的 delegate_task 是同步子进程调用、rpi-orchestrator 的 dispatch 在插件进程内完成；两者都不暴露按子代理 id 终止的宿主面（rpi 无 agent_hub registry）".into())
     }
 
     pub fn hub_send(&self, _agent_id: &str, _body: &str) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("hub 发送"))
+        Err("hub 发送不可用：rpi-subagents / rpi-orchestrator 没有子代理收件箱（rpi 无 agent_hub），插件未暴露 steer/发送面".into())
     }
 
     pub fn hub_inbox(&self, _agent_id: &str) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("hub 收件箱"))
+        Err("hub 收件箱不可用：rpi-subagents / rpi-orchestrator 没有子代理收件箱（rpi 无 agent_hub），插件未暴露读取面".into())
     }
 
     pub fn hub_transcript(&self, _agent_id: &str) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("hub 转写"))
+        Err("hub 转写不可用：rpi-subagents 的子进程输出直接作为工具结果返回、rpi-orchestrator 的 DAG 只在插件进程内存；插件未暴露按 id 读取转写的宿主面".into())
     }
 
+    /// 后台任务列表：rpi-background-tasks 插件未安装（`~/.rpi/agent/extensions`
+    /// 无该 cdylib）；即便安装，它的 `background-tasks` 快照条目只有
+    /// id/kind/label/command/status/pid/exitCode/startedAt，缺前端 Terminal
+    /// 分区 wire 的 schema/artifactPath/artifactTruncated/outputTail/
+    /// outputComplete 与 startedAtMs——投影只能靠编默认值（规矩 12 禁止），
+    /// 故如实 Err。
     pub fn job_list(&self) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("后台任务列表"))
+        Err("后台任务列表不可用：rpi-background-tasks 插件未安装（~/.rpi/agent/extensions 无该 cdylib），且其 background-tasks 快照条目只有 id/kind/label/command/status/pid/exitCode/startedAt，缺 Terminal 分区所需的 schema/artifactPath/outputTail/startedAtMs 字段".into())
     }
 
     pub fn job_cancel(&self, _job_id: &str) -> Result<serde_json::Value, String> {
-        Err(Self::unavailable("后台任务取消"))
+        Err("后台任务取消不可用：宿主未安装 rpi-background-tasks 插件，没有任务表可取消".into())
     }
 
     /// 手动压缩（`AgentLane::compact(None)`）——rpi 在会话树上追加一条

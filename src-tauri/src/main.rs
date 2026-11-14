@@ -11,6 +11,9 @@ mod fs;
 
 // pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
 mod pi_session;
+// rpi 插件状态只读投影（rpi-todo / rpi-plan-mode 的 AppendEntry 条目 → 旧
+// wire）：pi_session.rs 的 todo_state / mode_state 消费
+mod pi_plugin_state;
 mod agui;
 mod pi_paths;
 

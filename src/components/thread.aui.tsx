@@ -1086,8 +1086,10 @@ const RunTiming: FC = () => {  const role = useAuiState((s) => s.message.role);
     stats.push({ label: "输出", value: `${usage.outputTokens} tok` });
   if (usage.totalTokens !== undefined)
     stats.push({ label: "总计", value: `${usage.totalTokens} tok` });
-  if (usage.costUsd !== undefined)
-    stats.push({ label: "费用", value: `$${usage.costUsd.toFixed(4)}` });
+  // 费用行已按用户要求删除（2026-11-15）：rpi 的 usage.cost 恒有值（0 也报
+  // 0），成本来自 models.json 的 per-model 价目；没配价目的端点恒显示
+  // "$0.0000"，用户判定为噪音。需要成本时在 models.json 配 cost 后在
+  // 设置 → 使用统计 查看（usage-settings 的聚合面仍保留成本字段）。
   if (stats.length === 0) return null;
   return <MessageTiming stats={stats} streaming={streaming} className="ms-2 mt-1" />;
 };
