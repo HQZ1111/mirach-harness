@@ -3,7 +3,6 @@
 import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired';
 import { WorkspaceComposerMenu } from '@/components/panes/hermes-sidebar/workspace-composer-menu';
 import { statusPanelStore } from '@/components/assistant-ui/status-panel-store';
-import { PlanReviewCard } from '@/components/assistant-ui/mode-switch';
 import { VoiceLivePanel } from '@/components/assistant-ui/voice-live-panel';
 import { VoiceLiveConversationDrive } from '@/components/assistant-ui/voice-live-conversation';
 import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
@@ -98,6 +97,7 @@ import { TurnNavigator } from "@/components/assistant-ui/elements/turn-navigator
 import { SelectionToolbar } from "@/components/assistant-ui/elements/selection-toolbar.aui";
 import { ConversationFind } from "@/components/assistant-ui/elements/conversation-find.aui";
 import { SubagentLine } from "@/components/assistant-ui/elements/subagent-line";
+import { DelegationCard, parseDelegationResult } from "@/components/assistant-ui/elements/delegation-card";
 import { TurnFileSummary } from "@/components/assistant-ui/elements/turn-file-summary";
 import { TimelineMarkerRow, bucketMarkers } from "@/components/assistant-ui/elements/timeline-marker";
 import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-store";
@@ -141,8 +141,6 @@ import {
   MicIcon,
   MinimizeIcon,
   PencilIcon,
-  Redo2Icon,
-  Undo2Icon,
   PhoneIcon,
   Volume2Icon,
 } from "lucide-react";
@@ -807,6 +805,16 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
   const { toolName, args, result, status, isError, argsText } = part;
   const running = status?.type === "running";
 
+  // 子代理委托卡（2026-11-15）：rpi-subagents 的 `delegate_task`（以及
+  // orchestrator 的同类结果）在 ToolOutput.content[0].text 里给
+  // `{kind:"rpi-delegation", …}` JSON。**先于 subagent 行与 isError 分流**
+  // ——同一工具跑完后用专用卡（role/status/turns/report/sessionId），
+  // 解析失败（null）照常落到下面的通用路径（不编造字段）。
+  const delegation = parseDelegationResult(result);
+  if (delegation !== null) {
+    return <DelegationCard result={delegation} running={running} />;
+  }
+
   // subagent（pi 子代理工具，subagents.rs:440）：单行摘要（ZCode agent.tsx
   // 的 collapsed 形态——bot 图标 + "子代理" + agent 名 + 任务摘要）。ZCode
   // 不可展开（详情在它的侧栏子会话面板）；宿主没有下钻面，展开 = 看工具
@@ -941,69 +949,30 @@ const PiToolUI: ToolCallMessagePartComponent = (part) => {
 // ── message-timing（官方元素）：run 级 usage 展示。轮次机只归并 run 级
 // 快照（RUN_FINISHED.usage，替换语义——不按消息归并），因此只在最后一条
 // assistant 上显示（旧消息显示过期快照会误导）；流式中蓝字。
-// ── 会话维护条（手动压缩 / 撤销 / 重做）────────────────────────────────
-// pi 能力：`AgentSessionHandle::compact` 与会话级 FileMutationRecorder
-// 的 undo/redo（docs/pi-coverage.md 缺口 G7）。此前无任何前端入口。
-// 只在非运行态渲染：运行中压缩会与自动压缩打架、撤销会与工具写入竞争。
-// 全部结果诚实反馈（失败 console.error + 可见文案；不乐观假装成功）。
+// ── 会话维护条（手动压缩）──────────────────────────────────────────────
+// 只在非运行态渲染：运行中压缩会与自动压缩打架。
+// 结果诚实反馈（失败 console.error + 可见文案；不乐观假装成功）。
+//
+// **撤销 / 重做按钮已删（2026-11-15）**：rpi-main v0.24.0 没有会话级
+// FileMutationRecorder（`pi_undo_history` / `pi_undo_redo` 在 Rust 侧恒
+// Err），入口是假入口。压缩（`pi_compact`）保留。
 const SessionMaintenanceBar: FC = () => {
   const isRunning = useAuiState((s) => s.thread.isRunning);
-  const [busy, setBusy] = useState<null | 'compact' | 'undo' | 'redo'>(null);
+  const [busy, setBusy] = useState<null | 'compact'>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [undoable, setUndoable] = useState(0);
-
-  const refreshHistory = useCallback(async () => {
-    try {
-      const raw = await invoke<unknown>('pi_undo_history');
-      const r = (raw ?? {}) as { units?: unknown[] };
-      setUndoable(Array.isArray(r.units) ? r.units.length : 0);
-    } catch (e) {
-      // 无会话 / 无 recorder 是预期态（不刷错误）
-      if (!String(e).includes('no active session')) {
-        console.error('[pi] 撤销历史拉取失败', e);
-      }
-      setUndoable(0);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (isRunning) return;
-    void refreshHistory();
-  }, [isRunning, refreshHistory]);
 
   if (isRunning) return null;
 
-  const run = async (kind: 'compact' | 'undo' | 'redo') => {
+  const run = async (kind: 'compact') => {
     if (busy !== null) return;
     setBusy(kind);
     setNote(null);
     try {
-      if (kind === 'compact') {
-        await invoke('pi_compact');
-        setNote('已触发压缩');
-      } else {
-        const out = await invoke<unknown>('pi_undo_redo', {
-          kind,
-          n: 1,
-          force: false,
-        });
-        const o = (out ?? {}) as {
-          restored?: unknown[]
-          applied?: unknown[]
-          skipped?: unknown[]
-        };
-        const done = (kind === 'undo' ? o.restored : o.applied) ?? [];
-        const skipped = o.skipped ?? [];
-        setNote(
-          skipped.length > 0
-            ? `${kind === 'undo' ? '撤销' : '重做'} ${done.length} 个文件，${skipped.length} 个冲突跳过（可加 force 覆盖）`
-            : `${kind === 'undo' ? '已撤销' : '已重做'} ${done.length} 个文件`,
-        );
-      }
-      await refreshHistory();
+      await invoke('pi_compact');
+      setNote('已触发压缩');
     } catch (e) {
       console.error(`[pi] ${kind} 失败`, e);
-      setNote(`${kind === 'undo' ? '撤销' : kind === 'redo' ? '重做' : '压缩'}失败：${String(e)}`);
+      setNote(`压缩失败：${String(e)}`);
     } finally {
       setBusy(null);
     }
@@ -1020,19 +989,6 @@ const SessionMaintenanceBar: FC = () => {
       <button type="button" className={btn} disabled={busy !== null} onClick={() => void run('compact')}>
         <MinimizeIcon className="size-[var(--size-icon-md)]" aria-hidden />
         压缩上下文
-      </button>
-      <button
-        type="button"
-        className={btn}
-        disabled={busy !== null || undoable === 0}
-        onClick={() => void run('undo')}
-      >
-        <Undo2Icon className="size-[var(--size-icon-md)]" aria-hidden />
-        撤销{undoable > 0 ? ` (${undoable})` : ''}
-      </button>
-      <button type="button" className={btn} disabled={busy !== null} onClick={() => void run('redo')}>
-        <Redo2Icon className="size-[var(--size-icon-md)]" aria-hidden />
-        重做
       </button>
       {note !== null && (
         <span className="min-w-0 truncate font-mono text-[11px] tracking-tight text-foreground/40">
@@ -1431,10 +1387,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
               经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
           <CompactionBanner />
 
-          {/* 计划审批卡（2026-11-01 模式切换的全链路一环）：模型 submit_plan
-              后出现，批准 = 计划钉入上下文并放行、驳回 = 按反馈修改。轮询
-              planPending（仅计划模式期间），数据面 mode-store。 */}
-          <PlanReviewCard />
+          {/* 计划审批卡已删（2026-11-15）：rpi-plan-mode 没有宿主审批闸
+              （plan_mode_complete 直接存盘退出，Rust `pi_decide_plan` 恒 Err，
+              `planPending` 恒 null）——卡片永远不会出现，属于死功能。 */}
 
           {/* GPT-Live 委托回路驱动（2026-11-12）：面板写 pendingDelegation →
               这里消费（busy 先 cancelRun → aui.thread.append 提交）→ 回复经

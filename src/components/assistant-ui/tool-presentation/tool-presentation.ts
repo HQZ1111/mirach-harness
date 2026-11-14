@@ -158,6 +158,17 @@ const ZH: Partial<Record<ToolPhraseId, string>> = {
   searchWeb: '搜索网页',
   askQuestion: '提问',
   runDebugger: '调试',
+  markCheckpoint: '标记检查点',
+  listCheckpoints: '列出检查点',
+  rewindCheckpoint: '回到检查点',
+  useMcp: '使用 MCP',
+  startPlanMode: '进入计划模式',
+  useGoal: '使用目标',
+  useCodeLens: '代码分析',
+  usePermissions: '检查权限',
+  useMessaging: '使用消息服务',
+  useLangfuse: '使用 Langfuse',
+  useRpc: '使用 RPC',
 }
 
 /** 中文短语（active/done 同形——中文动词无时态变化，用「正在」前缀区分）。 */

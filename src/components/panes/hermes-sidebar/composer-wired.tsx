@@ -44,7 +44,6 @@ import {
   toModelOptions,
 } from '@/components/assistant-ui/model-catalog-store'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
-import { ModeSwitch } from '@/components/assistant-ui/mode-switch'
 
 const COMMANDS = [
   { name: 'image', description: '生成一张图片', icon: ImageIcon },
@@ -396,9 +395,10 @@ export function ComposerWired() {
                 <ComposerPrimitive.AddAttachment asChild>
                   <ComposerAttachButton aria-label="添加附件" />
                 </ComposerPrimitive.AddAttachment>
-                {/* 模式切换（ZCode V4ComposerModeSwitch 同位："+" 右侧）：
-                    计划模式 / 文件内修改 / 完全访问（mode-store 全链路） */}
-                <ModeSwitch />
+                {/* 模式切换钮已移除（2026-11-15）：rpi 没有 always-ask /
+                    write / yolo 审批三态（set_approval_mode 恒 Err），计划模式
+                    进入/退出也由 rpi-plan-mode 插件自己完成（set_plan_mode 恒
+                    Err）——留着就是假入口。计划状态在活动面板的待办分区可见。 */}
               </div>
               <ComposerActions>
                 {/* 上下文明细按钮（ZCode 同位：模型选择器左侧；2026-11-01

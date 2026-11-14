@@ -237,6 +237,21 @@ export const TOOL_PHRASES = {
   readTime: { active: 'Checking time', done: 'Checked time' },
   askUser: { active: 'Asking you', done: 'Asked you' },
   runService: { active: 'Managing service', done: 'Managed service' },
+
+  // ── rpi 插件工具（2026-11-15 补：subagents / orchestrator / checkpoint /
+  //    mcp / web / plan-mode / goal / codemode / permissions / messaging /
+  //    langfuse / rpc）──────────────────────────────────────────────────────
+  markCheckpoint: { active: 'Marking checkpoint', done: 'Marked checkpoint' },
+  listCheckpoints: { active: 'Listing checkpoints', done: 'Listed checkpoints' },
+  rewindCheckpoint: { active: 'Rewinding to checkpoint', done: 'Rewound to checkpoint' },
+  useMcp: { active: 'Using MCP', done: 'Used MCP' },
+  startPlanMode: { active: 'Starting plan mode', done: 'Started plan mode' },
+  useGoal: { active: 'Using goal', done: 'Used goal' },
+  useCodeLens: { active: 'Analyzing with code lens', done: 'Analyzed with code lens' },
+  usePermissions: { active: 'Checking permissions', done: 'Checked permissions' },
+  useMessaging: { active: 'Using messaging server', done: 'Used messaging server' },
+  useLangfuse: { active: 'Using Langfuse', done: 'Used Langfuse' },
+  useRpc: { active: 'Using RPC', done: 'Used RPC' },
 } as const satisfies Record<string, { active: string; done: string }>;
 
 export type ToolPhraseId = keyof typeof TOOL_PHRASES;

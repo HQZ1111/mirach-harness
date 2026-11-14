@@ -18,14 +18,14 @@
  * - **mini 胶囊**：优先级链（当前待办 → git 变更 → 最近完成项 → 计数
  *   → 运行计数），点开回 panel。
  *
- * 数据面：待办（todo-store）/ 子代理（agent-hub-store）/ 后台命令
- * （jobs-store）/ git 变更（git-store）→ conversation-status-panel-model.ts
- * （上游 buildConversationStatusPanelModel 的宿主适配）。
+ * 数据面：待办（todo-store）/ git 变更（git-store）→ conversation-status-panel-model.ts
+ * （上游 buildConversationStatusPanelModel 的宿主适配）。**面板常驻**：
+ * 有活动会话即渲染（无数据时显示"暂无活动"空态），上游的"无内容整块卸载"
+ * 不再照抄（2026-11-15 用户定稿）。
  *
- * **引擎侧没有的数据 = 没有分区**（工作流 / 目标 / 会话计划，pi 无这些
- * 概念——docs/engine-gaps.md G3/G4）：上游本就是"无数据返回 null"，分区
- * 自然不渲染。2026-10-16 旧口径的「保留占位分区 + 标注缺数据」按本次
- * "直接用zcode的"撤销——占位分区是常驻噪声，不是 ZCode 的形态。
+ * **已移除的分区（2026-11-15，实证不可做）**：终端（rpi jobs 插件不可装）、
+ * 智能体（子代理状态在引擎进程内无读取面）、工作流 / 目标（rpi 引擎无概念）
+ * ——UI、模型字段与 hub/jobs 拉取一并删除，不留永远空的假分区。
  *
  * **与上游其余两处偏差**（都因宿主没有对应原语/页面）：
  * 1. Todo 折叠预览：上游 HoverCard（悬停出浮层），宿主无 HoverCard →
@@ -34,16 +34,15 @@
  * 2. git 区：上游有分支切换器 / git 动作菜单（宿主引擎无此能力面）→
  *    只保留「更改」行（点击开审查面板，走 __dvApi 全局 + openPagePanel，
  *    与 session-drag 同款全局取 api）与分支名只读行。
- * 3. 子代理行是平的（上游同款）：旧移植版的 TaskCard 展开 / transcript
- *    / steer 随本版移除——ZCode 的行没有这层。
+ * 3. 子代理行分区已随"实证不可做"整段删除（2026-11-15）：子代理在对话区
+ *    走工具卡（delegation-card），状态面板不再有智能体分区。
  */
-import { memo, useCallback, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useStore } from 'zustand'
 import {
   ActivityIcon,
   ArrowRightIcon,
-  BotIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   ChevronLeftIcon,
@@ -54,8 +53,6 @@ import {
   ListChecksIcon,
   Maximize2Icon,
   Minimize2Icon,
-  SquareIcon,
-  SquareTerminalIcon,
 } from 'lucide-react'
 import type { DockviewApi } from 'dockview-react'
 
@@ -75,11 +72,6 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { openPagePanel } from '@/components/layout/open-page-actions'
-import {
-  agentHubBridge,
-  useAgentHubBridge,
-} from '@/components/assistant-ui/agent-hub-store'
-import { jobsBridge, useJobsBridge } from '@/components/assistant-ui/jobs-store'
 import { gitBridge, useGitBridge } from '@/components/assistant-ui/git-store'
 import { flatTasks, todoBridge, useTodoBridge } from '@/components/assistant-ui/todo-store'
 import {
@@ -106,59 +98,23 @@ const L = {
   environment: 'Git 工具',
   changes: '更改',
   todo: '进程',
-  terminals: '终端',
-  agents: '智能体',
   openReview: '打开审查面板',
+  /** 常驻面板的空态（无待办 / 无 git 变更）。 */
+  empty: '暂无活动',
+  emptyHint: '本次会话还没有待办或文件更改',
 } as const
-
-/** ZCode formatDurationUnits：空格连接（"1小时 2分"）。 */
-const formatDurationUnits = (totalSeconds: number): string => {
-  const seconds = Math.max(0, Math.floor(totalSeconds))
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  const rest = seconds % 60
-  const parts: string[] = []
-  if (hours > 0) parts.push(`${hours}小时`)
-  if (minutes > 0) parts.push(`${minutes}分`)
-  if (rest > 0 || parts.length === 0) parts.push(`${rest}秒`)
-  return parts.join(' ')
-}
-
-/** ZCode formatBackgroundTaskElapsedLabel："已运行 {s} 秒 / {m} 分 {s} 秒"。 */
-const formatElapsed = (elapsedMs: number): string => {
-  const totalSeconds = Math.max(1, Math.floor(elapsedMs / 1000))
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return minutes > 0 ? `已运行 ${minutes} 分 ${seconds} 秒` : `已运行 ${totalSeconds} 秒`
-}
-
-const formatRunningCount = (count: number) => `${count} 后台`
-const formatRunningSubagentCount = (count: number) => `${count} 运行`
-
-/** 每秒心跳（仅在有活动行时开——上游 useNowTicker / setInterval 同纪律）。 */
-function useNowTicker(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!active) return
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [active])
-  return now
-}
 
 // ── 显示策略（variant）──────────────────────────────────────────────
 // override/持久化住在 status-panel-store（对话内容列的让位类要消费同一
 // 份策略；本组件还负责把"此刻以面板形态在场"写回 store）。
 
 // ── 可折叠分区（上游 StatusSection 逐条照抄）────────────────────────
-type StatusSectionKind = 'environment' | 'plan' | 'terminal' | 'agent'
+type StatusSectionKind = 'environment' | 'plan'
 
 const STATUS_SECTION_SCROLL_POLICY = {
   environment: null,
   // 六个双行 Todo（6 × 52px）需要约 20rem；超过后只滚动进程区块。
   plan: 'max-h-80',
-  terminal: 'max-h-48',
-  agent: 'max-h-48',
 } as const satisfies Record<StatusSectionKind, string | null>
 
 function StatusSectionHeader({
@@ -573,285 +529,6 @@ function PlanStatusSection({
   )
 }
 
-// ── 分区：终端（上游 BackgroundWorkStatusSection，section=terminal）──
-const BASH_STATUS_TEXT: Record<string, string> = {
-  exited: '已退出',
-  killed: '已终止',
-  timedOut: '超时',
-  failed: '失败',
-}
-
-const AGENT_STATUS_TEXT: Record<string, string> = {
-  done: '已完成',
-  killed: '已终止',
-  timedOut: '超时',
-  failed: '失败',
-  cancelled: '已取消',
-}
-
-function RunningWorkCancelButton({
-  workId,
-  onCancel,
-}: {
-  workId: string
-  onCancel?: (workId: string) => void
-}) {
-  const [busy, setBusy] = useState(false)
-  const handleClick = (event: ReactMouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation()
-    if (busy) return
-    setBusy(true)
-    void Promise.resolve(onCancel?.(workId)).finally(() => setBusy(false))
-  }
-
-  if (!onCancel) return null
-
-  return (
-    <button
-      type="button"
-      aria-label="停止运行中的后台任务"
-      onClick={handleClick}
-      disabled={busy}
-      className={cn(
-        ghostButton,
-        'text-foreground pointer-events-auto relative z-[2] ml-auto h-6 shrink-0 gap-1 px-1.5 text-[12px]',
-        busy && 'opacity-40',
-      )}
-    >
-      <SquareIcon aria-hidden className="size-[var(--size-icon-xs)] fill-current" />
-      停止
-    </button>
-  )
-}
-
-function RunningStatusItem({
-  now,
-  onCancelBackgroundWork,
-  work,
-}: {
-  now: number
-  onCancelBackgroundWork?: (workId: string) => void
-  work: StatusPanelModel['runningBashWorks'][number]
-}) {
-  return (
-    <li
-      data-work-id={work.workId}
-      data-work-status={work.status}
-      className="hover:bg-foreground/[0.04] group relative flex min-w-0 items-start gap-2 rounded-lg px-2 py-2"
-    >
-      <SquareTerminalIcon className="text-foreground/45 pointer-events-none relative z-[1] mt-0.5 size-4 shrink-0" />
-      <div className="pointer-events-none relative z-[1] flex min-w-0 flex-1 flex-col gap-1.5">
-        <p className="text-foreground line-clamp-2 text-[13px] leading-5">{work.title}</p>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
-          <span className="text-foreground/45 shrink-0 tabular-nums">
-            {formatElapsed(Math.max(0, now - work.startedAt))}
-          </span>
-          {work.cancellable !== false ? (
-            <RunningWorkCancelButton workId={work.workId} onCancel={onCancelBackgroundWork} />
-          ) : null}
-        </div>
-      </div>
-    </li>
-  )
-}
-
-/** 已退出行（宿主无「已结束」目录页 → 历史就地留在分区，运行中的在前）。 */
-function EndedStatusItem({
-  work,
-  icon,
-  statusText,
-}: {
-  work: StatusPanelModel['endedBashWorks'][number]
-  icon: ReactNode
-  statusText: string
-}) {
-  return (
-    <li
-      data-work-id={work.workId}
-      data-work-status={work.status}
-      className="flex min-w-0 items-start gap-2 rounded-lg px-2 py-2"
-    >
-      <span className="text-foreground/25 pointer-events-none relative z-[1] mt-0.5 shrink-0">{icon}</span>
-      <div className="pointer-events-none relative z-[1] flex min-w-0 flex-1 flex-col gap-1.5">
-        <p className="text-foreground/45 line-clamp-2 text-[13px] leading-5">{work.title}</p>
-        <span className="text-foreground/30 text-[13px] tabular-nums">
-          {work.status === 'exited' && work.exitCode !== null ? `${statusText}（exit ${work.exitCode}）` : statusText}
-        </span>
-      </div>
-    </li>
-  )
-}
-
-function BackgroundWorkStatusSection({
-  model,
-  onCancelBackgroundWork,
-  onOpenChange,
-  open,
-  separated,
-  section,
-  title,
-}: {
-  model: StatusPanelModel
-  onCancelBackgroundWork?: (workId: string) => void
-  onOpenChange?: (open: boolean) => void
-  open?: boolean
-  separated: boolean
-  section: 'terminal'
-  title: string
-}) {
-  const running = model.runningBashWorks
-  const ended = model.endedBashWorks
-  const now = useNowTicker(running.length > 0)
-  const orderedRunningWorks = useMemo(
-    () => [...running].sort((left, right) => left.startedAt - right.startedAt),
-    [running],
-  )
-
-  if (running.length === 0 && ended.length === 0) return null
-
-  const collapsedElapsedLabel = formatDurationUnits(
-    Math.max(
-      1,
-      Math.floor(
-        orderedRunningWorks.reduce(
-          (longest, work) => Math.max(longest, Math.max(0, now - work.startedAt)),
-          0,
-        ) / 1000,
-      ),
-    ),
-  )
-
-  return (
-    <StatusSection
-      section={section}
-      defaultOpen={false}
-      open={open}
-      onOpenChange={onOpenChange}
-      separated={separated}
-      title={title}
-      trailing={(isOpen) =>
-        isOpen ? (
-          <span>
-            {running.length > 0
-              ? `${running.length} 个后台运行`
-              : `${running.length + ended.length} 个`}
-          </span>
-        ) : running.length > 0 ? (
-          <>
-            <span className="min-w-0 truncate">{collapsedElapsedLabel}</span>
-            <span className="shrink-0">·</span>
-            <span className="shrink-0">{formatRunningCount(running.length)}</span>
-          </>
-        ) : (
-          <span className="shrink-0">{`${running.length + ended.length} 个`}</span>
-        )
-      }
-    >
-      <ul className="space-y-0">
-        {orderedRunningWorks.map((work) => (
-          <RunningStatusItem key={work.workId} work={work} now={now} onCancelBackgroundWork={onCancelBackgroundWork} />
-        ))}
-        {ended.map((work) => (
-          <EndedStatusItem
-            key={work.workId}
-            work={work}
-            icon={<SquareTerminalIcon className="size-4" />}
-            statusText={BASH_STATUS_TEXT[work.status] ?? work.status}
-          />
-        ))}
-      </ul>
-    </StatusSection>
-  )
-}
-
-// ── 分区：智能体（上游 SubagentStatusSection + 历史尾巴）────────────
-function SubagentStatusSection({
-  model,
-  onCancelBackgroundWork,
-  onOpenChange,
-  open,
-  separated,
-  title,
-}: {
-  model: StatusPanelModel
-  onCancelBackgroundWork?: (workId: string) => void
-  onOpenChange?: (open: boolean) => void
-  open?: boolean
-  separated: boolean
-  title: string
-}) {
-  const subagents = model.runningSubagentWorks
-  const ended = model.endedSubagentWorks
-  const now = useNowTicker(subagents.length > 0)
-  const ordered = useMemo(
-    () => [...subagents].sort((left, right) => left.startedAt - right.startedAt),
-    [subagents],
-  )
-  if (subagents.length === 0 && ended.length === 0) return null
-  const longestElapsedMs = subagents.reduce(
-    (longest, item) => Math.max(longest, Math.max(0, now - item.startedAt)),
-    0,
-  )
-
-  return (
-    <StatusSection
-      section="agent"
-      defaultOpen={false}
-      open={open}
-      onOpenChange={onOpenChange}
-      separated={separated}
-      title={title}
-      trailing={(isOpen) =>
-        isOpen ? (
-          <span>
-            {subagents.length > 0
-              ? formatRunningSubagentCount(subagents.length)
-              : `${subagents.length + ended.length} 个`}
-          </span>
-        ) : subagents.length > 0 ? (
-          <>
-            <span className="min-w-0 truncate">{formatDurationUnits(Math.max(1, Math.floor(longestElapsedMs / 1000)))}</span>
-            <span className="shrink-0">·</span>
-            <span className="shrink-0">{formatRunningSubagentCount(subagents.length)}</span>
-          </>
-        ) : (
-          <span className="shrink-0">{`${subagents.length + ended.length} 个`}</span>
-        )
-      }
-    >
-      <ul className="space-y-0">
-        {ordered.map((subagent) => (
-          <li
-            key={subagent.childSessionId}
-            data-child-session-id={subagent.childSessionId}
-            data-work-status="running"
-            className="hover:bg-foreground/[0.04] group relative flex min-w-0 items-start gap-2 rounded-lg px-2 py-2"
-          >
-            <BotIcon className="text-foreground/45 pointer-events-none relative z-[1] mt-0.5 size-4 shrink-0" />
-            <div className="pointer-events-none relative z-[1] flex min-w-0 flex-1 flex-col gap-1.5">
-              <span className="text-foreground line-clamp-2 text-[13px] leading-5">{subagent.title}</span>
-              <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
-                <span className="text-foreground/45 text-[13px] tabular-nums">
-                  {formatElapsed(Math.max(0, now - subagent.startedAt))}
-                </span>
-                <RunningWorkCancelButton workId={subagent.agentId} onCancel={onCancelBackgroundWork} />
-              </span>
-            </div>
-          </li>
-        ))}
-        {ended.map((work) => (
-          <EndedStatusItem
-            key={work.workId}
-            work={work}
-            icon={<BotIcon className="size-4" />}
-            statusText={AGENT_STATUS_TEXT[work.status] ?? work.status}
-          />
-        ))}
-      </ul>
-    </StatusSection>
-  )
-}
-
 // ── mini 胶囊（上游 StatusSummaryRow，缺数据分支按同序剔除）─────────
 function StatusSummaryMetric({ children, icon }: { children: ReactNode; icon: ReactNode }) {
   return (
@@ -892,13 +569,6 @@ function StatusSummaryRow({
   const removed = model.git?.removed ?? 0
   const hasGitMiniSummary = Boolean(model.git && added + removed > 0)
 
-  // 恰好一类沿用该类图标，混合才是 Activity（上游同规则）
-  const hasRunningBash = model.runningBashWorks.length > 0
-  const hasRunningSubagent = model.runningSubagentWorks.length > 0
-  const runningCount = model.runningBashWorks.length + model.runningSubagentWorks.length
-  const RunningSummaryIcon =
-    hasRunningBash && hasRunningSubagent ? ActivityIcon : hasRunningBash ? SquareTerminalIcon : BotIcon
-
   const summaryMetric = currentPlanItem ? (
     <StatusSummaryMetric icon={<ArrowRightIcon className="text-foreground size-4" />}>
       <span className="min-w-0 truncate">{currentPlanItem.content}</span>
@@ -920,18 +590,13 @@ function StatusSummaryRow({
         {model.plan.completedCount}/{model.plan.totalCount}
       </span>
     </StatusSummaryMetric>
-  ) : runningCount > 0 ? (
-    <StatusSummaryMetric icon={<RunningSummaryIcon className="text-foreground size-4" />}>
-      {/* 终端 / 智能体的实时计数只能在没有 Todo/Git 等主状态时兜底（上游同注） */}
-      <span className="shrink-0">
-        {hasRunningSubagent
-          ? formatRunningSubagentCount(runningCount)
-          : formatRunningCount(runningCount)}
-      </span>
+  ) : (
+    // 面板常驻（2026-11-15 用户："我的活动面板也没有了"）：无待办/无 git
+    // 变更时给一行诚实空态——不是 0/0 也不是假状态，就是"没有活动"。
+    <StatusSummaryMetric icon={<ActivityIcon className="text-foreground/45 size-4" />}>
+      <span className="min-w-0 truncate">{L.empty}</span>
     </StatusSummaryMetric>
-  ) : null
-
-  if (!summaryMetric) return null
+  )
 
   return (
     <button
@@ -954,13 +619,13 @@ const statusPanelApi = (): DockviewApi | null => {
 
 function ConversationStatusPanelImpl() {
   // **draft 态不挂**（上游同款：SessionPane 只在有会话时渲染本面板）——
-  // New Chat / 启动无会话时没有工作区可查（git/todo/jobs 全部诚实空），
-  // 挂着只会渲染 null。activeId === null 即 New Chat（catalog 与 runtime
+  // New Chat / 启动无会话时没有工作区可查，面包屑也还不存在。
+  // **有会话即常驻**（2026-11-15 用户："我的活动面板也没有了"）：上游的
+  // `!hasContent → null` 不再照抄——没有数据时面板显示诚实空态（"暂无活动"），
+  // 而不是整块消失。activeId === null 即 New Chat（catalog 与 runtime
   // currentThreadId 同源）。
   const activeId = useStore(sessionCatalog, (s) => s.activeId)
   const { todo } = useTodoBridge()
-  const { children } = useAgentHubBridge()
-  const { jobs } = useJobsBridge()
   const { stat: gitStat } = useGitBridge()
   // 活动会话工作区（git 变更统计的目标目录）；数据源与对话栏列头同源
   const cwd = useStore(sessionCatalog, (s) =>
@@ -968,8 +633,6 @@ function ConversationStatusPanelImpl() {
   )
 
   const override = useStore(statusPanelStore, (s) => s.override)
-  const [terminalSectionOpen, setTerminalSectionOpen] = useState<boolean | undefined>(undefined)
-  const [agentSectionOpen, setAgentSectionOpen] = useState<boolean | undefined>(undefined)
 
   // 面板在场 → 写共享 store（对话内容列的顶部余隙判定；卸载即清除）。
   // mini 胶囊也算在场（胶囊同样挂在列右上角，需要余隙）。
@@ -979,11 +642,11 @@ function ConversationStatusPanelImpl() {
     return () => statusPanelStore.getState().setMounted(false)
   }, [])
 
-  // 挂载/聚焦拉取：registry 与会话解耦（旧版同款）——模型没调 hub/jobs 工具
-  // 时也要能看到已注册的子代理与后台任务；待办重放；git 变更统计。
+  // 挂载/聚焦拉取：待办重放 + git 变更统计。
+  // **hub / jobs 拉取已移除**（2026-11-15）：rpi 的 jobs 插件不可装、子代理
+  // 状态在引擎进程内无读取面——`pi_hub_roster` / `pi_job_list` 没有真实数据，
+  // 拉它只是往空 registry 上做无意义 IPC。
   useEffect(() => {
-    void agentHubBridge.getState().refresh()
-    void jobsBridge.getState().refresh()
     void todoBridge.getState().refresh()
     void gitBridge.getState().refresh(cwd ?? null)
   }, [cwd])
@@ -992,11 +655,9 @@ function ConversationStatusPanelImpl() {
     () =>
       buildStatusPanelModel({
         todoTasks: todo === null ? [] : flatTasks(todo),
-        children,
-        jobs,
         git: gitStat,
       }),
-    [todo, children, jobs, gitStat],
+    [todo, gitStat],
   )
 
   const isVariantAutomatic = override === null
@@ -1025,33 +686,11 @@ function ConversationStatusPanelImpl() {
     }
   }, [])
 
-  const onCancelBackgroundWork = useCallback(async (workId: string) => {
-    // workId 既是 job id 也是子代理 id（两个 registry 的主键不重叠）。
-    // 先试 jobs，失败再试 hub——都不行错误可见（兜底禁令）。
-    try {
-      await invoke('pi_job_cancel', { jobId: workId })
-      await jobsBridge.getState().refresh()
-      return
-    } catch {
-      // 不是 job——继续试子代理
-    }
-    try {
-      await invoke('pi_hub_kill', { agentId: workId })
-      await agentHubBridge.getState().refresh()
-    } catch (e) {
-      console.error('[status-panel] 停止后台任务失败', workId, e)
-    }
-  }, [])
-
   const canRenderGit = Boolean(model.git)
   const canRenderPlan = Boolean(model.plan)
-  const canRenderTerminals =
-    model.runningBashWorks.length > 0 || model.endedBashWorks.length > 0
-  const canRenderAgents =
-    model.runningSubagentWorks.length > 0 || model.endedSubagentWorks.length > 0
 
-  // 无活内容整块卸载（上游 !hasContent → null 同判）；draft（无会话）不挂
-  if (activeId === null || !model.hasContent) return null
+  // draft（无会话）不挂；有会话常驻（空态见 StatusSummaryRow / 正文空态）
+  if (activeId === null) return null
 
   return (
     // **顶带下方**（2026-11-01 用户："活动状态面板的高度也应该避开顶栏"）：
@@ -1063,9 +702,7 @@ function ConversationStatusPanelImpl() {
         aria-label={L.panelTitle}
         data-state={variant === 'mini' ? 'collapsed' : 'expanded'}
         data-display-mode={variant}
-        data-running-background-count={model.runningBashWorks.length + model.runningSubagentWorks.length}
-        data-running-terminal-count={model.runningBashWorks.length}
-        data-running-agent-count={model.runningSubagentWorks.length}
+        data-empty={canRenderGit || canRenderPlan ? undefined : 'true'}
         className={cn(
           paper,
           'pointer-events-auto relative overflow-hidden rounded-2xl text-foreground shadow-md transition-[border-radius,padding,background-color,box-shadow] duration-300 ease-in-out',
@@ -1129,26 +766,16 @@ function ConversationStatusPanelImpl() {
             {canRenderPlan ? (
               <PlanStatusSection model={model} separated={canRenderGit} />
             ) : null}
-            {canRenderTerminals ? (
-              <BackgroundWorkStatusSection
-                model={model}
-                onCancelBackgroundWork={onCancelBackgroundWork}
-                onOpenChange={setTerminalSectionOpen}
-                open={terminalSectionOpen}
-                section="terminal"
-                separated={canRenderGit || canRenderPlan}
-                title={L.terminals}
-              />
-            ) : null}
-            {canRenderAgents ? (
-              <SubagentStatusSection
-                model={model}
-                onCancelBackgroundWork={onCancelBackgroundWork}
-                onOpenChange={setAgentSectionOpen}
-                open={agentSectionOpen}
-                separated={canRenderGit || canRenderPlan || canRenderTerminals}
-                title={L.agents}
-              />
+            {/* 常驻面板的空态：没有待办也没有 git 变更时，正文给一行说明
+                （不造假数据、不渲染空分区）。 */}
+            {!canRenderGit && !canRenderPlan ? (
+              <div
+                data-slot="aui_status-empty"
+                className="text-foreground/40 flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px]"
+              >
+                <ActivityIcon className="size-[var(--size-icon-md)] shrink-0" aria-hidden />
+                <span className="min-w-0 truncate">{L.emptyHint}</span>
+              </div>
             ) : null}
           </div>
         ) : null}

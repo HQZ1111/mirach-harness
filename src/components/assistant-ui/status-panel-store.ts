@@ -9,7 +9,7 @@
  * - store 持**显示策略**（auto/panel/mini，localStorage
  *   `mirach:status-panel-variant` 持久化——原在面板组件本地的 state 上移到
  *   这里，因为消费方有两个：面板本体 + 对话内容列）；
- * - `mounted` = 面板组件在场（挂载 = hasContent 且非 draft），由面板组件
+ * - `mounted` = 面板组件在场（挂载 = 有活动会话且非 draft），由面板组件
  *   写入；内容列只读它决定顶部余隙。≥1280 的宽度条件由 CSS 容器查询
  *   承担（`@min-[1280px]/thread:`），不进 store——React 不翻译容器宽度
  *   （上游同纪律）。
@@ -32,7 +32,7 @@ const readOverride = (): StatusPanelVariant | null => {
 interface StatusPanelState {
   /** 用户钉死的显示策略；null = auto（容器查询裁决）。 */
   readonly override: StatusPanelVariant | null
-  /** 面板组件**在场**（挂载 = hasContent 且非 draft）——面板组件写入。
+  /** 面板组件**在场**（挂载 = 有活动会话且非 draft）——面板组件写入。
    *  mini 胶囊在场也算在场（顶部余隙的判定依据）。 */
   readonly mounted: boolean
   setOverride(variant: StatusPanelVariant | null): void

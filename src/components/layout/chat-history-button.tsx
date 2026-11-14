@@ -98,12 +98,12 @@ export const ChatHistoryButton: FC = () => {
         aria-expanded={open}
         aria-label="聊天记录"
         title="聊天记录"
-        className="pointer-events-auto flex size-6 shrink-0 items-center justify-center rounded-[4px] text-muted-foreground transition-colors hover:text-foreground"
+        className="pointer-events-auto flex size-7 shrink-0 items-center justify-center rounded-[4px] text-muted-foreground transition-colors hover:text-foreground"
         data-slot="chat-history-button"
         onClick={() => (open ? setOpen(false) : openAt())}
         type="button"
       >
-        <HistoryIcon className="size-4" />
+        <HistoryIcon className="size-[18px]" />
       </button>
       {open &&
         pos !== null &&

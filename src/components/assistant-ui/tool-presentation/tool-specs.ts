@@ -18,6 +18,8 @@
  */
 import type { LucideIcon } from 'lucide-react'
 import {
+  ActivityIcon,
+  BookmarkIcon,
   BotIcon,
   BoxesIcon,
   BrainIcon,
@@ -32,15 +34,20 @@ import {
   FolderOpenIcon,
   GitBranchIcon,
   GlobeIcon,
+  HistoryIcon,
   ImageIcon,
+  LightbulbIcon,
   ListChecksIcon,
   ListTodoIcon,
+  MessageSquareIcon,
   MonitorIcon,
   PlugIcon,
+  RotateCcwIcon,
   SearchIcon,
   ShieldCheckIcon,
   SparklesIcon,
   SquareTerminalIcon,
+  TargetIcon,
   TerminalIcon,
   WrenchIcon,
 } from 'lucide-react'
@@ -154,6 +161,69 @@ export const EXACT_TOOL_SPECS: Record<string, ToolSpec> = {
 
   // ── 扩展 UI ────────────────────────────────────────────────────────────
   extension_ui_request: spec('askUser', PlugIcon, 'system'),
+
+  // ── rpi 插件工具（2026-11-15 补；注册表来自 rpi 各插件）─────────────────
+  // 子代理 / 编排：delegate_task = rpi-subagents；subagent/dispatch/plan =
+  // orchestrator（plan 与 submit_plan 不是同一件事——前者是编排器的任务
+  // 分解工具，后者是内核的计划提交）。
+  delegate_task: spec('runAgent', BotIcon, 'agent', {
+    chip: chip.text('task', 'prompt', 'description'),
+    body: 'agent',
+  }),
+  dispatch: spec('runAgent', BotIcon, 'agent', {
+    chip: chip.text('task', 'prompt', 'description'),
+    body: 'agent',
+  }),
+  plan: spec('submitPlan', ListChecksIcon, 'plan', {
+    chip: chip.text('goal', 'objective', 'task', 'plan'),
+    body: 'plan',
+  }),
+  ask_user: spec('askUser', BrainIcon, 'agent', {
+    chip: chip.text('question', 'prompt', 'message'),
+  }),
+
+  // 检查点：rpi 的会话打点（mark / list / rewind）
+  checkpoint_mark: spec('markCheckpoint', BookmarkIcon, 'plan', {
+    chip: chip.text('label', 'name', 'message'),
+  }),
+  checkpoint_list: spec('listCheckpoints', HistoryIcon, 'plan'),
+  checkpoint_rewind: spec('rewindCheckpoint', RotateCcwIcon, 'plan', {
+    chip: chip.text('checkpointId', 'id', 'label'),
+  }),
+
+  // MCP：四类工具共用一个短语（服务器 / 工具名做 chip）
+  mcp_list: spec('useMcp', PlugIcon, 'system', { chip: chip.text('server', 'query') }),
+  mcp_call: spec('useMcp', PlugIcon, 'system', {
+    chip: chip.text('tool', 'name', 'server'),
+  }),
+  mcp_request: spec('useMcp', PlugIcon, 'system', { chip: chip.text('server', 'method') }),
+  mcp_resource: spec('useMcp', PlugIcon, 'system', { chip: chip.text('uri', 'server') }),
+
+  // Web 取用（rpi 的 websearch/webfetch 与内核 web_search 是不同工具名）
+  websearch: spec('searchWeb', GlobeIcon, 'web', {
+    chip: chip.query(),
+    body: 'webSearch',
+  }),
+  webfetch: spec('readWebpage', GlobeIcon, 'web', { chip: chip.url() }),
+
+  // 计划模式（rpi-plan-mode）：进入 / 完成两个工具
+  plan_mode_start: spec('startPlanMode', LightbulbIcon, 'plan', {
+    chip: chip.text('goal', 'objective', 'task'),
+  }),
+  plan_mode_complete: spec('finishPlan', ListChecksIcon, 'plan', { body: 'plan' }),
+
+  // 其它插件面
+  goal: spec('useGoal', TargetIcon, 'plan', { chip: chip.text('goal', 'objective', 'task') }),
+  code_lens: spec('useCodeLens', CodeIcon, 'code', { chip: chip.text('query', 'symbol') }),
+  codemode: spec('runCode', CodeIcon, 'code', { chip: chip.text('code', 'expression') }),
+  permissions: spec('usePermissions', ShieldCheckIcon, 'system', {
+    chip: chip.text('action', 'path', 'tool'),
+  }),
+  im_message_server: spec('useMessaging', MessageSquareIcon, 'system', {
+    chip: chip.text('action', 'channel'),
+  }),
+  rpc_server: spec('useRpc', PlugIcon, 'system', { chip: chip.text('action', 'name') }),
+  rpc_client: spec('useRpc', PlugIcon, 'system', { chip: chip.text('server', 'method') }),
 }
 
 /**
@@ -176,6 +246,8 @@ export const ACTION_TOOL_SPECS: Record<string, ToolSpec> = {
 export const FAMILY_TOOL_SPECS: Record<string, ToolSpec> = {
   ast_: spec('searchCode', CodeIcon, 'code'),
   lsp_: spec('searchCode', CodeIcon, 'code'),
+  // rpi-langfuse 的观测工具（langfuse_trace / langfuse_score / …）
+  langfuse_: spec('useLangfuse', ActivityIcon, 'system'),
 }
 
 /** 从 args 取动作字符串（`hub { action: "agent" }`）。 */

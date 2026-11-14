@@ -119,7 +119,7 @@
      剩余空间重分配影响，transform 不参与布局、位移确定）。 */
   transform: translateY(var(--chat-workspace-nudge));
   flex: 1 1 0;
-  max-width: calc(100% - 56px);
+  max-width: calc(100% - 64px);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -134,7 +134,7 @@
   align-items: center;
   display: flex;
   flex: none;
-  gap: 2px;
+  gap: 4px;
   margin-left: auto;
   transform: translateY(var(--chat-workspace-nudge));
 }

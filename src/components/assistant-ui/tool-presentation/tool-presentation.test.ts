@@ -84,6 +84,31 @@ describe('describeToolCall（pi 工具表）', () => {
     expect(describeToolCall({ name: 'read', status: 'success' }).label).toBe('Read file')
     expect(describeToolCall({ name: 'read', status: 'error' }).label).toBe('Read file')
   })
+
+  it('rpi 插件工具：delegate_task / orchestrator 三件套 → 子代理', () => {
+    for (const name of ['delegate_task', 'subagent', 'dispatch']) {
+      expect(describeToolCall({ name, args: { task: 'do it' } }).category).toBe('agent')
+    }
+    // orchestrator 的 plan = 任务分解（plan 分类，不是内核 submit_plan）
+    expect(describeToolCall({ name: 'plan', args: {} }).category).toBe('plan')
+    expect(describeToolCall({ name: 'delegate_task', args: { task: 't' } }).phrase).toBe('runAgent')
+    expect(describeToolCall({ name: 'delegate_task', args: {} }).body).toBe('agent')
+    expect(describeToolCall({ name: 'ask_user', args: { question: 'q' } }).phrase).toBe('askUser')
+  })
+
+  it('rpi 插件工具：checkpoint / mcp / plan-mode / langfuse', () => {
+    expect(describeToolCall({ name: 'checkpoint_mark', args: {} }).phrase).toBe('markCheckpoint')
+    expect(describeToolCall({ name: 'checkpoint_list', args: {} }).phrase).toBe('listCheckpoints')
+    expect(describeToolCall({ name: 'checkpoint_rewind', args: {} }).phrase).toBe('rewindCheckpoint')
+    expect(describeToolCall({ name: 'mcp_call', args: { tool: 'fs_read' } }).phrase).toBe('useMcp')
+    expect(describeToolCall({ name: 'mcp_list', args: {} }).phrase).toBe('useMcp')
+    expect(describeToolCall({ name: 'plan_mode_start', args: {} }).phrase).toBe('startPlanMode')
+    expect(describeToolCall({ name: 'plan_mode_complete', args: {} }).phrase).toBe('finishPlan')
+    expect(describeToolCall({ name: 'langfuse_trace', args: {} }).source).toBe('family')
+    expect(describeToolCall({ name: 'langfuse_trace', args: {} }).phrase).toBe('useLangfuse')
+    expect(describeToolCall({ name: 'websearch', args: { query: 'x' } }).phrase).toBe('searchWeb')
+    expect(describeToolCall({ name: 'webfetch', args: { url: 'https://a.dev/b' } }).chip).toBe('a.dev/b')
+  })
 })
 
 describe('toolLabelZh', () => {
