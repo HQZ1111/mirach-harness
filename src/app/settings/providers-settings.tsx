@@ -39,7 +39,10 @@
  * · API 模式（2026-11-14 接真）：写 provider 条目的 `api` 字段——rpi 没有
  *   协议自动检测（缺省 = anthropic-messages，openai-completions /
  *   openai-responses 必须显式），控制器可点选并持久化。
- * · 发现模型：rpi 无模型发现端点——复选框渲染为禁用 + 说明，不持久化。
+ * · 发现模型（2026-11-14 接真）：rpi 自身不发现（models[] 必须显式列出），
+ *   但 OpenAI 兼容端点的 GET {base}/models 就是标准发现面——保存时勾选
+ *   「发现模型」会先探测并把全量 id 写进 provider.models（按 id 保留既有
+ *   逐模型配置）；探测失败错误可见并中止保存（不静默退化单模型）。
  * · hermes EnvVarInfo 的 category/description/url/redacted_value/advanced/
  *   provider_profiles/channel_managed 字段 pi_auth_status 没有：所有行按
  *   provider 域全列（等价 hermes category==='provider' 的过滤结果），
@@ -599,7 +602,8 @@ function KeysView({
     **持久化**为 provider 条目的 `api` 字段——rpi 没有协议自动检测，
     `ProviderConfig.api` 缺省 = anthropic-messages、openai-completions/
     openai-responses 必须显式声明（rpi-runtime/src/config.rs:201-215）。
-    discoverModels 仍只渲染（rpi 无模型发现通道）。 */
+    discoverModels = 保存时 GET {base}/models 拉全量模型（动作开关，
+    不落盘）。 */
 interface EndpointForm {
   apiKey: string
   apiMode: string
@@ -864,28 +868,61 @@ function CustomEndpointsView() {
       // 留空 = 保留现有密钥（hermes apiKeyNewPlaceholder 语义）；新条目
       // 留空 = 不写 apiKey 键。密钥内容只写不读。
       if (apiKey !== '') entry['apiKey'] = apiKey
-      // models：表单只暴露单模型（hermes 的默认模型 + 上下文 → pi 的
-      // models[0]，ModelConfig 必须 camelCase：serde rename_all camelCase、
-      // 无 snake 别名）。model 为空时不写 models（编辑场景保留原目录）。
-      const modelEntry: JsonRecord = { id: model }
+      // models：rpi **不自动发现**——目录 = 内置 + models.json 里显式列出
+      // 的 models[]。勾「发现模型」时保存前先 GET {base}/models（OpenAI
+      // 兼容端点的标准发现面）把全量 id 写进来；探测失败 = 错误可见并
+      // 中止保存，**不静默退化成单模型**（铁律 12；另给出取消勾选的退路）。
+      // 既有条目的逐模型配置（contextWindow 等）按 id 合并不丢。
+      const existingModels = Array.isArray(existing['models'])
+        ? existing['models'].filter(isJsonRecord)
+        : []
+      const byId = new Map(existingModels.map((m) => [String(m['id']), m]))
+      let modelIds: string[] = [model]
+      if (form.discoverModels) {
+        const probe = await invoke<{
+          ok: boolean
+          status: number
+          models: string[]
+          message: string
+        }>('pi_endpoint_validate', {
+          baseUrl,
+          apiKey: apiKey === '' ? null : apiKey,
+        })
+        if (!probe.ok || probe.models.length === 0) {
+          throw new Error(
+            `模型发现失败：${probe.message}${probe.ok ? '（端点没有返回模型列表）' : ''}——取消勾选「发现模型」可只保存默认模型`,
+          )
+        }
+        modelIds = probe.models.includes(model) ? probe.models : [model, ...probe.models]
+      }
       const ctx = Number.parseInt(form.contextLength, 10)
-      if (Number.isFinite(ctx) && ctx > 0) modelEntry['contextWindow'] = ctx
-      entry['models'] = [modelEntry]
+      const models: JsonRecord[] = modelIds.map((mid) => {
+        const prev = byId.get(mid)
+        return prev !== undefined ? { ...prev } : { id: mid }
+      })
+      // 表单的「上下文」只作用于默认模型（models[0]）。
+      if (Number.isFinite(ctx) && ctx > 0) models[0]['contextWindow'] = ctx
+      entry['models'] = models
       const doc: JsonRecord = modelsDoc !== null ? { ...modelsDoc } : {}
       doc['providers'] = { ...providersTable, [id]: entry }
       await invoke('pi_set_models_config', { value: doc })
       setModelsDoc(doc)
+      const discovered = form.discoverModels ? models.length : 0
+      const summary =
+        discovered > 1
+          ? `（发现 ${discovered} 个模型）`
+          : ''
       if (form.makeDefault) {
         try {
           await writeDefault(id, model)
-          setResult({ ok: true, text: '自定义端点已保存并设为新对话默认。' })
+          setResult({ ok: true, text: `自定义端点已保存${summary}并设为新对话默认。` })
         } catch (e) {
           // 端点本体已保存，启用失败——失败可见（铁律 12），不吞。
           console.error('[pi] 保存后启用失败', e)
-          setResult({ ok: false, text: `端点已保存，但写入默认模型失败：${describeIpcError(e)}` })
+          setResult({ ok: false, text: `端点已保存${summary}，但写入默认模型失败：${describeIpcError(e)}` })
         }
       } else {
-        setResult({ ok: true, text: '自定义端点已保存。' })
+        setResult({ ok: true, text: `自定义端点已保存${summary}。` })
       }
     } catch (e) {
       console.error('[pi] models.json 写入失败', e)
@@ -1126,14 +1163,14 @@ function CustomEndpointsView() {
                   />
                   用于新对话（保存即设为默认）
                 </label>
-                <label style={{ alignItems: 'center', display: 'flex', gap: 6 }} title="pi 无模型发现端点——此开关不持久化">
-                  <input checked={form.discoverModels} disabled onChange={(e) => setForm((c) => ({ ...c, discoverModels: e.target.checked }))} type="checkbox" />
-                  发现模型（pi 无发现通道——不持久化）
+                <label style={{ alignItems: 'center', display: 'flex', gap: 6 }} title="保存时 GET {端点URL}/models 拉全部模型 id 写进 provider.models">
+                  <input checked={form.discoverModels} onChange={(e) => setForm((c) => ({ ...c, discoverModels: e.target.checked }))} type="checkbox" />
+                  发现模型（保存时 GET /models 自动列出全部模型）
                 </label>
                 {editingEp !== null && editingEp.modelCount > 1 && (
                   <span className="set-field-note">
-                    该条目已声明 {editingEp.modelCount} 个模型——保存会以「默认模型」单条目录覆盖；多模型请直接编辑
-                    models.json 原始文档。
+                    该条目已声明 {editingEp.modelCount} 个模型——勾选「发现模型」会重新拉取并按 id 保留既有配置；
+                    取消勾选则只保留「默认模型」一条。
                   </span>
                 )}
               </div>

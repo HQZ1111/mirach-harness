@@ -1622,6 +1622,14 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   ws 依赖）。白屏类问题先看 `Runtime.exceptionThrown`。
 - 门禁：cargo check 0/0；cargo test **140**；tsc 0；dist+二进制重建、app
   重启（设置窗 bodyLen 31 → 35177 实证恢复）。
+- **「发现模型」接真（同日续）**：rpi 引擎自身**不发现**（ModelsConfig
+  只认显式 `models[]`；目录 = 内置 + models.json）。但 OpenAI 兼容端点的
+  `GET {base}/models` 就是标准发现面：表单勾选「发现模型」→ 保存时先
+  `pi_endpoint_validate` 探测 → 全量 id 写进 `provider.models`（按 id 保留
+  既有逐模型配置：contextWindow 等）；探测失败**中止保存且错误可见**，
+  并提示"取消勾选可只存默认模型"（不静默退化）。添加模型的三个入口：
+  ①表单+发现（推荐）②表单不勾发现（只写默认模型一条）③模型页的原始
+  JSON 编辑器直编 models.json。
 
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
