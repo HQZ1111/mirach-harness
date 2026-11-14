@@ -1663,6 +1663,57 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   `cdp-settings-probe.mjs`（console/异常）。刷新设置页会回到「账号」节，
   填表前先点导航「自定义端点」。
 
+## 全 SDK 接线轮（2026-11-14 夜，3 子代理并行：会话树/设置页/用量）
+
+- **致命陷阱：`Runtime::block_on` 不能在 tauri async 命令线程上直接调**
+  （2026-11-14 实锤，表现为"点会话/新建会话没反应"）：tauri async 命令跑
+  在 tokio runtime worker 上，直接 block_on 引擎 runtime 会 panic
+  `Cannot start a runtime from within a runtime`，命令 promise 永不
+  resolve。**修在 `PiRuntime::block_on` 一处**：检测
+  `Handle::try_current().is_ok()` → 把 future 搬到独立线程
+  （`thread::Builder` 16MiB + `spawn_scoped`，可借用、无需 'static）再
+  block_on；`F: Send + F::Output: Send` 是代价。agui 早用 spawn_blocking
+  线程绕开了这个坑，IPC 命令层漏了。**新增任何"命令层直接 block_on
+  引擎"的代码前先想这条。**
+- **会话面接真（pi_session.rs）**：`pi_get_messages`（rpi
+  `find_entries_on_branch` + MessageEntry → hydrate wire）、`compact`
+  （AgentLane::compact）、`sessions_usage` / `state.messageCount`（**会话
+  文件行扫描**：harness.get_stats() 在恢复会话上实测恒 0）、`export_session_html`
+  （rpi_cli::export；写临时文件再读回）、`fork`（JsonlSessionRepo::
+  fork_typed + ForkOptions::Branch + release_writer_lease）、fork 点、
+  兄弟分支（按旧 pi 语义自投影）、`switch_branch` / `retry_edit`
+  （navigate_tree）、`session_lineage`（parent_session_id 反查路径）、
+  时间线标记（ModelChange/Compaction 条目）。rewind/undo/redo/checkpoint
+  保留 Err（rpi 只有条目级 label 与 durable 执行日志，无会话回退内核，
+  文案已改准确）。
+- **单写者租约二次实锤**：`open_session` 现在自带 `is_live_session` 守卫
+  （同路径已是活动会话直接复用返回 id）——IPC 的 pi_open_session / 前端
+  切页签 / bot-launch 全部受益；agui 的守卫保留。
+- **pi_list_sessions 三修**：①会话根与引擎同源（settings.sessionDir 优先，
+  原来硬编码 HOME 路径）；②跳过 `*.jsonl.progress.jsonl` 边车（原来当
+  会话列出空 id 幽灵行）；③name/messageCount 走 rpi 只读快照
+  （`JsonlSessionStorage::read_snapshot` + Session::get_name；原来只读首行，
+  set_name 是 fact 条目不在 header，重启后名字/条数全丢）。实测
+  messageCount 4 / 3 行列表无幽灵。
+- **设置页补齐 rpi 全选项（settings-overlay.tsx +860 行）**：新增
+  defaultThinkingLevel / hideThinkingBlock / thinkingBudgets /
+  scopedModels / steeringMode+followUpMode / httpProxy / cdnBaseUrl /
+  streamIdleTimeout / httpIdleTimeout / sessionDir / skillDirs+promptDirs+
+  extensionDirs / defaultTools；TUI 专属（keybindings/editorPaddingX/
+  terminal.*/quietStartup 等）明确跳过并注释理由；修正 compaction:null
+  被误报"段不是 JSON object"的老 bug。**rpi settings 全表见
+  G:\pi-rust-main\crates\rpi-cli\src\settings.rs（38 个字段，camelCase，
+  无 snake alias）**。
+- **用量聚合（pi_usage.rs 全量重写）**：扫 `~/.rpi/sessions/**/*.jsonl`
+  行级聚合（按 provider/model、UTC 日、工具结果），wire 与旧 pi 形状
+  零漂移；实测 41075 tokens/2 turns/favoriteModel DS。vault_sources 照
+  df701a4 的纯 CLI 探测移植（bw/op）。OAuth/ask 保留 Err + 准确文案
+  （OAuth 需加载扩展注册表 + rpi-extensions 依赖；ask 由插件工具提供）。
+- **门禁**：cargo check 0 错 0 警 / cargo test **151**（140 + 会话树 3 +
+  用量 8）/ tsc 0 / vitest **792**；真机 CDP 实证：new/open 秒回、
+  hydrate 4 条（user/assistant 交替、tool 块保留）、fork 点 2 个、
+  session usage 41075、state.messageCount 4。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换

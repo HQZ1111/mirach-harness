@@ -14,15 +14,25 @@
  *   重试 · retry → Agent 控制 / 模型（重试/故障转移是模型请求域）
  *   高级 · 原始配置 → 安全与数据 / 安全（第二个子块）
  *   关于 → 关于 / 版本与更新
- * 其余 16 项无数据面，一律占位面板 + 逐项说明原因（铁律 12：不假装有
+ * 其余项无数据面，一律占位面板 + 逐项说明原因（铁律 12：不假装有
  * 功能、不造假数据）；文案在 NAV_GROUPS 的 placeholder 字段，右栏按
  * IMPLEMENTED_SECTIONS 分流到真实面板 / 占位。
  *
  * 结构化段只收录 rpi Settings 实锤字段——键名/类型/默认值逐项核对
  * rpi-cli/src/settings.rs（camelCase，见各段注释的行号）；Settings 没有的
  * 配置面（system_prompt / append_system_prompt 是 CLI/SDK 参数非
- * settings.json 字段；工具开关的真实机制是 tools.loadMode 自由映射）不造
- * UI，留原始 JSON 段。
+ * settings.json 字段）不造 UI，留原始 JSON 段。
+ *
+ * **GUI 相关字段覆盖（2026-11-14）**：模型节补 defaultThinkingLevel /
+ * hideThinkingBlock / thinkingBudgets / scopedModels / steeringMode /
+ * followUpMode；核心连接节补 httpProxy / cdnBaseUrl / streamIdleTimeout /
+ * httpIdleTimeout；会话管理节（sessionDir）与技能与工具节（skillDirs /
+ * promptDirs / extensionDirs / defaultTools）从占位改为真实面板。
+ * **TUI 专属字段一律不做 UI**（keybindings、doubleEscapeAction、
+ * editorPaddingX、autocompleteMaxVisible、fullscreenCopyOnSelect、
+ * outputPad、quietStartup、showTerminalProgress、terminal.*、showImages、
+ * last*ChangelogVersion、showCacheMissNotices、shellPath、branchSummary）
+ * ——逐条理由见下方「TUI 专属字段」注释块。
  *
  * 配置真相 = pi 自己的配置文件（§5）：settings.json / models.json 经
  * pi_get_settings / pi_set_models_config 管理——**nested 对象整体替换
@@ -235,6 +245,103 @@ const K_FAILOVER_COOLDOWN_SECS = [
 ] as const
 const K_MAX_FAILOVERS_PER_TURN = ['max_failovers_per_turn', 'maxFailoversPerTurn'] as const
 
+// ── GUI 相关新增键组（2026-11-14，逐项核对 rpi-cli/src/settings.rs）─────
+//
+// 全部 canonical = camelCase（settings.rs 的 `#[serde(rename_all =
+// "camelCase")]`，无 snake_case alias）。别名只用于**读**历史文件；
+// applyFieldToRecord 会就地更新已存在的键形式、新建键取首选项，避免同一
+// 字段两种拼法并存（别名与主名同时存在时 serde 报 duplicate field）。
+
+/** 模型节：默认思考档位（settings.rs:94-97，字符串档位名）。 */
+const K_DEFAULT_THINKING_LEVEL = ['defaultThinkingLevel', 'default_thinking_level'] as const
+/** 模型节：隐藏思考块正文（settings.rs:189-191）。 */
+const K_HIDE_THINKING_BLOCK = ['hideThinkingBlock', 'hide_thinking_block'] as const
+/** 模型节：可用模型范围（settings.rs:101-106；`enabledModels` 是上游别名，
+    与主名同时出现会被 serde 判重复字段）。 */
+const K_SCOPED_MODELS = ['scopedModels', 'enabledModels'] as const
+/** 模型节 · thinkingBudgets 段：档位 → token 预算（settings.rs:251-255，
+    rpi-ai ThinkingBudgets 全字段 Option<u64>）。 */
+const K_TB_MINIMAL = ['minimal'] as const
+const K_TB_LOW = ['low'] as const
+const K_TB_MEDIUM = ['medium'] as const
+const K_TB_HIGH = ['high'] as const
+const K_TB_XHIGH = ['xhigh'] as const
+const K_TB_MAX = ['max'] as const
+/** thinkingBudgets 的六个档位行（低 → 高；draftKey 只用于草稿表寻址）。 */
+const THINKING_BUDGET_ROWS: readonly {
+  keys: readonly string[]
+  label: string
+  draftKey: string
+}[] = [
+  { keys: K_TB_MINIMAL, label: 'minimal', draftKey: 'thinkingBudgets.minimal' },
+  { keys: K_TB_LOW, label: 'low', draftKey: 'thinkingBudgets.low' },
+  { keys: K_TB_MEDIUM, label: 'medium', draftKey: 'thinkingBudgets.medium' },
+  { keys: K_TB_HIGH, label: 'high', draftKey: 'thinkingBudgets.high' },
+  { keys: K_TB_XHIGH, label: 'xhigh', draftKey: 'thinkingBudgets.xhigh' },
+  { keys: K_TB_MAX, label: 'max', draftKey: 'thinkingBudgets.max' },
+]
+/** 模型节：队列排空节奏（settings.rs:155-163，kebab-case 落盘）。 */
+const K_STEERING_MODE = ['steeringMode', 'steering_mode'] as const
+const K_FOLLOW_UP_MODE = ['followUpMode', 'follow_up_mode'] as const
+
+/** 核心连接节：HTTP 代理（settings.rs:125-128；rpi 只写进环境变量，
+    显式 HTTP_PROXY/HTTPS_PROXY 优先）。 */
+const K_HTTP_PROXY = ['httpProxy', 'http_proxy'] as const
+/** 核心连接节：发布包下载加速前缀（settings.rs:130-133）。 */
+const K_CDN_BASE_URL = ['cdnBaseUrl', 'cdn_base_url'] as const
+/** 核心连接节：流静默超时秒数（settings.rs:247-250；0 = 关闭）。 */
+const K_STREAM_IDLE_TIMEOUT = ['streamIdleTimeout', 'stream_idle_timeout'] as const
+/** 核心连接节：连接池空闲超时（settings.rs:241-246；毫秒数字或
+    "disabled"——上游还有 `httpIdleTimeoutMs` 别名）。 */
+const K_HTTP_IDLE_TIMEOUT = ['httpIdleTimeout', 'httpIdleTimeoutMs', 'http_idle_timeout'] as const
+
+/** 会话管理节：会话根目录（settings.rs:108-111）。 */
+const K_SESSION_DIR = ['sessionDir', 'session_dir'] as const
+/** 技能与工具节：追加资源目录（settings.rs:164-176；`skills`/`prompts`/
+    `extensions` 是上游兼容简称）。 */
+const K_SKILL_DIRS = ['skillDirs', 'skills', 'skill_dirs'] as const
+const K_PROMPT_DIRS = ['promptDirs', 'prompts', 'prompt_dirs'] as const
+const K_EXTENSION_DIRS = ['extensionDirs', 'extensions', 'extension_dirs'] as const
+/** 技能与工具节：引擎默认启用的工具名列表（settings.rs:186-188）。 */
+const K_DEFAULT_TOOLS = ['defaultTools', 'default_tools'] as const
+
+// ── TUI 专属字段（有 settings.rs 字段，但**不做 UI**）────────────────────
+//
+// 判据：字段只影响 rpi 的终端渲染/键位，宿主 GUI 不消费，也不该把"改了
+// 没效果"的设置项摆给用户（铁律 12：不假装有功能）。
+//
+//   · keybindings / doubleEscapeAction —— 终端键位表。宿主的快捷键是
+//     「安全与数据 · 键盘快捷键」节自有体系（lib/keybinds，localStorage
+//     差分），与 rpi 的终端键位无关；混进设置页会出现两套"快捷键"。
+//   · editorPaddingX / autocompleteMaxVisible —— 终端编辑器列距与补全
+//     行数，宿主是 React 输入框，没有这两个几何量。
+//   · fullscreenCopyOnSelect / outputPad —— 全屏终端选区复制与 transcript
+//     左右内距，纯 TUI 渲染量。
+//   · quietStartup / showTerminalProgress / terminal.*（showImages 嵌套、
+//     clearOnShrink）—— 启动横幅与 OSC 9;4 进度条，终端进程才有；宿主
+//     的窗口/任务栏进度不走这个键。
+//   · showImages —— 终端内联图片渲染开关；宿主消息渲染是 DOM，不读它。
+//   · lastChangelogVersion / lastRpiChangelogVersion —— 升级提示基线，
+//     引擎自维护的标记，不是用户设置（手工改只会让更新提示错乱）。
+//   · showCacheMissNotices —— 终端 transcript 的诊断提示行。
+//   · shellPath —— rpi 解析但不消费（settings.rs:113-118 原文：nothing in
+//     pi-tools carries a shell binary）。给 UI 等于承诺一个不生效的开关。
+//   · branchSummary —— rpi 的两个访问器都注明"尚无消费方"
+//     （settings.rs:144-153/323-341）。
+
+/** 结构化键所在的嵌套段（null = 顶层键）。thinkingBudgets 是对象段
+    （档位 → 预算），其余新增字段都在顶层。 */
+type NestedLoc = 'compaction' | 'retry' | 'thinkingBudgets'
+
+/** 写入队列的反馈分组：每个分组在右栏有自己的一对"已保存/错误"行。
+    compaction/retry 是既有两段（状态各自独立）；model/connection/
+    sessions/skills 是 2026-11-14 新增的四节（共用 extraFeedback）。 */
+type WriteUi = 'compaction' | 'retry' | 'model' | 'connection' | 'sessions' | 'skills'
+
+type ExtraWriteUi = Exclude<WriteUi, 'compaction' | 'retry'>
+
+const EXTRA_WRITE_UIS: readonly ExtraWriteUi[] = ['model', 'connection', 'sessions', 'skills']
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
@@ -245,7 +352,7 @@ type FieldRead = { state: 'unset' } | { state: 'ok'; raw: unknown }
 /** 读一个结构化字段（loc = 嵌套段名，null = 顶层键）。 */
 function readField(
   doc: SettingsDoc,
-  loc: 'compaction' | 'retry' | null,
+  loc: NestedLoc | null,
   keys: readonly string[],
 ): FieldRead {
   const rec =
@@ -317,8 +424,8 @@ function describeIpcError(e: unknown): string {
 }
 
 /** 串行写入队列的一笔改动（见 SettingsOverlay 内 drainWrites）。 */
-interface StructuredWriteJob {  ui: 'compaction' | 'retry'
-  loc: 'compaction' | 'retry' | null
+interface StructuredWriteJob {  ui: WriteUi
+  loc: NestedLoc | null
   keys: readonly string[]
   value: unknown | undefined
   savedMsg: string
@@ -329,7 +436,7 @@ interface StructuredWriteJob {  ui: 'compaction' | 'retry'
     err（pi 侧校验也会拒绝，这里给出可读消息）；否则返回新文档。 */
 function applyStructuredMutation(
   base: SettingsDoc,
-  loc: 'compaction' | 'retry' | null,
+  loc: NestedLoc | null,
   keys: readonly string[],
   value: unknown | undefined,
 ): { ok: SettingsDoc } | { err: string } {
@@ -342,7 +449,9 @@ function applyStructuredMutation(
   if (value === undefined && existing === undefined) {
     return { ok: doc } // 段不存在 = 全默认，无可删（幂等写）
   }
-  if (existing !== undefined && !isPlainObject(existing)) {
+  // null 与缺键同为 None（rpi 的 Option<T> 反序列化语义），视作空段——
+  // 否则文档里写了 "compaction": null 会被误判成"段形状错误"而卡住编辑。
+  if (existing !== undefined && existing !== null && !isPlainObject(existing)) {
     return { err: `${loc} 段不是 JSON object——先在「安全与数据 · 安全」的原始配置里修正后再改此设置` }
   }
   const obj: SettingsDoc = isPlainObject(existing) ? { ...existing } : {}
@@ -478,6 +587,154 @@ function SetEnumField({ read, options, unsetLabel, onWrite }: {
   )
 }
 
+/** 字符串字段的已落盘文本；非法类型 → invalidRaw 非 null（如实显示）。 */
+function textFieldView(read: FieldRead): { committed: string; invalidRaw: unknown | null } {
+  if (read.state === 'unset') return { committed: '', invalidRaw: null }
+  if (typeof read.raw === 'string') return { committed: read.raw, invalidRaw: null }
+  return { committed: '', invalidRaw: read.raw }
+}
+
+/** 字符串数组字段（目录 / 模型 id）→ 多行文本；非法类型 → invalidRaw。 */
+function listFieldView(read: FieldRead): { committed: string; invalidRaw: unknown | null } {
+  if (read.state === 'unset') return { committed: '', invalidRaw: null }
+  if (Array.isArray(read.raw) && read.raw.every((v) => typeof v === 'string')) {
+    return { committed: (read.raw as string[]).join('\n'), invalidRaw: null }
+  }
+  return { committed: '', invalidRaw: read.raw }
+}
+
+/** httpIdleTimeout 的已落盘文本：毫秒数字或 "disabled"（settings.rs 注释：
+    上游两种形态都合法；其它类型如实判非法）。 */
+function httpIdleFieldView(read: FieldRead): { committed: string; invalidRaw: unknown | null } {
+  if (read.state === 'unset') return { committed: '', invalidRaw: null }
+  const raw = read.raw
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 0) {
+    return { committed: String(raw), invalidRaw: null }
+  }
+  if (typeof raw === 'string') return { committed: raw.trim(), invalidRaw: null }
+  return { committed: '', invalidRaw: raw }
+}
+
+/** 纯文本：空 = 删键回默认（null 与缺键同为 None）。 */
+function parsePlainText(text: string): { value: unknown | undefined } {
+  const trimmed = text.trim()
+  return { value: trimmed === '' ? undefined : trimmed }
+}
+
+/** 列表文本：换行或逗号分隔（逐项 trim、丢空项）；全空 = 删键回默认。 */
+function parseListText(text: string): { value: unknown | undefined } {
+  const entries = text
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+  return { value: entries.length === 0 ? undefined : entries }
+}
+
+/** httpIdleTimeout：非负整数毫秒或 disabled；空 = 删键回默认。 */
+function parseHttpIdle(text: string): { value: unknown | undefined } | { error: string } {
+  const trimmed = text.trim()
+  if (trimmed === '') return { value: undefined }
+  if (trimmed.toLowerCase() === 'disabled') return { value: 'disabled' }
+  if (!/^\d+$/.test(trimmed)) {
+    return { error: `「${text}」须为非负整数（毫秒）或 disabled，未写入` }
+  }
+  const n = Number(trimmed)
+  if (!Number.isSafeInteger(n)) {
+    return { error: `「${text}」超出安全整数范围，未写入` }
+  }
+  return { value: n }
+}
+
+/** 文本 / 列表字段：草稿态由 overlay 顶层持有（与 SetNumField 同一套
+    numDrafts），失焦或 Enter 提交——受控输入逐击写盘会吃字，且每次写盘
+    = 一次整文档 IPC。空文本 = 删键回默认；非法值不写入且错误可见。 */
+function SetTextDraftField({
+  committed,
+  invalidRaw,
+  expect,
+  placeholder,
+  multiline,
+  rows,
+  draft,
+  onDraft,
+  parse,
+  onWrite,
+  onReject,
+}: {
+  committed: string
+  /** 文档里该键类型不符时的原始值（null = 合法）。 */
+  invalidRaw: unknown | null
+  expect: string
+  placeholder: string
+  multiline?: boolean
+  rows?: number
+  draft: string | null
+  onDraft: (value: string | null) => void
+  parse: (text: string) => { value: unknown | undefined } | { error: string }
+  onWrite: (value: unknown | undefined) => Promise<void>
+  onReject: (message: string) => void
+}) {
+  const value = draft ?? committed
+  /** 提交草稿；内容与已落盘文本一致时只清草稿（不做无意义的整文档写盘）。 */
+  const commit = (): void => {
+    if (draft === null) return
+    if (draft === committed) {
+      onDraft(null)
+      return
+    }
+    const parsed = parse(draft)
+    if ('error' in parsed) {
+      onReject(parsed.error)
+      return
+    }
+    void onWrite(parsed.value).then(() => onDraft(null))
+  }
+  return (
+    <>
+      {multiline === true ? (
+        <textarea
+          className="set-textarea"
+          onBlur={commit}
+          onChange={(e) => onDraft(e.target.value)}
+          onKeyDown={(e) => {
+            // 多行：Enter 是换行，Ctrl/Cmd+Enter 提交（与单行的 Enter 语义对齐）
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault()
+              commit()
+            }
+          }}
+          placeholder={placeholder}
+          rows={rows ?? 4}
+          spellCheck={false}
+          value={value}
+        />
+      ) : (
+        <input
+          className="set-input"
+          onBlur={commit}
+          onChange={(e) => onDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              commit()
+            }
+          }}
+          placeholder={placeholder}
+          spellCheck={false}
+          type="text"
+          value={value}
+        />
+      )}
+      {draft !== null && draft !== committed && (
+        <span className="set-field-note">
+          未提交——失焦或按 Enter（多行 Ctrl+Enter）写入；清空文本 = 删键回默认
+        </span>
+      )}
+      {invalidRaw !== null && <SetInvalidNote expect={expect} raw={invalidRaw} />}
+    </>
+  )
+}
+
 // ── 主从两栏（hermes settings 左导航右内容同构）────────────────────────
 // 左栏节列表 + 右栏条件渲染选中节。id 仅用于左导航寻址（data-section-id），
 // 不进任何持久化面。
@@ -487,15 +744,20 @@ function SetEnumField({ read, options, unsetLabel, onWrite }: {
 // 结构（样式见 overlays.css 的 .set-nav 家族），但不引入 motion/react——
 // 这里只借视觉与信息层级，动效仍用本工程既有 CSS 令牌。
 //
-// 真实数据面的 4 个节（其余全是占位，见各条 placeholder 说明）：
-//   model    ← 旧 model（默认模型）+ 旧 retry（重试/故障转移都是模型请求域：
-//              429/过载重试与跨模型 failover 都发生在同一个 provider 请求上，
-//              放进「安全与数据」会把一次请求的两半拆到两个组）
+// 真实数据面的节（其余占位，见各条 placeholder 说明；完整清单以
+// IMPLEMENTED_SECTIONS 为准）：
+//   model    ← 旧 model（默认模型 + 引擎思考/预算/模型范围/队列）+ 旧 retry
+//              （重试/故障转移都是模型请求域：429/过载重试与跨模型 failover
+//              都发生在同一个 provider 请求上，放进「安全与数据」会把一次
+//              请求的两半拆到两个组）
 //   memory   ← 旧 compaction（上下文压缩 = pi 的记忆管理面，memory.rs 同域）
 //   security ← 旧 auth（凭据存在性/来源）+ 旧 raw（settings.json / models.json
 //              整体编辑）——凭据与配置文件同属"安全与数据"，且 raw 是修正
 //              凭据/配置文档的最后手段，两者必须同屏可切换
 //   updates  ← 旧 about（应用名/版本/配置文件路径）
+//   core-connection ← 网关连接面板 + 引擎网络（httpProxy/cdn/超时）
+//   sessions ← rpi sessionDir（会话存储目录）
+//   skills-tools ← rpi 资源目录（技能/提示词/扩展）+ defaultTools
 //
 // 插件集成组没有可选节：它给"带设置页面的插件"预留位置，当前无插件注册
 // 设置页 → 渲染一条空态行（带 beui 子级竖线），不造假入口。
@@ -616,8 +878,6 @@ const NAV_GROUPS: readonly NavGroup[] = [
         icon: Wrench,
         id: 'skills-tools',
         label: '技能与工具',
-        placeholder:
-          '只读资源面板已存在（左栏入口条的「技能与工具」浮层，pi_list_resources），但它是独立浮层而非设置节；此处未嵌入，避免同一数据面出现两套入口。',
       },
       {
         icon: Mic,
@@ -645,8 +905,6 @@ const NAV_GROUPS: readonly NavGroup[] = [
         icon: MessagesSquare,
         id: 'sessions',
         label: '会话管理',
-        placeholder:
-          '会话的建/切/重命名/删除在左栏会话列表里（threadListAdapter），没有需要在此配置的项。',
       },
       {
         icon: Keyboard,
@@ -753,6 +1011,12 @@ const IMPLEMENTED_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
   'general',
   'persona',
   'usage-stats',
+  // 2026-11-14：rpi settings 的 GUI 相关字段补齐后，这两个从占位改为真实面板
+  // （sessions = sessionDir；skills-tools = skillDirs/promptDirs/
+  // extensionDirs/defaultTools）。资源**浏览**仍在左栏浮层（pi_list_resources），
+  // 本节只写引擎配置，两个入口不重复同一数据面。
+  'sessions',
+  'skills-tools',
   // GPT-Live 语音（2026-11-12）：引擎模式 / OpenAI key / 模型音色 + 就绪
   // 读数——voice-settings.tsx（moss live 桥接层的配置面）
   'voice',
@@ -851,6 +1115,17 @@ export function SettingsOverlay({
   const [compactionError, setCompactionError] = useState<string | null>(null)
   const [retrySaved, setRetrySaved] = useState<string | null>(null)
   const [retryError, setRetryError] = useState<string | null>(null)
+  /** 新增四节（model / connection / sessions / skills）的写盘反馈。共用一份
+      记录而不是四个 useState 对：drainWrites 需要在任一笔成功时把**其它
+      分组**的"已保存"一并标陈旧（文档被整体替换），记录形态一次搞定。 */
+  const [extraFeedback, setExtraFeedback] = useState<
+    Record<ExtraWriteUi, { saved: string | null; error: string | null }>
+  >({
+    model: { saved: null, error: null },
+    connection: { saved: null, error: null },
+    sessions: { saved: null, error: null },
+    skills: { saved: null, error: null },
+  })
   // ── 主从两栏状态 ──
   // 选中节：左导航高亮 + 右栏条件渲染的依据，默认落模型节。
   const [activeSection, setActiveSection] = useState<SectionId>('model')
@@ -924,9 +1199,12 @@ export function SettingsOverlay({
       if (job.ui === 'retry') {
         setRetrySaved(null)
         setRetryError(msg)
-      } else {
+      } else if (job.ui === 'compaction') {
         setCompactionSaved(null)
         setCompactionError(msg)
+      } else {
+        // 新增四节：错误落在各自分组（切节后仍可见）
+        setExtraFeedback((prev) => ({ ...prev, [job.ui]: { saved: null, error: msg } }))
       }
     }
 
@@ -982,6 +1260,15 @@ export function SettingsOverlay({
           setModelSaved(null)
           setCompactionSaved(null)
           setRetrySaved(null)
+          // 新增四节：先全部标陈旧，再给本笔的分组上"已写入"
+          setExtraFeedback((prev) => {
+            const next = { ...prev }
+            for (const key of EXTRA_WRITE_UIS) next[key] = { saved: null, error: null }
+            if (job.ui !== 'compaction' && job.ui !== 'retry') {
+              next[job.ui] = { saved: job.savedMsg, error: null }
+            }
+            return next
+          })
           if (job.ui === 'retry') {
             setRetrySaved(job.savedMsg)
             setRetryError(null)
@@ -1007,8 +1294,8 @@ export function SettingsOverlay({
       resolve（成功或失败）供控件复位草稿态。 */
   const enqueueStructuredWrite = useCallback(
     (
-      ui: 'compaction' | 'retry',
-      loc: 'compaction' | 'retry' | null,
+      ui: WriteUi,
+      loc: NestedLoc | null,
       keys: readonly string[],
       value: unknown | undefined,
       savedMsg: string,
@@ -1048,6 +1335,32 @@ export function SettingsOverlay({
       setCompactionSaved(null)
       setCompactionError(msg)
     }
+  }, [])
+
+  /** 新增四节的键写入（顶层键或 thinkingBudgets 段）；反馈落 ui 分组。 */
+  const writeKey = useCallback(
+    (
+      ui: ExtraWriteUi,
+      loc: NestedLoc | null,
+      keys: readonly string[],
+      value: unknown | undefined,
+    ): Promise<void> =>
+      enqueueStructuredWrite(ui, loc, keys, value, '已写入 settings.json'),
+    [enqueueStructuredWrite],
+  )
+
+  const rejectExtra = useCallback((ui: ExtraWriteUi, msg: string) => {
+    setExtraFeedback((prev) => ({ ...prev, [ui]: { saved: null, error: msg } }))
+  }, [])
+
+  /** 文档被某个非队列路径整体替换后，把四节的"已保存"一并标陈旧（陈旧
+      徽标 = 假装成功）。 */
+  const clearExtraSaved = useCallback(() => {
+    setExtraFeedback((prev) => {
+      const next = { ...prev }
+      for (const key of EXTRA_WRITE_UIS) next[key] = { saved: null, error: null }
+      return next
+    })
   }, [])
 
   useEffect(() => {
@@ -1151,6 +1464,7 @@ export function SettingsOverlay({
           setModelSaved('默认模型已写入 settings.json（pi 创建新会话时读取）')
           setCompactionSaved(null)
           setRetrySaved(null)
+          clearExtraSaved()
         })
         .catch((e) => {
           console.error('[pi] 默认模型写入失败', e)
@@ -1158,7 +1472,7 @@ export function SettingsOverlay({
           setModelSaved(null)
         })
     },
-    [settingsText, settingsParsed],
+    [settingsText, settingsParsed, clearExtraSaved],
   )
 
   /** 高级段保存：JSON.parse 失败就地显示错误且不发 invoke（禁止静默）。 */
@@ -1173,13 +1487,14 @@ export function SettingsOverlay({
         writesRef.current.committed = settingsParsed.doc
         setSettingsError(null)
         setSettingsSaved('已保存到 settings.json')
+        clearExtraSaved()
       })
       .catch((e) => {
         console.error('[pi] settings.json 写入失败', e)
         setSettingsError(describeIpcError(e))
         setSettingsSaved(null)
       })
-  }, [settingsText, settingsParsed])
+  }, [settingsText, settingsParsed, clearExtraSaved])
 
   const saveModelsConfigDoc = useCallback(() => {
     if (modelsConfigText === null || modelsConfigParsed === null) return
@@ -1727,9 +2042,9 @@ export function SettingsOverlay({
                 </select>
                 <p className="set-hint">
                   默认模型写入 settings.json 的{' '}
-                  <span className="set-code">default_provider</span> /{' '}
-                  <span className="set-code">default_model</span>（pi 创建新会话时读取；
-                  对当前会话用输入框的模型选择器切换）。
+                  <span className="set-code">defaultProvider</span> /{' '}
+                  <span className="set-code">defaultModel</span>（rpi 只认 camelCase；
+                  pi 创建新会话时读取。对当前会话用输入框的模型选择器切换）。
                 </p>
                 {settingsParseError !== null && (
                   <div className="set-err">
@@ -1739,6 +2054,174 @@ export function SettingsOverlay({
                 )}
                 {modelSaved !== null && <span className="set-saved">{modelSaved}</span>}
               </>
+            )}
+
+            {/* ── 思考与推理 / 可用模型范围 / 消息队列（2026-11-14 GUI 相关
+                rpi settings 补齐）。全部是 settings.json **顶层**键（思考
+                预算除外，它在 thinkingBudgets 对象里），rpi 建会话时经
+                session::build / provider::resolve 读取；当前会话的思考档位
+                仍用输入框旁的档位选择器（pi_set_thinking_level，只作用于
+                本会话）。 ── */}
+            {settingsText !== null &&
+              settingsParsed !== null &&
+              !('error' in settingsParsed) && (
+                <>
+                  <h4 className="set-sub-title">思考与推理</h4>
+                  <p className="set-hint">
+                    rpi 的默认思考档位与各档位的 token 预算。宿主当前会话的
+                    档位用输入框旁的档位选择器切换（只改本会话）；这里的值是
+                    引擎建会话时的默认（宿主新会话同样走 rpi 的 build，故生效）。
+                  </p>
+                  <SetField
+                    name="defaultThinkingLevel"
+                    note="合法值：off / minimal / low / medium / high / xhigh / max（模型不支持的档位会被 clamp）"
+                  >
+                    <SetEnumField
+                      onWrite={(v) =>
+                        writeKey('model', null, K_DEFAULT_THINKING_LEVEL, v)
+                      }
+                      options={[
+                        { value: 'off', label: 'off（关闭思考）' },
+                        { value: 'minimal', label: 'minimal' },
+                        { value: 'low', label: 'low' },
+                        { value: 'medium', label: 'medium' },
+                        { value: 'high', label: 'high' },
+                        { value: 'xhigh', label: 'xhigh' },
+                        { value: 'max', label: 'max' },
+                      ]}
+                      read={readField(
+                        settingsParsed.doc,
+                        null,
+                        K_DEFAULT_THINKING_LEVEL,
+                      )}
+                      unsetLabel="未设置（默认：medium）"
+                    />
+                  </SetField>
+                  <SetField
+                    name="hideThinkingBlock"
+                    note="隐藏思考块正文、只保留紧凑标签（rpi 终端渲染偏好；宿主对话栏的思考块渲染尚未跟随此键）"
+                  >
+                    <SetBoolField
+                      onWrite={(v) =>
+                        writeKey('model', null, K_HIDE_THINKING_BLOCK, v)
+                      }
+                      read={readField(
+                        settingsParsed.doc,
+                        null,
+                        K_HIDE_THINKING_BLOCK,
+                      )}
+                      unsetLabel="未设置（默认：显示正文）"
+                    />
+                  </SetField>
+                  <p className="set-hint">
+                    思考预算（tokens，按档位；只对 token-budget 型推理模型有效，
+                    留空 = 模型内置预算）：
+                  </p>
+                  {THINKING_BUDGET_ROWS.map((row) => (
+                    <SetField key={row.label} name={`thinkingBudgets.${row.label}`}>
+                      <SetNumField
+                        {...numDraftFor(row.draftKey)}
+                        max={U32_MAX}
+                        onReject={(msg) => rejectExtra('model', msg)}
+                        onWrite={(v) =>
+                          writeKey('model', 'thinkingBudgets', row.keys, v)
+                        }
+                        placeholder="模型内置预算"
+                        read={readField(
+                          settingsParsed.doc,
+                          'thinkingBudgets',
+                          row.keys,
+                        )}
+                      />
+                    </SetField>
+                  ))}
+
+                  <h4 className="set-sub-title">可用模型范围</h4>
+                  <SetField
+                    name="scopedModels"
+                    note="一行一个 provider/modelId（也可用逗号分隔）；留空 = 删键，rpi 视为全部目录模型。enabledModels 是上游别名，文档里已有该形式时原地更新。"
+                  >
+                    <SetTextDraftField
+                      {...numDraftFor('scopedModels')}
+                      committed={
+                        listFieldView(
+                          readField(settingsParsed.doc, null, K_SCOPED_MODELS),
+                        ).committed
+                      }
+                      expect="字符串数组"
+                      invalidRaw={
+                        listFieldView(
+                          readField(settingsParsed.doc, null, K_SCOPED_MODELS),
+                        ).invalidRaw
+                      }
+                      multiline
+                      onReject={(msg) => rejectExtra('model', msg)}
+                      onWrite={(v) =>
+                        writeKey('model', null, K_SCOPED_MODELS, v)
+                      }
+                      parse={parseListText}
+                      placeholder={'anthropic/claude-sonnet-5\ndeepseek/deepseek-chat'}
+                      rows={3}
+                    />
+                  </SetField>
+                  <p className="set-hint">
+                    rpi 终端用此列表限定 Ctrl+P 循环的模型；宿主输入框的模型
+                    选择器读 pi_list_models 全量目录，尚未按此键过滤。
+                  </p>
+
+                  <h4 className="set-sub-title">消息队列</h4>
+                  <p className="set-hint">
+                    运行中发送的消息分 steer（引导当前回合）与 follow-up
+                    （回合结束后跟进）两条队列；这里是排空节奏。rpi 建会话时
+                    读取，宿主与终端共用同一 build 路径。
+                  </p>
+                  <SetField name="steeringMode" note="steer 队列的排空节奏">
+                    <SetEnumField
+                      onWrite={(v) => writeKey('model', null, K_STEERING_MODE, v)}
+                      options={[
+                        { value: 'all', label: 'all（一次全部送达）' },
+                        {
+                          value: 'one-at-a-time',
+                          label: 'one-at-a-time（逐条）',
+                        },
+                      ]}
+                      read={readField(settingsParsed.doc, null, K_STEERING_MODE)}
+                      unsetLabel="未设置（默认：one-at-a-time）"
+                    />
+                  </SetField>
+                  <SetField name="followUpMode" note="follow-up 队列的排空节奏">
+                    <SetEnumField
+                      onWrite={(v) =>
+                        writeKey('model', null, K_FOLLOW_UP_MODE, v)
+                      }
+                      options={[
+                        { value: 'all', label: 'all（一次全部送达）' },
+                        {
+                          value: 'one-at-a-time',
+                          label: 'one-at-a-time（逐条）',
+                        },
+                      ]}
+                      read={readField(
+                        settingsParsed.doc,
+                        null,
+                        K_FOLLOW_UP_MODE,
+                      )}
+                      unsetLabel="未设置（默认：one-at-a-time）"
+                    />
+                  </SetField>
+                  {extraFeedback.model.error !== null && (
+                    <div className="set-err">{extraFeedback.model.error}</div>
+                  )}
+                  {extraFeedback.model.saved !== null && (
+                    <span className="set-saved">{extraFeedback.model.saved}</span>
+                  )}
+                </>
+              )}
+            {settingsText !== null && settingsParseError !== null && (
+              <div className="set-err">
+                settings 文档解析失败——修正「安全与数据 · 安全」里的 JSON 后，本节的引擎默认值才能编辑：
+                {settingsParseError}
+              </div>
             )}
 
             {/* ── 重试与故障转移（旧「重试 · Retry」节原样并入）：
@@ -1974,6 +2457,7 @@ export function SettingsOverlay({
                     setCompactionError(null)
                     setRetrySaved(null)
                     setRetryError(null)
+                    clearExtraSaved()
                   }}
                   spellCheck={false}
                   value={settingsText}
@@ -2029,6 +2513,228 @@ export function SettingsOverlay({
                     <span className="set-saved">{modelsConfigSaved}</span>
                   )}
                 </div>
+              </>
+            )}
+          </section>
+          )}
+
+          {/* ── 会话管理（安全与数据 / 会话管理）：rpi 的会话存储目录。
+              旧占位文案「没有需要在此配置的项」被 rpi 的 sessionDir 推翻
+              （2026-11-14 补齐）——建/切/重命名/删除仍在左栏会话列表，
+              本节只配"会话存在哪"。 ── */}
+          {activeSection === 'sessions' && (
+          <section className="set-section">
+            <h4 className="set-sub-title">会话存储</h4>
+            <p className="set-hint">
+              rpi 建会话时的会话根目录。优先级：命令行{' '}
+              <span className="set-code">--session-dir</span> &gt; 本键{' '}
+              <span className="set-code">sessionDir</span> &gt; 环境变量{' '}
+              <span className="set-code">RPI_CODING_AGENT_SESSION_DIR</span> &gt;{' '}
+              <span className="set-code">{'<workspace>/.rpi/sessions'}</span>。
+              相对路径相对工作区；留空 = 删键回默认。
+            </p>
+            {settingsMissing && (
+              <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
+            )}
+            {settingsText !== null && settingsParseError !== null && (
+              <div className="set-err">
+                settings 文档解析失败——修正「安全与数据 · 安全」里的 JSON 后才能使用本段：
+                {settingsParseError}
+              </div>
+            )}
+            {settingsParsed !== null && !('error' in settingsParsed) && (
+              <>
+                <SetField
+                  name="sessionDir"
+                  note="绝对路径，或相对当前工作区的路径（rpi 按工作区解析相对根）"
+                >
+                  <SetTextDraftField
+                    {...numDraftFor('sessionDir')}
+                    committed={
+                      textFieldView(
+                        readField(settingsParsed.doc, null, K_SESSION_DIR),
+                      ).committed
+                    }
+                    expect="字符串"
+                    invalidRaw={
+                      textFieldView(
+                        readField(settingsParsed.doc, null, K_SESSION_DIR),
+                      ).invalidRaw
+                    }
+                    onReject={(msg) => rejectExtra('sessions', msg)}
+                    onWrite={(v) =>
+                      writeKey('sessions', null, K_SESSION_DIR, v)
+                    }
+                    parse={parsePlainText}
+                    placeholder="默认 <workspace>/.rpi/sessions"
+                  />
+                </SetField>
+                <p className="set-hint">
+                  注意（如实）：宿主左栏的会话列表固定扫{' '}
+                  <span className="set-code">{'<workspace>/.rpi/sessions'}</span>
+                  （pi_session.rs 的 list_sessions）。把本键指到别处后，rpi 会把
+                  新会话写进那个目录，而宿主列表看不到它们——列表跟随本键是
+                  宿主的待接线项。
+                </p>
+                {extraFeedback.sessions.error !== null && (
+                  <div className="set-err">{extraFeedback.sessions.error}</div>
+                )}
+                {extraFeedback.sessions.saved !== null && (
+                  <span className="set-saved">{extraFeedback.sessions.saved}</span>
+                )}
+              </>
+            )}
+          </section>
+          )}
+
+          {/* ── 技能与工具（Agent 控制 / 技能与工具）：rpi 的追加资源目录 +
+              引擎默认工具列表（2026-11-14 补齐）。旧占位文案说"只读资源
+              面板是独立浮层、此处不嵌入"——资源**浏览**仍在左栏浮层
+              （pi_list_resources），本节是**引擎配置的写面**，两者不重复。 ── */}
+          {activeSection === 'skills-tools' && (
+          <section className="set-section">
+            <h4 className="set-sub-title">资源目录</h4>
+            <p className="set-hint">
+              rpi 装载技能 / 提示词模板 / 原生扩展时**追加**的目录（一行一个，
+              也可用逗号分隔）。相对路径相对 settings 的所属者：全局 settings
+              （<span className="set-code">~/.rpi/agent/settings.json</span>）
+              相对 <span className="set-code">~/.rpi/agent</span>，项目{' '}
+              <span className="set-code">.rpi/settings.json</span> 相对项目根。
+              留空 = 删键，只用默认目录。
+            </p>
+            {settingsMissing && (
+              <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
+            )}
+            {settingsText !== null && settingsParseError !== null && (
+              <div className="set-err">
+                settings 文档解析失败——修正「安全与数据 · 安全」里的 JSON 后才能使用本段：
+                {settingsParseError}
+              </div>
+            )}
+            {settingsParsed !== null && !('error' in settingsParsed) && (
+              <>
+                <SetField
+                  name="skillDirs"
+                  note="追加技能目录。宿主自己的技能页（左栏「技能与工具」浮层 / pi_capabilities）当前只扫 <workspace>/.rpi/skills 与 ~/.rpi/agent/skills，不读本键；rpi 建会话时读"
+                >
+                  <SetTextDraftField
+                    {...numDraftFor('skillDirs')}
+                    committed={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_SKILL_DIRS),
+                      ).committed
+                    }
+                    expect="字符串数组"
+                    invalidRaw={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_SKILL_DIRS),
+                      ).invalidRaw
+                    }
+                    multiline
+                    onReject={(msg) => rejectExtra('skills', msg)}
+                    onWrite={(v) => writeKey('skills', null, K_SKILL_DIRS, v)}
+                    parse={parseListText}
+                    placeholder={'skills\nD:\\team-skills'}
+                    rows={3}
+                  />
+                </SetField>
+                <SetField
+                  name="promptDirs"
+                  note="追加提示词模板目录（rpi 的 / 命令模板 loader；宿主资源面板只列举 ~/.rpi/agent/prompts）"
+                >
+                  <SetTextDraftField
+                    {...numDraftFor('promptDirs')}
+                    committed={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_PROMPT_DIRS),
+                      ).committed
+                    }
+                    expect="字符串数组"
+                    invalidRaw={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_PROMPT_DIRS),
+                      ).invalidRaw
+                    }
+                    multiline
+                    onReject={(msg) => rejectExtra('skills', msg)}
+                    onWrite={(v) => writeKey('skills', null, K_PROMPT_DIRS, v)}
+                    parse={parseListText}
+                    placeholder={'prompts\nD:\\team-prompts'}
+                    rows={3}
+                  />
+                </SetField>
+                <SetField
+                  name="extensionDirs"
+                  note="追加原生扩展（Rust cdylib）目录。宿主扩展列表（pi_extensions）只扫 ~/.rpi/agent/extensions 与登记表；rpi 启动扫描读本键"
+                >
+                  <SetTextDraftField
+                    {...numDraftFor('extensionDirs')}
+                    committed={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_EXTENSION_DIRS),
+                      ).committed
+                    }
+                    expect="字符串数组"
+                    invalidRaw={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_EXTENSION_DIRS),
+                      ).invalidRaw
+                    }
+                    multiline
+                    onReject={(msg) => rejectExtra('skills', msg)}
+                    onWrite={(v) =>
+                      writeKey('skills', null, K_EXTENSION_DIRS, v)
+                    }
+                    parse={parseListText}
+                    placeholder={'extensions\nD:\\team-extensions'}
+                    rows={3}
+                  />
+                </SetField>
+
+                <h4 className="set-sub-title">默认工具</h4>
+                <p className="set-hint">
+                  rpi 建会话时只启用这里列出的内置工具（留空 = 删键 =
+                  全部内置工具）。与宿主「工具集」开关不是同一个面：工具集是
+                  宿主的语义分组，存{' '}
+                  <span className="set-code">~/.rpi/agent/harness-capabilities.json</span>
+                  （独立文件，不写 settings.json 以免污染 rpi schema），且 rpi
+                  侧的工具过滤尚未接回宿主；这里写的是引擎自己的{' '}
+                  <span className="set-code">defaultTools</span>（rpi-cli
+                  session.rs 的 build 直接消费）。
+                </p>
+                <SetField
+                  name="defaultTools"
+                  note="一行一个工具名（如 read / bash / edit）；留空 = 全部内置工具"
+                >
+                  <SetTextDraftField
+                    {...numDraftFor('defaultTools')}
+                    committed={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_DEFAULT_TOOLS),
+                      ).committed
+                    }
+                    expect="字符串数组"
+                    invalidRaw={
+                      listFieldView(
+                        readField(settingsParsed.doc, null, K_DEFAULT_TOOLS),
+                      ).invalidRaw
+                    }
+                    multiline
+                    onReject={(msg) => rejectExtra('skills', msg)}
+                    onWrite={(v) =>
+                      writeKey('skills', null, K_DEFAULT_TOOLS, v)
+                    }
+                    parse={parseListText}
+                    placeholder={'read\nbash\nedit\nwrite'}
+                    rows={4}
+                  />
+                </SetField>
+                {extraFeedback.skills.error !== null && (
+                  <div className="set-err">{extraFeedback.skills.error}</div>
+                )}
+                {extraFeedback.skills.saved !== null && (
+                  <span className="set-saved">{extraFeedback.skills.saved}</span>
+                )}
               </>
             )}
           </section>
@@ -2606,8 +3312,136 @@ export function SettingsOverlay({
               完整复刻（src/app/settings/gateway-settings.tsx，2026-10-24
               子代理移植）——四张连接模式卡（云/远程/SSH 按实态禁用）+
               本地面板（端点/token/复制）+ 诊断行。hermes 的远程/云/SSH
-              模式深绑它的网关后端，未实现——卡面如实禁用。 ── */}
-          {activeSection === 'core-connection' && <GatewaySettings />}
+              模式深绑它的网关后端，未实现——卡面如实禁用。
+              下半段「引擎网络」= rpi settings.json 的 HTTP 面（2026-11-14
+              补齐）：rpi 建会话时读取（session::build 的 saved_settings
+              段），改动对下一个会话生效。 ── */}
+          {activeSection === 'core-connection' && (
+            <>
+              <GatewaySettings />
+              <section className="set-section">
+                <h4 className="set-sub-title">引擎网络</h4>
+                <p className="set-hint">
+                  引擎自身 HTTP 客户端的网络配置（settings.json 顶层键，rpi
+                  建会话时读取）。这些不是宿主窗口/网关的设置——网关端点在
+                  上方「本地面板」。
+                </p>
+                {settingsMissing && (
+                  <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
+                )}
+                {settingsText !== null && settingsParseError !== null && (
+                  <div className="set-err">
+                    settings 文档解析失败——修正「安全与数据 · 安全」里的 JSON 后才能使用本段：
+                    {settingsParseError}
+                  </div>
+                )}
+                {settingsParsed !== null && !('error' in settingsParsed) && (
+                  <>
+                    <SetField
+                      name="httpProxy"
+                      note="写入 HTTP_PROXY/HTTPS_PROXY 供 rpi 的 HTTP 客户端使用；环境变量里已有值时以环境变量为准。留空 = 直连"
+                    >
+                      <SetTextDraftField
+                        {...numDraftFor('httpProxy')}
+                        committed={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_HTTP_PROXY),
+                          ).committed
+                        }
+                        expect="字符串"
+                        invalidRaw={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_HTTP_PROXY),
+                          ).invalidRaw
+                        }
+                        onReject={(msg) => rejectExtra('connection', msg)}
+                        onWrite={(v) =>
+                          writeKey('connection', null, K_HTTP_PROXY, v)
+                        }
+                        parse={parsePlainText}
+                        placeholder="http://127.0.0.1:7890"
+                      />
+                    </SetField>
+                    <SetField
+                      name="cdnBaseUrl"
+                      note="发布包下载的 CDN 加速前缀；GitHub 清单仍是权威来源（CDN 只是传输加速）。留空 = 直连 GitHub"
+                    >
+                      <SetTextDraftField
+                        {...numDraftFor('cdnBaseUrl')}
+                        committed={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_CDN_BASE_URL),
+                          ).committed
+                        }
+                        expect="字符串"
+                        invalidRaw={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_CDN_BASE_URL),
+                          ).invalidRaw
+                        }
+                        onReject={(msg) => rejectExtra('connection', msg)}
+                        onWrite={(v) =>
+                          writeKey('connection', null, K_CDN_BASE_URL, v)
+                        }
+                        parse={parsePlainText}
+                        placeholder="https://assets.example.com"
+                      />
+                    </SetField>
+                    <SetField
+                      name="streamIdleTimeout"
+                      note="流式回复两段数据之间的最大静默秒数（默认 300；0 = 关闭该保护）"
+                    >
+                      <SetNumField
+                        {...numDraftFor('streamIdleTimeout')}
+                        max={U32_MAX}
+                        onReject={(msg) => rejectExtra('connection', msg)}
+                        onWrite={(v) =>
+                          writeKey('connection', null, K_STREAM_IDLE_TIMEOUT, v)
+                        }
+                        placeholder="默认 300"
+                        read={readField(
+                          settingsParsed.doc,
+                          null,
+                          K_STREAM_IDLE_TIMEOUT,
+                        )}
+                      />
+                    </SetField>
+                    <SetField
+                      name="httpIdleTimeout"
+                      note="空闲连接在池中的保留时长：非负整数（毫秒）或 disabled（关闭回收）。留空 = 库内置默认"
+                    >
+                      <SetTextDraftField
+                        {...numDraftFor('httpIdleTimeout')}
+                        committed={
+                          httpIdleFieldView(
+                            readField(settingsParsed.doc, null, K_HTTP_IDLE_TIMEOUT),
+                          ).committed
+                        }
+                        expect="毫秒整数或 disabled"
+                        invalidRaw={
+                          httpIdleFieldView(
+                            readField(settingsParsed.doc, null, K_HTTP_IDLE_TIMEOUT),
+                          ).invalidRaw
+                        }
+                        onReject={(msg) => rejectExtra('connection', msg)}
+                        onWrite={(v) =>
+                          writeKey('connection', null, K_HTTP_IDLE_TIMEOUT, v)
+                        }
+                        parse={parseHttpIdle}
+                        placeholder="30000 或 disabled"
+                      />
+                    </SetField>
+                    {extraFeedback.connection.error !== null && (
+                      <div className="set-err">{extraFeedback.connection.error}</div>
+                    )}
+                    {extraFeedback.connection.saved !== null && (
+                      <span className="set-saved">{extraFeedback.connection.saved}</span>
+                    )}
+                  </>
+                )}
+              </section>
+            </>
+          )}
 
           {/* ── 账户（关于 / 账户）：openhuman AccountPanel 的完整移植
                （src/app/settings/account-settings.tsx，2026-10-25）——

@@ -1224,13 +1224,22 @@ fn pi_ask_pending(
     Ok(serde_json::Value::Array(state.asks.list()))
 }
 
-/// 应答 ask 问题（竖链移植降级：rpi 无 ask 工具——如实 Err）。
+/// 应答 ask 问题（宿主问答卡桥待接——如实 Err）。
+///
+/// rpi 的提问能力来自插件 `rpi-ask-user` 的工具 `ask_user`（本机已装：
+/// `~/.rpi/agent/extensions/rpi_ask_user.dll`）。实现 = `rpi-extensions`
+/// 的 `UiDialogMailbox`（runtime action 17，`handle` 收
+/// `{op:open|poll|cancel|response}` 信封），且**必须有交互 UI 挂载**，
+/// 否则上游明确拒绝 "ask_user requires an interactive UI"
+/// （`crates/rpi-extensions/src/actions.rs:526`）。宿主目前既没把该
+/// mailbox 挂到会话上，也没把问题卡扇出到前端——`pi_ask_pending` 恒空、
+/// 这里没有可回灌的 id，故保留 Err，等问答卡桥接好再接真。
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_ask_response(
     _state: tauri::State<std::sync::Arc<agui::AguiState>>,
     _id: String,
 ) -> Result<(), String> {
-    Err("rpi 引擎待接：ask 工具".into())
+    Err("ask_user 由 rpi-ask-user 插件工具提供（会话内）；宿主问答卡桥待接".into())
 }
 
 /// 子代理 transcript（活动面板 TaskCard 展开）：pi `transcript_page`。
