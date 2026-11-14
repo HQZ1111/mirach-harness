@@ -91,15 +91,23 @@
 
 /* 列头上行容器：项目名 + 双工语音钮（2026-11-14 用户定稿"项目名右边，
    像微信的语音通话按钮"）。列头整体 pointer-events:none（拖拽区语义），
-   钮在组件上单独 pointer-events-auto 放行。max-width 50% 的省略语义随
-   span 下沉到行内不变。 */
+   钮在组件上单独 pointer-events-auto 放行。
+   **必须撑满列头宽**（2026-11-15 用户："语音按钮在工作区名的上面，把工作
+   区名挤住了"）：父容器是 flex column + align-items:flex-start（shrink-wrap），
+   行不撑满时 span 的百分比 max-width 解析基准塌成自身内容宽 → 名字被截成
+   "Admin…"；行撑满后 span 才有可分配的剩余宽度做省略。 */
 .chat-tab-label__row {
   align-items: center;
+  align-self: stretch;
   display: flex;
   gap: 10px;
   min-width: 0;
+  width: 100%;
 }
 
+/* 名字吃掉按钮之外的全部宽度（右上角动作组 = 语音通话 + 聊天记录两枚
+   size-6 钮 + 间隙 ≈ 52），超宽省略。flex-basis 0 让省略只发生在空间
+   不足时，不会把名字硬砍到一半。 */
 .chat-tab-label__workspace {
   color: var(--chat-tab-workspace-color);
   font-size: var(--chat-tab-workspace-size);
@@ -110,10 +118,29 @@
      用 transform（同 __session 的理由：容器 space-between 下 margin 会被
      剩余空间重分配影响，transform 不参与布局、位移确定）。 */
   transform: translateY(var(--chat-workspace-nudge));
-  max-width: 50%; /* 栏宽的 50%——超宽省略（与旧叠片语义一致） */
+  flex: 1 1 0;
+  max-width: calc(100% - 56px);
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 右上角动作组（2026-11-15 用户定稿："语音钮放右上角，图标换成语音通话的，
+   右边再放聊天记录，和微信一样"）。margin-left:auto 贴右端；整组与工作区名
+   同一视觉基线（工作区名有 --chat-workspace-nudge 的下移，动作组同步位移，
+   否则会"浮在名字上方"）。 */
+.chat-tab-label__actions {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 2px;
+  margin-left: auto;
+  transform: translateY(var(--chat-workspace-nudge));
+}
+
+.chat-tab-label__actions > * {
+  pointer-events: auto;
 }
 
 .chat-tab-label__session {

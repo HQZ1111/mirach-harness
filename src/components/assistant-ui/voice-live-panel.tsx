@@ -16,7 +16,7 @@
  * voice-live-conversation.tsx（provider 内常驻），两个传输共用。
  */
 import { FC, useEffect, useRef, useState } from 'react'
-import { MicIcon, MicOffIcon, SquareIcon } from 'lucide-react'
+import { MicIcon, MicOffIcon, PhoneIcon, PhoneOffIcon, SquareIcon } from 'lucide-react'
 import { useAui } from '@assistant-ui/react'
 
 import { MossLiveSession } from '@/lib/moss-live'
@@ -227,7 +227,7 @@ export const VoiceLiveButton: FC = () => {
       }
       type="button"
     >
-      {sessionUp ? <SquareIcon className="size-3.5" /> : <MicIcon className="size-3.5" />}
+      {sessionUp ? <PhoneOffIcon className="size-3.5" /> : <PhoneIcon className="size-3.5" />}
     </button>
   )
 }

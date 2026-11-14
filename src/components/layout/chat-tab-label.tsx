@@ -16,6 +16,7 @@ import {
   sessionProjectCwd,
 } from '@/components/panes/session-manage/session-catalog';
 import { VoiceLiveButton } from '@/components/assistant-ui/voice-live-panel';
+import { ChatHistoryButton } from '@/components/layout/chat-history-button';
 
 export function ChatTabLabel(): React.ReactElement | null {
   const entry = useStore(sessionCatalog, (s) =>
@@ -29,13 +30,18 @@ export function ChatTabLabel(): React.ReactElement | null {
   const workspace = cwd != null ? workspaceGroupLabel(cwd) : 'WORK SPACE';
   return (
     <div className="chat-tab-label" data-slot="chat-tab-label">
-      {/* 双工语音钮在项目名右侧（2026-11-14 用户定稿"像微信的语音通话按钮
-          一样"）——行容器接住钮的 pointer-events（列头整体 none，见 CSS）。 */}
+      {/* 行 1 = 工作区名 + 右上角动作组（2026-11-15 用户定稿"语音钮放右上角，
+          图标换成语音通话的，右边再放聊天记录，和微信一样"）。动作组
+          margin-left:auto 贴右端；工作区名吃剩余宽度、超出省略——不再被
+          按钮挤成 "Admin…"。 */}
       <div className="chat-tab-label__row" data-slot="chat-tab-label-row">
         <span className="chat-tab-label__workspace" data-workspace={workspace}>
           {workspace}
         </span>
-        <VoiceLiveButton />
+        <div className="chat-tab-label__actions" data-slot="chat-tab-label-actions">
+          <VoiceLiveButton />
+          <ChatHistoryButton />
+        </div>
       </div>
       {/* title 悬停看全名：pointer-events 需在 span 上放行（锚层整体
           none——见 flexlayout.css 的 __session 规则） */}
