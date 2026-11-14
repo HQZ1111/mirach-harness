@@ -1771,6 +1771,38 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   保留（将来配价目/恢复展示随时可用）。
 - **门禁**：cargo check 0/0 · cargo test **164** · tsc 0 · vitest **793**。
 
+## 待办清零轮（2026-11-15）：bot 会话 / 子代理实证 / 三项不可做实证
+
+- **bot 会话接真**：`create_bot_session` 从 Err 改为真实现——新增
+  `build_harness_with(cwd, session_path, provider, model)`（resolve 带
+  provider/model 覆盖；`build_harness` 委托它），再
+  `set_system_prompt` + `AgentLane::set_active_tools` → 作为活动会话；
+  命令层 `pi_create_bot_session` 照旧 rename 成 bot 名。真机实测：
+  注入 SOUL「只回复'机器人已就绪'」→ 会话回复正好是「机器人 已就绪」；
+  sessionId 返回、provider/model 覆盖生效。
+- **子代理能力实证通过**：`delegate_task`（rpi-subagents 插件）——
+  rpi-cli 的 `extensions_actions.rs:689` **实现了 RuntimeActionHost::
+  child_agent**（trait 默认是 Err "not supported"），所以模型真能派子代理：
+  实测模型回「子代理返回结果：2（completed，1 轮）」。**hub 花名册 UI
+  仍不可得**：child 状态在 rpi-cli 进程内（`ChildAgents` 是 pub(crate)，
+  无 AppendEntry/SetStatus），宿主没有任何读取面——保留 Err 是事实。
+- **background-tasks 插件：上游包不可用于本引擎（实证）**：无预编译
+  （rpi-extension.json 缺）；`rpi install rpi-background-tasks --build`
+  源码编译 **5 个错**（E0061/E0133/E0277/E0425）——该 crate 针对的
+  rpi-plugin-sdk 版本与本地 v0.24.0 不兼容。等上游更新前无解。
+- **OAuth：无可用路径（实证）**：rpi-cli auth.rs 只有交互式 TUI
+  （`run`/`run_with_extensions`，无 begin/exchange/poll 嵌入 API）；
+  宿主桥 `rpi-extensions::oauth::request_oauth` 需要**已注册的 OAuth
+  provider 插件**，而 rpi-package 没有 OAuth provider 扩展（24 个已装
+  插件里也没有）——桥接代码会是死代码。凭据走 env key / models.json
+  apiKey（设置页已覆盖）。保留 Err + 准确文案。
+- **分栏 side / undo/redo：引擎结构性不可做（实证）**：rpi 非 main
+  lane 的 `LaneHandle` 一律拒绝 run 操作（只读视图），side_prompt 无法
+  实现；undo/redo 需要 FileMutationRecorder（rpi 全仓无此概念，任何
+  ABI 都读不回改动前文件内容）。两者保留 Err + 准确文案。
+- **门禁**：cargo check 0/0 · cargo test **164** · 真机：bot 会话、
+  delegate_task、ask_user、checkpoint 四个插件面全部闭环。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换

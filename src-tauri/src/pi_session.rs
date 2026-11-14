@@ -234,8 +234,20 @@ impl PiEngine {
     /// 这里按会话 id 反查会话目录补齐——删除保护、fork、导出、静态面板都靠
     /// 路径定位；拿不到路径 = Err（不静默留 None）。
     fn build_harness(&self, cwd: &Path, session_path: Option<&str>) -> Result<HarnessLive, String> {
-        let (harness, events, reload, provider, model_id, id) = self.shared.rt.block_on(async {
-            let resolved = rpi_cli::provider::resolve(None, None, None, None, None)
+        self.build_harness_with(cwd, session_path, None, None)
+    }
+
+    /// 同 [`Self::build_harness`]，但允许指定 provider/model 覆盖（bot 会话
+    /// 与 cron 之外的按需覆盖场景；None = 走 settings/内置默认解析）。
+    fn build_harness_with(
+        &self,
+        cwd: &Path,
+        session_path: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<HarnessLive, String> {
+        let (harness, events, reload, resolved_provider, model_id, id) = self.shared.rt.block_on(async {
+            let resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
                 .map_err(|e| format!("模型解析失败: {e}"))?;
             let mut args = rpi_cli::args::Args::default();
             if let Some(p) = session_path {
@@ -276,7 +288,7 @@ impl PiEngine {
             reload,
             session_path: Some(session_path),
             sessions_root,
-            provider,
+            provider: resolved_provider,
             model_id,
         })
     }
@@ -1648,14 +1660,53 @@ impl PiEngine {
 
     pub fn create_bot_session(
         &self,
-        _provider: Option<String>,
-        _model: Option<String>,
-        _system_prompt: Option<String>,
-        _cwd: Option<String>,
-        _enabled_tools: Option<Vec<String>>,
+        provider: Option<String>,
+        model: Option<String>,
+        system_prompt: Option<String>,
+        cwd: Option<String>,
+        enabled_tools: Option<Vec<String>>,
         _ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
-        Err(Self::unavailable("bot 会话"))
+        // hermes/旧 pi 的 bot 会话 = **带 system_prompt 与（可选）模型覆盖的
+        // 新会话**（不是普通会话加壳）：机器人自己的 SOUL 提示就是它的身份。
+        // rpi 侧等价面：resolve 带 provider/model 覆盖 → build → set_system_prompt
+        // → set_active_tools → 作为活动会话。cwd 缺省 = 默认工作区。
+        let cwd = cwd
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.shared.cwd.clone());
+        let live = self.build_harness_with(
+            &cwd,
+            None,
+            provider.as_deref(),
+            model.as_deref(),
+        )?;
+        if let Some(prompt) = system_prompt {
+            self.shared
+                .rt
+                .block_on(live.harness.set_system_prompt(Some(prompt)))
+                .map_err(|e| format!("bot 会话系统提示设置失败: {e}"))?;
+        }
+        if let Some(tools) = enabled_tools {
+            self.shared
+                .rt
+                .block_on(AgentLane::set_active_tools(live.harness.as_ref(), tools))
+                .map_err(|e| format!("bot 会话工具集设置失败: {e}"))?;
+        }
+        let id = self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .get_metadata()
+                .await
+                .map(|m| m.id)
+                .map_err(|e| format!("bot 会话元数据读取失败: {e}"))
+        })?;
+        *self
+            .shared
+            .model_line
+            .lock()
+            .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
+        *self.shared.live.lock().map_err(|_| "锁中毒".to_string())? = Some(Arc::new(live));
+        Ok(id)
     }
 
     // ── 分栏（v7.4 多柄）——rpi v1 非 main lane 拒绝 run 操作 ────────────────
