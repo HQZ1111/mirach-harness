@@ -1345,6 +1345,56 @@ vitest 792。**坑**：HMR 时序下 thread.aui 的旧模块会短暂报
 `VoiceLiveButton is not defined`（改 import 与改 JSX 两个 HMR 到达之间）——
 reload 后即消，不是真引用残留（Select-String 全量复核 0）。
 
+## 引擎核心换 rpi-main（2026-11-14 竖链移植，用户定稿"核心换成
+G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
+
+- **egui 试验田结论先行**（G:\mirach-egui，独立仓库，已重建保留待做）：
+  egui 直连 rpi 的竖链（AgentHarness 驱动）+ 样式对齐轮全部打通，但**内存
+  地板四组实测证伪了 egui 的内存优势**（空窗 Private：0.37 Vello/wgpu
+  D3D12 385.5 / GL 218.6 / 0.32+glow 182.9 / WebView2 空 ~190——本机任何
+  GPU 渲染 UI 地板 ~180-220 起，0.37 的 Vello 后端比 WebView2 还重；应用级
+  423MB > 打包版 WebView 全应用 321.8MB）。用户看过原型样式差距后定夺：
+  egui 删除→重建保留待做，主线留在 WebView。
+- **引擎核心交换（本轮主体）**：`pi_session.rs` 全量重写——对话面
+  （ensure/open/discard/prompt/prompt_with_content/interrupt/state/
+  list_sessions/rename/delete/new_session_with_cwd）换 **rpi-harness
+  AgentHarness**；旧 pi 独有面（hub 五面/todo/usage/分支线系/检查点/rewind/
+  undo/retry_edit/compact/export/timeline/job 面/bot 会话/模型切换/plan-
+  审批模式）**如实降级 Err("rpi 引擎待接：…")**——标红纪律，rpi-main
+  v0.24.0 尚无对应能力；分栏 side_* = Err（rpi 非 main lane 只读）；
+  session_lineage = Ok(None)（线系条不渲染，非错误）。
+- **嵌入法（照 egui 试验田验证）**：**rpi-cli 当 SDK 库**——
+  `provider::resolve`（models.json+env key）→ `session::build(&resolved,
+  &args, &cwd, false)`（文档原话 "v1 equivalent of TS createAgentSession"）
+  → `(AgentHarness, tokio broadcast::Receiver<AgentEvent>, ReloadContext)`；
+  prompt = `AgentLane::prompt_text(&self, text, images)`（&self 可共享，
+  **须 use rpi_harness::agent_harness::AgentLane**）；流式 = options 的
+  BroadcastEmitter → build 返回的 Receiver → **每轮 resubscribe** 排水任务
+  转 on_event；中断 = `AgentLane::abort(&self)`；运行时 = **tokio
+  multi-thread**（rpi 用 tokio，旧 asupersync/16MiB 大栈/AbortHandle/
+  spawn_blocking 深递归机制全部退役）。
+- **AG-UI 协议面 100% 不变**（前端零改动）：agui.rs 只换 ①AgentEvent
+  import 源（pi::sdk → rpi_agent）②map_agent_event 变体映射（rpi
+  AgentEnd 无 error 字段——RUN_ERROR 由 prompt Err 的 POST 分支承担；
+  RetryScheduled 新事件 → CUSTOM "provider_retry" 观察面；其余
+  TEXT_MESSAGE_CONTENT/THINKING/TOOL_CALL_*/CUSTOM tool_execution/
+  STEP_FINISHED/RUN_FINISHED 形状逐一保持）③图片转换不变（AguiImage →
+  rpi ImageContent 在引擎内做）。**分栏 side_* = Err 如实上屏**。
+- **降级清单（rpi-main 追平后逐项接回）**：hub 花名册五面 / todo 重放 /
+  usage 聚合（pi::stats 无 rpi 对应）/ 分支线系 / 检查点+rewind / undo/
+  redo / retry_edit / compact / export_session_html / timeline_markers /
+  job 面 / create_bot_session / set_model+thinking（重建 harness）/ plan-
+  审批模式 / 审批卡桥（before_tool_call + ApprovalRegistry——本轮工具
+  直接执行，审批卡不出现，已记降级）/ get_messages 水合（Err——重放面
+  待写）/ messageCount（诚实 null）。
+- **依赖并存**：vendored pi_agent_rust 0.8.0 保留（pi_cron.rs 自开会话
+  用）+ rpi-cli/rpi-agent/rpi-ai/rpi-harness path-dep
+  `../../pi-rust-main/crates/*`——两引擎并存至迁移完成（迁移完拆旧）。
+  **path-dep 工作区成员从外部工程可行**（egui/mirach 双实测）。
+- 待办（rpi-main 侧追平后）：hub/todo/stats/分支/审批桥/水合重放/分栏
+  多 lane。rpi 会话目录 = `<workspace>/.rpi/sessions/<sanitized-cwd>/
+  *.jsonl`（默认 workspace = USERPROFILE，工作区选择面后续接列头）。
+
 ## 内存排查轮（2026-11-14，用户："加了机器人和双全工的语音，运行内存暴涨
 了很多"——点名两模块）
 

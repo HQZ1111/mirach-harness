@@ -27,6 +27,11 @@ base64 = "0.22"
 # 补丁已退休（v0.6.0 上游修复，gh #239）。
 # default-features=false 去 TUI 栈；nightly 钉版见 rust-toolchain.toml
 pi = { package = "pi_agent_rust", path = "vendor/pi_agent_rust", default-features = false, features = ["sqlite-sessions"] }
+# rpi-main 引擎（2026-11-14 竖链移植：核心对话链换 rpi 工作区，cron 暂留 vendored pi）
+rpi-cli = { path = "../../pi-rust-main/crates/rpi-cli" }
+rpi-agent = { path = "../../pi-rust-main/crates/rpi-agent" }
+rpi-ai = { path = "../../pi-rust-main/crates/rpi-ai" }
+rpi-harness = { path = "../../pi-rust-main/crates/rpi-harness" }
 asupersync = "0.5"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }

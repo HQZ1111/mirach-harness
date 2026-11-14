@@ -21,7 +21,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use pi::sdk::AgentEvent;
+use rpi_agent::AgentEvent;
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
@@ -83,6 +83,13 @@ pub struct ApprovalRegistry {
 }
 
 impl ApprovalRegistry {
+    /// 引擎构造入口（rpi 竖链：PiEngine 持注册表，agui 共享同一 Arc）。
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
     pub(crate) fn register(
         &self,
         id: String,
@@ -149,6 +156,13 @@ pub struct AskRegistry {
 }
 
 impl AskRegistry {
+    /// 引擎构造入口（同 ApprovalRegistry）。
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+        }
+    }
+
     pub(crate) fn register(&self, id: String, request: serde_json::Value, ask_tool: pi::ask::AskTool) {
         self.pending
             .lock()
@@ -278,21 +292,29 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
     match event {
         // RUN_STARTED 由 POST 处理器在起 run 时手动 push（runId 在那里才
         // 生成），AgentStart 不再重复发。
-        AgentEvent::AgentStart { .. } => vec![],
+        AgentEvent::AgentStart => vec![],
+        // 重试调度（可重试 provider 失败 + 退避）——旧映射无此事件，给一个
+        // CUSTOM 观察名（前端未注册的名字自然忽略，不破坏协议）。
+        AgentEvent::RetryScheduled { attempt, max_retries, delay_ms, error } => vec![json!({
+            "type": "CUSTOM", "name": "provider_retry",
+            "value": { "attempt": attempt, "maxRetries": max_retries, "delayMs": delay_ms, "error": error },
+        })],
+        AgentEvent::TurnStart => vec![],
+        AgentEvent::MessageStart { .. } => vec![],
         AgentEvent::MessageUpdate {
             assistant_message_event,
             ..
         } => match assistant_message_event {
-            pi::model::AssistantMessageEvent::TextDelta { delta, .. } => {
+            rpi_ai::types::AssistantMessageEvent::TextDelta { delta, .. } => {
                 vec![json!({ "type": "TEXT_MESSAGE_CONTENT", "delta": delta })]
             }
-            pi::model::AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+            rpi_ai::types::AssistantMessageEvent::ThinkingDelta { delta, .. } => {
                 vec![json!({ "type": "THINKING_TEXT_MESSAGE_CONTENT", "delta": delta })]
             }
-            pi::model::AssistantMessageEvent::ToolCallStart { .. } => {
+            rpi_ai::types::AssistantMessageEvent::ToolCallStart { .. } => {
                 vec![json!({ "type": "TOOL_CALL_START" })]
             }
-            pi::model::AssistantMessageEvent::ToolCallDelta { delta, .. } => {
+            rpi_ai::types::AssistantMessageEvent::ToolCallDelta { delta, .. } => {
                 vec![json!({ "type": "TOOL_CALL_ARGS", "delta": delta })]
             }
             _ => vec![],
@@ -302,7 +324,6 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
             tool_call_id,
             tool_name,
             args,
-            ..
         } => vec![json!({
             "type": "CUSTOM", "name": "tool_execution",
             "value": { "phase": "start", "toolCallId": tool_call_id, "toolName": tool_name, "args": args },
@@ -325,80 +346,42 @@ fn map_agent_event(event: &AgentEvent) -> Vec<serde_json::Value> {
             "value": { "phase": "end", "toolCallId": tool_call_id, "result": result, "isError": is_error },
         })],
         AgentEvent::TurnEnd { .. } => vec![json!({ "type": "STEP_FINISHED" })],
-        AgentEvent::AgentEnd { messages, error, .. } => match error {
-            Some(err) => vec![json!({ "type": "RUN_ERROR", "message": err })],
-            None => {
-                // run 总成本：AgentEnd.messages 是本 run 的全部新消息（多次
-                // 工具迭代各带自己的 usage/cost），run 总成本 = Σ
-                // assistant.usage.cost.total（pi Cost 以美元计）。
-                let cost_total: f64 = messages
-                    .iter()
-                    .filter_map(|m| match m {
-                        pi::sdk::Message::Assistant(a) => Some(a.usage.cost.total),
-                        _ => None,
-                    })
-                    .sum();
-                // 用量快照（ContextDisplay 数据面）：取最后一条 assistant
-                // 消息的 usage（= 最终 turn 的上下文规模，input 已含历史）；
-                // cacheWriteTokens/costUsd 为本轮增补字段
-                let usage = messages.iter().rev().find_map(|m| match m {
-                    pi::sdk::Message::Assistant(a) => {
-                        let mut o = serde_json::Map::new();
-                        o.insert("inputTokens".into(), json!(a.usage.input));
-                        o.insert("outputTokens".into(), json!(a.usage.output));
-                        o.insert("cachedInputTokens".into(), json!(a.usage.cache_read));
-                        o.insert("totalTokens".into(), json!(a.usage.total_tokens));
-                        o.insert("cacheWriteTokens".into(), json!(a.usage.cache_write));
-                        o.insert("costUsd".into(), json!(cost_total));
-                        Some(serde_json::Value::Object(o))
-                    }
+        // run 总成本：AgentEnd.messages 是本 run 的全部新消息（多次工具迭代
+        // 各带自己的 usage/cost），run 总成本 = Σ assistant.usage.cost.total。
+        // rpi AgentEnd 无 error 字段——provider 失败经 prompt Err 走进程级
+        // RUN_ERROR（竖链移植注：RUN_ERROR 语义由 POST 的 Err 分支承担）。
+        AgentEvent::AgentEnd { messages } => {
+            let cost_total: f64 = messages
+                .iter()
+                .filter_map(|m| match m {
+                    rpi_agent::message::AgentMessage::Assistant(a) => Some(a.usage.cost.total),
                     _ => None,
-                });
-                vec![json!({
-                    "type": "RUN_FINISHED",
-                    "usage": usage,
-                })]
-            }
-        },
-        AgentEvent::AutoCompactionStart { reason } => vec![json!({
-            "type": "CUSTOM", "name": "compaction", "value": { "phase": "start", "reason": reason },
-        })],
-        AgentEvent::AutoCompactionEnd {
-            result,
-            aborted,
-            will_retry,
-            error_message,
-        } => {
-            // result 成功时 = auto_compaction_result_payload：{summary,
-            // firstKeptEntryId, tokensBefore, tokensAfter, details?}（agent.rs）
-            //——取 tokens 两个数透出；失败/中止时 result 为 None（可选键缺席）。
-            let (tokens_before, tokens_after) = match result {
-                Some(v) => (
-                    v.get("tokensBefore").and_then(|t| t.as_u64()),
-                    v.get("tokensAfter").and_then(|t| t.as_u64()),
-                ),
-                None => (None, None),
-            };
-            let mut value = serde_json::Map::new();
-            value.insert("phase".into(), json!("end"));
-            if let Some(tb) = tokens_before {
-                value.insert("tokensBefore".into(), json!(tb));
-            }
-            if let Some(ta) = tokens_after {
-                value.insert("tokensAfter".into(), json!(ta));
-            }
-            value.insert("aborted".into(), json!(aborted));
-            value.insert("willRetry".into(), json!(will_retry));
-            if let Some(em) = error_message {
-                value.insert("errorMessage".into(), json!(em));
-            }
+                })
+                .sum();
+            // 用量快照（ContextDisplay 数据面）：取最后一条 assistant 消息的
+            // usage（= 最终 turn 的上下文规模，input 已含历史）；
+            // cacheWriteTokens/costUsd 为本轮增补字段
+            let usage = messages.iter().rev().find_map(|m| match m {
+                rpi_agent::message::AgentMessage::Assistant(a) => {
+                    let mut o = serde_json::Map::new();
+                    o.insert("inputTokens".into(), json!(a.usage.input));
+                    o.insert("outputTokens".into(), json!(a.usage.output));
+                    o.insert("cachedInputTokens".into(), json!(a.usage.cache_read));
+                    o.insert("totalTokens".into(), json!(a.usage.total_tokens));
+                    o.insert("cacheWriteTokens".into(), json!(a.usage.cache_write));
+                    o.insert("costUsd".into(), json!(cost_total));
+                    Some(serde_json::Value::Object(o))
+                }
+                _ => None,
+            });
             vec![json!({
-                "type": "CUSTOM", "name": "compaction", "value": value,
+                "type": "RUN_FINISHED",
+                "usage": usage,
             })]
         }
-        _ => vec![],
     }
 }
+
 
 /// POST body 的图片块（前端契约：`{threadId, message, images?: [{data,
 /// mimeType}]}`；data = 不带 data: 前缀的纯 base64）。
@@ -617,6 +600,7 @@ async fn agui_run(
     Json(serde_json::json!({ "runId": run_id })).into_response()
 }
 
+
 async fn agui_stream(
     State(st): State<Arc<AguiState>>,
     Query(q): Query<HashMap<String, String>>,
@@ -755,42 +739,40 @@ pub fn router(state: Arc<AguiState>) -> Router {
 
 #[cfg(test)]
 mod tests {
-    //! agui 单元测试（§7-2 欠债：§2.2 事件映射表逐行 + 环形缓冲语义 +
-    //! 审批注册表）。pi 事件样本按上游真实形状构造（G:\pi_agent_rust-main
-    //! 的 src/agent.rs AgentEvent、src/model.rs AssistantMessageEvent/
-    //! Usage/ToolCall、src/tools.rs ToolOutput），只 import pi::sdk /
-    //! pi::model / pi::tools 的事件类型面。全部同步断言（oneshot 用
-    //! try_recv，不依赖 tokio rt feature 进 dev 依赖）。
+    //! agui 单元测试（竖链移植后：**rpi-main AgentEvent 形状** + AG-UI 映射
+    //! 语义保持——形状逐一对照 rpi-agent/src/events.rs + rpi-ai types.rs）。
+    //! 与旧版（df701a4）的差异：AgentEnd 无 error 字段（RUN_ERROR 语义由
+    //! prompt Err 的 POST 分支承担，用例 agent_end_error 随之退役）；
+    //! AutoCompaction 变体退役（rpi 无对应，三条 compaction 用例随删，追平
+    //! 后按 CUSTOM compaction 形状接回）；工具结果 = AgentToolResult
+    //! （details 为 Value 直通——None→null 语义不变）。
+    //! 全部同步断言（oneshot 用 try_recv，不依赖 tokio rt feature 进 dev）。
 
     use super::*;
-    use pi::model::{AssistantMessage, AssistantMessageEvent, Cost, Message, Usage};
-    use pi::tools::ToolOutput;
+    use rpi_ai::types::{Api, AssistantMessage, AssistantMessageEvent, Usage};
+    use rpi_agent::message::AgentMessage;
 
     // ---------- 样本助手 ----------
 
-    fn sess() -> Arc<str> {
-        Arc::from("sess-test")
+    /// 最小合法 assistant 消息（rpi AssistantMessage::empty + zeroed usage）。
+    fn sample_assistant() -> AssistantMessage {
+        AssistantMessage::empty(Api::OpenaiCompletions, "test-provider", "test-model", 0)
     }
 
-    /// 流式事件携带的累积 assistant 快照（AssistantMessageEvent 全家族
-    /// 变体都带 partial——映射器不读它，Default 即最小合法样本）。
-    fn partial() -> Arc<AssistantMessage> {
-        Arc::new(AssistantMessage::default())
+    fn partial() -> std::sync::Arc<AssistantMessage> {
+        std::sync::Arc::new(sample_assistant())
     }
 
     fn msg_update(ev: AssistantMessageEvent) -> AgentEvent {
         AgentEvent::MessageUpdate {
-            message: Message::assistant(AssistantMessage::default()),
+            message_id: None,
+            message: std::sync::Arc::new(sample_assistant()),
             assistant_message_event: ev,
         }
     }
 
-    fn tool_out() -> ToolOutput {
-        ToolOutput {
-            content: vec![],
-            details: None,
-            is_error: false,
-        }
+    fn tool_out() -> rpi_agent::types::AgentToolResult {
+        rpi_agent::types::AgentToolResult::default()
     }
 
     fn answer(value: Option<serde_json::Value>, cancelled: bool) -> UiAnswer {
@@ -808,7 +790,7 @@ mod tests {
         // §2.2 行 1（AgentStart→RUN_STARTED）的有意偏差：RUN_STARTED 由
         // POST 处理器经 on_start 回调挂在真实 run 上推送（runId 在那里才
         // 生成），映射器对 AgentStart 不再重复发。
-        let e = AgentEvent::AgentStart { session_id: sess() };
+        let e = AgentEvent::AgentStart;
         assert!(map_agent_event(&e).is_empty());
     }
 
@@ -865,7 +847,8 @@ mod tests {
     #[test]
     fn message_end_maps_text_message_end() {
         let e = AgentEvent::MessageEnd {
-            message: Message::assistant(AssistantMessage::default()),
+            message: AgentMessage::Assistant(Box::new(sample_assistant())),
+            message_id: None,
         };
         let v = map_agent_event(&e);
         assert_eq!(v.len(), 1);
@@ -912,14 +895,17 @@ mod tests {
         // §2.2 表要求 MessageUpdate{ToolCallEnd}→TOOL_CALL_END——当前未
         // 映射（工具调用的 result/isError 由 CUSTOM tool_execution end
         // 承载，§2.2 维度裁定；前端 TOOL_CALL_* 无 END 分支，现状无破损）。
-        // 同上：翻转点用例，本轮不改正事逻辑。
+        // rpi ToolCallEnd { content_index, tool_call, partial }。
         let e = msg_update(AssistantMessageEvent::ToolCallEnd {
             content_index: 2,
-            tool_call: pi::model::ToolCall {
+            tool_call: rpi_ai::types::ToolCall {
+                kind: Default::default(),
                 id: "tc-1".into(),
                 name: "read".into(),
                 arguments: serde_json::json!({ "path": "G:/x" }),
                 thought_signature: None,
+                namespace: None,
+                recorded: None,
             },
             partial: partial(),
         });
@@ -951,7 +937,7 @@ mod tests {
             tool_call_id: "tc-1".into(),
             tool_name: "bash".into(),
             args: serde_json::json!({}),
-            partial_result: tool_out(),
+            partial_result: std::sync::Arc::new(tool_out()),
         };
         let v = map_agent_event(&e);
         assert_eq!(v.len(), 1);
@@ -959,15 +945,16 @@ mod tests {
         assert_eq!(v[0]["name"], "tool_execution");
         assert_eq!(v[0]["value"]["phase"], "update");
         assert_eq!(v[0]["value"]["toolCallId"], "tc-1");
-        // partial 是 pi ToolOutput 的序列化（content 数组 + isError skip）
+        // partial 是 rpi AgentToolResult 的序列化（content 数组 + details null）
         assert!(v[0]["value"]["partial"].is_object());
         assert_eq!(v[0]["value"]["partial"]["content"], serde_json::json!([]));
+        assert!(v[0]["value"]["partial"]["details"].is_null());
     }
 
     #[test]
     fn tool_execution_end_maps_custom_with_result_and_error_flag() {
         let mut result = tool_out();
-        result.is_error = true;
+        result.details = serde_json::json!({ "marker": true });
         let e = AgentEvent::ToolExecutionEnd {
             tool_call_id: "tc-9".into(),
             tool_name: "read".into(),
@@ -981,16 +968,18 @@ mod tests {
         assert_eq!(v[0]["value"]["toolCallId"], "tc-9");
         // end 带 result/isError（tool-error 元素数据源）
         assert_eq!(v[0]["value"]["isError"], true);
-        assert_eq!(v[0]["value"]["result"]["isError"], true);
+        assert_eq!(v[0]["value"]["result"]["details"]["marker"], true);
     }
 
-    /// 带 details 的工具输出（活动面板数据面：todo/subagent/jobs 的
-    /// schema payload 都走 ToolOutput.details）。
-    fn tool_out_with_details(details: serde_json::Value) -> ToolOutput {
-        ToolOutput {
+    /// 带 details 的工具结果（活动面板数据面：todo/subagent/jobs 的
+    /// schema payload 都走 AgentToolResult.details）。
+    fn tool_out_with_details(details: serde_json::Value) -> rpi_agent::types::AgentToolResult {
+        rpi_agent::types::AgentToolResult {
             content: vec![],
-            details: Some(details),
-            is_error: false,
+            details,
+            usage: None,
+            added_tool_names: vec![],
+            terminate: false,
         }
     }
 
@@ -1008,7 +997,7 @@ mod tests {
             tool_call_id: "tc-todo".into(),
             tool_name: "todo".into(),
             args: serde_json::json!({}),
-            partial_result: tool_out_with_details(details.clone()),
+            partial_result: std::sync::Arc::new(tool_out_with_details(details.clone())),
         };
         let v = map_agent_event(&e);
         assert_eq!(v[0]["value"]["partial"]["details"]["schema"], "todo_list.v1");
@@ -1039,7 +1028,7 @@ mod tests {
         assert_eq!(v[0]["value"]["result"]["details"], details);
     }
 
-    /// details 缺省时不注入空对象（None → 字段缺席，不是 `{}`）：前端据
+    /// details 缺省时不注入空对象（Value::Null → JSON null，不是 `{}`）：前端据
     /// 「有无 details」区分「工具无结构化输出」与「空结构化输出」。
     #[test]
     fn tool_execution_without_details_omits_field() {
@@ -1056,11 +1045,9 @@ mod tests {
     #[test]
     fn turn_end_maps_step_finished() {
         let e = AgentEvent::TurnEnd {
-            session_id: sess(),
-            turn_index: 0,
-            message: Message::assistant(AssistantMessage::default()),
+            message: AgentMessage::Assistant(Box::new(sample_assistant())),
             tool_results: vec![],
-            latency_breakdown: None,
+            pending_messages: 0,
         };
         let v = map_agent_event(&e);
         assert_eq!(v.len(), 1);
@@ -1073,19 +1060,13 @@ mod tests {
 
     #[test]
     fn agent_end_success_maps_run_finished_with_usage() {
+        let mut msg = sample_assistant();
+        msg.usage.input = 1234;
+        msg.usage.output = 567;
+        msg.usage.cache_read = 89;
+        msg.usage.total_tokens = 1801;
         let e = AgentEvent::AgentEnd {
-            session_id: sess(),
-            messages: vec![Message::assistant(AssistantMessage {
-                usage: Usage {
-                    input: 1234,
-                    output: 567,
-                    cache_read: 89,
-                    total_tokens: 1801,
-                    ..Default::default()
-                },
-                ..Default::default()
-            })],
-            error: None,
+            messages: vec![AgentMessage::Assistant(Box::new(msg))],
         };
         let v = map_agent_event(&e);
         assert_eq!(v.len(), 1);
@@ -1103,11 +1084,7 @@ mod tests {
     fn agent_end_without_assistant_messages_usage_null() {
         // 无 assistant 消息 → RUN_FINISHED 照发（不能没有 run 终态），
         // usage = null（前端 reducer 对缺字段保留旧值）
-        let e = AgentEvent::AgentEnd {
-            session_id: sess(),
-            messages: vec![],
-            error: None,
-        };
+        let e = AgentEvent::AgentEnd { messages: vec![] };
         let v = map_agent_event(&e);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0]["type"], "RUN_FINISHED");
@@ -1115,134 +1092,38 @@ mod tests {
     }
 
     #[test]
-    fn agent_end_error_maps_run_error() {
-        let e = AgentEvent::AgentEnd {
-            session_id: sess(),
-            messages: vec![],
-            error: Some("provider down".into()),
-        };
-        let v = map_agent_event(&e);
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0]["type"], "RUN_ERROR");
-        assert_eq!(v[0]["message"], "provider down");
-    }
-
-    #[test]
-    fn auto_compaction_maps_custom() {
-        let v = map_agent_event(&AgentEvent::AutoCompactionStart {
-            reason: "context full".into(),
-        });
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0]["type"], "CUSTOM");
-        assert_eq!(v[0]["name"], "compaction");
-        assert_eq!(v[0]["value"]["phase"], "start");
-        assert_eq!(v[0]["value"]["reason"], "context full");
-
-        let v = map_agent_event(&AgentEvent::AutoCompactionEnd {
-            result: None,
-            aborted: false,
-            will_retry: false,
-            error_message: None,
-        });
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0]["type"], "CUSTOM");
-        assert_eq!(v[0]["name"], "compaction");
-        assert_eq!(v[0]["value"]["phase"], "end");
-    }
-
-    #[test]
-    fn auto_compaction_end_with_result_maps_tokens_payload() {
-        // 成功载荷（agent.rs auto_compaction_result_payload 同形状）：tokens
-        // 两个数从 result 透出；成功路径 aborted/willRetry false、无 errorMessage
-        let v = map_agent_event(&AgentEvent::AutoCompactionEnd {
-            result: Some(serde_json::json!({
-                "summary": "compacted",
-                "firstKeptEntryId": "entry-7",
-                "tokensBefore": 8000,
-                "tokensAfter": 1200,
-            })),
-            aborted: false,
-            will_retry: false,
-            error_message: None,
-        });
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0]["type"], "CUSTOM");
-        assert_eq!(v[0]["name"], "compaction");
-        assert_eq!(v[0]["value"]["phase"], "end");
-        assert_eq!(v[0]["value"]["tokensBefore"], 8000);
-        assert_eq!(v[0]["value"]["tokensAfter"], 1200);
-        assert_eq!(v[0]["value"]["aborted"], false);
-        assert_eq!(v[0]["value"]["willRetry"], false);
-        assert!(v[0]["value"].get("errorMessage").is_none());
-    }
-
-    #[test]
-    fn auto_compaction_end_aborted_without_result_maps_flags_only() {
-        // 失败/中止路径：result None → tokens 键缺席；aborted/willRetry/
-        // errorMessage 照发（前端可感知"压缩没成，稍后重试"）
-        let v = map_agent_event(&AgentEvent::AutoCompactionEnd {
-            result: None,
-            aborted: true,
-            will_retry: true,
-            error_message: Some("compactor down".into()),
-        });
-        assert_eq!(v[0]["value"]["phase"], "end");
-        assert_eq!(v[0]["value"]["aborted"], true);
-        assert_eq!(v[0]["value"]["willRetry"], true);
-        assert_eq!(v[0]["value"]["errorMessage"], "compactor down");
-        assert!(v[0]["value"].get("tokensBefore").is_none());
-        assert!(v[0]["value"].get("tokensAfter").is_none());
-    }
-
-    #[test]
     fn agent_end_usage_carries_cache_write_and_run_cost() {
-        // usage 增补字段：cacheWriteTokens 取最后一条 assistant 的
-        // cache_write；costUsd = 本 run 全部 assistant 消息的 cost.total 加和
-        // （AgentEnd.messages 是 run 作用域的新消息）
+        let mut msg = sample_assistant();
+        msg.usage.cache_write = 400;
+        msg.usage.cost.total = 0.0123;
         let e = AgentEvent::AgentEnd {
-            session_id: sess(),
-            messages: vec![
-                Message::assistant(AssistantMessage {
-                    usage: Usage {
-                        input: 50,
-                        output: 4,
-                        total_tokens: 54,
-                        cost: Cost {
-                            total: 0.01,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-                Message::assistant(AssistantMessage {
-                    usage: Usage {
-                        input: 100,
-                        output: 5,
-                        cache_read: 7,
-                        cache_write: 9,
-                        total_tokens: 121,
-                        cost: Cost {
-                            total: 0.002,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            ],
-            error: None,
+            messages: vec![AgentMessage::Assistant(Box::new(msg))],
         };
         let v = map_agent_event(&e);
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0]["type"], "RUN_FINISHED");
-        // usage 仍取最后一条 assistant（最终 turn 上下文规模）
-        assert_eq!(v[0]["usage"]["inputTokens"], 100);
-        assert_eq!(v[0]["usage"]["cacheWriteTokens"], 9);
-        // costUsd = 0.01 + 0.002（整 run 加和）
-        let cost = v[0]["usage"]["costUsd"].as_f64().expect("costUsd number");
-        assert!((cost - 0.012).abs() < 1e-9, "costUsd = {cost}");
+        assert_eq!(v[0]["usage"]["cacheWriteTokens"], 400);
+        assert_eq!(v[0]["usage"]["costUsd"], 0.0123);
     }
+
+    // rpi AgentEnd 无 error 字段——RUN_ERROR 语义由 prompt Err 的 POST 分支
+    // 承担（竖链移植注）；旧 agent_end_error_maps_run_error 用例随事件族
+    // 变化退役，POST 分支的错误路径由实机冒烟覆盖。
+    //
+    // AutoCompaction 三条用例随旧 pi 事件族退役（rpi 无对应变体——压缩事件
+    // 面 = rpi-main 待补能力，追平后按 CUSTOM compaction 形状接回）。
+
+    #[test]
+    fn turn_start_and_message_start_unmapped() {
+        // rpi 新增 TurnStart/MessageStart——当前映射器不消费（§2.2 表无此
+        // 二行；前端无分支）。钉住现状作为将来补齐时的翻转点。
+        assert!(map_agent_event(&AgentEvent::TurnStart).is_empty());
+        assert!(map_agent_event(&AgentEvent::MessageStart {
+            message: AgentMessage::Assistant(Box::new(sample_assistant())),
+            message_id: None,
+        })
+        .is_empty());
+    }
+
+    // ---------- parse_images（POST 层校验） ----------
 
     #[test]
     fn parse_images_rejects_non_allowlisted_mime_and_empty_data() {
@@ -1275,21 +1156,7 @@ mod tests {
         assert!(parse_images(&serde_json::json!({ "images": "nope" })).is_err());
     }
 
-    #[test]
-    fn turn_start_and_message_start_unmapped() {
-        // §2.2 行 2：TurnStart 内部计数不外发；MessageStart 无映射行。
-        // 两者 fall-through 空 vec 是有意行为。
-        let ts = AgentEvent::TurnStart {
-            session_id: sess(),
-            turn_index: 0,
-            timestamp: 0,
-        };
-        assert!(map_agent_event(&ts).is_empty());
-        let ms = AgentEvent::MessageStart {
-            message: Message::assistant(AssistantMessage::default()),
-        };
-        assert!(map_agent_event(&ms).is_empty());
-    }
+    // turn_start_and_message_start_unmapped 移到映射器测试段（rpi 形状版）。
 
     #[test]
     fn token_check_rejects_missing_or_wrong() {
