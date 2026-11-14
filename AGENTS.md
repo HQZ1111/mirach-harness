@@ -1645,13 +1645,23 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   held"），第二条消息必挂。修复：`PiEngine::is_live_session(path)` 守卫
   ——已是活动会话就复用、不重建 harness（agui.rs 主柄分支）；锁中毒 Err
   传播。**教训：rpi 会话单写者，任何"按路径重开"的代码都要先查在场态。**
-- 遗留小项：编辑器模型钮仍显示 "Select model"（catalog 有 DS 分组但
-  currentModel 未从 settings 回填的时序问题）；实际请求用的是 settings
-  默认模型（用量/回复证明），仅显示层待修。
+- 遗留小项（同轮已修）：编辑器模型钮显示 "Select model" 的根因 =
+  `composer-wired.tsx` 只认英文 `'no active session'`，后端真实文案是
+  中文 **「无活动会话」** → 永远走"其它失败"分支 return，settings 默认
+  模型回填从不执行。已改为两种文案都认；实测 trigger 显示
+  `deepseek-v4.1-flash-1017`。**教训：跨语言错误文案匹配是雷区，宁可
+  优先结构化错误码；至少中英双认并注释来源。**
+- **发现模型端到端实证**：`GET https://cnkey.win/v1/models` → 200，2 个
+  模型；编辑态表单不回显密钥 → 新增 **`pi_discover_models`**（服务端在
+  apiKey 留空时从 models.json 借用已存密钥，JSON Pointer 转义）；UI 勾
+  「发现模型」保存 → models.json models[] = flash + flash-1017（按 id
+  合并既有配置），结果提示"已保存（发现 2 个模型）"；刷新后选择器两个
+  都在、trigger 显示当前模型。
 - 调试资产：`%TEMP%\cdp-fill-settings.mjs`（填表+保存）、
-  `%TEMP%\cdp-send-click.mjs`（发消息+抓回复）、
-  `%TEMP%\cdp-settings-probe.mjs`（console/异常）。刷新设置页会回到
-  「账号」节，填表前先点导航「自定义端点」。
+  `cdp-fill-discover.mjs`（发现+保存）、`cdp-send-click.mjs`（发消息+
+  抓回复）、`cdp-verify-model.mjs`（trigger/选项）、
+  `cdp-settings-probe.mjs`（console/异常）。刷新设置页会回到「账号」节，
+  填表前先点导航「自定义端点」。
 
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 

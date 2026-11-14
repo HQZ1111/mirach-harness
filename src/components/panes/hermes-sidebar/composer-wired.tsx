@@ -188,8 +188,13 @@ export function ComposerWired() {
         }
       })
       .catch((e) => {
-        // 首条消息前必然发生（无会话=预期域状态）；其余失败照常可见
-        if (!String(e).includes('no active session')) {
+        // 首条消息前必然发生（无会话=预期域状态）；其余失败照常可见。
+        // 后端错误文案是中文「无活动会话」（pi_session::live），历史代码
+        // 只认英文 "no active session" → 永远走"其它失败"分支 return，
+        // 默认模型回填从不执行（输入框永远 "Select model"，2026-11-14
+        // 实锤）。两种文案都认。
+        const msg = String(e)
+        if (!msg.includes('无活动会话') && !msg.includes('no active session')) {
           console.error('[pi] 会话状态获取失败', e)
           return
         }

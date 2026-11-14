@@ -1508,6 +1508,7 @@ fn main() {
             pi_login::pi_oauth_start,
             pi_login::pi_oauth_status,
             pi_login::pi_endpoint_validate,
+            pi_login::pi_discover_models,
             pi_login::pi_vault_sources,
             pi_resources::pi_list_resources,
             pi_persona::pi_persona_read,

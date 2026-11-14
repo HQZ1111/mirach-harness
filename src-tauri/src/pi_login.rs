@@ -42,53 +42,98 @@ pub fn pi_oauth_status(_provider: String) -> Result<Value, String> {
 /// 模型预览）。message 只描述请求本身，模型列表由前端拼。
 #[tauri::command(async)]
 pub fn pi_endpoint_validate(base_url: String, api_key: Option<String>) -> Result<Value, String> {
+    on_big_stack(move || probe_models(&base_url, api_key.as_deref()))?
+}
+
+/// 模型发现（保存时「发现模型」用）：GET `{base_url}/models`。
+///
+/// 与 [`pi_endpoint_validate`] 的区别：`api_key` 留空时**从 models.json 的
+/// `provider.apiKey` 借用已存密钥**——编辑已有端点时表单「留空保留当前
+/// 密钥」（密钥只写不读），但发现探测仍需鉴权；密钥读不到就按无凭据探测
+/// （端点公开则成功、需鉴权则 401 如实报，不假装）。
+#[tauri::command(async)]
+pub fn pi_discover_models(
+    provider_id: String,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<Value, String> {
     on_big_stack(move || {
-        let base = base_url.trim().trim_end_matches('/');
-        if base.is_empty() {
-            return Err("端点 URL 为空".to_string());
-        }
-        let url = format!("{base}/models");
-        let parsed = reqwest::Url::parse(&url).map_err(|e| format!("端点 URL 非法: {e}"))?;
-        if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(format!("端点协议必须是 http/https: {}", parsed.scheme()));
-        }
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
-        let mut request = client.get(parsed);
-        if let Some(key) = api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
-            request = request.bearer_auth(key);
-        }
-        match request.send() {
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.text().unwrap_or_default();
-                if status.is_success() {
-                    let models = parse_model_ids(&body);
-                    Ok(json!({
-                        "ok": true,
-                        "status": status.as_u16(),
-                        "models": models,
-                        "message": format!("GET {url} → {}", status),
-                    }))
-                } else {
-                    Ok(json!({
-                        "ok": false,
-                        "status": status.as_u16(),
-                        "models": [],
-                        "message": format!("GET {url} → {}: {}", status, truncate_body(&body)),
-                    }))
-                }
-            }
-            Err(e) => Ok(json!({
-                "ok": false,
-                "status": 0,
-                "models": [],
-                "message": format!("请求失败: {e}"),
-            })),
-        }
+        let key = match api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+            Some(k) => Some(k.to_string()),
+            None => stored_api_key(&provider_id)?,
+        };
+        probe_models(&base_url, key.as_deref())
     })?
+}
+
+/// 从 models.json 读 provider 的已存 apiKey（编辑态发现探测的凭据回退）。
+/// 文件不存在 = 没有已存密钥（Ok(None)，正常态）；坏文件/坏 JSON = Err。
+fn stored_api_key(provider_id: &str) -> Result<Option<String>, String> {
+    let path = crate::pi_paths::models_path()?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(format!("models.json 读取失败 {}: {e}", path.display()))
+        }
+    };
+    let doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("models.json 解析失败: {e}"))?;
+    // JSON Pointer 转义：~ → ~0，/ → ~1（provider id 可能含 '/' 的极端形态）
+    let ptr = format!(
+        "/providers/{}/apiKey",
+        provider_id.replace('~', "~0").replace('/', "~1")
+    );
+    Ok(doc.pointer(&ptr).and_then(Value::as_str).map(str::to_string))
+}
+
+/// GET `{base}/models` 探测（两个命令共用）。HTTP 成败 = 探测结论。
+fn probe_models(base_url: &str, api_key: Option<&str>) -> Result<Value, String> {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("端点 URL 为空".to_string());
+    }
+    let url = format!("{base}/models");
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("端点 URL 非法: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(format!("端点协议必须是 http/https: {}", parsed.scheme()));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
+    let mut request = client.get(parsed);
+    if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        request = request.bearer_auth(key);
+    }
+    match request.send() {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().unwrap_or_default();
+            if status.is_success() {
+                let models = parse_model_ids(&body);
+                Ok(json!({
+                    "ok": true,
+                    "status": status.as_u16(),
+                    "models": models,
+                    "message": format!("GET {url} → {}", status),
+                }))
+            } else {
+                Ok(json!({
+                    "ok": false,
+                    "status": status.as_u16(),
+                    "models": [],
+                    "message": format!("GET {url} → {}: {}", status, truncate_body(&body)),
+                }))
+            }
+        }
+        Err(e) => Ok(json!({
+            "ok": false,
+            "status": 0,
+            "models": [],
+            "message": format!("请求失败: {e}"),
+        })),
+    }
 }
 
 /// 从 `/models` 响应体提取模型 id（兼容三种形状）：

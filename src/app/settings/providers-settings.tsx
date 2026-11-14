@@ -879,12 +879,15 @@ function CustomEndpointsView() {
       const byId = new Map(existingModels.map((m) => [String(m['id']), m]))
       let modelIds: string[] = [model]
       if (form.discoverModels) {
+        // 服务端探测：apiKey 留空时宿主从 models.json 借用已存密钥（编辑态
+        // 表单不回显密钥，但发现仍需鉴权）。
         const probe = await invoke<{
           ok: boolean
           status: number
           models: string[]
           message: string
-        }>('pi_endpoint_validate', {
+        }>('pi_discover_models', {
+          providerId: id,
           baseUrl,
           apiKey: apiKey === '' ? null : apiKey,
         })
