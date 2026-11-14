@@ -233,6 +233,23 @@ impl PiEngine {
         Ok(())
     }
 
+    /// 该路径是否就是当前活动会话。
+    ///
+    /// agui_run 的重开守卫：rpi 会话是**单写者**（writer lease 独占），
+    /// 同一文件二次 open 必然 "writer lease is already held"。发消息的
+    /// POST 带 sessionPath 时若已开着就复用，不重建 harness。
+    pub fn is_live_session(&self, path: &str) -> Result<bool, String> {
+        let guard = self
+            .shared
+            .live
+            .lock()
+            .map_err(|_| "引擎状态锁中毒".to_string())?;
+        Ok(guard
+            .as_ref()
+            .and_then(|live| live.session_path.as_ref())
+            .is_some_and(|p| p.to_string_lossy() == path))
+    }
+
     /// 打开指定会话文件（rpi 恢复路径：args.session + allow_existing）。
     /// 返回会话 id（前端锚定用）。
     pub fn open_session(

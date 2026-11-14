@@ -1631,6 +1631,28 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
   ①表单+发现（推荐）②表单不勾发现（只写默认模型一条）③模型页的原始
   JSON 编辑器直编 models.json。
 
+## 真机端到端验证 + 单写者租约修复（2026-11-14 深夜，用户"在模型里试一下"）
+
+- **实测全绿**（DS / cnkey.win / deepseek-v4.1-flash-1017）：设置表单
+  填 → 保存 → `~/.rpi/agent/models.json`（`api: "openai-completions"` +
+  apiKey + models[]）与 `settings.json`（`defaultProvider`/`defaultModel`
+  camelCase）**由 UI 正确写出**；聊天发消息 → 引擎 resolve → 真实回复
+  上屏（输入 41 tok / 总计 20563 tok）。UI 驱动方式：CDP 9223 →
+  `Runtime.evaluate` 原生 value setter + input 事件填表、`[data-slot=
+  "composer-send"]` 点击发送（**Enter 不触发发送**，assistant-ui 走按钮）。
+- **真 bug：`agui_run` 每次 POST 都 `open_session(同一路径)`** → rpi 单
+  写者 writer lease 冲突（"Failed to acquire writer lease … already
+  held"），第二条消息必挂。修复：`PiEngine::is_live_session(path)` 守卫
+  ——已是活动会话就复用、不重建 harness（agui.rs 主柄分支）；锁中毒 Err
+  传播。**教训：rpi 会话单写者，任何"按路径重开"的代码都要先查在场态。**
+- 遗留小项：编辑器模型钮仍显示 "Select model"（catalog 有 DS 分组但
+  currentModel 未从 settings 回填的时序问题）；实际请求用的是 settings
+  默认模型（用量/回复证明），仅显示层待修。
+- 调试资产：`%TEMP%\cdp-fill-settings.mjs`（填表+保存）、
+  `%TEMP%\cdp-send-click.mjs`（发消息+抓回复）、
+  `%TEMP%\cdp-settings-probe.mjs`（console/异常）。刷新设置页会回到
+  「账号」节，填表前先点导航「自定义端点」。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换

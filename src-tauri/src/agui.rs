@@ -463,10 +463,17 @@ async fn agui_run(
             .spawn(move || {
                 if is_main_thread {
                     if let Some(path) = &session_path {
-                        st_create
-                            .engine
-                            .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
-                            .map(|_| ())
+                        // 单写者租约：已在场的同一会话直接复用（每条消息都
+                        // 重新 open 会撞 "writer lease is already held"——
+                        // 前端每次 POST 都带 sessionPath，这是主路径）。
+                        match st_create.engine.is_live_session(path) {
+                            Ok(true) => Ok(()),
+                            Ok(false) => st_create
+                                .engine
+                                .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
+                                .map(|_| ()),
+                            Err(e) => Err(e),
+                        }
                     } else {
                         st_create
                             .engine
