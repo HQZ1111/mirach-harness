@@ -2057,10 +2057,6 @@ const AssistantActionBar: FC<{
     if (r) aui.message.submitFeedback({ type: r === "up" ? "positive" : "negative" });
   };
 
-  const onRegenerate = () => {
-    aui.message.reload();
-  };
-
   const onMore = () => {
     // 模板的 More 是回调式按钮——经隐藏的 ActionBarMorePrimitive.Trigger
     // 复用官方 ExportMarkdown 弹层（display:none 元素可程序化 click）
@@ -2079,7 +2075,6 @@ const AssistantActionBar: FC<{
         regenerating={false}
         onCopy={onCopy}
         onReactionChange={onReactionChange}
-        onRegenerate={onRegenerate}
         onMore={onMore}
         onFork={fork}
         forkable={forkable}

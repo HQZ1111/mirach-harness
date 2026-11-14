@@ -68,6 +68,23 @@ describe('reduceAguiEvent tool-call parts', () => {
     ])
   })
 
+  it('stale/replayed event (id <= applied cursor) is dropped at the reducer entry', () => {
+    // 根因修复：SSE 重连重放同一 seq 时不得二次应用（否则同一 toolCallId
+    // 会产生两个部件 → Duplicate key 崩渲染）。
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    const applied = c
+    // 同一事件 id 重放（send 用 lastEventId+1，这里手工指定旧 id）
+    const replayed = reduceAguiEvent(
+      applied,
+      { type: 'CUSTOM', name: 'tool_execution', value: { phase: 'start', toolCallId: 't1', toolName: 'read' } } as never,
+      applied.lastEventId,
+    )
+    expect(replayed).toBe(applied)
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   it('duplicate tool start is merged into the existing part (no duplicate key crash)', () => {
     // 2026-11-15 实锤：SSE 重连重放/水合与实时叠加会让同一 toolCallId 的
     // start 到两次 → assistant-ui useResources 抛 "Duplicate key" 并炸掉

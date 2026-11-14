@@ -123,6 +123,19 @@ const isMessageWriteEvent = (ev: AguiEvent): boolean =>
 
 /** 归约单条 AG-UI 事件 → 上下文（纯函数，可单测）。 */
 export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): TurnContext {
+  // ── 游标去重（根因修复，2026-11-15）────────────────────────────────────
+  // SSE 事件带单调递增序号（服务端 Event::id(seq)）。重连重放/重复投递
+  // 会把**已应用过**的事件再送一次——旧代码只把 id 记为游标、从不比较，
+  // 于是同一事件（如 tool_execution start）被应用两次 → 同一 toolCallId
+  // 出现两个部件 → assistant-ui useResources 抛 Duplicate key 崩渲染。
+  // 这里按序号丢弃 id <= 已应用游标的整事件（游标不倒退），并 console.warn
+  // 让重放可见（不静默）。id=0（无序号事件）不受影响。
+  if (id > 0 && id <= ctx.lastEventId) {
+    console.warn(
+      `[turn] 丢弃重放事件 seq=${id}（已应用游标 ${ctx.lastEventId}，type=${ev.type}）`,
+    )
+    return ctx
+  }
   const next = { ...ctx, lastEventId: id }
   if (ctx.currentRunId === null && isMessageWriteEvent(ev)) {
     console.warn(`[turn] run 外收到消息类事件 ${ev.type}——丢弃（无 run 段可写）`)

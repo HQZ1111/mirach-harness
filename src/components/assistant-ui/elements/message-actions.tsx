@@ -24,7 +24,11 @@ export interface MessageActionsProps extends Omit<
   regenerating: boolean;
   onCopy: () => void;
   onReactionChange: (reaction: Reaction) => void;
-  onRegenerate: () => void;
+  /**
+   * 重新发送本条回复（原「Regenerate response」/↻）。**可选**——2026-11-15
+   * 用户明确不要这个刷新钮（"那是重新发送，删除"）：不传即不渲染。
+   */
+  onRegenerate?: (() => void) | undefined;
   onMore: () => void;
   /**
    * 从这条回复分叉（ZCode `chat.message.fork`）。宿主 = 在该轮最后一条
@@ -119,19 +123,21 @@ export function MessageActions({
           <TrendingUpDownIcon className="size-[var(--size-icon-md)]" />
         </button>
       ) : null}
-      <button
-        type="button"
-        aria-label="Regenerate response"
-        onClick={onRegenerate}
-        className={buttonClassName}
-      >
-        <RefreshCwIcon
-          className={cn(
-            "size-3.5",
-            regenerating && "animate-spin motion-reduce:animate-none",
-          )}
-        />
-      </button>
+      {onRegenerate ? (
+        <button
+          type="button"
+          aria-label="Regenerate response"
+          onClick={onRegenerate}
+          className={buttonClassName}
+        >
+          <RefreshCwIcon
+            className={cn(
+              "size-3.5",
+              regenerating && "animate-spin motion-reduce:animate-none",
+            )}
+          />
+        </button>
+      ) : null}
       <button
         type="button"
         aria-label="More response actions"
