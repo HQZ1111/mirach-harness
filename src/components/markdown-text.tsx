@@ -55,7 +55,7 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
-      className="aui-md"
+      className="aui-md text-[14px] leading-[24.5px] [&>*+*]:mt-[16px]"
       components={markdownComponents}
       // 平滑逐字揭示（stream-animate 参数对齐，见 assistant-ui/stream-reveal.ts）：
       // 逐字铺开 + 限制提交频率，避免每个 SSE chunk 一次性贴上来、也避免
@@ -72,7 +72,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h1: ({ className, ...props }) => (
     <h1
       className={cn(
-        "aui-md-h1 mt-5 mb-2 scroll-m-20 text-xl font-semibold first:mt-0 last:mb-0",
+        "aui-md-h1 mt-[24px] mb-[16px] scroll-m-20 text-[18px] leading-[28px] font-semibold first:mt-0",
         className,
       )}
       {...props}
@@ -81,7 +81,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h2: ({ className, ...props }) => (
     <h2
       className={cn(
-        "aui-md-h2 mt-5 mb-2 scroll-m-20 text-lg font-semibold first:mt-0 last:mb-0",
+        "aui-md-h2 mt-[24px] mb-[16px] scroll-m-20 text-[16px] leading-[28px] font-semibold first:mt-0",
         className,
       )}
       {...props}
@@ -90,7 +90,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h3: ({ className, ...props }) => (
     <h3
       className={cn(
-        "aui-md-h3 mt-4 mb-1.5 scroll-m-20 text-base font-semibold first:mt-0 last:mb-0",
+        "aui-md-h3 mt-[24px] mb-[16px] scroll-m-20 text-[14px] leading-[24.5px] font-semibold first:mt-0",
         className,
       )}
       {...props}
@@ -99,7 +99,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h4: ({ className, ...props }) => (
     <h4
       className={cn(
-        "aui-md-h4 mt-3.5 mb-1 scroll-m-20 text-base font-medium first:mt-0 last:mb-0",
+        "aui-md-h4 mt-[24px] mb-[16px] scroll-m-20 text-[14px] leading-[24.5px] font-semibold first:mt-0",
         className,
       )}
       {...props}
@@ -108,7 +108,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h5: ({ className, ...props }) => (
     <h5
       className={cn(
-        "aui-md-h5 mt-3 mb-1 text-sm font-semibold first:mt-0 last:mb-0",
+        "aui-md-h5 mt-[24px] mb-[16px] text-[14px] leading-[24.5px] font-medium first:mt-0",
         className,
       )}
       {...props}
@@ -117,7 +117,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h6: ({ className, ...props }) => (
     <h6
       className={cn(
-        "aui-md-h6 mt-3 mb-1 text-sm font-medium first:mt-0 last:mb-0",
+        "aui-md-h6 mt-[24px] mb-[16px] text-[14px] leading-[24.5px] font-normal first:mt-0",
         className,
       )}
       {...props}
@@ -126,7 +126,7 @@ const defaultComponents = memoizeMarkdownComponents({
   p: ({ className, ...props }) => (
     <p
       className={cn(
-        "aui-md-p my-3 leading-relaxed first:mt-0 last:mb-0",
+        "aui-md-p my-0 mb-[16px] leading-[24.5px] first:mt-0",
         className,
       )}
       {...props}
@@ -144,7 +144,7 @@ const defaultComponents = memoizeMarkdownComponents({
   blockquote: ({ className, ...props }) => (
     <blockquote
       className={cn(
-        "aui-md-blockquote border-muted-foreground/30 text-muted-foreground my-3 border-s-2 ps-4",
+        "aui-md-blockquote border-muted-foreground/30 text-muted-foreground my-[12px] border-s-2 ps-[16px]",
         className,
       )}
       {...props}
@@ -153,7 +153,7 @@ const defaultComponents = memoizeMarkdownComponents({
   ul: ({ className, ...props }) => (
     <ul
       className={cn(
-        "aui-md-ul marker:text-muted-foreground my-3 ms-5 list-disc [&>li]:mt-1",
+        "aui-md-ul marker:text-muted-foreground my-[12px] list-outside list-disc space-y-[6px] ps-[20px]",
         className,
       )}
       {...props}
@@ -162,7 +162,7 @@ const defaultComponents = memoizeMarkdownComponents({
   ol: ({ className, ...props }) => (
     <ol
       className={cn(
-        "aui-md-ol marker:text-muted-foreground my-3 ms-5 list-decimal [&>li]:mt-1",
+        "aui-md-ol marker:text-muted-foreground my-[12px] list-outside list-decimal space-y-[6px] ps-[20px]",
         className,
       )}
       {...props}
@@ -170,12 +170,12 @@ const defaultComponents = memoizeMarkdownComponents({
   ),
   hr: ({ className, ...props }) => (
     <hr
-      className={cn("aui-md-hr border-muted-foreground/20 my-3", className)}
+      className={cn("aui-md-hr border-muted-foreground/20 my-[12px]", className)}
       {...props}
     />
   ),
   table: ({ className, ...props }) => (
-    <div className="aui-md-table-wrapper my-3 overflow-x-auto">
+    <div className="aui-md-table-wrapper my-[12px] overflow-x-auto">
       <table
         className={cn(
           "aui-md-table w-full border-separate border-spacing-0",
@@ -213,7 +213,7 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   li: ({ className, ...props }) => (
-    <li className={cn("aui-md-li leading-relaxed", className)} {...props} />
+    <li className={cn("aui-md-li ps-[4px] leading-[24.5px] [&>p]:my-0 [&>p]:inline", className)} {...props} />
   ),
   strong: ({ className, ...props }) => (
     <strong

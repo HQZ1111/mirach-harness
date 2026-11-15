@@ -378,7 +378,7 @@ export function ComposerWired() {
             ) : (
               <ComposerPrimitive.Input
                 aria-label="消息输入"
-                className="max-h-40 min-h-11 w-full resize-none bg-transparent px-3 text-[0.9375rem] leading-6 text-(--text) outline-none placeholder:text-(--text-4)"
+                className="max-h-40 min-h-[40px] w-full resize-none bg-transparent p-0 text-[14px] leading-[20px] text-(--text) outline-none placeholder:text-(--text-4)"
                 enterKeyHint="send"
                 onKeyDown={onInputKeyDown}
                 placeholder="输入消息，/ 指令，@ 成员…"

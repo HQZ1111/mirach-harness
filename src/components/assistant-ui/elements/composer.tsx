@@ -133,10 +133,10 @@ export function ComposerBar({
         /* 输入区容器描边保留（用户口径：输入框类不动；paper 已全局去描边，
            这里补回原 paper 的描边保证打字框可见性）；shadow-none 抵消
            paper 新增的 shadow-sm，保持输入框与去描边前逐像素一致。 */
-        "border-border/60 border shadow-none",
-        /* 圆角 20（用户 2026-10-05 定稿；kit 原值 24）——harness 侧对官方
-           kit 的取值调整，编辑态 composer 的 --composer-radius 同步 */
-        "flex w-full flex-col gap-2 rounded-[20px] p-2.5 transition-colors",
+        "border-border/60 border-[0.5px] shadow-none",
+        /* 2026-11-15 按真实 ZCode 渲染器实测：radius 32 / padding 12 /
+           gap 12 / border 0.5px（旧值 20/10/8/1 是 hermes kit 口径）。 */
+        "flex w-full flex-col gap-[12px] rounded-[32px] p-[12px] transition-colors",
         dragActive && "bg-blue-500/[0.04] dark:bg-blue-500/10",
         className,
       )}

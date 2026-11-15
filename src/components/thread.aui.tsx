@@ -1012,8 +1012,8 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           // composer 与消息同列，自动跟随。
           ["--composer-bg" as string]:
             "color-mix(in oklab, var(--color-muted) 30%, transparent)",
-          ["--composer-radius" as string]: "20px",
-          ["--composer-padding" as string]: "8px",
+          ["--composer-radius" as string]: "32px",
+          ["--composer-padding" as string]: "12px",
         }}
       >
         <ConnectionBanner />
@@ -1112,7 +1112,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
               // ZCode 一致；顶部 4px 白→透明渐隐，不硬切。
               "aui-thread-viewport-footer relative flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
               "bg-[var(--surface)]",
-              "before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-gradient-to-t before:from-[var(--surface)] before:to-transparent before:content-['']",
+              "before:pointer-events-none before:absolute before:inset-x-0 before:-top-6 before:h-6 before:bg-gradient-to-t before:from-[var(--surface)] before:to-transparent before:content-['']",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
@@ -1534,7 +1534,7 @@ const AssistantMessage: FC = () => {
     >
       <div
         data-slot="aui_assistant-message-content"
-        className="text-foreground px-2 leading-relaxed wrap-break-word"
+        className="text-foreground text-[14px] leading-[1.75] wrap-break-word"
       >
         {/* 工作项渲染器（2026-11-07）：替换 MessagePrimitive.GroupedParts。
             ZCode 扫描语义——隐藏的思考行（非首条）在扫描前剔除，工具族组
@@ -1853,13 +1853,13 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 px-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
+      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />
 
       <div className="aui-user-message-content-wrapper col-start-2 min-w-0">
-        <div className="aui-user-message-content bg-muted text-foreground rounded-(--composer-radius) px-4 py-2 wrap-break-word empty:hidden">
+        <div className="aui-user-message-content bg-muted text-foreground rounded-[24px] rounded-tr-[6px] border border-border px-[16px] py-[12px] text-[14px] leading-[21px] wrap-break-word empty:hidden">
           <MessagePrimitive.Parts
             components={{ File: UserFilePart, Image: UserImagePart, Quote: QuoteBlock }}
           />
