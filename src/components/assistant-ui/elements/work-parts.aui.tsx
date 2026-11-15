@@ -78,6 +78,7 @@ import { TypingIndicator } from "@/components/assistant-ui/elements/typing-indic
 import { File } from "@/components/file";
 import { Image } from "@/components/image";
 import { MarkdownText } from "@/components/markdown-text";
+import { cn } from "@/lib/utils";
 
 /** 兼容旧槽位形状（自定义组渲染器收到的 group 描述）。 */
 export interface WorkGroupPart {
@@ -428,7 +429,15 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
         </WorkSegmentGroup>
       ) : null}
       {hasFinalText ? (
-        <div data-slot="aui_assistant-work-following" className="flex flex-col gap-3">
+        <div
+          data-slot="aui_assistant-work-following"
+          className={cn(
+            "flex flex-col gap-5",
+            // ZCode 外层 flow items 之间是 mt-5（20px）；历史折叠区与最终
+            // 正文之间的间距必须与"已工作"头→内容（pb-2 + pt-5）分开算。
+            history.length > 0 && "mt-5",
+          )}
+        >
           <PartLeafAt index={split.lastTextIndex} slots={slots} />
           {following.length > 0 ? <WorkItems indices={following} ctx={ctx} /> : null}
         </div>

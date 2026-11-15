@@ -99,7 +99,9 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
     return (
       <div data-slot="aui_work-segment" data-work-state={status.state}>
         {header}
-        <div data-slot="aui_work-segment-content" className="pt-3">
+        {/* ZCode ConversationAssistantWorkItems 的 history 容器：pt-5（20px），
+            配合头部 pb-2 得到 28px 的「已工作」头→内容间距。 */}
+        <div data-slot="aui_work-segment-content" className="pt-5">
           {children}
         </div>
       </div>
@@ -124,7 +126,7 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
           "data-closed:fill-mode-forwards data-closed:pointer-events-none",
         )}
       >
-        <div className="pt-3">{children}</div>
+        <div className="pt-5">{children}</div>
       </CollapsibleContent>
     </Collapsible>
   );
