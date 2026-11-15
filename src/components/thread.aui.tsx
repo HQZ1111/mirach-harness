@@ -1099,7 +1099,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
 
           <div
             data-slot="aui_message-group"
-            className="mb-14 flex flex-col gap-y-6 empty:hidden"
+            // ZCode 实测（9444）：每个 turn 是独立 SECTION，`pt-56 pb-20`，
+            // 相邻轮之间 = 76px。旧值 gap-y-6（根字号 15px 下 22.5px）只有
+            // 三分之一，整段对话看起来"挤在一起"。
+            className="mb-14 flex flex-col gap-y-[76px] empty:hidden"
           >
             <MessageTurnList />
           </div>

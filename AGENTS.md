@@ -2519,6 +2519,8 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
     组容器内部 `pt-5`）；组内容 mt8、rail ml8+pl16、gap8、
     `max-h 16lh+30*--spacing`。history-message 的子项（除 collapsible-content）
     一律 `mt-5`；collapsible-content 自身 `mb -4 / pb 4`。
+  - **轮间距 = 76px**：每个 turn 是独立 SECTION，`pt-56 pb-20`；宿主旧值
+    gap-y-6 只有 22.5px，整段对话会明显偏挤。turn 内 user→assistant 20px。
   - **user 气泡 = 四角统一 24、无描边**（border 宽度实测 0；类里的
     rounded-tr-xs 被 rounded-xl 覆盖）、padding 12/16、14/21。
   - **动作钮 = 24×24、圆角 6px、图标 14px、容器 gap 4px、常态 text-foreground**；
