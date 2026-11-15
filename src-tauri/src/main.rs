@@ -957,6 +957,14 @@ fn pi_mode_state(
     state.engine.mode_state()
 }
 
+/// 目标态（活动面板「目标」分区）：rpi-goal 的 `goal-state` 会话条目。
+#[tauri::command(async)]
+fn pi_goal_state(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.goal_state()
+}
+
 /// 执行扩展 slash command（`/plan start|exit` 等）——与 rpi-cli RPC 的
 /// `execute_command` 同一 handler 契约；模式芯片据此真的进入/退出计划模式
 /// （计划态下插件只放行 read/bash/docs/plan_mode_complete，write/edit 被拒）。
@@ -1544,6 +1552,7 @@ fn main() {
             pi_pending_approvals,
             pi_extension_ui_response,
             pi_mode_state,
+            pi_goal_state,
             pi_run_command,
             pi_set_approval_mode,
             pi_set_plan_mode,

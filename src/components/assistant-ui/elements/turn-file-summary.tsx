@@ -30,7 +30,7 @@
  * 收尾）。
  */
 import { useMemo, useState, type FC } from "react";
-import { ChevronRightIcon } from "lucide-react";
+import { FileDiffIcon } from "lucide-react";
 import { useAui, useAuiState } from "@assistant-ui/react";
 import {
   Collapsible,
@@ -104,24 +104,23 @@ export const TurnFileSummary: FC = () => {
       data-file-count={totals.files}
       open={open}
       onOpenChange={setOpen}
-      className="mt-3 w-full overflow-hidden rounded-xl border border-border/70"
+      className="mt-[20px] w-full overflow-hidden rounded-xl border border-border bg-card shadow-sm"
     >
       <CollapsibleTrigger
         data-slot="aui_turn-file-summary-trigger"
-        className="hover:bg-muted/40 flex h-9 w-full min-w-0 items-center gap-2 px-2.5 text-left text-sm transition-colors"
+        className="hover:bg-muted/40 flex h-[40px] w-full min-w-0 items-center gap-2 px-2 text-left text-[14px] transition-colors"
       >
-        <ChevronRightIcon
+        {/* ZCode 实测（9444）：卡片头 40 高、bg-card、左侧 file-diff 图标
+            （不是 chevron）、14px 文本、+/- 与标题同一行。 */}
+        <FileDiffIcon
           aria-hidden
-          className={cn(
-            "text-muted-foreground size-[var(--size-icon-sm)] shrink-0 transition-transform",
-            open ? "rotate-90" : "rotate-0",
-          )}
+          className="text-muted-foreground size-[14px] shrink-0"
         />
         <span className="text-foreground min-w-0 truncate font-medium">
           {totals.files} 个文件已更改
         </span>
         {totals.additions !== null || totals.deletions !== null ? (
-          <span className="ms-auto shrink-0 font-mono text-xs tabular-nums">
+          <span className="ms-auto shrink-0 tabular-nums">
             {totals.additions !== null && (
               <span className="text-emerald-600 dark:text-emerald-400">
                 +{totals.additions}

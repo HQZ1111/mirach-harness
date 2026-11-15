@@ -1340,6 +1340,18 @@ impl PiEngine {
         Ok(wire)
     }
 
+    /// 目标态（活动面板「目标」分区）：rpi-goal 把状态存成当前分支的
+    /// `goal-state` custom 条目（data = `{active, archived}`，见
+    /// rpi-package/rpi-goal/src/lib.rs）。无条目 = Null（诚实空态）。
+    pub fn goal_state(&self) -> Result<serde_json::Value, String> {
+        let Some(live) = self.live_opt()? else {
+            return Ok(serde_json::Value::Null);
+        };
+        Ok(self
+            .latest_plugin_entry(&live, "goal-state")?
+            .unwrap_or(serde_json::Value::Null))
+    }
+
     pub fn set_approval_mode(&self, _mode: &str) -> Result<(), String> {
         Err("审批模式切换不可用：rpi 无 always-ask/write/yolo 三态概念（权限由 rpi-permissions / rpi-permission-gate 的规则文件与 ask 对话框承担），插件未暴露切换面".into())
     }

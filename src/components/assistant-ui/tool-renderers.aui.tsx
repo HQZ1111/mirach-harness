@@ -25,6 +25,7 @@ import {
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
 import {
+  CircleHelpIcon,
   FilePenIcon,
   FilePlusIcon,
   FileTextIcon,
@@ -299,6 +300,28 @@ const PlanCard: React.FC<{
   );
 };
 
+/** ask_user 结果 → 问答对（rpi-ask-user details.answers：{id, question,
+ *  values, text, confirmed}；values = 选项标题数组，text = 自由输入）。 */
+export function parseAskAnswers(
+  result: unknown,
+): { question: string | null; answer: string | null }[] {
+  if (!isPlainRecord(result)) return [];
+  const details = result.details;
+  if (!isPlainRecord(details)) return [];
+  const answers = details.answers;
+  if (!Array.isArray(answers)) return [];
+  return answers.flatMap((raw) => {
+    if (!isPlainRecord(raw)) return [];
+    const question = typeof raw.question === "string" ? raw.question : null;
+    const values = Array.isArray(raw.values)
+      ? raw.values.filter((v): v is string => typeof v === "string")
+      : [];
+    const text = typeof raw.text === "string" && raw.text !== "" ? raw.text : null;
+    const answer = values.length > 0 ? values.join("、") : text;
+    return [{ question, answer }];
+  });
+}
+
 // ── 分流 ────────────────────────────────────────────────────────────
 
 export const PiToolUI: ToolCallMessagePartComponent = (part) => {
@@ -347,6 +370,7 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
 
   const summary = (opts: {
     icon: ReactNode;
+    kindLabelOverride?: string;
     primaryText?: ReactNode;
     secondaryText?: ReactNode;
     hideSecondaryWhenOpen?: boolean;
@@ -358,7 +382,7 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
       toolId={row.toolId}
       toolName={toolName}
       icon={opts.icon}
-      kindLabel={kindLabel}
+      kindLabel={opts.kindLabelOverride ?? kindLabel}
       primaryText={opts.primaryText}
       secondaryText={opts.secondaryText}
       hideSecondaryWhenOpen={opts.hideSecondaryWhenOpen}
@@ -401,6 +425,55 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
         ),
       });
     }
+  }
+
+  // 5a2. ask_user → 询问行（ZCode AskUserQuestion 卡）：摘要 = `已询问 N 个问题`，
+  // 展开 = 左侧竖线内的 Q（medium）/ A（subtle）对。失败无 answers 时回退展示
+  // 问题参数 + 错误（不编造答案）。
+  if (["ask_user", "AskUserQuestion", "ask_question"].includes(toolName)) {
+    const answers = parseAskAnswers(result);
+    const questionFallback = stringArg(args, "question", "prompt");
+    const batch = isPlainRecord(args) && Array.isArray(args.questions) ? args.questions.length : 0;
+    const count = answers.length > 0 ? answers.length : batch > 0 ? batch : 1;
+    return summary({
+      icon: <CircleHelpIcon />,
+      kindLabelOverride: running ? "正在询问" : "已询问",
+      primaryText: `${count} 个问题`,
+      canToggle: true,
+      content: (
+        <div className="pt-2">
+          <div className="border-border ml-2 space-y-2 border-l pl-3.5">
+            {answers.length > 0 ? (
+              answers.map((entry, index) => (
+                <div key={index} className="space-y-1">
+                  {entry.question !== null ? (
+                    <p className="text-foreground text-[14px] leading-5 font-medium">
+                      {entry.question}
+                    </p>
+                  ) : null}
+                  {entry.answer !== null ? (
+                    <p className="text-muted-foreground text-[14px] leading-5">
+                      {entry.answer}
+                    </p>
+                  ) : null}
+                </div>
+              ))
+            ) : (
+              <div className="space-y-1">
+                <p className="text-foreground text-[14px] leading-5 font-medium">
+                  {questionFallback ?? "（问题参数缺失）"}
+                </p>
+                {row.failed ? (
+                  <p className="text-muted-foreground text-[14px] leading-5">
+                    {row.errorText ?? "执行失败"}
+                  </p>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </div>
+      ),
+    });
   }
 
   // 5b. read / ls / image → 只读行（ZCode read 不可展开：正文在侧栏文件预览）

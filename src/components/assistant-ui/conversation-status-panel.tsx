@@ -39,10 +39,12 @@
  */
 import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { useAuiState } from '@assistant-ui/react'
 import { useStore } from 'zustand'
 import {
   ActivityIcon,
   ArrowRightIcon,
+  BotIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   ChevronLeftIcon,
@@ -53,6 +55,7 @@ import {
   ListChecksIcon,
   Maximize2Icon,
   Minimize2Icon,
+  TargetIcon,
 } from 'lucide-react'
 import type { DockviewApi } from 'dockview-react'
 
@@ -85,6 +88,8 @@ import {
   type StatusPanelPlanItem,
 } from '@/components/assistant-ui/conversation-status-panel-model'
 import { statusPanelStore, type StatusPanelVariant } from '@/components/assistant-ui/status-panel-store'
+import { parseDelegationResult } from '@/components/assistant-ui/elements/delegation-card'
+import { formatWorkDuration } from '@/components/assistant-ui/work-segment'
 
 // ── 文案（ZCode zh-CN 原文，硬编码——宿主无 i18n）───────────────────
 const L = {
@@ -98,10 +103,14 @@ const L = {
   environment: 'Git 工具',
   changes: '更改',
   todo: '进程',
-  openReview: '打开审查面板',
-  /** 常驻面板的空态（无待办 / 无 git 变更）。 */
+  goal: '目标',
+  agents: '智能体',
+  goalActive: '进行中',
+  goalPaused: '已暂停',
+  goalComplete: '已完成',
+  agentsRunning: (n: number) => `${n} 个运行中`,
   empty: '暂无活动',
-  emptyHint: '本次会话还没有待办或文件更改',
+  emptyHint: '本次会话还没有待办、目标或文件更改',
 } as const
 
 // ── 显示策略（variant）──────────────────────────────────────────────
@@ -109,12 +118,16 @@ const L = {
 // 份策略；本组件还负责把"此刻以面板形态在场"写回 store）。
 
 // ── 可折叠分区（上游 StatusSection 逐条照抄）────────────────────────
-type StatusSectionKind = 'environment' | 'plan'
+type StatusSectionKind = 'environment' | 'goal' | 'plan' | 'agent'
 
 const STATUS_SECTION_SCROLL_POLICY = {
   environment: null,
+  // 目标行最多 3 行，单条不滚；多条迭代（上游）也只是少量行。
+  goal: null,
   // 六个双行 Todo（6 × 52px）需要约 20rem；超过后只滚动进程区块。
   plan: 'max-h-80',
+  // 并行子代理通常个位数；超过后滚动。
+  agent: 'max-h-64',
 } as const satisfies Record<StatusSectionKind, string | null>
 
 function StatusSectionHeader({
@@ -529,6 +542,146 @@ function PlanStatusSection({
   )
 }
 
+// ── 目标分区（上游 GoalStatusSection；数据 = rpi-goal 的 goal-state 条目）──
+interface GoalRow {
+  title: string
+  status: 'active' | 'paused' | 'complete'
+  turnsUsed: number
+  maxTurns: number
+  startedAt: number | null
+}
+
+function parseGoalRow(raw: unknown): GoalRow | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const active = (raw as Record<string, unknown>).active
+  if (typeof active !== 'object' || active === null) return null
+  const goal = active as Record<string, unknown>
+  const title = typeof goal.title === 'string' ? goal.title.trim() : ''
+  if (title === '') return null
+  const status =
+    goal.status === 'paused' || goal.status === 'complete' ? goal.status : 'active'
+  const num = (key: string) => (typeof goal[key] === 'number' ? (goal[key] as number) : 0)
+  return {
+    title,
+    status,
+    turnsUsed: num('turnsUsed'),
+    maxTurns: num('maxTurns'),
+    startedAt: typeof goal.startedAt === 'number' ? goal.startedAt : null,
+  }
+}
+
+function GoalStatusSection({ goal, separated }: { goal: GoalRow; separated: boolean }) {
+  const [now, setNow] = useState(() => Date.now())
+  const ticking = goal.status === 'active' && goal.startedAt !== null
+  useEffect(() => {
+    if (!ticking) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [ticking, goal.startedAt])
+  const elapsed = ticking
+    ? formatWorkDuration(Math.max(0, now - (goal.startedAt ?? now)))
+    : null
+  const statusLabel =
+    goal.status === 'paused'
+      ? L.goalPaused
+      : goal.status === 'complete'
+        ? L.goalComplete
+        : L.goalActive
+
+  return (
+    <StatusSection
+      section="goal"
+      separated={separated}
+      title={L.goal}
+      trailing={() => (
+        <span className="shrink-0 tabular-nums">{elapsed ?? statusLabel}</span>
+      )}
+    >
+      <div className="flex min-w-0 cursor-default items-start gap-2 rounded-lg px-2 py-2 hover:bg-foreground/[0.04]">
+        <TargetIcon className="text-foreground/45 mt-0.5 size-3.5 shrink-0" aria-hidden />
+        <p className="text-foreground line-clamp-3 min-w-0 flex-1 text-[14px] leading-4">
+          {goal.title}
+        </p>
+        {goal.maxTurns > 0 ? (
+          <span className="text-muted-foreground shrink-0 text-[12px] tabular-nums">
+            {goal.turnsUsed}/{goal.maxTurns}
+          </span>
+        ) : null}
+      </div>
+    </StatusSection>
+  )
+}
+
+// ── 智能体分区（上游 AgentStatusSection；数据 = 本线程 delegate_task 工具调用）──
+export interface RunningAgentRow {
+  id: string
+  title: string
+  startedAt: number | null
+}
+
+function AgentStatusSection({
+  agents,
+  separated,
+}: {
+  agents: readonly RunningAgentRow[]
+  separated: boolean
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (agents.length === 0) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [agents.length])
+  const longest = agents.reduce(
+    (max, agent) =>
+      Math.max(max, agent.startedAt === null ? 0 : now - agent.startedAt),
+    0,
+  )
+
+  return (
+    <StatusSection
+      section="agent"
+      separated={separated}
+      title={L.agents}
+      trailing={() => (
+        <>
+          <span className="min-w-0 truncate tabular-nums">
+            {formatWorkDuration(Math.max(1000, Math.floor(longest / 1000) * 1000))}
+          </span>
+          <span className="shrink-0">·</span>
+          <span className="shrink-0">{L.agentsRunning(agents.length)}</span>
+        </>
+      )}
+    >
+      <ul className="space-y-0">
+        {agents.map((agent) => (
+          <li
+            key={agent.id}
+            data-slot="aui_status-agent-row"
+            className="flex min-w-0 items-start gap-2 rounded-lg px-2 py-2 hover:bg-foreground/[0.04]"
+          >
+            <span className="flex h-5 w-3.5 shrink-0 items-center justify-center">
+              <BotIcon className="text-muted-foreground size-3.5" aria-hidden />
+            </span>
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              <span className="text-foreground line-clamp-2 text-[14px] leading-5">
+                {agent.title}
+              </span>
+              <span className="text-muted-foreground text-[14px] leading-5 tabular-nums">
+                {agent.startedAt === null
+                  ? '—'
+                  : formatWorkDuration(Math.max(0, now - agent.startedAt))}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </StatusSection>
+  )
+}
+
 // ── mini 胶囊（上游 StatusSummaryRow，缺数据分支按同序剔除）─────────
 function StatusSummaryMetric({ children, icon }: { children: ReactNode; icon: ReactNode }) {
   return (
@@ -627,6 +780,8 @@ function ConversationStatusPanelImpl() {
   const activeId = useStore(sessionCatalog, (s) => s.activeId)
   const { todo } = useTodoBridge()
   const { stat: gitStat } = useGitBridge()
+  const isRunning = useAuiState((s) => s.thread.isRunning)
+  const threadMessages = useAuiState((s) => s.thread.messages)
   // 活动会话工作区（git 变更统计的目标目录）；数据源与对话栏列头同源
   const cwd = useStore(sessionCatalog, (s) =>
     sessionProjectCwd(s.activeId ? s.entries[s.activeId] : undefined, s.pendingCwd),
@@ -642,7 +797,7 @@ function ConversationStatusPanelImpl() {
     return () => statusPanelStore.getState().setMounted(false)
   }, [])
 
-  // 挂载/聚焦拉取：待办重放 + git 变更统计。
+  // 挂载/聚焦拉取：待办重放 + git 变更统计 + 目标态（rpi-goal 条目）。
   // **hub / jobs 拉取已移除**（2026-11-15）：rpi 的 jobs 插件不可装、子代理
   // 状态在引擎进程内无读取面——`pi_hub_roster` / `pi_job_list` 没有真实数据，
   // 拉它只是往空 registry 上做无意义 IPC。
@@ -650,6 +805,59 @@ function ConversationStatusPanelImpl() {
     void todoBridge.getState().refresh()
     void gitBridge.getState().refresh(cwd ?? null)
   }, [cwd])
+
+  // 目标态：条目随 goal 工具/命令变化；run 结束（isRunning false）再拉一次。
+  // 另加 3s 轮询——goal 可在 run 中被工具改状态（pause/complete），宿主没有
+  // 对应事件面；轮询只读一个会话条目，成本可忽略。
+  const [goalRaw, setGoalRaw] = useState<unknown>(null)
+  useEffect(() => {
+    let cancelled = false
+    const fetchGoal = () => {
+      invoke<unknown>('pi_goal_state')
+        .then((raw) => {
+          if (!cancelled) setGoalRaw(raw)
+        })
+        .catch((e) => console.error('[status-panel] pi_goal_state 读取失败', e))
+    }
+    fetchGoal()
+    const timer = window.setInterval(fetchGoal, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [activeId, cwd, isRunning])
+  const goal = useMemo(() => parseGoalRow(goalRaw), [goalRaw])
+
+  // 智能体分区：本线程里仍在跑的 delegate_task 工具调用（timing.completedAt
+  // 缺席 = 运行中）。数据面是 AG-UI 工具事件本身，不需要引擎 roster。
+  const runningAgents = useMemo<RunningAgentRow[]>(() => {
+    const out: RunningAgentRow[] = []
+    for (const message of threadMessages) {
+      if (message.role !== 'assistant' || typeof message.content === 'string') continue
+      for (const part of message.content) {
+        if (part.type !== 'tool-call' || part.toolName !== 'delegate_task') continue
+        const timing = (
+          part as unknown as { timing?: { startedAt?: number; completedAt?: number } }
+        ).timing
+        if (timing?.completedAt !== undefined) continue
+        const parsed = parseDelegationResult(part.result)
+        const args = (part.args ?? {}) as Record<string, unknown>
+        const task =
+          parsed?.task ??
+          (typeof args.task === 'string' && args.task !== '' ? args.task : null)
+        const role =
+          parsed?.role ??
+          (typeof args.role === 'string' && args.role !== '' ? args.role : null)
+        out.push({
+          id: part.toolCallId,
+          title: task ?? role ?? '子代理',
+          startedAt:
+            typeof timing?.startedAt === 'number' ? timing.startedAt : null,
+        })
+      }
+    }
+    return out
+  }, [threadMessages])
 
   const model = useMemo(
     () =>
@@ -687,7 +895,10 @@ function ConversationStatusPanelImpl() {
   }, [])
 
   const canRenderGit = Boolean(model.git)
+  const canRenderGoal = goal !== null
   const canRenderPlan = Boolean(model.plan)
+  const canRenderAgents = runningAgents.length > 0
+  const hasAnySection = canRenderGit || canRenderGoal || canRenderPlan || canRenderAgents
 
   // draft（无会话）不挂；有会话常驻（空态见 StatusSummaryRow / 正文空态）
   if (activeId === null) return null
@@ -702,17 +913,17 @@ function ConversationStatusPanelImpl() {
         aria-label={L.panelTitle}
         data-state={variant === 'mini' ? 'collapsed' : 'expanded'}
         data-display-mode={variant}
-        data-empty={canRenderGit || canRenderPlan ? undefined : 'true'}
+        data-empty={hasAnySection ? undefined : 'true'}
         className={cn(
           paper,
           'pointer-events-auto relative overflow-hidden rounded-2xl text-foreground shadow-md transition-[border-radius,padding,background-color,box-shadow] duration-300 ease-in-out',
           // 胶囊宽度只由 CSS 决定：w-max 跟随摘要内容（上游同判——ResizeObserver
           // 量宽会晚一帧，文字会落到胶囊外面）
           variant === 'mini'
-            ? 'inline-flex max-h-8.5 w-max max-w-[min(20rem,calc(100cqw-2rem))] flex-col'
+            ? 'inline-flex max-h-8.5 w-max max-w-[min(320px,calc(100cqw-2rem))] flex-col'
             : variant === 'panel'
-              ? 'flex max-h-[min(64dvh,32rem)] w-80 max-w-[calc(100cqw-2rem)] flex-col'
-              : 'inline-flex max-h-8.5 w-max max-w-[min(20rem,calc(100cqw-2rem))] flex-col @min-[1280px]/thread:max-h-[min(64dvh,32rem)] @min-[1280px]/thread:w-80',
+              ? 'flex max-h-[min(64dvh,32rem)] w-[320px] max-w-[calc(100cqw-2rem)] flex-col'
+              : 'inline-flex max-h-8.5 w-max max-w-[min(320px,calc(100cqw-2rem))] flex-col @min-[1280px]/thread:max-h-[min(64dvh,32rem)] @min-[1280px]/thread:w-[320px]',
         )}
       >
         {variant !== 'mini' ? (
@@ -763,12 +974,24 @@ function ConversationStatusPanelImpl() {
             {canRenderGit ? (
               <GitStatusSection model={model} cwd={cwd ?? ''} onOpenGitReview={onOpenGitReview} separated={false} />
             ) : null}
-            {canRenderPlan ? (
-              <PlanStatusSection model={model} separated={canRenderGit} />
+            {canRenderGoal && goal !== null ? (
+              <GoalStatusSection goal={goal} separated={canRenderGit} />
             ) : null}
-            {/* 常驻面板的空态：没有待办也没有 git 变更时，正文给一行说明
-                （不造假数据、不渲染空分区）。 */}
-            {!canRenderGit && !canRenderPlan ? (
+            {canRenderPlan ? (
+              <PlanStatusSection
+                model={model}
+                separated={canRenderGit || canRenderGoal}
+              />
+            ) : null}
+            {canRenderAgents ? (
+              <AgentStatusSection
+                agents={runningAgents}
+                separated={canRenderGit || canRenderGoal || canRenderPlan}
+              />
+            ) : null}
+            {/* 常驻面板的空态：没有待办/目标/git/运行中智能体时，正文给一行
+                说明（不造假数据、不渲染空分区）。 */}
+            {!hasAnySection ? (
               <div
                 data-slot="aui_status-empty"
                 className="text-foreground/40 flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px]"
