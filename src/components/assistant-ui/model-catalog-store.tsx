@@ -72,6 +72,8 @@ interface ModelCatalogState {
   /** 目录拉取缓存：成功后保持 resolved promise（不重复拉）；失败清空可重试 */
   loadPromise: Promise<void> | null
   load: () => Promise<void>
+  /** 强制重拉（写 models.json 后刷新 contextWindow 等字段） */
+  reload: () => Promise<void>
   /** 当前选中模型（provider/modelId）；null = 未知（首条消息前无会话） */
   currentModel: string | null
   setCurrentModel: (model: string | null) => void
@@ -94,6 +96,10 @@ export const modelCatalogStore = createStore<ModelCatalogState>((set, get) => ({
       })
     set({ loadPromise: p })
     return p
+  },
+  reload: () => {
+    set({ loadPromise: null })
+    return get().load()
   },
   currentModel: null,
   setCurrentModel: (model) => set({ currentModel: model }),

@@ -2539,16 +2539,20 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
   - **图标线宽 lucide 1.5**（本工程根字号 15px，`size-6/7/8` 分别只有
     22.5/26.25/30px，对 ZCode 的 24/28 全部要写死像素）。
   - **上下文用量环常驻**：窗口未知（models.json 没写 `contextWindow`）也渲染，
-    环上叠 `?`、弹层写"窗口未知"+ 指向设置；用量从 pi 最后一条带非零 usage
-    的 assistant 提取（`usageFromPiMessages` → `HYDRATE.usage`，历史会话也
-    有数）。**总量唯一来源 = models.json 的 contextWindow**（设置 → 模型 →
-    服务商 表单的「上下文长度」写 models[0]）；ZCode 有自家 registry，rpi 没有，
-    不要编默认值。
-  - **模式芯片只读**：ZCode 四态（计划/变更前确认/自主/完全访问），rpi 只有
-    `rpi-plan-mode` 插件条目（宿主 `set_plan_mode` 恒 Err）与
-    `rpi-permission-gate` 的启动开关（`--permission-gate` /
-    `RPI_PERMISSION_GATE=1`，bash/write/edit 每次经扩展 UI 确认；无运行时
-    切换面）。芯片展示当前真实态，其余态置灰并标注原因——不造假开关。
+    环上叠 `?`、弹层写"窗口未知"；用量从 pi 最后一条带非零 usage 的 assistant
+    提取（`usageFromPiMessages` → `HYDRATE.usage`，历史会话也有数）。
+    **总量唯一来源 = models.json 的 contextWindow**（ZCode 有自家 registry，
+    rpi 没有）。弹层**就地可设**：输入 tokens → `pi_get_models_config` →
+    `pi_set_models_config` → `modelCatalogStore.reload()`（环/百分比立刻更新；
+    注意它同时影响引擎压缩阈值，且当前 activity 会话的 in-memory model 要重开
+    才生效）。**不要编默认值**。
+  - **模式芯片 = 计划 / 完全访问两态，可切换**：`pi_run_command`
+    （宿主新 IPC）直接调扩展 slash command `/plan start|exit`，与 rpi-cli
+    RPC `execute_command` 同一 handler 契约（snapshot.commands() + handler +
+    `OwnedString::from_raw`），**不需要改引擎**。计划态下插件只放行
+    `read`/`bash`/`docs`/`plan_mode_complete`，write/edit 的 tool_call 被
+    before_tool_call veto；**bash 不是只读沙箱**（扩展 README 原话）。
+    `RPI_PERMISSION_GATE=1` 是启动期开关（无运行时切换面），芯片如实标注。
 - **流式投影铁律**：同一 tool 边界内只保留一个 text part，thinking 一律插到
   该 text part 之前（对齐 pi 落盘 `[thinking, text]`）；否则 live 的
   `text→thinking→text` 会和完成后形状不一致（用户："思考和结论穿插"）。

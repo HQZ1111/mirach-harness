@@ -139,6 +139,7 @@ export function ComposerWired() {
   const input = unstable_useComposerInput()
   const value = input.value
   const isRunning = useAuiState((s) => s.thread.isRunning)
+  const threadId = useAuiState((s) => s.threadListItem.id)
   const setText = input.setText
   const slash = useSlashMatches(value, COMMANDS)
   const mentions = useMentionMatches(value, PEOPLE)
@@ -264,6 +265,48 @@ export function ComposerWired() {
   const currentContextWindow = currentModel
     ? entries.find((e) => `${e.provider}/${e.id}` === currentModel)?.contextWindow
     : undefined
+
+  /** 上下文环就地设置总量：写 models.json 的 models[].contextWindow，再强制
+   *  重拉目录（环/百分比立刻收敛）。窗口未知不再是死胡同。 */
+  const setContextWindow = useCallback(
+    async (tokens: number) => {
+      if (!currentModel) throw new Error('当前模型未知，无法写入上下文窗口')
+      const slash = currentModel.indexOf('/')
+      if (slash <= 0 || slash === currentModel.length - 1) {
+        throw new Error(`模型键格式异常：${currentModel}`)
+      }
+      const providerId = currentModel.slice(0, slash)
+      const modelId = currentModel.slice(slash + 1)
+      const doc = await invoke<Record<string, unknown> | null>('pi_get_models_config')
+      if (doc === null || typeof doc !== 'object') {
+        throw new Error('models.json 为空：先在设置 → 模型 → 服务商里添加该服务商')
+      }
+      const next = structuredClone(doc)
+      const providers = next['providers']
+      if (typeof providers !== 'object' || providers === null) {
+        throw new Error('models.json 缺 providers 表')
+      }
+      const provider = (providers as Record<string, unknown>)[providerId]
+      if (typeof provider !== 'object' || provider === null) {
+        throw new Error(`models.json 里没有服务商 ${providerId}`)
+      }
+      const models = (provider as Record<string, unknown>)['models']
+      if (!Array.isArray(models)) {
+        throw new Error(`服务商 ${providerId} 的 models 不是数组`)
+      }
+      let hit = models.find(
+        (m) => typeof m === 'object' && m !== null && (m as Record<string, unknown>)['id'] === modelId,
+      )
+      if (hit === undefined) {
+        hit = { id: modelId }
+        models.push(hit)
+      }
+      ;(hit as Record<string, unknown>)['contextWindow'] = tokens
+      await invoke('pi_set_models_config', { value: next })
+      await modelCatalogStore.getState().reload()
+    },
+    [currentModel],
+  )
 
   // ── 斜杠/@ 菜单键盘导航（↑↓ 移动高亮、Enter/Tab 确认、Esc 关闭）──
   // Input 的传入 onKeyDown 先于内部 handleKeyPress 执行（包内
@@ -400,7 +443,7 @@ export function ComposerWired() {
                     plan-mode 插件态 + permission-gate 启动开关，没有运行时
                     切换面——芯片只读展示当前真实模式，菜单里其余态置灰并
                     标注原因（不造假开关）。 */}
-                <PermissionModeChip />
+                <PermissionModeChip threadId={threadId} running={isRunning} />
               </div>
               <ComposerActions>
                 {/* 上下文明细按钮（ZCode 同位：模型选择器左侧；2026-11-01
@@ -411,6 +454,7 @@ export function ComposerWired() {
                     看不到入口（2026-11-15 用户："zcode 中都能显示"）。 */}
                 <ContextDisplay.Button
                   modelContextWindow={currentContextWindow ?? 0}
+                  onSetContextWindow={setContextWindow}
                   usage={
                     usage
                       ? {

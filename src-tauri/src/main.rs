@@ -938,6 +938,20 @@ fn pi_mode_state(
     state.engine.mode_state()
 }
 
+/// 执行扩展 slash command（`/plan start|exit` 等）——与 rpi-cli RPC 的
+/// `execute_command` 同一 handler 契约；模式芯片据此真的进入/退出计划模式
+/// （计划态下插件只放行 read/bash/docs/plan_mode_complete，write/edit 被拒）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_run_command(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    command: String,
+    args: Option<String>,
+) -> Result<serde_json::Value, String> {
+    state
+        .engine
+        .run_command(&command, args.as_deref().unwrap_or(""))
+}
+
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_set_approval_mode(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
@@ -1499,6 +1513,7 @@ fn main() {
             pi_pending_approvals,
             pi_extension_ui_response,
             pi_mode_state,
+            pi_run_command,
             pi_set_approval_mode,
             pi_set_plan_mode,
             pi_decide_plan,

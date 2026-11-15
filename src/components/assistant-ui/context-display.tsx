@@ -96,6 +96,11 @@ export type PresetProps = {
   side?: "top" | "bottom" | "left" | "right";
   usage?: TokenUsage | undefined;
   resetKey?: string | undefined;
+  /**
+   * 窗口未知时的就地设置入口（宿主写 models.json 的 contextWindow）。
+   * 不传 = 只展示"窗口未知"提示（设置页仍可改）。
+   */
+  onSetContextWindow?: ((tokens: number) => Promise<void>) | undefined;
 };
 
 export type ContextDisplayRootProps = {
@@ -450,12 +455,29 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
   modelContextWindow,
   usage,
   className,
+  onSetContextWindow,
 }) => {
   const totalTokens = usage?.totalTokens ?? 0;
   const hasUsage = totalTokens > 0;
   const windowKnown = modelContextWindow > 0;
   const percent = hasUsage ? getUsagePercent(totalTokens, modelContextWindow) : 0;
   const segments = hasUsage ? getContextSegments(usage) : [];
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const submitWindow = () => {
+    if (!onSetContextWindow) return;
+    const tokens = Number.parseInt(draft.replace(/[,_\s]/g, ""), 10);
+    if (!Number.isFinite(tokens) || tokens <= 0) {
+      setSaveError("请输入正整数 tokens");
+      return;
+    }
+    setSaving(true);
+    setSaveError(null);
+    onSetContextWindow(tokens)
+      .catch((e) => setSaveError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSaving(false));
+  };
   // ZCode 的 aria-label = "上下文已用 825,450 / 总量 1,000,000"。窗口未知
   // （models.json 没写 contextWindow）时不编造总量，明说"窗口未知"。
   const usageLabel = windowKnown
@@ -544,6 +566,40 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
             </p>
           </div>
         )}
+        {!windowKnown && onSetContextWindow ? (
+          <div className="mt-3 border-t pt-2.5">
+            <label className="text-muted-foreground block text-[11px] leading-4">
+              设置上下文窗口（tokens）
+            </label>
+            <div className="mt-1 flex items-center gap-1.5">
+              <input
+                aria-label="上下文窗口 tokens"
+                className="border-input bg-transparent h-7 min-w-0 flex-1 rounded-md border px-2 font-mono text-[12px] outline-none"
+                inputMode="numeric"
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submitWindow();
+                  }
+                }}
+                placeholder="例如 1000000"
+                value={draft}
+              />
+              <button
+                type="button"
+                className="bg-foreground text-background h-7 shrink-0 rounded-md px-2 text-[12px] disabled:opacity-50"
+                disabled={saving}
+                onClick={submitWindow}
+              >
+                {saving ? "…" : "保存"}
+              </button>
+            </div>
+            {saveError !== null ? (
+              <p className="mt-1 text-[11px] leading-4 text-red-500">{saveError}</p>
+            ) : null}
+          </div>
+        ) : null}
       </PopoverContent>
     </Popover>
   );

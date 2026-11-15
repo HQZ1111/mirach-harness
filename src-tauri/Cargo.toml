@@ -28,6 +28,10 @@ rpi-agent = { path = "../../pi-rust-main/crates/rpi-agent" }
 rpi-ai = { path = "../../pi-rust-main/crates/rpi-ai" }
 rpi-harness = { path = "../../pi-rust-main/crates/rpi-harness" }
 rpi-tools = { path = "../../pi-rust-main/crates/rpi-tools" }
+# 扩展命令面（pi_run_command）：宿主直接调已注册的 slash command（/plan
+# start|exit 等），与 rpi-cli RPC 的 execute_command 同一套 handler 契约。
+rpi-extensions = { path = "../../pi-rust-main/crates/rpi-extensions" }
+rpi-plugin-sdk = { path = "../../pi-rust-main/crates/rpi-plugin-sdk" }
 # 应用级偏好（app_prefs.rs）：保持电脑唤醒 = SetThreadExecutionState
 # （Win32_System_Power）。只取这一个 feature，避免把整个 win32 元数据拖进来。
 windows-sys = { version = "0.59", features = ["Win32_System_Power"] }

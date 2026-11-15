@@ -1316,6 +1316,55 @@ impl PiEngine {
         Err("审批模式切换不可用：rpi 无 always-ask/write/yolo 三态概念（权限由 rpi-permissions / rpi-permission-gate 的规则文件与 ask 对话框承担），插件未暴露切换面".into())
     }
 
+    /// 执行已注册的扩展 slash command（与 rpi-cli RPC `execute_command` 同一
+    /// 套 handler 契约）：宿主用它触发 `/plan start|exit` 等扩展命令。
+    ///
+    /// 没有加载扩展 / 命令未知 / handler 返回非 JSON = Err（不静默）。
+    pub fn run_command(&self, command: &str, args: &str) -> Result<serde_json::Value, String> {
+        let live = self.live()?;
+        let snapshot = {
+            let session = live
+                .reload
+                .extension_session
+                .lock()
+                .map_err(|_| "扩展会话锁中毒".to_string())?;
+            session.snapshot_arc()
+        }
+        .ok_or_else(|| format!("扩展命令不可用：当前会话没有加载扩展（{command}）"))?;
+        let cmd = snapshot
+            .commands()
+            .iter()
+            .find(|c| c.name.trim_start_matches('/') == command.trim_start_matches('/'))
+            .ok_or_else(|| format!("未知扩展命令：{command}"))?;
+        let input = serde_json::json!({ "command": command, "args": args }).to_string();
+        let handler = cmd.handler;
+        let user_data = cmd.user_data;
+        let name = cmd.name.clone();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut out = rpi_plugin_sdk::StbString::empty();
+            let rc = handler(
+                rpi_plugin_sdk::StbStringRef::from_str(&input),
+                &mut out,
+                user_data,
+            );
+            // SAFETY: the callback transfers its output using the host
+            // allocator — same contract as rpi-cli's rpc_execute_command and
+            // the TUI command invocation.
+            let out = unsafe {
+                rpi_plugin_sdk::callbacks::OwnedString::from_raw(
+                    out,
+                    Some(rpi_extensions::host_free_string),
+                )
+            };
+            if rc != 0 {
+                return Err(format!("扩展命令失败：{name}（code {rc}）"));
+            }
+            serde_json::from_str(&out.to_string_lossy())
+                .map_err(|_| format!("扩展命令返回非 JSON：{name}"))
+        }))
+        .unwrap_or_else(|_| Err(format!("扩展命令 panic：{name}")))
+    }
+
     pub fn set_plan_mode(&self, _enabled: bool) -> Result<(), String> {
         Err("plan 模式切换不可用：rpi-plan-mode 只注册 `/plan` 命令与 plan_mode_start / plan_mode_complete 工具，进入退出由插件自身完成；宿主只有读取面（pi_mode_state）".into())
     }
