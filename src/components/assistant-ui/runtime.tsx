@@ -1181,6 +1181,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       try {
         await invoke('pi_open_session', { path })
+        // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
+        // 下一次 RUN_STARTED 的归约自然覆盖）。
+        errorBridge.getState().setError(null)
         const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(id)
@@ -1193,6 +1196,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         branchBridge.getState().requestRefresh()
       } catch (e) {
         console.error(`[pi] 会话 ${id} 打开失败（保持当前会话）`, e)
+        // 不是所有失败都该静默：文件损坏 / 跨工作区打不开时，聊天区红条
+        // 给出引擎原文（例：会话文件缺 header 被 rpi 报成 No session found）。
+        errorBridge.getState().setError(
+          `无法打开会话：${e instanceof Error ? e.message : String(e)}`,
+        )
       }
     },
     [actorRef, hydratePiMessages, refreshThreads, resetSessionScopedBridges],

@@ -236,6 +236,37 @@ fn session_cache_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// 打开前预检：会话文件必须存在且**首行是 rpi header**。
+///
+/// 2026-11-15 实锤：`G:\pi_agent_rust-main` 那个会话在用户让它"删除自己的
+/// 工作区"后被写坏——文件只剩两条 entry（首行是 tool_result，seq 26），
+/// header 丢失。rpi 的 `find_session_metadata` 只收录能解析出 header 的
+/// 文件，于是报 "No session found for session <path>"，看起来像"切工作区
+/// 失败"，实际是文件损坏。预检把真实原因带出来（UI 红条可见）。
+fn preflight_session_file(path: &str) -> Result<(), String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("会话文件无法打开（{path}）：{e}"))?;
+    let mut first = String::new();
+    std::io::BufReader::new(file)
+        .read_line(&mut first)
+        .map_err(|e| format!("会话文件读取失败（{path}）：{e}"))?;
+    let line = first.trim();
+    if line.is_empty() {
+        return Err(format!("会话文件为空，缺少 header（{path}）"));
+    }
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| format!("会话文件首行不是合法 JSON——文件已损坏（{path}）：{e}"))?;
+    if value.get("kind").and_then(|v| v.as_str()) != Some("header") {
+        return Err(format!(
+            "会话文件损坏：首行不是 rpi session header（kind={:?}，{path}）。\
+             文件不再可恢复，请新建会话或删除该文件。",
+            value.get("kind")
+        ));
+    }
+    Ok(())
+}
+
 impl PiEngine {
     pub fn new() -> Self {
         let approvals = Arc::new(ApprovalRegistry::new());
@@ -608,6 +639,9 @@ impl PiEngine {
             self.asks.cleanup();
             return Ok(id);
         }
+        // 文件损坏（header 丢失）→ 明确报错，不要让 rpi 报误导性的
+        // "No session found"（见 preflight_session_file 注释）。
+        preflight_session_file(path)?;
         // 跨工作区打开（2026-11-15 侧栏「选择文件夹」会话）：rpi 的
         // `--session <id>` 只在 `default_session_dir(cwd)` 里查找——用活动
         // 会话的 cwd 去开别的工作区的文件必然 "No session found"。
@@ -2566,5 +2600,37 @@ mod tests {
             workspace_from_session_path(Path::new(r"C:\w\.rpi\sessions\x.jsonl")),
             None
         );
+    }
+
+    #[test]
+    fn preflight_accepts_a_header_and_rejects_corruption() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("mirach-preflight-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ok = dir.join("ok.jsonl");
+        let mut f = std::fs::File::create(&ok).unwrap();
+        writeln!(
+            f,
+            r#"{{"kind":"header","version":4,"id":"01a1","createdAt":1,"cwd":"C:\\\\x"}}"#
+        )
+        .unwrap();
+        writeln!(f, r#"{{"kind":"entry"}}"#).unwrap();
+        drop(f);
+        assert!(preflight_session_file(&ok.to_string_lossy()).is_ok());
+
+        let broken = dir.join("broken.jsonl");
+        let mut f = std::fs::File::create(&broken).unwrap();
+        writeln!(f, r#"{{"kind":"entry","lane":"main","seq":26}}"#).unwrap();
+        drop(f);
+        let err = preflight_session_file(&broken.to_string_lossy()).unwrap_err();
+        assert!(err.contains("会话文件损坏"), "{err}");
+
+        let empty = dir.join("empty.jsonl");
+        std::fs::File::create(&empty).unwrap();
+        let err = preflight_session_file(&empty.to_string_lossy()).unwrap_err();
+        assert!(err.contains("缺少 header"), "{err}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
