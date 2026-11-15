@@ -1297,7 +1297,7 @@ impl PiEngine {
     /// 无活动会话 = 默认快照（不是错误：mode-switch 挂载即轮询，首启时没有
     /// 会话是预期态）。
     pub fn mode_state(&self) -> Result<serde_json::Value, String> {
-        // rpi 的「模式」= plan-mode 插件条目（planMode）+ 启动期权限闸开关
+        // rpi 的「模式」= plan-mode 插件态 + 启动期权限闸开关
         // （permissionGate，RPI_PERMISSION_GATE=1 → bash/write/edit 每次确认）。
         // 该开关**只读**：扩展在会话构建时读 env，宿主没有运行时切换面。
         let gate = permission_gate_enabled();
@@ -1308,6 +1308,19 @@ impl PiEngine {
                 crate::pi_plugin_state::mode_wire(data.as_ref())?
             }
         };
+        // **进程级真值**：rpi-plan-mode 的 active 是插件里的 static（不是会话
+        // 条目；切会话时不落新条目，`activate()` 只做 false→true 的持久化）。
+        // 只看会话条目会在"计划态切到另一个会话"时显示 off，而工具实际仍被
+        // veto——用 `/plan status` 的 "Plan · Planning" 覆盖条目判断。
+        if let Ok(status) = self.run_command("/plan", "status") {
+            if let Some(text) = status.get("text").and_then(|v| v.as_str()) {
+                if text.contains("Plan · Planning") {
+                    wire["planMode"] = serde_json::json!("planning");
+                } else if wire["planMode"] == serde_json::json!("planning") {
+                    wire["planMode"] = serde_json::json!("off");
+                }
+            }
+        }
         wire["permissionGate"] = serde_json::json!(gate);
         Ok(wire)
     }

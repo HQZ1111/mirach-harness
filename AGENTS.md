@@ -2549,9 +2549,18 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
   - **模式芯片 = 计划 / 完全访问两态，可切换**：`pi_run_command`
     （宿主新 IPC）直接调扩展 slash command `/plan start|exit`，与 rpi-cli
     RPC `execute_command` 同一 handler 契约（snapshot.commands() + handler +
-    `OwnedString::from_raw`），**不需要改引擎**。计划态下插件只放行
-    `read`/`bash`/`docs`/`plan_mode_complete`，write/edit 的 tool_call 被
-    before_tool_call veto；**bash 不是只读沙箱**（扩展 README 原话）。
+    `OwnedString::from_raw`），**不需要改引擎**。计划态下插件
+    `activate()` 会 `set_tools([read,bash,docs,plan_mode_complete])`——write/edit
+    不在工具表里（**bash 不是只读沙箱**，扩展 README 原话）。
+    **状态真值用 `/plan status`，不要只看会话条目**：rpi-plan-mode 0.2.3 的
+    `active` 是 DLL 里的进程级 static，`persist_state` 只在 false→true 时写
+    条目；切会话后条目可能是 off 而工具已被限制（或反之，见下条上游缺陷）。
+    `pi_mode_state` 现在跑一次 `/plan status`，text 含 "Plan · Planning" 即
+    planning。
+    **上游缺陷（实测）**：`restore_state()` 在 SessionStart/Tree 只恢复
+    `active/plan`，**不重新 set_tools**；切到没有条目的会话时也不重置 active。
+    即"计划态中切会话"= 插件仍认为 planning，但新 harness 的工具表没被收紧。
+    宿主不做 exit+start 补救（会清掉进行中的 plan）；UI 只如实显示状态。
     `RPI_PERMISSION_GATE=1` 是启动期开关（无运行时切换面），芯片如实标注。
 - **流式投影铁律**：同一 tool 边界内只保留一个 text part，thinking 一律插到
   该 text part 之前（对齐 pi 落盘 `[thinking, text]`）；否则 live 的
