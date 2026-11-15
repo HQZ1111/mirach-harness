@@ -240,6 +240,8 @@ export const VoiceLivePanel: FC = () => {
   const muted = useVoiceLive((s) => s.muted)
   const captions = useVoiceLive((s) => s.captions)
   const error = useVoiceLive((s) => s.error)
+  const activeDelegationId = useVoiceLive((s) => s.activeDelegationId)
+  const pendingDelegation = useVoiceLive((s) => s.pendingDelegation)
   const logRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
@@ -276,6 +278,13 @@ export const VoiceLivePanel: FC = () => {
           className={cn('size-1.5 rounded-full', speaking ? 'bg-emerald-500' : 'bg-muted-foreground/50')}
         />
         <span>{speaking ? '正在说话' : '聆听中'}</span>
+        {/* 异步委托可见：语音模型把任务交给主代理后，麦克风照常开着，
+            用户可以继续说话（新请求会接管在途 turn）。 */}
+        {(activeDelegationId !== null || pendingDelegation !== null) && (
+          <span className="text-foreground/70" data-slot="voice-live-delegation">
+            主代理处理中…
+          </span>
+        )}
         <span className="flex-1" />
         <button
           aria-label={muted ? '解除静音' : '静音'}
