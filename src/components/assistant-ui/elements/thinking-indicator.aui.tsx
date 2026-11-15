@@ -8,29 +8,28 @@
  */
 import { useEffect, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
+import { useStore } from "zustand";
 
+import { askBridge } from "@/components/assistant-ui/ask-bridge";
+import { approvalBridge } from "@/components/assistant-ui/approval-bridge";
+import { formatWorkDuration } from "@/components/assistant-ui/work-segment";
 import { ThinkingIndicator } from "./thinking-indicator";
 
 export function ThreadThinkingIndicator() {
   const isRunning = useAuiState((s) => s.thread.isRunning);
-  const lastParts = useAuiState((s) => s.thread.messages.at(-1)?.parts);
-
-  const pendingTool = lastParts?.find(
-    (p): p is Extract<typeof p, { toolName: string }> =>
-      p.type === "tool-call" && !("result" in p && p.result !== undefined),
-  );
-  const hasVisibleText = lastParts?.some(
-    (p) => p.type === "text" && p.text.length > 0,
-  );
-
-  const label = pendingTool
-    ? `正在使用 ${pendingTool.toolName}`
-    : "正在思考";
-  const visible = isRunning && !hasVisibleText;
+  // ZCode `shouldShowTurnChatLoading`：运行中且有交互卡（ask/审批）待处理时
+  // 让位给交互卡；否则整轮都显示「工作中 N」——不能只在"还没有正文"时显示，
+  // 否则正文一流出计时就消失（用户："工作中几分几秒怎么没有"）。
+  const askPending = useStore(askBridge, (s) => s.pending.length);
+  const approvalPending = useStore(approvalBridge, (s) => s.pending.length);
+  const visible = isRunning && askPending === 0 && approvalPending === 0;
 
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) {
+      setElapsed(0);
+      return;
+    }
     setElapsed(0);
     const timer = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(timer);
@@ -39,8 +38,8 @@ export function ThreadThinkingIndicator() {
   if (!visible) return null;
   return (
     <ThinkingIndicator
-      label={label}
-      elapsed={elapsed > 0 ? `${elapsed}s` : undefined}
+      label="工作中"
+      elapsed={elapsed > 0 ? formatWorkDuration(elapsed * 1000) : undefined}
     />
   );
 }
