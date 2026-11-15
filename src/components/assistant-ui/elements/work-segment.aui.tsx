@@ -84,7 +84,9 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
           <ChevronRightIcon
             aria-hidden
             className={cn(
-              "size-4 shrink-0 opacity-70 transition-transform",
+              // ZCode 实测（9444）：chevron 16×16（size-4 在 16px 根字号下）、
+              // foreground-subtlest/70、展开 rotate-90。本工程 size-4 = 15px。
+              "size-[16px] shrink-0 text-muted-foreground/50 opacity-70 transition-transform",
               userOpen ? "rotate-90" : "rotate-0",
             )}
           />

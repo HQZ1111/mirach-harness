@@ -2509,15 +2509,28 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
 - 该实例与正式 ZCode 共用 `~/.zcode` 任务数据，但不抢窗口/单实例锁；
   只读对照用，别在里面发消息（会写用户任务数据）。
 - CDP 端口 9444；`set CDP_PORT=9444` 后可直接用 `scripts/cdp.mjs eval/shot`。
-- 已实测的 ZCode 基准值（2026-11-15）：
+- **主窗 + 设置窗是两个 page target**（9223 上 `?win=settings` 与 `/` 各一个，
+  list 顺序不稳定）。用 `CDP_EXCLUDE=win=settings`（或 `CDP_INCLUDE`）按 URL
+  选目标，否则会在设置窗里量对话区、得到全 null。
+- 已实测的 ZCode 基准值（2026-11-15，**以 9444 实时 DOM 为准**）：
   - 正文字号 14px / 行高 24.5px（`text-ui-base leading-[1.75]`），段落 mb16，
     h1/h2 18/16px·行高 28·mt24/mb16，列表 my12/pl20/行距 6。
-  - 工作段头 14/21、pb8、border .9px；header→组 20；组内容 mt8、
-    rail ml8+pl16、gap8、`max-h 16lh+30*--spacing`。
-  - user 气泡 14/21、padding 12/16、radius 24（右上 6）。
-  - composer radius 32 / padding 12 / gap 12 / border .5；输入 14/20、min-h40。
-  - assistant action bar h24、gap4、与正文同 x、默认 opacity-0 悬停显形。
+  - 工作段头 14/21、pb8、border .9px；header→组 20（实测是 header pb8 +
+    组容器内部 `pt-5`）；组内容 mt8、rail ml8+pl16、gap8、
+    `max-h 16lh+30*--spacing`。history-message 的子项（除 collapsible-content）
+    一律 `mt-5`；collapsible-content 自身 `mb -4 / pb 4`。
+  - **user 气泡 = 四角统一 24、无描边**（border 宽度实测 0；类里的
+    rounded-tr-xs 被 rounded-xl 覆盖）、padding 12/16、14/21。
+  - **动作钮 = 24×24、圆角 6px、图标 14px、容器 gap 4px、常态 text-foreground**；
+    条本身 `opacity-0` + hover/focus 显形，**始终挂载**（不是卸载）。
+    assistant-ui 的 `autohide="always"` 是卸载（悬停行高跳变），要用
+    `autohide="never"` + CSS 透明度。消息时间 12/18、subtlest、跟在按钮后。
+  - composer radius 32 / padding 12 / gap 12 / border .5；输入 14/20、min-h40；
+    **控件 28×28**：附件/上下文/模型触发器圆角 8（非胶囊），语音/发送圆形；
+    模型触发器 14px 字、padding 0 6 0 8；工具行 gap 4。
   - 「工作中」= ChatLoadingOrbs（105 点球面→Z 字形，8240ms）。
+  - 图标线宽 lucide **1.5**（本工程根字号 15px，`size-6/7/8` 分别只有
+    22.5/26.25/30px，对 ZCode 的 24/28 全部要写死像素）。
 - **流式投影铁律**：同一 tool 边界内只保留一个 text part，thinking 一律插到
   该 text part 之前（对齐 pi 落盘 `[thinking, text]`）；否则 live 的
   `text→thinking→text` 会和完成后形状不一致（用户："思考和结论穿插"）。
