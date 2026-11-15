@@ -8,21 +8,17 @@
  */
 import { useEffect, useState } from "react";
 import { useAuiState } from "@assistant-ui/react";
-import { useStore } from "zustand";
 
-import { askBridge } from "@/components/assistant-ui/ask-bridge";
-import { approvalBridge } from "@/components/assistant-ui/approval-bridge";
 import { formatWorkDuration } from "@/components/assistant-ui/work-segment";
 import { ThinkingIndicator } from "./thinking-indicator";
 
 export function ThreadThinkingIndicator() {
   const isRunning = useAuiState((s) => s.thread.isRunning);
-  // ZCode `shouldShowTurnChatLoading`：运行中且有交互卡（ask/审批）待处理时
-  // 让位给交互卡；否则整轮都显示「工作中 N」——不能只在"还没有正文"时显示，
-  // 否则正文一流出计时就消失（用户："工作中几分几秒怎么没有"）。
-  const askPending = useStore(askBridge, (s) => s.pending.length);
-  const approvalPending = useStore(approvalBridge, (s) => s.pending.length);
-  const visible = isRunning && askPending === 0 && approvalPending === 0;
+  // 运行期间全程显示「工作中 N」。不再用 ask/approval 待处理状态做门：
+  // 那两个 store 是**会话级**的，历史里未关闭的卡片会让所有后续 run 的
+  // 计时永久消失（实测）。ZCode 的 blockedByInteraction 只针对当前轮的
+  // 交互；宿主拿不到"当前轮"归属，宁可与交互卡同屏也不隐藏计时。
+  const visible = isRunning;
 
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
