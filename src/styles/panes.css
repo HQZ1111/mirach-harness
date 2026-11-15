@@ -73,7 +73,9 @@
 [data-slot='aui_assistant-message-content'] {
   --spacing: 4px;
   --text-sm: 14px;
-  --text-sm--line-height: 1.625;
+  /* ZCode text-ui-base 实测 line-height = 21px（不是 1.625=22.75）；
+     组内行高、16lh 限高都跟它走。 */
+  --text-sm--line-height: 21px;
 }
 
 /* ── 对话栏列头（ChatTabLabel 双行块，v8 布局定稿"工作区名=容器子元素"

@@ -832,7 +832,9 @@ const MessageTurnList: FC = () => {
             data-turn-key={turn.key}
             data-turn-has-user={turn.userId ? "true" : "false"}
             data-turn-last={turnIndex === turns.length - 1 ? "true" : "false"}
-            className="group/turn flex flex-col gap-y-6"
+            // ZCode 同 turn flow items 实测间距 20px（user 气泡底 →「已工作」
+            // 头顶 = 20）；宿主根字号 15px 下 gap-y-6 会变成 22.5px。
+            className="group/turn flex flex-col gap-y-[20px]"
           >
             {turnMarkers?.map((m, i) => (
               <TimelineMarkerRow
