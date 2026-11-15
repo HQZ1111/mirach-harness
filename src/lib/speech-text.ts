@@ -320,6 +320,32 @@ export class IncrementalSpeechSentenceBuffer {
   }
 }
 
+/**
+ * 委托回复回流用的**增量**切句：返回下一段可读文本，不够一句返回 null。
+ *
+ * 为什么不用 `cutSentences`：它的正则在句末标点后要求空白（`\s+`），中文
+ * 正文「。下一句」没有空格，永远切不出来——旧实现用的 `'. '` 更是只认英文，
+ * 导致中文委托结果整段攒到 turn 结束才一次性 `commentary.append`，听感就是
+ * "TTS 念稿"、无法边做边说。这里中文句末标点（。！？；…）无空格也切；
+ * 英文句点仍要求后接空白/结尾，避免把 3.14 / 文件名里的点切断。
+ * 长句没有标点时按逗号/空格回退，80 字硬切，保证音频不会长时间空窗。
+ */
+export function nextSpeechChunk(text: string): null | string {
+  const SENTENCE_END = /[。！？!?…；;\n]+|\.(?=\s|$)/g
+  const match = SENTENCE_END.exec(text)
+  if (match) return text.slice(0, (match.index ?? 0) + match[0].length)
+  if (text.length < 80) return null
+  const window = text.slice(0, 120)
+  const fallback = Math.max(
+    window.lastIndexOf('，'),
+    window.lastIndexOf('、'),
+    window.lastIndexOf(','),
+    window.lastIndexOf('；'),
+    window.lastIndexOf(' '),
+  )
+  return text.slice(0, fallback > 20 ? fallback + 1 : 80)
+}
+
 export function sanitizeTextForSpeech(text: string): string {
   // Tables first: their right-align marker is a trailing colon (":-"), and
   // closing colons before the table detector runs would mangle it.

@@ -21,7 +21,7 @@
 import { FC, useEffect, useRef } from 'react'
 import { useAui, useAuiState } from '@assistant-ui/react'
 
-import { sanitizeTextForSpeech } from '@/lib/speech-text'
+import { nextSpeechChunk, sanitizeTextForSpeech } from '@/lib/speech-text'
 import {
   delegationPrompt,
   type LiveTranscriptFragment
@@ -154,13 +154,15 @@ export const VoiceLiveConversationDrive: FC = () => {
         const spoken = sanitizeTextForSpeech(reply.text)
 
         if (busy) {
-          // 流式：只追加完整句（尾部收尾时落）
-          const boundary = spoken.lastIndexOf('. ', spoken.length - 2)
-          const cut = boundary > spokenLengthRef.current ? boundary + 1 : spokenLengthRef.current
+          // 流式：完整句就送出。用 CJK 感知的切句（nextSpeechChunk）——旧的
+          // `lastIndexOf('. ')` 只认英文句点，中文委托回复会整段攒到 turn
+          // 结束才一次 commentary.append，听感就是 TTS 念稿。
+          const tail = spoken.slice(spokenLengthRef.current)
+          const chunk = nextSpeechChunk(tail)
 
-          if (cut > spokenLengthRef.current) {
-            session.speak(delegationId, spoken.slice(spokenLengthRef.current, cut))
-            spokenLengthRef.current = cut
+          if (chunk !== null) {
+            session.speak(delegationId, chunk)
+            spokenLengthRef.current += chunk.length
           }
 
           return
