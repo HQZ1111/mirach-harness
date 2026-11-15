@@ -1631,7 +1631,9 @@ const MessageTimeLabel: FC = () => {
   return (
     <span
       data-slot="aui_message-time"
-      className="text-muted-foreground/70 select-none px-1 text-[0.6875rem] tabular-nums"
+      // ZCode 实测（9444）：消息时间 12/18、text-foreground-subtlest、
+      // 紧跟在动作钮之后（无额外内距）。旧值 0.6875rem（10.3px）+ px-1 偏小偏散。
+      className="text-muted-foreground/50 select-none text-[12px] leading-[18px] tabular-nums"
     >
       {label}
     </span>
@@ -1735,8 +1737,12 @@ const AssistantActionBar: FC<{
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
-      autohide="not-last"
-      className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 flex gap-1 duration-200"
+      // ZCode 实测（9444）：动作条**常驻 DOM、悬停才显示**
+      // （`opacity-0 group-hover/assistant-turn:opacity-100`）。
+      // autohide="always" 在 assistant-ui 里是**卸载**（Root 直接 return null），
+      // 悬停时整行高度会跳一下，没有淡入——故用 never + CSS 透明度。
+      autohide="never"
+      className="aui-assistant-action-bar-root text-muted-foreground col-start-3 row-start-2 flex gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/turn:opacity-100"
     >
       <MessageActions
         copied={isCopied}
@@ -1858,7 +1864,7 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
+      className="group/user-row fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
       <UserMessageAttachments />
@@ -1972,14 +1978,14 @@ const UserActionBar: FC = () => {
   return (
     <ActionBarPrimitive.Root
       hideWhenRunning
-      // ZCode 的用户消息操作条**一律悬停才显示**（`opacity-0
+      // ZCode 的用户消息操作条**常驻 DOM、悬停才显示**（`opacity-0
       // group-hover/user-row:opacity-100`），不看它是不是最后一条。
-      // 原 `autohide="not-last"` 会让最后一条用户消息的按钮常显——
-      // 与本轮刚发出的气泡并排一排图标，视觉上像常驻控件。
-      autohide="always"
+      // autohide="always" 在 assistant-ui 里是卸载（悬停时行高跳变），
+      // 与 assistant 条同一处理：never + CSS 透明度。
+      autohide="never"
       // ZCode `MessageActions` 是**横排**（复制 → 编辑），旧实现 `flex-col`
       // 把两枚钮竖着叠在气泡左侧。
-      className="aui-user-action-bar-root text-muted-foreground mt-[4px] flex items-center gap-[4px]"
+      className="aui-user-action-bar-root text-muted-foreground mt-[4px] flex items-center gap-[4px] opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/user-row:opacity-100"
     >
       <TooltipIconButton
         tooltip={copied ? "已复制" : "复制"}

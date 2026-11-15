@@ -2,9 +2,20 @@
 // screenshot. No deps — plain WebSocket via node's global WebSocket (Node 22+).
 const PORT = process.env.CDP_PORT || '9223'
 
+// 主窗与设置窗是同一 CDP 端口上的两个 page target，list 顺序不保证固定。
+// 用 CDP_EXCLUDE / CDP_INCLUDE 按 URL 子串选目标（默认第一个 page）。
+const EXCLUDE = process.env.CDP_EXCLUDE || ''
+const INCLUDE = process.env.CDP_INCLUDE || ''
+
 async function targets() {
   const res = await fetch(`http://127.0.0.1:${PORT}/json/list`)
-  return res.json()
+  const list = await res.json()
+  return list.filter(
+    (t) =>
+      t.type === 'page' &&
+      (!EXCLUDE || !String(t.url).includes(EXCLUDE)) &&
+      (!INCLUDE || String(t.url).includes(INCLUDE)),
+  )
 }
 
 async function connect(wsUrl) {
