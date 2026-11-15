@@ -330,6 +330,13 @@ export class MossLiveSession {
       case 'session_attached': {
         this.sessionId = data.session_id ?? null
         this.connected = true
+        // **二进制音频通道声明（2026-11-15 真机实锤，缺了它说话完全没反应）**：
+        // 官方参考顺序 = attach_session → `media.mode`(binary_protocol:
+        // "tagged-v1") → mic_state → 上行二进制音频。不声明 media.mode 时
+        // 服务端**静默忽略**所有 0x00+PCM16 帧（连接不断、不报错——这就是
+        // "聆听中但没反应"的根因）。补上后 input.speech.started /
+        // input.transcript.updated / done 立即出现。
+        this.send({ action: 'media.mode', binary_protocol: 'tagged-v1' })
         // 工具面声明（session.update 整表替换——mic_state 前发，模型一开口
         // 就带着工具；声明被 vendor 拒绝经 session.updated data.error 暴露）
         this.toolFlow?.announce()
