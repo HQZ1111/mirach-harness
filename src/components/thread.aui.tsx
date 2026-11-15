@@ -1104,7 +1104,13 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
 
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              "aui-thread-viewport-footer bg-transparent flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
+              // 2026-11-15 用户："对话内容穿透到输入框下面"。footer 原来
+              // bg-transparent + sticky，滚动内容会从输入框背后和下方透出来。
+              // 用外壳底色（--surface-shell = body/pane 实色）mask 掉，顶部
+              // 再留 4px 同色渐隐，滚动边界不生硬。
+              "aui-thread-viewport-footer relative flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
+              "bg-[var(--surface-shell)]",
+              "before:pointer-events-none before:absolute before:inset-x-0 before:-top-4 before:h-4 before:bg-gradient-to-t before:from-[var(--surface-shell)] before:to-transparent before:content-['']",
               !isEmpty &&
                 "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
             )}
