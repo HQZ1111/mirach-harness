@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   formatWorkDuration,
   resolveWorkSegmentStatus,
+  splitWorkParts,
   turnHasTextAfter,
   workSegmentDefaultOpen,
   workSegmentLabel,
@@ -141,5 +142,99 @@ describe('formatWorkDuration', () => {
 
   it('分 + 秒', () => {
     expect(formatWorkDuration(63_000)).toBe('1 分 3 秒');
+  });
+
+  it('ZCode 用户截图口径：21 分 54 秒', () => {
+    expect(formatWorkDuration(21 * 60_000 + 54_000)).toBe('21 分 54 秒');
+  });
+
+  it('最多两段单位：时 + 分（不写秒）', () => {
+    expect(formatWorkDuration(3_600_000 + 2 * 60_000 + 5_000)).toBe('1 时 2 分');
+  });
+
+  it('天 + 时', () => {
+    expect(formatWorkDuration(86_400_000 + 3_600_000)).toBe('1 天 1 时');
+  });
+});
+
+describe('splitWorkParts（一个 turn 一个工作段）', () => {
+  it('最后一条非空正文留在折叠区外，它之前的一切进工作段', () => {
+    const parts = [
+      { type: 'reasoning' },
+      { type: 'tool-call' },
+      { type: 'text', text: '中间正文' },
+      { type: 'tool-call' },
+      { type: 'text', text: '最终回答' },
+    ];
+    const split = splitWorkParts(parts);
+    expect(split.lastTextIndex).toBe(4);
+    expect(split.history).toEqual([0, 1, 2, 3]);
+    expect(split.following).toEqual([]);
+  });
+
+  it('正文之后还有工具：进 following（折叠区外顺序渲染）', () => {
+    const split = splitWorkParts([
+      { type: 'text', text: '答案' },
+      { type: 'tool-call' },
+    ]);
+    expect(split.lastTextIndex).toBe(0);
+    expect(split.history).toEqual([]);
+    expect(split.following).toEqual([1]);
+  });
+
+  it('没有正文：全部进工作段（外层默认展开）', () => {
+    const split = splitWorkParts([{ type: 'reasoning' }, { type: 'tool-call' }]);
+    expect(split.lastTextIndex).toBe(-1);
+    expect(split.history).toEqual([0, 1]);
+    expect(split.following).toEqual([]);
+  });
+
+  it('空白正文不算正文（流式尚未出字）', () => {
+    const split = splitWorkParts([
+      { type: 'tool-call' },
+      { type: 'text', text: '   ' },
+    ]);
+    expect(split.lastTextIndex).toBe(-1);
+    expect(split.history).toEqual([0, 1]);
+  });
+});
+
+describe('resolveWorkSegmentStatus 的消息级兜底', () => {
+  it('部件无计时时用 metadata.custom 的 turn 边界', () => {
+    expect(
+      resolveWorkSegmentStatus([{ type: 'text', text: 'x' }], [0], {
+        startedAt: 1000,
+        completedAt: 5000,
+      }),
+    ).toEqual({ state: 'completed', durationMs: 4000 });
+  });
+
+  it('起始优先部件计时、结束优先消息兜底（把最终正文算进工时，ZCode activeMs 同口径）', () => {
+    expect(
+      resolveWorkSegmentStatus(
+        [tool({ timing: { startedAt: 2000, completedAt: 3000 } })],
+        [0],
+        { startedAt: 1000, completedAt: 9000 },
+      ),
+    ).toEqual({ state: 'completed', durationMs: 7000 });
+  });
+
+  it('跑来不冻结时长', () => {
+    expect(
+      resolveWorkSegmentStatus([tool({ status: { type: 'running' } })], [0], {
+        startedAt: 1000,
+        completedAt: 9000,
+      }),
+    ).toEqual({ state: 'running' });
+  });
+
+  it('中断（部件 incomplete）优先于完成 → interrupted（带时长也不改标签）', () => {
+    expect(
+      resolveWorkSegmentStatus([tool({ status: { type: 'incomplete' } })], [0], {
+        startedAt: 1000,
+        completedAt: 5000,
+      }),
+    ).toEqual({ state: 'interrupted', durationMs: 4000 });
+    expect(workSegmentLabel({ state: 'interrupted', durationMs: 4000 }, '4 秒')).toBe('已停止');
   });
 });

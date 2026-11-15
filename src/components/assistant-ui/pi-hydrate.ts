@@ -1,126 +1,235 @@
 /**
  * pi 会话历史 → 聊天投影的纯映射（runtime 与会话静态投影面板共用的
  * 数据面——无 React、无状态）。
+ *
+ * ## 2026-11-15：按 turn 合并（ZCode 一个 turn 一个工作段的前提）
+ *
+ * ZCode 的 turn = 一条 user 行 + 其后**全部** assistant 行，工作段头「已工作
+ * N 分 M 秒」按 turn 计。pi 的历史里，一次工具循环会落成**多条** assistant
+ * 消息（文本→工具→文本→工具→最终回答），若逐条投影，聊天流里一个 turn 就会
+ * 冒出好几个「已处理」头（旧版实测症状）。
+ *
+ * 故本模块把**连续 assistant 消息（直到下一条 user）合并成一条** TurnMessage：
+ * - parts 顺序原样保留（text / thinking / toolCall / image）；
+ * - toolResult 仍按 toolCallId 归并到对应部件（可跨被合并的消息）；
+ * - 部件计时：tool-call 的 startedAt = 所在 assistant 消息的 timestamp、
+ *   completedAt = 对应 toolResult 的 timestamp；text/thinking 至少写所在消息的
+ *   startedAt，并在下一条消息到达时补 completedAt（= 下一条消息 timestamp，
+ *   即「这段输出在被下一条消息取代时结束」）；
+ * - 合并消息的 createdAt = 前一条 user 的 timestamp（无则首条 assistant），
+ *   completedAt = 本轮最后一条消息的 timestamp —— 外层工作段时长 =
+ *   completedAt − createdAt，与 ZCode 的 turn.activeMs 同口径。
+ *
+ * 实时路径（turn-actor）本来就是「run 一条消息」，不走这里；`convertTurnMessage`
+ * 是两条路径的共用出口。
  */
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import type { TurnMessage, TurnPart } from './turn-actor'
 
 const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
+/** pi Message 的最小形状（hydrate 输入；字段缺失时按类型收窄）。 */
+interface PiMessageLike {
+  role?: string
+  content?: unknown
+  toolCallId?: string
+  toolName?: string
+  isError?: boolean
+  /** pi ToolOutput.details（edit 的 diff、submit_plan 的审批态等） */
+  details?: unknown
+  timestamp?: unknown
+}
+
+function readTimestamp(message: PiMessageLike): number | undefined {
+  return typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
+    ? message.timestamp
+    : undefined
+}
+
+/** user 内容块 → 投影部件（text 拼接、白名单图片 → data URL、其余可见报错跳过）。 */
+function userBlocksToParts(content: unknown): TurnPart[] {
+  const blocks =
+    typeof content === 'string' ? [content] : Array.isArray(content) ? content : []
+  const parts: TurnPart[] = []
+  let textBuf = ''
+  const flushText = () => {
+    if (textBuf) parts.push({ type: 'text', text: textBuf })
+    textBuf = ''
+  }
+  for (const b of blocks) {
+    if (typeof b === 'string') {
+      textBuf += b
+      continue
+    }
+    const blk = b as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown }
+    if (typeof blk?.text === 'string') {
+      textBuf += blk.text
+      continue
+    }
+    if (
+      blk?.type === 'image' &&
+      typeof blk.data === 'string' &&
+      typeof blk.mimeType === 'string' &&
+      IMAGE_MIME_WHITELIST.has(blk.mimeType)
+    ) {
+      flushText()
+      parts.push({ type: 'image', image: `data:${blk.mimeType};base64,${blk.data}` })
+      continue
+    }
+    console.error('[pi] 历史 user 消息存在未识别/白名单外内容块——跳过', blk)
+  }
+  flushText()
+  return parts
+}
+
+/**
+ * assistant 内容块 → 投影部件。`startedAt` 是该消息的 timestamp：
+ * 每个部件都带上（文本/思考的 completedAt 由后续消息补齐，见 mergeAssistant）。
+ */
+function assistantBlocksToParts(content: unknown, startedAt: number | undefined): TurnPart[] {
+  const blocks = Array.isArray(content) ? content : []
+  const parts: TurnPart[] = []
+  for (const b of blocks) {
+    const blk = b as {
+      type?: string
+      text?: string
+      thinking?: string
+      id?: string
+      name?: string
+      arguments?: unknown
+      data?: unknown
+      mimeType?: unknown
+    }
+    if (blk.type === 'text' && typeof blk.text === 'string') {
+      parts.push({ type: 'text', text: blk.text, ...(startedAt !== undefined ? { startedAt } : {}) })
+    } else if (blk.type === 'image' && typeof blk.data === 'string' && typeof blk.mimeType === 'string') {
+      if (IMAGE_MIME_WHITELIST.has(blk.mimeType)) {
+        parts.push({ type: 'image', image: `data:${blk.mimeType};base64,${blk.data}` })
+      } else {
+        console.error(`[pi] 历史 assistant 图片块 mime ${blk.mimeType} 不在白名单——跳过`)
+      }
+    } else if (blk.type === 'toolCall' && typeof blk.id === 'string') {
+      parts.push({
+        type: 'tool-call',
+        toolCallId: blk.id,
+        toolName: blk.name ?? '',
+        args:
+          blk.arguments && typeof blk.arguments === 'object' && !Array.isArray(blk.arguments)
+            ? (blk.arguments as Record<string, unknown>)
+            : undefined,
+        // 工具调用起始 = 产出该调用的 assistant 消息时刻（ZCode row.createdAt 同口径）
+        ...(startedAt !== undefined ? { startedAt } : {}),
+      })
+    } else if (blk.type === 'thinking' && typeof blk.thinking === 'string') {
+      // pi 的 thinking 块（session jsonl：`{"type":"thinking","thinking":"…"}`）
+      // → TurnPart thinking → convertTurnMessage 的 reasoning 部件。
+      // 空串不产部件（空思考不占一行）。
+      if (blk.thinking.trim().length > 0) {
+        parts.push({
+          type: 'thinking',
+          text: blk.thinking,
+          ...(startedAt !== undefined ? { startedAt } : {}),
+        })
+      }
+    } else if (blk.type === 'thinking' || blk.type === 'redacted_thinking') {
+      // redacted_thinking 无正文（pi 只给签名占位），不造假文本。
+      console.error(`[pi] 历史 assistant 思考块无可渲染正文（type=${blk.type}）——跳过`)
+    }
+  }
+  return parts
+}
+
+/** 被合并消息的文本/思考段：下一条消息到达即视为结束（补 completedAt）。 */
+function closeOpenTextParts(parts: TurnPart[], endedAt: number): void {
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!
+    if (part.type !== 'text' && part.type !== 'thinking') continue
+    if (part.completedAt !== undefined) continue
+    parts[i] = { ...part, completedAt: endedAt }
+  }
+}
+
 /** pi Message JSON → 聊天投影（真相在 pi）——**模块级纯函数**（会话静态
- *  投影面板复用，见 session-thread-pane）：
- * - assistant：content blocks → parts（text/toolCall/image）；
- * - toolResult：结果归并到前一条 assistant 匹配 toolCallId 的部件
- *   （孤儿结果跳过——无宿主消息可挂）；
- * - user：string/blocks（text/image）→ 投影。
- * pi Message 带 timestamp（i64，epoch ms）→ createdAt（day-separator 用）；
- * id 用 hydrate 序号（pi 消息无稳定 id 字段，须自造稳定键）。 */
+ *  投影面板复用，见 session-thread-pane）。
+ *
+ *  合并规则见模块头；toolResult 的孤儿结果（无宿主部件）跳过并可见报错。 */
 export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessage[] {
   const out: TurnMessage[] = []
-  for (let i = 0; i < history.length; i++) {
-    const m = history[i] as {
-      role?: string
-      content?: unknown
-      toolCallId?: string
-      toolName?: string
-      isError?: boolean
-      /** pi ToolOutput.details（edit 的 diff、submit_plan 的审批态等） */
-      details?: unknown
-      timestamp?: unknown
+  /** 当前 turn 的合并目标（assistant 消息）；遇到 user 清空。 */
+  let pendingAssistant: {
+    message: TurnMessage
+    parts: TurnPart[]
+    lastTimestamp: number | undefined
+  } | null = null
+
+  const closePendingTurn = () => {
+    if (!pendingAssistant) return
+    if (pendingAssistant.lastTimestamp !== undefined) {
+      pendingAssistant.message.completedAt = pendingAssistant.lastTimestamp
     }
-    const createdAt =
-      typeof m.timestamp === 'number' && Number.isFinite(m.timestamp)
-        ? new Date(m.timestamp)
-        : undefined
+    pendingAssistant = null
+  }
+
+  for (let i = 0; i < history.length; i++) {
+    const m = history[i] as PiMessageLike
+    const timestamp = readTimestamp(m)
+
     if (m.role === 'user') {
-      // user 内容块严格映射：text 拼接、image（白名单内）→ data URL
-      // image part；其余形状 console.error 可见并跳过该块（渲染选择
-      // 非吞错——单块异常不拖垮整个会话水合）
-      const blocks =
-        typeof m.content === 'string'
-          ? [m.content]
-          : Array.isArray(m.content)
-            ? m.content
-            : []
-      const parts: TurnPart[] = []
-      let textBuf = ''
-      const flushText = () => {
-        if (textBuf) parts.push({ type: 'text', text: textBuf })
-        textBuf = ''
-      }
-      for (const b of blocks) {
-        if (typeof b === 'string') {
-          textBuf += b
-          continue
-        }
-        const blk = b as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown }
-        if (typeof blk?.text === 'string') {
-          textBuf += blk.text
-          continue
-        }
-        if (
-          blk?.type === 'image' &&
-          typeof blk.data === 'string' &&
-          typeof blk.mimeType === 'string' &&
-          IMAGE_MIME_WHITELIST.has(blk.mimeType)
-        ) {
-          flushText()
-          parts.push({ type: 'image', image: `data:${blk.mimeType};base64,${blk.data}` })
-          continue
-        }
-        console.error('[pi] 历史 user 消息存在未识别/白名单外内容块——跳过', blk)
-      }
-      flushText()
+      closePendingTurn()
+      const parts = userBlocksToParts(m.content)
       const content: string | TurnPart[] =
-        parts.length === 0 ? '' : parts.length === 1 && parts[0]!.type === 'text' ? parts[0]!.text : parts
-      out.push({ id: `hydrate-${i}-user`, role: 'user', content, ...(createdAt ? { createdAt } : {}) })
-    } else if (m.role === 'assistant') {
-      const blocks = Array.isArray(m.content) ? m.content : []
-      const parts: TurnPart[] = []
-      for (const b of blocks) {
-        const blk = b as { type?: string; text?: string; thinking?: string; id?: string; name?: string; arguments?: unknown; data?: unknown; mimeType?: unknown }
-        if (blk.type === 'text' && typeof blk.text === 'string') {
-          parts.push({ type: 'text', text: blk.text })
-        } else if (blk.type === 'image' && typeof blk.data === 'string' && typeof blk.mimeType === 'string') {
-          if (IMAGE_MIME_WHITELIST.has(blk.mimeType)) {
-            parts.push({ type: 'image', image: `data:${blk.mimeType};base64,${blk.data}` })
-          } else {
-            console.error(`[pi] 历史 assistant 图片块 mime ${blk.mimeType} 不在白名单——跳过`)
-          }
-        } else if (blk.type === 'toolCall' && typeof blk.id === 'string') {
-          parts.push({
-            type: 'tool-call',
-            toolCallId: blk.id,
-            toolName: blk.name ?? '',
-            args:
-              blk.arguments && typeof blk.arguments === 'object' && !Array.isArray(blk.arguments)
-                ? (blk.arguments as Record<string, unknown>)
-                : undefined,
-          })
-        } else if (blk.type === 'thinking' && typeof blk.thinking === 'string') {
-          // pi 的 thinking 块（session jsonl：`{"type":"thinking","thinking":"…"}`）
-          // → TurnPart thinking → convertTurnMessage 的 reasoning 部件。
-          // **2026-11-02 修复**：此前这里直接丢弃，导致历史会话里的思考整块
-          // 消失（只有实时流式才显示），与 ZCode "Thought · N 秒" 折叠行
-          // 的行为不一致。空串不产部件（空思考不占一行）。
-          if (blk.thinking.trim().length > 0) {
-            parts.push({ type: 'thinking', text: blk.thinking })
-          }
-        } else if (blk.type === 'thinking' || blk.type === 'redacted_thinking') {
-          // redacted_thinking 无正文（pi 只给签名占位），不造假文本。
-          console.error(`[pi] 历史 assistant 思考块无可渲染正文（type=${blk.type}）——跳过`)
+        parts.length === 0
+          ? ''
+          : parts.length === 1 && parts[0]!.type === 'text'
+            ? parts[0]!.text
+            : parts
+      out.push({
+        id: `hydrate-${i}-user`,
+        role: 'user',
+        content,
+        ...(timestamp !== undefined ? { createdAt: new Date(timestamp) } : {}),
+      })
+      continue
+    }
+
+    if (m.role === 'assistant') {
+      const parts = assistantBlocksToParts(m.content, timestamp)
+      if (pendingAssistant) {
+        // 合并：上一段的开放文本以本消息时刻收尾，parts 顺序追加
+        if (timestamp !== undefined) {
+          closeOpenTextParts(pendingAssistant.parts, timestamp)
+        }
+        pendingAssistant.parts.push(...parts)
+        pendingAssistant.message.content = pendingAssistant.parts
+        if (timestamp !== undefined) pendingAssistant.lastTimestamp = timestamp
+        continue
+      }
+      // 新 turn 的 assistant：createdAt 取前一条 user 的时间戳（ZCode 的
+      // turn.startedAt = 用户提交时刻），没有则退回首条 assistant 自身时间。
+      let createdAt = timestamp
+      for (let j = out.length - 1; j >= 0; j--) {
+        const prev = out[j]!
+        if (prev.role === 'user') {
+          if (prev.createdAt) createdAt = prev.createdAt.getTime()
+          break
         }
       }
-      out.push({ id: `hydrate-${i}-assistant`, role: 'assistant', content: parts, ...(createdAt ? { createdAt } : {}) })
-    } else if (m.role === 'toolResult' && typeof m.toolCallId === 'string') {
-      // 工具结果归并：挂到前一条 assistant 匹配 toolCallId 的部件
+      const message: TurnMessage = {
+        id: `hydrate-${i}-assistant`,
+        role: 'assistant',
+        content: parts,
+        ...(createdAt !== undefined ? { createdAt: new Date(createdAt) } : {}),
+      }
+      out.push(message)
+      pendingAssistant = { message, parts, lastTimestamp: timestamp }
+      continue
+    }
+
+    if (m.role === 'toolResult' && typeof m.toolCallId === 'string') {
       const resultBlocks = Array.isArray(m.content) ? m.content : []
       // **result 与流式路径同形**（2026-11-03 修）：pi 的 ToolExecutionEnd
-      // 携带的是完整 ToolOutput 对象 `{content, details?, isError}`（agent.rs
-      // :1428 + agui.rs:318 原样透传），此前水合把 content 拼成纯文本字符串
-      // ——details（edit 的 diff、submit_plan 的审批态）全部丢失，历史会话
-      // 的 edit 卡片退回通用卡、文件汇总拿不到行数。修成对象形状后两条
-      // 路径一致；渲染层 `toolResultText` 兼容两种形状。
+      // 携带完整 ToolOutput `{content, details?, isError}`，历史里也是对象
+      // 形状——details（edit 的 diff、submit_plan 的审批态）不能丢。
       const result: Record<string, unknown> = {
         content: resultBlocks,
         isError: m.isError === true,
@@ -128,21 +237,40 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
       if (m.details !== undefined && m.details !== null) {
         result.details = m.details
       }
-      for (let j = out.length - 1; j >= 0; j--) {
-        const msg = out[j]
-        if (msg.role !== 'assistant' || typeof msg.content === 'string') continue
-        const parts = msg.content as TurnPart[]
-        const idx = parts.findIndex((p) => p.type === 'tool-call' && p.toolCallId === m.toolCallId)
-        if (idx >= 0) {
-          const p = parts[idx]
-          if (p.type !== 'tool-call') continue
-          parts[idx] = { ...p, result, isError: m.isError === true }
+      let matched = false
+      if (pendingAssistant) {
+        if (timestamp !== undefined) {
+          // 工具结果到达 = 此前的文本输出已结束（比「等下一条 assistant」更准）
+          closeOpenTextParts(pendingAssistant.parts, timestamp)
+        }
+        // 合并后的当前 turn 就是自然边界；回溯兜底只在上一条 assistant
+        // 已闭合的历史快照出现（不会被本次合并产生）。
+        const parts = pendingAssistant.parts
+        for (let j = parts.length - 1; j >= 0; j--) {
+          const p = parts[j]!
+          if (p.type !== 'tool-call' || p.toolCallId !== m.toolCallId) continue
+          parts[j] = {
+            ...p,
+            result,
+            isError: m.isError === true,
+            ...(timestamp !== undefined ? { completedAt: timestamp } : {}),
+          }
+          matched = true
           break
         }
       }
-      // 孤儿 toolResult（无匹配部件）：跳过
+      if (!matched) {
+        console.error(
+          `[pi] 历史 toolResult 找不到宿主部件（toolCallId=${m.toolCallId}）——跳过`,
+        )
+      }
+      if (pendingAssistant && timestamp !== undefined) {
+        pendingAssistant.lastTimestamp = timestamp
+      }
+      continue
     }
   }
+  closePendingTurn()
   return out
 }
 
@@ -154,19 +282,30 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
  *    读它做工具卡耗时（官方注释明说 host 自己提供权威时间）；
  *  - thinking → reasoning（ThreadMessageLike 的 ReasoningMessagePart，
  *    §2.2 thinking 流式；TurnPart 内部保持 thinking）；
- *  - text / image 原样透传；createdAt 透传（day-separator 消费）。 */
+ *  - text / image 原样透传；createdAt 透传（day-separator 消费）；
+ *  - **工作段时长**：message.metadata.custom 带 `workStartedAt` /
+ *    `workEndedAt`（= createdAt / completedAt，history 有、实时缺）
+ *    ——`work-segment.ts` 的 resolveWorkSegmentStatus 在外层「已工作
+ *    N 分 M 秒」上用它兜底无工具计时的轮次。 */
 export function convertTurnMessage(m: TurnMessage): ThreadMessageLike {
+  const workStartedAt = m.createdAt?.getTime()
+  const custom: Record<string, number> = {}
+  if (workStartedAt !== undefined && Number.isFinite(workStartedAt)) {
+    custom.workStartedAt = workStartedAt
+  }
+  if (m.completedAt !== undefined) custom.workEndedAt = m.completedAt
   return {
     id: m.id,
     role: m.role,
     ...(m.createdAt ? { createdAt: m.createdAt } : {}),
+    ...(Object.keys(custom).length > 0 ? { metadata: { custom } } : {}),
     content:
       typeof m.content === 'string'
         ? m.content
         : m.content.map((p) => {
             if (p.type === 'tool-call') {
-              // startedAt 由 tool_execution start 记录；缺它就不给 timing
-              // （hook 会返回 undefined，不编造时长）。
+              // startedAt 由 tool_execution start / 所在消息时刻记录；缺它就不给
+              // timing（hook 会返回 undefined，不编造时长）。
               const { startedAt, completedAt, ...rest } = p
               return {
                 ...rest,
@@ -182,7 +321,21 @@ export function convertTurnMessage(m: TurnMessage): ThreadMessageLike {
                     }),
               }
             }
-            if (p.type === 'thinking') return { type: 'reasoning' as const, text: p.text }
+            if (p.type === 'thinking') {
+              const { startedAt, completedAt, ...rest } = p
+              return {
+                type: 'reasoning' as const,
+                text: rest.text,
+                ...(startedAt === undefined
+                  ? {}
+                  : { providerMetadata: { mirach: { startedAt, ...(completedAt === undefined ? {} : { completedAt }) } } }),
+              }
+            }
+            if (p.type === 'text') {
+              // text 部件不参与工具计时；时间只留在 TurnPart 投影里（assistant-ui
+              // 的 TextMessagePart 没有 timing 字段），故此处不额外携带。
+              return { type: 'text' as const, text: p.text }
+            }
             return p
           }),
   }

@@ -18,6 +18,10 @@ export interface TurnMessage {
   /** 消息时刻：run 段 = RUN_STARTED 到达时刻、乐观用户消息 = 提交时刻、
    * 历史会话 = pi Message.timestamp（i64，epoch ms）。day-separator 用。 */
   createdAt?: Date
+  /** 本轮结束时刻（epoch ms）：历史水合取本轮最后一条 pi 消息的 timestamp；
+   * 实时路径不写（外层工作段时长回落到部件计时）。外层「已工作 N 分 M 秒」
+   * 的结束边界（ZCode turn.activeMs 同口径）。 */
+  completedAt?: number
 }
 
 /** 结构化内容部件（ThreadMessageLike 兼容形状；args 限 JSON 对象——
@@ -27,8 +31,23 @@ export interface TurnMessage {
  * image part 的 image 是 data URL（FileReader.readAsDataURL 产物 /
  * hydrate 时由 pi ContentBlock::Image 的 base64 拼装）。 */
 export type TurnPart =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; text: string }
+  | {
+      type: 'text'
+      text: string
+      /** 部件起始时刻（epoch ms）——历史水合写所在 pi 消息的 timestamp；
+       * 实时流式不写（文本计时对外层工作段无意义，见 work-segment）。 */
+      startedAt?: number
+      /** 部件结束时刻——历史水合里 = 下一条消息的 timestamp（该段输出
+       * 被下一条消息取代即结束）。 */
+      completedAt?: number
+    }
+  | {
+      type: 'thinking'
+      text: string
+      /** 见 text 部件的同名字段。 */
+      startedAt?: number
+      completedAt?: number
+    }
   | { type: 'image'; image: string }
   | {
       type: 'tool-call'

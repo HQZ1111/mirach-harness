@@ -2456,14 +2456,28 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
   持久记忆/memory 工具/外部提供方协议 → 记忆层与 hermes 特有百分比字段
   禁用并注明；`compaction.enabled`、`reserveTokens`、`keepRecentTokens`、
   `mode`、`compactionMode` 真写。
-- **对话显示（ZCode 流程）**：`tool-summary.aui.tsx`（摘要行 + 展开记忆 +
-  running→completed 自动收起 + 收起后 300ms 卸载 children + 失败红字虚线
-  tooltip + Enter/Space）、`tool-renderers.aui.tsx`（bash/powershell 终端行、
-  read/ls/image 只读、grep/find 搜索、edit/write diff、web_search、
-  submit_plan；todo 不进消息流）、`tool-family-group` 分组契约（收起+运行中
-  滚动最新子动作，展开/结束显示统计）、`stream-reveal.ts`（drain 300ms /
-  24 字每帧 / 48ms 提交，`prefers-reduced-motion` 直出）。子代理行复用同一
-  摘要外壳。
+- **对话显示（ZCode 完整复刻，2026-11-15 二次交付）**：不再用"族组"简化版。
+  - 历史投影按 turn 合并（`pi-hydrate.ts`）：连续 assistant 消息并成一条，
+    toolResult 按 toolCallId 归并；消息 timestamp 映射成 part timing，
+    `metadata.custom.{workStartedAt,workEndedAt}` 供「已工作」时长兜底。
+  - 一个 turn 一个外层工作段（`work-segment.ts::splitWorkParts`）：最后一条
+    非空正文之外的部件全进折叠区（含中间正文）；running 不渲染头部、
+    `已工作 {duration}` / 无时长 `已处理` / `已停止`；时长格式 = ZCode 规则。
+  - 内层连续摘要组（`work-summary.ts` + `elements/summary-group.aui.tsx`）：
+    explore/run/change/session 分类，连续摘要行成组（≥2），统计
+    `已查阅 N 项，已执行 N 命令，已修改 N 文件`（change 按唯一路径去重、
+    无路径计 unresolved、分隔符「，」、空统计回退「思考」）；代表图标
+    优先级 change > run > explore；hover 才显 chevron；组内容
+    `ml-2 pl-4 border-l` + 隐藏子行 leading icon + `16lh+30*spacing`
+    限高滚动；收起+运行中滚动最新子动作，展开显示统计。
+  - 子行：思考 `思考 持续了几秒/持续了 N 秒`；execute
+    `已执行 description ?? command`；read `已读取`、search `已搜索` 不可
+    展开；edit/write `已编辑/已写入 文件 +N −N`；失败红字 + 虚线下划线 +
+    错误 tooltip；成功不挂状态词。
+  - 删除被取代的简化实现：`assistant-work-items.ts(+test)`、
+    `tool-family-group.aui.tsx`、`tool-grouping.ts(+test)`。
+  - 门禁：tsc 0 · vitest 869 · vite build；CDP 长会话实测每 turn 一个
+    `已工作` 头、摘要组统计/子行走线/图标隐藏/失败样式均与 ZCode 对齐。
 - **新建项目文件夹流程**：ZCode ProjectEditor 语义（选目录 → 保存前
   `stat` 校验存在且是目录 → 建会话）；`workspace-session-registry.ts` 把
   跨会话根的新建行登记进 localStorage，`refreshThreads` 合并；取消零副作用；

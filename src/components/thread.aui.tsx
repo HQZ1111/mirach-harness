@@ -158,12 +158,11 @@ export type ThreadComponents = {
   TaskGroup?: ComponentType<{ group: WorkGroupPart }> | undefined;
 };
 
-// ── 分组路径（旧实现，2026-11-07 已被 work-parts.aui.tsx 替换）─────────
+// ── 分组路径（旧实现，2026-11-07 起由 work-parts.aui.tsx 承担）─────────
 // 此前用 `groupPartByType` + 自建 groupBy（带 GROUPBY_MEMO_KEY 指纹）做
-// 相邻合并；GroupedParts 的合并会被任何插入部件断组（思考行拆散工具族组），
-// 现改为 `assistant-work-items.ts` 的 ZCode 扫描 + `work-parts.aui.tsx`
-// 渲染器。族分类（classifyToolFamily）与父组摘要（buildFamilySummary）
-// 仍在 `tool-grouping.ts`，渲染器直接消费。
+// 相邻合并；GroupedParts 的合并会被任何插入部件断组。
+// 2026-11-15 定稿：ZCode 「连续摘要组」扫描在 `work-summary.ts`（跨族统计
+// 组头 + 组内单行），渲染器在 `work-parts.aui.tsx` / `summary-group.aui.tsx`。
 
 export type ThreadProps = {
   components?: ThreadComponents | undefined;

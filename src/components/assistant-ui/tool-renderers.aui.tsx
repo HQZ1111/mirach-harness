@@ -21,7 +21,6 @@
  * 正文照常展开（ZCode `showFailureStatus` 同款）。
  */
 import {
-  useToolCallElapsed,
   type ToolCallMessagePartComponent,
   type ToolCallMessagePartProps,
 } from "@assistant-ui/react";
@@ -53,6 +52,10 @@ import {
   diffFilename,
   diffFromToolResult,
 } from "@/components/assistant-ui/diff-parse";
+import {
+  changedFileOf,
+  summaryFileLeafName,
+} from "@/components/assistant-ui/work-summary";
 import { parsePlanSteps, planReviewState } from "@/components/assistant-ui/plan-parse";
 import {
   describeToolCall,
@@ -257,21 +260,18 @@ interface RowModel {
 
 const buildRowModel = (
   part: ToolCallMessagePartProps,
-  elapsedMs: number | undefined,
 ): RowModel => {
   const statusType = part.status?.type;
   const failed = part.isError === true || statusType === "incomplete";
   const errorText = failed ? toolResultText(part.result) || undefined : undefined;
-  // 状态词只在「失败 / 等待审批 / 运行中耗时」出现——ZCode 的
-  // `showStatusLabel` 默认 false：成功态由类别词的时态表达（已执行），
-  // 再挂一个「已执行」就是同一句话说两遍。
+  // 状态词只在「失败 / 等待审批」出现——ZCode 的 `showStatusLabel` 默认 false：
+  // 成功态由类别词的时态表达（已执行），运行态由类别词扫光表达；再挂一个
+  // 状态词（或秒数）就是同一句话说两遍。
   const statusLabel = failed
     ? "执行失败"
     : statusType === "requires-action"
       ? "等待中"
-      : statusType === "running" && elapsedMs !== undefined
-        ? `${(elapsedMs / 1000).toFixed(1)}s`
-        : undefined;
+      : undefined;
   return {
     toolId: part.toolCallId,
     running: statusType === "running",
@@ -304,8 +304,7 @@ const PlanCard: React.FC<{
 export const PiToolUI: ToolCallMessagePartComponent = (part) => {
   const { toolName, args, result, status } = part;
   const running = status?.type === "running";
-  const elapsedMs = useToolCallElapsed();
-  const row = buildRowModel(part, elapsedMs);
+  const row = buildRowModel(part);
 
   // 1. 子代理委托结果（结果里带 rpi-delegation JSON）→ 专用卡
   const delegation = parseDelegationResult(result);
@@ -374,19 +373,29 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     />
   );
 
-  // 5a. bash / powershell → 终端行（类别词 + 命令；正文 = 命令 + 输出）
+  // 5a. bash / powershell → 终端行（ZCode ExecuteToolCallBlock）
+  // 摘要 = `已执行 <description ?? command>`：ZCode 只对 **Bash** 读
+  // `input.description`（调用意图），其余命令工具直接显示命令行；
+  // **数据面实测**：rpi 的 bash（bash.rs）/ powershell（powershell.rs）参数
+  // 只有 `command`，没有 description —— 故这里恒走 description ?? command 的
+  // 回退分支（不编造意图文案）。展开后仍保留描述；没有描述时命令行在展开态
+  // 隐藏（正文里有完整命令，避免与摘要重复）。
   if (toolName === "bash" || toolName === "powershell") {
-    const command = stringArg(args, "command");
-    if (command !== undefined) {
+    const description = stringArg(args, "description");
+    const command = stringArg(args, "command", "cmd", "script");
+    const summaryText = description ?? command;
+    if (summaryText !== undefined) {
       const text = toolResultText(result);
       return summary({
         icon: <SquareTerminalIcon />,
-        secondaryText: command,
-        hideSecondaryWhenOpen: true,
+        secondaryText: (
+          <code className="truncate font-sans text-muted-foreground/70">{summaryText}</code>
+        ),
+        hideSecondaryWhenOpen: description === undefined,
         canToggle: true,
         content: (
           <ToolBody>
-            <CommandLine command={command} />
+            {command !== undefined ? <CommandLine command={command} /> : null}
             <OutputBlock text={text} running={running} />
           </ToolBody>
         ),
@@ -395,11 +404,21 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
   }
 
   // 5b. read / ls / image → 只读行（ZCode read 不可展开：正文在侧栏文件预览）
+  // 摘要 = 文件图标 + 文件名（tooltip 全路径），类别词 `已读取`
   if (toolName === "read" || toolName === "ls" || toolName === "image") {
     const path = stringArg(args, "path", "file_path", "filePath");
     return summary({
       icon: toolName === "ls" ? <FolderOpenIcon /> : <FileTextIcon />,
-      primaryText: path ? shortenPath(path) : undefined,
+      primaryText: path ? (
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5" title={path}>
+          {toolName === "ls" ? (
+            <FolderOpenIcon className="size-4 shrink-0" />
+          ) : (
+            <FileTextIcon className="size-4 shrink-0" />
+          )}
+          <span className="min-w-0 truncate">{shortenPath(path)}</span>
+        </span>
+      ) : undefined,
       canToggle: false,
     });
   }
@@ -414,16 +433,31 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     });
   }
 
-  // 5d. 写文件类 → 更改行（文件 chip + diff 计数；正文 = diff / 参数 + 结果）
-  const diff = diffFromToolResult(toolName, result);
+  // 5d. 写文件类 → 更改行（ZCode EditToolCallBlock）：文件 chip + diff 计数；
+  // 正文 = diff（edit 系）或参数/结果（write 无 diff）
   if (["edit", "hashline_edit", "ast_edit", "write"].includes(toolName)) {
     const path = stringArg(args, "path", "file_path", "filePath");
+    const diff = diffFromToolResult(toolName, result);
+    // 行数：edit 系取 details.diff；write 无 diff，按写入内容行数计新增
+    // （数据来源与口径见 work-summary.ts::changedFileOf）
+    const file = changedFileOf({ type: "tool-call", toolName, args, result });
+    const additions = diff?.additions ?? file?.additions ?? 0;
+    const removals = diff?.deletions ?? file?.removed ?? 0;
     return summary({
       icon: toolName === "write" ? <FilePlusIcon /> : <FilePenIcon />,
-      primaryText: path ? shortenPath(path) : undefined,
+      primaryText: path ? (
+        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5" title={path}>
+          {toolName === "write" ? (
+            <FilePlusIcon className="size-4 shrink-0" />
+          ) : (
+            <FilePenIcon className="size-4 shrink-0" />
+          )}
+          <span className="min-w-0 truncate">{summaryFileLeafName(path)}</span>
+        </span>
+      ) : undefined,
       diffCount:
-        diff === null ? undefined : (
-          <ToolDiffStat added={diff.additions} removed={diff.deletions} />
+        additions === 0 && removals === 0 ? undefined : (
+          <ToolDiffStat added={additions} removed={removals} />
         ),
       canToggle: true,
       content: (

@@ -2,27 +2,27 @@
 
 /**
  * 工作段折叠（ZCode `ConversationWorkSegmentFlow` + `AssistantHistoryStatus`
- * 的宿主版，2026-11-03）。
+ * 的宿主版，2026-11-03；2026-11-15 改为「一个 turn 一个工作段」）。
  *
- * ## 为什么折叠 `group-chainOfThought`
+ * ## 折叠的是什么
  *
- * 宿主的分组器把 reasoning 与工具调用全部挂在 `group-chainOfThought` 下，
- * 正文 text 不分组——**这个分组就是宿主的工作段**。折叠它 = 折叠中间工作，
- * 正文自然在折叠区外，与 ZCode 的 flowItems（assistantHistory 折叠、
- * assistantText 在外）同构，且**不需要复刻分组树**（`buildGroupTree` 非包
- * 导出，AGENTS.md 明令禁止复刻）。
+ * 一个 turn 的**中间工作**：最后一条非空 assistant 正文之前的全部部件
+ * （思考、工具、以及中间正文），正文留在折叠区外。切分在
+ * `work-segment.ts::splitWorkParts`，规格来自 ZCode
+ * `conversationTurnWorkSegments.ts`（`assistantHistoryRows` /
+ * `assistantFollowingRows`）。
  *
- * ## 状态字与开合规则（ZCode 同款，纯函数在 work-segment.ts，20 条单测）
+ * ## 状态字与开合规则（ZCode `AssistantHistoryStatus` 同款，纯函数在
+ * `work-segment.ts`，逐条单测）
  *
  * - running → **头部不渲染**、内容展开（运行反馈在轮尾 loading 位）；
- * - completed → 头部 `已工作 N 秒`（无计时 = `已处理`），默认收起；
+ * - completed 带时长 → `已工作 N 分 M 秒`；无时长 → `已处理`；
  * - interrupted → `已停止`；
- * - 工作段之后没有正文（本轮再无 assistant 文本）→ 默认展开。
- * - 用户手点后以用户为准（ZCode 的 historyOpen）；running 中不允许收。
+ * - **没有最终正文**（折叠区外空着）→ 默认展开且不可收起；
+ * - 有最终正文 → 默认收起，头部带 chevron（hover/点击展开）。
  */
-import { useMemo, useState, type FC, type PropsWithChildren } from "react";
+import { useState, type FC, type ReactNode } from "react";
 import { ChevronRightIcon } from "lucide-react";
-import { useAuiState } from "@assistant-ui/react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -31,74 +31,90 @@ import {
 import { cn } from "@/lib/utils";
 import {
   formatWorkDuration,
-  resolveWorkSegmentStatus,
-  turnHasTextAfter,
-  workSegmentDefaultOpen,
   workSegmentLabel,
-  type WorkPartLike,
+  type WorkSegmentStatus,
 } from "@/components/assistant-ui/work-segment";
 
-export type WorkSegmentGroupProps = PropsWithChildren<{
-  /** 该分组的 parts 下标（GroupPart.indices） */
-  indices: readonly number[];
-}>;
+export interface WorkSegmentGroupProps {
+  status: WorkSegmentStatus;
+  /** 折叠区外没有正文（= 全折叠且默认展开，且不可收起）。 */
+  defaultOpen: boolean;
+  /** 轮仍在跑（头部不渲染）。 */
+  running: boolean;
+  children: ReactNode;
+}
 
-export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({ indices, children }) => {
-  // **selector 只取原始值**（useAuiState 契约）：status / hasTextAfter 都
-  // 返回 boolean，不分配数组。`turnHasTextAfter` 直接吃 MessageState 数组
-  // （结构兼容 WorkPartLike），覆盖"组后正文"的两种位置：本消息后续
-  // parts、本轮后续 assistant 消息的正文（跨消息——工具在上一条、最终
-  // 回答在下一条是常态）。
-  const parts = useAuiState((s) => s.message.parts);
-  const running = useAuiState((s) => s.message.status?.type === "running");
-  const hasTextAfter = useAuiState((s) =>
-    turnHasTextAfter(s.thread.messages, s.message.index, afterIndexOf(indices)),
-  );
+export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
+  status,
+  defaultOpen,
+  running,
+  children,
+}) => {
   const [userOpen, setUserOpen] = useState(false);
-
-  const status = useMemo(
-    () => resolveWorkSegmentStatus(parts as readonly WorkPartLike[], indices),
-    [parts, indices],
-  );
-  const open = running || workSegmentDefaultOpen(hasTextAfter, running) || userOpen;
   const duration =
     status.durationMs !== undefined ? formatWorkDuration(status.durationMs) : null;
+  const label = workSegmentLabel(status, duration);
 
   // running：头部不渲染（ZCode shouldShowHistoryStatus），内容恒开
   if (running) {
-    return <div data-slot="aui_work-segment">{children}</div>;
+    return (
+      <div data-slot="aui_work-segment" data-work-state="running">
+        {children}
+      </div>
+    );
+  }
+
+  const header = (
+    <div className="border-border/50 flex w-full flex-wrap items-center gap-2 border-b pb-2">
+      <CollapsibleTrigger
+        data-slot="aui_work-segment-trigger"
+        data-history-open={String(defaultOpen || userOpen)}
+        disabled={defaultOpen}
+        className="group/history-message text-muted-foreground focus-visible:ring-ring inline-flex max-w-full items-center gap-2 rounded text-left text-sm outline-none focus-visible:ring-2"
+      >
+        <span
+          className={cn(
+            "min-w-0 truncate",
+            status.state === "interrupted" && "text-amber-600 dark:text-amber-400",
+          )}
+        >
+          {label}
+        </span>
+        {defaultOpen ? null : (
+          <ChevronRightIcon
+            aria-hidden
+            className={cn(
+              "size-4 shrink-0 opacity-70 transition-transform",
+              userOpen ? "rotate-90" : "rotate-0",
+            )}
+          />
+        )}
+      </CollapsibleTrigger>
+    </div>
+  );
+
+  // 没有最终正文：常开、不可收起（ZCode 的 assistantHistoryDefaultOpen 分支
+  // 给 onOpenChange=undefined，头部退化成 span）。
+  if (defaultOpen) {
+    return (
+      <div data-slot="aui_work-segment" data-work-state={status.state}>
+        {header}
+        <div data-slot="aui_work-segment-content" className="pt-3">
+          {children}
+        </div>
+      </div>
+    );
   }
 
   return (
     <Collapsible
       data-slot="aui_work-segment"
       data-work-state={status.state}
-      open={open}
+      open={userOpen}
       onOpenChange={setUserOpen}
       className="flex w-full flex-col"
     >
-      <div className="border-border/50 flex w-full flex-wrap items-center gap-2 border-b pb-1.5">
-        <CollapsibleTrigger
-          data-slot="aui_work-segment-trigger"
-          className="text-muted-foreground focus-visible:ring-ring inline-flex max-w-full items-center gap-2 rounded text-left text-sm outline-none focus-visible:ring-2"
-        >
-          <span
-            className={cn(
-              "min-w-0 truncate",
-              status.state === "interrupted" && "text-amber-600 dark:text-amber-400",
-            )}
-          >
-            {workSegmentLabel(status, duration)}
-          </span>
-          <ChevronRightIcon
-            aria-hidden
-            className={cn(
-              "text-muted-foreground/70 size-[var(--size-icon-sm)] shrink-0 opacity-70 transition-transform",
-              open ? "rotate-90" : "rotate-0",
-            )}
-          />
-        </CollapsibleTrigger>
-      </div>
+      {header}
       <CollapsibleContent
         data-slot="aui_work-segment-content"
         className={cn(
@@ -113,8 +129,3 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({ indices, children 
     </Collapsible>
   );
 };
-
-/** 组内最大下标（组已按邻接合并，indices 连续）——"组之后"的起点。 */
-function afterIndexOf(indices: readonly number[]): number {
-  return indices.length ? Math.max(...indices) : -1;
-}

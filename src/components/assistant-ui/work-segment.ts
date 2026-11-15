@@ -28,6 +28,14 @@ export interface WorkSegmentStatus {
   durationMs?: number;
 }
 
+/** 消息级兜底边界（history 水合写 metadata.custom，实时路径缺省）。 */
+export interface WorkSegmentFallback {
+  /** turn 起始（= 前一条 user 时间戳 / assistant createdAt） */
+  startedAt?: number;
+  /** turn 结束（= 本轮最后一条 pi 消息 timestamp） */
+  completedAt?: number;
+}
+
 /** 部件最小形状（MessageState.parts 的 tool-call / reasoning 子集）。 */
 export interface WorkPartLike {
   type: string;
@@ -42,6 +50,9 @@ export interface WorkPartLike {
  * 解析工作段状态与时长：区间 = [firstStartedAt, lastCompletedAt]。
  *
  * - 任何子部件 status.type === 'running' → running（时长不冻结）；
+ * - 起始优先取**部件计时**（首个 assistant 产出时刻），结束优先取**消息级
+ *   兜底**（本轮最后一条 pi 消息 timestamp，含最终正文的生成时间）——
+ *   ZCode 的 turn.activeMs 同样把最终正文算进工时；
  * - 有 startedAt/completedAt 计时 → completed + durationMs；
  * - 全无计时（纯 reasoning 段——思考块的计时由 Reasoning 组件自测）→
  *   completed 且无 durationMs（头部落「已处理」，不造时长）。
@@ -49,6 +60,7 @@ export interface WorkPartLike {
 export function resolveWorkSegmentStatus(
   parts: readonly WorkPartLike[],
   indices: readonly number[],
+  fallback?: WorkSegmentFallback,
 ): WorkSegmentStatus {
   let start: number | undefined;
   let end: number | undefined;
@@ -70,10 +82,21 @@ export function resolveWorkSegmentStatus(
     }
   }
   if (running) return { state: 'running' };
-  if (start !== undefined && end !== undefined && end >= start) {
-    return { state: 'completed', durationMs: end - start };
+  const rangeStart = start ?? fallback?.startedAt;
+  const rangeEnd = fallback?.completedAt ?? end;
+  const durationMs =
+    rangeStart !== undefined && rangeEnd !== undefined && rangeEnd >= rangeStart
+      ? rangeEnd - rangeStart
+      : undefined;
+  // 中断优先于完成（ZCode 的 interrupted 来自 turn header；宿主用部件的
+  // incomplete 状态表达「本段被取消/打断」，标签只写「已停止」不写时长）
+  if (interrupted) {
+    return { state: 'interrupted', ...(durationMs === undefined ? {} : { durationMs }) };
   }
-  return { state: interrupted ? 'interrupted' : 'completed' };
+  if (durationMs !== undefined) {
+    return { state: 'completed', durationMs };
+  }
+  return { state: 'completed' };
 }
 
 /**
@@ -104,7 +127,7 @@ export function workSegmentDefaultOpen(hasTextAfter: boolean, isRunning: boolean
 }
 
 /**
- * 该工作段之后是否还有正文：本消息 `afterPartIndex` 之后的非空 text part，
+ * 该 work 段之外是否还有正文：本消息 `afterPartIndex` 之后的非空 text part，
  * 或本消息之后（同一 turn 内，即下一条 user 之前）的 assistant 消息里的
  * 非空 text part。纯函数，可单测。
  */
@@ -131,15 +154,46 @@ export function turnHasTextAfter(
   return false;
 }
 
-/** 时长格式化（ZCode `conversationWorkDuration`：≥1s、至多两个单位、
- * 中文数字与单位间不加空格——ZCode zh 实测「3 秒 20 毫秒」形态是 en 的，
- * zh 为「3秒」）。这里取最简形态：≥60s → 「N 分 M 秒」，否则「N 秒」；
- * 不足 1s → 「<1 秒」。 */
+/** 一个 turn 的部件切分（ZCode `segmentHistoryRows` / `segmentFollowingRows`）：
+ * **最后一条非空 assistant 正文**留在折叠区外，它之前的全部部件（含中间
+ * 正文）进工作段；它之后的（少见：正文后又有工具）在折叠区外顺序渲染。 */
+export function splitWorkParts(
+  parts: readonly { type: string; text?: string }[],
+): { history: readonly number[]; following: readonly number[]; lastTextIndex: number } {
+  let lastTextIndex = -1;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    if (p?.type === 'text' && (p.text ?? '').trim().length > 0) {
+      lastTextIndex = i;
+      break;
+    }
+  }
+  const history: number[] = [];
+  const following: number[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (i === lastTextIndex) continue;
+    if (lastTextIndex >= 0 && i > lastTextIndex) following.push(i);
+    else history.push(i);
+  }
+  return { history, following, lastTextIndex };
+}
+
+/**
+ * 时长格式化（ZCode `conversationWorkDuration`）：秒向最近取整、至少显示
+ * 「<1 秒」；天 / 时 / 分 / 秒只写非零的，**最多两段**（「1 时 3 分」，不写
+ * 秒）；中文单位前留一个空格（ZCode `workDurationUnitSeparator('zh-CN')`）。
+ */
 export function formatWorkDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 1000) return '<1 秒';
-  const totalSec = Math.round(ms / 1000);
-  if (totalSec < 60) return `${totalSec} 秒`;
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  return sec === 0 ? `${min} 分` : `${min} 分 ${sec} 秒`;
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days} 天`);
+  if (hours > 0) parts.push(`${hours} 时`);
+  if (minutes > 0) parts.push(`${minutes} 分`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds} 秒`);
+  return parts.slice(0, 2).join(' ');
 }

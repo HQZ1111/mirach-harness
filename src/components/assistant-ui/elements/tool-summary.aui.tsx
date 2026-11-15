@@ -28,6 +28,7 @@
  */
 import {
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
@@ -47,6 +48,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { SummaryPreviewContext } from "@/components/assistant-ui/summary-preview-context";
 
 const CONTENT_UNMOUNT_DELAY_MS = 300;
 
@@ -108,6 +110,7 @@ export const ToolSummary: FC<ToolSummaryProps> = ({
   const hasAutoOpenedRef = useRef(false);
   const [copied, setCopied] = useState(false);
   const copyResetRef = useRef<number | null>(null);
+  const preview = useContext(SummaryPreviewContext);
 
   // toolId 变化（列表位移复用节点）时重新读持久化态——ZCode 同款重置语义
   useEffect(() => {
@@ -232,6 +235,26 @@ export const ToolSummary: FC<ToolSummaryProps> = ({
 
   const showSecondary = secondaryText != null && !(isOpen && hideSecondaryWhenOpen);
 
+  // 摘要预览（连续摘要组收起态的组头滚动）：只渲染摘要行本体，不挂折叠壳，
+  // 不写展开记忆（ZCode ToolLayout 的 preview 分支同款）。
+  if (preview) {
+    return (
+      <div className="summary-hover-text group/tool-summary flex min-w-0 max-w-full items-center gap-2 text-sm">
+        <SummaryContent
+          icon={icon}
+          kindLabel={kindLabel}
+          running={running}
+          primaryText={primaryText}
+          secondaryText={secondaryText}
+          diffCount={diffCount}
+          statusWord={statusWord}
+          isOpen={false}
+          canToggle={false}
+        />
+      </div>
+    );
+  }
+
   return (
     <Collapsible
       data-slot="aui_tool-summary"
@@ -332,7 +355,7 @@ const SummaryContent: FC<{
     {/* 图标槽自己持 hover 色：全局 SVG 选择器会盖掉图标自身的固定色（ZCode 注释） */}
     <span
       data-summary-leading-icon
-      className="text-muted-foreground group-hover/tool-summary:text-foreground shrink-0 [&_svg]:size-[var(--size-icon-md)]"
+      className="flex size-4 shrink-0 items-center justify-center text-muted-foreground group-hover/tool-summary:text-foreground [&_svg]:size-4"
     >
       {icon}
     </span>
@@ -349,7 +372,7 @@ const SummaryContent: FC<{
         <span className="text-foreground/80 min-w-0 truncate">{primaryText}</span>
       ) : null}
       {secondaryText != null && secondaryText !== "" ? (
-        <span className="text-muted-foreground/70 min-w-0 truncate font-mono text-xs">
+        <span className="text-muted-foreground/70 min-w-0 truncate">
           {secondaryText}
         </span>
       ) : null}
@@ -360,7 +383,9 @@ const SummaryContent: FC<{
       <ChevronRightIcon
         aria-hidden
         className={cn(
-          "text-muted-foreground/60 size-[var(--size-icon-md)] shrink-0 transition-transform transition-opacity duration-200 will-change-transform",
+          // twMerge 会把 transition-transform / transition-opacity 判为冲突，
+          // 合并成一条属性级 transition（ZCode 原文在非 Tailwind 环境是两条）
+          "text-muted-foreground/60 size-4 shrink-0 transition-[opacity,transform] duration-200 will-change-transform",
           "opacity-0 group-hover/tool-summary:opacity-100",
           isOpen ? "rotate-90 opacity-100" : "rotate-0",
         )}

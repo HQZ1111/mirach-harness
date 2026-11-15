@@ -303,22 +303,22 @@ function ReasoningTrigger({
     return () => observer.disconnect();
   }, [streamingSummary?.text]);
 
+  // ZCode `chat.reasoning.thought` + `durationFewSeconds` / `durationSeconds`：
+  // 「思考 持续了几秒」/「思考 持续了 N 秒」——两段之间只有 gap，没有分隔点。
   const thinkingMessage =
     isStreaming && !isOpen ? (
-      <span className="shimmer font-medium motion-reduce:animate-none">
+      <span className="shimmer font-normal motion-reduce:animate-none">
         正在思考
       </span>
     ) : duration === undefined ? (
       <span className="inline-flex items-center gap-2">
-        <span className="text-muted-foreground font-medium">思考</span>
-        <span className="text-muted-foreground font-normal">·</span>
-        <span className="text-muted-foreground font-normal">持续了几秒</span>
+        <span className="text-muted-foreground font-normal">思考</span>
+        <span className="text-muted-foreground/70 font-normal">持续了几秒</span>
       </span>
     ) : (
       <span className="inline-flex items-center gap-2">
-        <span className="text-muted-foreground font-medium">思考</span>
-        <span className="text-muted-foreground font-normal">·</span>
-        <span className="text-muted-foreground font-normal tabular-nums">
+        <span className="text-muted-foreground font-normal">思考</span>
+        <span className="text-muted-foreground/70 font-normal tabular-nums">
           持续了 {duration} 秒
         </span>
       </span>
@@ -335,7 +335,8 @@ function ReasoningTrigger({
     >
       <BrainIcon
         data-slot="reasoning-trigger-icon"
-        className="aui-reasoning-trigger-icon size-[var(--size-icon-md)] shrink-0"
+        data-summary-leading-icon
+        className="aui-reasoning-trigger-icon size-4 shrink-0"
       />
       {/* 左侧语义标签固定宽度，只让右侧摘要占剩余空间——否则长摘要会把
           「正在思考」挤成多行。 */}
