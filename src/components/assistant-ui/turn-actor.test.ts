@@ -85,6 +85,38 @@ describe('reduceAguiEvent tool-call parts', () => {
     warn.mockRestore()
   })
 
+  it('duplicate tool start (hydrate/stream race) is idempotent: no second part', () => {
+    // 2026-11-15 实锤：水合先写入 tool-call 部件，随后到达的同 id start
+    // 不能再挂一份（useResources Duplicate key 崩渲染）。toolCallId 是自然键
+    // → 已存在即跳过该事件（协议 at-least-once 的投影幂等）。
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const base = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    const hydrated: TurnContext = {
+      ...base,
+      messages: [
+        {
+          ...base.messages[0],
+          content: [
+            { type: 'tool-call', toolCallId: 'dup', toolName: 'todo', args: { action: 'add' }, result: 'ok' },
+          ],
+        },
+      ],
+    }
+    const next = reduceAguiEvent(
+      hydrated,
+      {
+        type: 'CUSTOM',
+        name: 'tool_execution',
+        value: { phase: 'start', toolCallId: 'dup', toolName: 'todo', args: { action: 'add' } },
+      } as never,
+      hydrated.lastEventId + 1,
+    )
+    const content = next.messages[0].content as { type: string; toolCallId?: string }[]
+    expect(content.filter((p) => p.type === 'tool-call')).toHaveLength(1)
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
   it('tool end attaches result by toolCallId; later text opens a new text part', () => {
     let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
     c = send(c, 'CUSTOM', {

@@ -254,6 +254,27 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
             : undefined
         const messages = [...ctx.messages]
         const startedAt = Date.now()
+        // **投影幂等（协议契约，不是兜底）**：tool 事件流是 at-least-once——
+        // ①SSE 断线重放（同 seq 已由入口游标挡掉）；②**水合与流的竞态**：
+        // 切会话/挂载时先 pi_get_messages 水合（历史里已有该 toolCall 部件），
+        // 而 SSE 是 150ms 轮询，水合前已产生、水合后才投递的
+        // `tool_execution start` 会再挂一份 → 同一 toolCallId 两个部件 →
+        // assistant-ui useResources 抛 "Duplicate key" 整窗崩（2026-11-15
+        // 实锤 call_8c148f…）。toolCallId 是自然键：已存在即**跳过**该事件
+        // （不合并、不改写既有部件——result 由后续 end 事件填），console.warn
+        // 让竞态可见。这与"合并掩盖"不同：重复事件在语义上就是 no-op。
+        for (const m of messages) {
+          const c = m.content
+          if (typeof c === 'string') continue
+          if (
+            c.some((p) => p.type === 'tool-call' && p.toolCallId === value.toolCallId)
+          ) {
+            console.warn(
+              `[turn] tool_execution start 重复（${value.toolCallId}，水合/流竞态或重放）——已存在部件，跳过`,
+            )
+            return next
+          }
+        }
         for (let i = messages.length - 1; i >= 0; i--) {
           if (messages[i].role !== 'assistant') continue
           const c = messages[i].content
