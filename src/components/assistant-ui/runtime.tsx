@@ -1075,25 +1075,63 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const usageRef = useRef<TurnUsage | null>(null)
   usageRef.current = usage
 
-  /** 队列 drain：endpoint 未就绪时保留队列（出队即丢 = 兜底，禁止） */
-  const drainQueue = useCallback(() => {
-    if (!endpointRef.current) {
-      console.error('[queue] endpoint 未就绪——排队消息保留，待下次 run 收尾再发')
-      return
+  /** 队列 drain：endpoint 未就绪时保留队列（出队即丢 = 兜底，禁止）。
+   *  **lane 收尾窗口**：RUN_FINISHED 到达 ≠ prompt 返回；引擎落盘/广播排空
+   *  期间 lane 仍 busy，此时 POST 会得到 "Lane main already has an active
+   *  run operation"（用户实报）。drain 前轮询 `pi_lane_busy`，busy 就等，
+   *  队列保留在原处；超时仍 busy 则 2s 后自动重试（不硬发、不丢消息）。 */
+  const drainRetryRef = useRef<number | null>(null)
+  /** 并发闸：一次只允许一个 drain（effect 边沿 + 重试定时器可能同时到） */
+  const drainInFlightRef = useRef(false)
+  const drainQueue = useCallback(async () => {
+    if (drainInFlightRef.current) return
+    drainInFlightRef.current = true
+    try {
+      if (!endpointRef.current) {
+        console.error('[queue] endpoint 未就绪——排队消息保留，待下次 run 收尾再发')
+        return
+      }
+      if (sessionQueue.getState().items.length === 0) return
+      let busy = true
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        busy = false
+        try {
+          busy = await invoke<boolean>('pi_lane_busy')
+        } catch (e) {
+          // 查询失败不阻止发送：真正的 busy 会以 RUN_ERROR 可见（不静默）
+          console.error('[queue] lane_busy 查询失败——按空闲继续', e)
+        }
+        if (!busy) break
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      if (busy) {
+        // 30s 仍 busy：不硬发（会撞 lane 拒绝）。消息保留在队列，2s 后再试
+        // ——流断开的 run 可能仍在引擎里，用户也可点停止释放。
+        console.error('[queue] lane 仍 busy——排队消息保留，2s 后重试')
+        if (drainRetryRef.current === null) {
+          drainRetryRef.current = window.setTimeout(() => {
+            drainRetryRef.current = null
+            void drainQueue()
+          }, 2000)
+        }
+        return
+      }
+      const next = sessionQueue.getState().takeFirst()
+      if (!next) return
+      actorRef.send({
+        type: 'USER_SUBMIT',
+        text: next.text,
+        messageId: `user-q-${Date.now()}`,
+        ...(next.imageDataUrls && next.imageDataUrls.length > 0
+          ? { images: next.imageDataUrls }
+          : {}),
+        ...(next.files && next.files.length > 0 ? { files: next.files } : {}),
+      })
+      postRun(next.submission ?? next.text, next.images)
+      void refreshThreads()
+    } finally {
+      drainInFlightRef.current = false
     }
-    const next = sessionQueue.getState().takeFirst()
-    if (!next) return
-    actorRef.send({
-      type: 'USER_SUBMIT',
-      text: next.text,
-      messageId: `user-q-${Date.now()}`,
-      ...(next.imageDataUrls && next.imageDataUrls.length > 0
-        ? { images: next.imageDataUrls }
-        : {}),
-      ...(next.files && next.files.length > 0 ? { files: next.files } : {}),
-    })
-    postRun(next.submission ?? next.text, next.images)
-    void refreshThreads()
   }, [actorRef, postRun, refreshThreads])
 
   /** 成本入账：失败 console.error 可见，本 run 不入账（不估算） */
@@ -1130,7 +1168,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     // 时间线标记重拉：模型切换 / 自动压缩都发生在 run 之间，run 收尾是
     // 唯一能看见它们落盘的时机（会话条目在 run 结束时 flush）。
     void timelineMarkerBridge.getState().refresh(currentThreadIdRef.current)
-    drainQueue()
+    void drainQueue()
     recordRunCost()
   }, [isRunning, drainQueue, recordRunCost])
 
@@ -1432,12 +1470,18 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       if (!endpointRef.current) {
         throw new MessageNotSentError('[agui] endpoint 未就绪，消息未发送')
       }
-      // run 进行中 → 入队（message-queue 语义，对应 pi steering/follow_up
-      // 的 one-at-a-time 排队模式）：pi prompt 持锁跨整个 run，立即 POST
-      // 只会撞锁。排队消息不进轮次投影（乐观 user 消息在出队发送时才
-      // 出现）——队列项本身在 MessageQueue 面板可见、可删；run 收尾后由
-      // drainQueue 按序发出。
-      if (actorRef.getSnapshot().matches('streaming')) {
+      // run 进行中（actor streaming **或** 引擎 lane 仍 busy）→ 入队：
+      // 后者覆盖 RUN_FINISHED 到 prompt 返回之间的收尾窗口——此时直接
+      // POST 会被引擎拒绝（"Lane main already has an active run operation"，
+      // 用户实报）。队列消息不进轮次投影；run 收尾后由 drainQueue 发出。
+      let laneBusy = false
+      try {
+        laneBusy = await invoke<boolean>('pi_lane_busy')
+      } catch (e) {
+        // 查询失败不吞：记录后按 actor 状态判断；真正的 busy 由 RUN_ERROR 可见
+        console.error('[pi] lane_busy 查询失败——按 actor 状态判断', e)
+      }
+      if (laneBusy || actorRef.getSnapshot().matches('streaming')) {
         sessionQueue.getState().enqueue({
           id: `queued-${++queuedSeq}`,
           text,
@@ -1447,6 +1491,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             : {}),
           ...(plan.files.length > 0 ? { files: plan.files } : {}),
         })
+        // lane 忙但 **UI 已 idle**（收尾窗口/断流残留）：没有 run 收尾事件
+        // 会来触发 drain，必须自己排一次重试——否则排队消息永远不发出。
+        if (laneBusy && !actorRef.getSnapshot().matches('streaming')) {
+          if (drainRetryRef.current === null) {
+            drainRetryRef.current = window.setTimeout(() => {
+              drainRetryRef.current = null
+              void drainQueue()
+            }, 500)
+          }
+        }
         return
       }
       actorRef.send({

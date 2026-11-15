@@ -908,6 +908,21 @@ fn pi_interrupt(
     }
 }
 
+/// main lane 是否仍有活动 run（含 RUN_FINISHED 后的收尾窗口）。前端提交
+/// 与队列 drain 前先查，busy 就留在本地队列，避免撞
+/// "Lane main already has an active run operation"。
+#[tauri::command(async)]
+fn pi_lane_busy(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    thread: Option<String>,
+) -> Result<bool, String> {
+    // rpi 非 main lane 只读（side_* 全部 unavailable），不作 run 判断。
+    if thread.as_deref().is_some_and(|t| t != "main") {
+        return Ok(false);
+    }
+    state.engine.lane_busy()
+}
+
 #[tauri::command(async)]
 fn pi_list_models(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
@@ -1655,6 +1670,7 @@ fn main() {
             pi_set_model,
             pi_set_thinking_level,
             pi_interrupt,
+            pi_lane_busy,
             pi_list_models,
             pi_refresh_model_registry,
             pi_pending_approvals,

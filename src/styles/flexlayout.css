@@ -182,7 +182,13 @@
    （.dv-open-tab-title 只在这张签里渲染）。生命周期保证「open 与实签同组」
    只是瞬时（实签抵达即撤锚，dockview-shell handlePanelAdded），稳态下
    [打开|文件树] 形态不存在，本规则不会误伤实签的标签条。 */
-.dv-tabs-and-actions-container:has(.dv-open-tab-title) {
+/* 判据收窄为「**只有**打开页这一张签」——open 签渲染 .dv-open-tab，
+   实签渲染 .dv-default-tab；一旦组里出现任意实签（拖入/移动/存档异常
+   都可能让 open 与实签同组），标签条必须正常显示，否则整组的实签被
+   一起藏掉（2026-11-15 实锤：终端被拖入 open 组后标签条 display:none，
+   用户报「标签页没了」）。嵌套 :has 是非法选择器（见上方注释），故用
+   :not(:has(.dv-default-tab)) 表达「无实签」。 */
+.dv-tabs-and-actions-container:has(.dv-open-tab-title):not(:has(.dv-default-tab)) {
   display: none;
 }
 /* 条隐藏后内容**留在原竖位**（2026-11-01 用户："打开页没有标签了怎么

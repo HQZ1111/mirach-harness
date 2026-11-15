@@ -89,7 +89,7 @@ export function ChatLoadingOrbs({ className }: { className?: string }) {
     if (!group) return;
     const dots = Array.from(group.querySelectorAll("circle"));
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    let frameId = 0;
+    let timer = 0;
     let startedAt = performance.now();
 
     const setDot = (
@@ -149,11 +149,13 @@ export function ChatLoadingOrbs({ className }: { className?: string }) {
           orbOpacity + ((target ? 1 : 0) - orbOpacity) * stagger,
         );
       });
-      frameId = window.requestAnimationFrame(frame);
+      // CEF/WebView2 下 rAF 在布局结算后会停 400ms+（AGENTS「已知陷阱」），
+      // 球体动画会看起来冻住/只偶尔跳一下。用 setTimeout(16ms) 驱动。
+      timer = window.setTimeout(() => frame(performance.now()), 16);
     };
 
     const updateMotion = () => {
-      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timer);
       if (reducedMotion.matches) {
         dots.forEach((dot, index) => {
           const target = ORB_M_POINTS[index];
@@ -162,14 +164,14 @@ export function ChatLoadingOrbs({ className }: { className?: string }) {
         });
       } else {
         startedAt = performance.now();
-        frameId = window.requestAnimationFrame(frame);
+        timer = window.setTimeout(() => frame(performance.now()), 16);
       }
     };
 
     updateMotion();
     reducedMotion.addEventListener("change", updateMotion);
     return () => {
-      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(timer);
       reducedMotion.removeEventListener("change", updateMotion);
     };
   }, []);

@@ -165,7 +165,8 @@ export interface DelegationCardProps {
 }
 
 export const DelegationCard: FC<DelegationCardProps> = ({ result, running }) => {
-  const [open, setOpen] = useState(true);
+  // ZCode agent.tsx：子代理行完成后回到摘要，详情不在消息里常驻摊开。
+  const [open, setOpen] = useState(false);
   const sessionId = result.sessionId;
   // 只有会话目录里真有这个线程时才能打开（switchToThread 需要 catalog 的
   // path）。子会话不在目录里 → 不渲染按钮，只显示 id 文本。

@@ -64,7 +64,6 @@ import { StoppedRun } from "@/components/assistant-ui/elements/stopped-run";
 import { PiToolUI } from "@/components/assistant-ui/tool-renderers.aui";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
 import { QuoteBlock } from "@/components/assistant-ui/elements/quote.aui";
-import { MessageStallIndicator } from "@/components/assistant-ui/elements/message-stall-indicator";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -1123,9 +1122,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           >
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
-            {/* 运行状态行（官方 thinking-indicator 元素）：思考前/思考中
-                （正文未到时）显示"正在思考/正在使用 <tool>" + 耗时——
-                放 composer 上方（用户视线处），正文流出即消失 */}
+            {/* 运行状态（2026-11-15 用户定稿）：ZCode 的「工作中 N」挂在
+                **输入框上方**，不在消息流里。全线程只有一个实例（gated by
+                thread.isRunning），轮内不再放第二个。 */}
             <ThreadThinkingIndicator />
             {!scoped && (
               <>
@@ -1554,6 +1553,11 @@ const AssistantMessage: FC = () => {
         <MessageError />
       </div>
 
+      {/* 停滞指示已删（2026-11-15，用户第二次报"两个工作中"）：ZCode 运行态
+          只有一个 ChatLoading（orbs + 工作中 + 计时），且挂在输入框上方
+          （用户 2026-11-15："工作中不是在输入框上面吗？"）。消息内不再放
+          第二个运行提示，也不在消息里重复一份加载位。 */}
+
       {/* **已删除 run 级工具时间线**（2026-11-02）：GroupedParts 的
           `group-explore/execute/changes` 分支已经渲染了本消息的全部工具行
           （ToolFamilyGroup → 子工具行），再挂一条聚合时间线就是**同一批
@@ -1561,10 +1565,9 @@ const AssistantMessage: FC = () => {
           ZCode 的对照口径：工具只以分组父行 + 子行出现一次，没有额外的
           run 级时间线摘要。 */}
 
-      {/* 停滞指示（官方 unstable_useMessageStallDetection）：正文/工具已流出
-          但内容 2s 未变（工具思考期/provider 卡住）时重新浮出"仍在工作"。
-          必须在消息 scope 内（hook 读 s.message.*）。 */}
-      <MessageStallIndicator />
+      {/* 停滞指示已删（2026-11-15，用户第二次报"两个工作中"）：ZCode 运行态
+          只有一个 ChatLoading（轮尾 orbs + 工作中 + 计时），消息内不再叠
+          "仍在工作"——那会让流式期间同时出现两处运行提示。 */}
 
       {/* run 级 usage（官方 message-timing 元素）——只在最后一条 assistant */}
       <RunTiming />

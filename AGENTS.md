@@ -2637,6 +2637,86 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
 14. **改 Rust 后 `cargo build` 会因运行中的 exe 报 os error 5**：先
     `taskkill /IM mirach-harness.exe /F` 再 build；重启时 WorkingDirectory
     设为 `src-tauri\target\debug`（CEF/WebView2 依赖文件在同目录）。
+15. **面板栏签条被 open 锚误藏（2026-11-15 实锤）**：
+    `.dv-tabs-and-actions-container:has(.dv-open-tab-title){display:none}` 的
+    原意只是藏「**只有**打开页」的空态签条；但 open 与实签同组（拖入 /
+    `moveTo` / 存档异常都会发生）时整条被藏——用户报「标签页没了」。
+    判据必须收窄为 `:has(.dv-open-tab-title):not(:has(.dv-default-tab))`
+    （open 签渲染 `.dv-open-tab`，实签渲染 `.dv-default-tab`；**嵌套
+    `:has` 是非法选择器**，不能写 `:has(x:has(y))`）。
+    另：直接把面板 `moveTo` 进 open 组不会带 `params.region='panels'`，
+    `handlePanelAdded` 的撤锚与 `handlePanelRemoved` 的末签判据都认不出它
+    ——手工/测试建面板必须补 `region`，正式路径走 `openPagePanel`。
+16. **终端「文字挤在一起」= 隐藏态启动的尺寸竞态（2026-11-15 实锤）**：
+    面板在后台/零尺寸时 xterm 只能按内置 80×24 fit；先 spawn 再用真实尺寸
+    resize，ConPTY/PSReadLine 会重绘旧屏（banner 与提示符在行 0 和行
+    41 各出现一次 = 用户看到「内容被撒开/挤在一起」）。同时隐藏态
+    `term.open()` 的滚动同步 rAF 与 `dispose()` 竞态会抛
+    `Cannot read properties of undefined (reading 'dimensions')`。
+    修法（terminal-pane.tsx 的 `ensureSpawned`）：**只有容器
+    clientWidth/Height > 0 才 `term.open` + fit + spawn**；隐藏时挂起，
+    由 ResizeObserver / `onDidVisibilityChange` / 活动签 effect 重试。
+    `term.open` 之后才存在 textarea，输入法兜底的监听也必须随之延迟挂载。
+17. **「已查阅 N 项，已执行 M 命令」总项（2026-11-15 最终定稿，ZCode 9444 实时
+    DOM 为基准）**：ZCode 的折叠轮**只有「已工作 N」，没有统计字**——统计是
+    展开后内层 `ConsecutiveSummaryGroup` 的头（9444 实测：折叠 trigger 文本
+    仅「已工作 12 分 14 秒」，展开 content 里才是「已查阅 11 项…」）。
+    分组规则（`groupConsecutiveAssistantSummaries`）：思考 + explore/run/
+    change/session 工具是摘要行；**assistantText 正文、子代理 Agent/Task、
+    工作流工具、未归类工具（MCP/ToolSearch/ask_user…）、待审批行、图片/文件**
+    是边界，边界后开新组；todo 行被过滤（不断组）。新 user 轮、以及最后正文
+    之后的 following 工作也会各成新的组。ZCode 的场景里组内只有「思考 +
+    工具」行，没有正文 commentary（9444 实测组内子行全是这两类）——所以它
+    看起来一轮一个总项。
+    **宿主的两处有意偏差**：
+    ①pi 在每个工具批次前写 commentary 正文；严格按 ZCode 的正文边界会碎成
+    十几个组头，宿主把非空正文并进当前组（不新开组）；
+    ②ZCode 组内 <2 行平铺；宿主单行也建组头，避免「第一条工具裸行、第二条
+    到达才变组头」的跳变。
+    组默认**收起**；运行中收起头滚动最新动态摘要，完成后收起头显示统计；
+    用户点开才看到思考/正文/工具行。
+18. **运行态只允许一个「工作中」，且挂在输入框上方（2026-11-15 用户定稿）**：
+    ZCode 的观感是 composer 上方一行 orbs + `工作中 N`；消息内没有
+    「仍在工作」，也没有轮尾第二个加载位。宿主曾把 ChatLoading 迁到轮尾
+    （`aui_turn-loading-slot`），用户明确要求回到输入框上方——已回退为
+    footer 单实例。`MessageStallIndicator` 已删。计时起点取当前 run 的
+    assistant `createdAt`（重启/切会话恢复运行轮不再从 0 计时），0 秒也
+    显示时长。orbs 动画驱动改用 `setTimeout(16ms)`（CEF 下 rAF 会停 400ms+
+    → 球体看起来冻住）。
+19. **工具行对齐要点（2026-11-15）**：`read` 用放大镜 + **文件名**
+    （完整路径进 tooltip）；`websearch/web_search` 是 ZCode search 行
+    「查找 {query}」不可展开（旧 WebSearch 结果卡解析不了 rpi 的纯文本
+    结果，退化成 JSON——已删）；`webfetch/web_fetch/fetch` 单独一行
+    「网页抓取/正在抓取 <url>」，prompt 不能替代 URL；`ask_user` 运行中
+    不可展开（`canToggle={!running}`）；bash/powershell 的英文
+    `description` 不显示（退回 command；中文 description 保留），避免
+    「已执行 Run radio tests」这类英文夹在中文界面里。
+20. **运行中插话 / 排队（ZCode 源码 + 9444 实测，2026-11-15）**：
+    ZCode 默认 `followupMode = queue`（设置 `zcodeInteractionBehavior ===
+    "guide"` 才切 guide）；运行中输入框 placeholder 是「继续输入以排队后续
+    修改」，Enter 把消息加入 **follow-up 队列**，不是停止。**有草稿时停止钮
+    隐藏**（`showStopControl = canStop && !hasDraftToSubmit`），停止走 Esc
+    ——所以运行中不可能同时出现「发送」和「停止」两个黑按钮（宿主曾同时
+    渲染，用户实报"两个发送按钮"）。队列面板项可 Steer/Send now/Edit/
+    Remove；stop 或 run error 时队列暂停并可 Continue。Ctrl/Cmd+Enter 在
+    queue 模式是反向投递（startNow/steer），guide 模式反之。
+    宿主落地：
+    - 运行中有草稿 → 只渲染「排队消息」按钮（普通 onClick 直接
+      `aui.composer.send()`；核心 `ComposerPrimitive.Send` 在 running &&
+      !capabilities.queue 时是 disabled 的）；无草稿 → 只有停止钮；Esc 停止。
+    - Enter 在 `onInputKeyDown` 里拦截（核心默认 Enter 在 running 且无
+      queue capability 时直接 return）→ `aui.composer.send()` → runtime
+      onNew 入本地队列。
+    - **lane 收尾竞态**：RUN_FINISHED 到达 ≠ prompt 返回，引擎 lane 仍
+      busy，POST 会得到 "Lane main already has an active run operation"。
+      新增 IPC `pi_lane_busy`（`AgentHarness::snapshot().active`）；onNew
+      与队列 drain 先查它，busy 就留在队列；drain 最多等 30s，仍 busy 则
+      2s 后重试（不硬发、不丢消息）。UI idle 但 lane busy 时 enqueue 会
+      自排一次 drain（否则没有 run 收尾事件可等）。
+    - 未做：真 steer（`AgentLane::steer` 引擎已支持，缺 IPC 与「已引导」
+      行渲染）。
+
+
 
 ## 架构（详见 `docs/architecture.md`）
 

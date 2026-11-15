@@ -294,6 +294,16 @@ const SummaryPreviewRow: FC<{ index: number; ctx: RenderCtx }> = ({ index, ctx }
       </span>
     );
   }
+  if (part.type === "text") {
+    // 运行中总项收起的“最新动态摘要”：只取正文首行，单行截断。不能把整段
+    // Markdown 塞进组头（会撑成多行、把总项高度顶飞）。
+    const firstLine = (part.text ?? "").trim().split("\n")[0] ?? "";
+    return (
+      <span className="inline-flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
+        <span className="min-w-0 truncate">{firstLine}</span>
+      </span>
+    );
+  }
   return (
     <PartScope index={index}>
       <SummaryPreviewContext.Provider value={true}>
@@ -329,9 +339,11 @@ const SummaryRunView: FC<{
   /** 整轮最后一个可见行（正文也参与）；组尾等于它才是 running 组。 */
   turnTailIndex: number;
 }> = ({ indices, ctx, running, turnTailIndex }) => {
-  if (indices.length < 2) {
-    return <PartLeafAt index={indices[0]!} slots={ctx.slots} />;
-  }
+  // **单行也建总项**（用户 2026-11-15："先出现散件再突然跳进总项里"）：
+  // ZCode 原文 <2 行平铺，但 pi 的第一个工具流进来时先渲染成裸行、第二个
+  // 工具到达才变成组头——视觉上就是散件跳进总项。这里从一开始就有总项头
+  // （运行中收起滚动当前项，完成后显示统计），没有形态跳变。
+  if (indices.length === 0) return null;
   const groupRunning = isTailSummaryGroup({
     running,
     groupLastIndex: indices[indices.length - 1]!,
@@ -362,7 +374,12 @@ const SummaryRunView: FC<{
         iconIndex === undefined ? undefined : ctx.parts[iconIndex],
       )}
       collapsedStatistics={collapsedStatistics}
+      // 总项默认收起：运行中收起头滚动“最新动态摘要”（思考/当前命令/最新
+      // 一段正文），完成后收起头显示总统计——行只有在用户点开时才出现。
+      // 这正是用户口径：“zcode 是直接在总项中出现”，不是散件后合并。
+      defaultOpen={false}
       groupRunning={groupRunning}
+      hasActiveItem={activeIndex !== undefined}
       activeKey={previewKeyFor(currentPart, currentIndex)}
       activeRefreshVersion={currentPart}
       activeSummary={<SummaryPreviewRow index={currentIndex} ctx={ctx} />}
@@ -375,11 +392,10 @@ const SummaryRunView: FC<{
 };
 
 /**
- * 工作段内的渲染项 → 连续摘要组 / 平铺单行。
- *
- * `buildWorkSummaryItems` 只把**连续**摘要行合成 `rows` 项；正文、子代理、
- * 未归类工具、图片是边界（`part` 项），在组之间内联渲染。待办行在扫描时
- * 剔除（不渲染、不断组）。
+ * 工作段内渲染项 → 连续摘要组（宿主只保留**一层**：pi 的 commentary 已并进
+ * 组内，子代理/未归类工具是边界）。运行中组默认展开（思考与工具行可见），
+ * 完成后收起为一行总统计——不是「散项突然跳进总项」，而是同一个组头下的
+ * 收起动作。
  */
 const WorkItems: FC<{
   indices: readonly number[];
@@ -442,7 +458,23 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
   turnWorkOwner = true,
 }) => {
   const parts = useAuiState((s) => s.message.parts);
-  const running = useAuiState((s) => s.message.status?.type === "running");
+  const messageRunning = useAuiState((s) => s.message.status?.type === "running");
+  // ZCode 的 `turnRunning` 是**轮级**事实（unit.isRunning），不是单条消息的
+  // status。工具等待审批/交互时消息段已 complete，但整轮仍在跑——此时外层
+  // 头必须继续隐藏、内容恒开（宿主曾按消息 status 判，等待期会错误出现
+  // 「已工作 N」头并允许收起）。非轮尾段的归属消息用自身 status 即可。
+  const threadRunning = useAuiState((s) => s.thread.isRunning);
+  // 「轮级 running」只属于**当前轮**（本消息之后没有新的 user 消息）。
+  // 不能直接用 thread.isRunning：它是线程级的，后台跑新一轮时所有历史
+  // 轮尾都会被误判成 running（外层头消失、组永不展开 → 思考全藏）。
+  const isCurrentTurnTail = useAuiState((s) => {
+    const messages = s.thread.messages;
+    for (let i = s.message.index + 1; i < messages.length; i++) {
+      if (messages[i]?.role === "user") return false;
+    }
+    return true;
+  });
+  const running = turnWorkOwner ? threadRunning && isCurrentTurnTail : messageRunning;
   const bounds = useWorkBounds();
 
   const slots = useMemo<AssistantWorkPartsSlots>(
@@ -456,8 +488,22 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
     [parts, slots],
   );
 
-  // 工作段 = 最后一条非空正文之前的全部部件；正文与之后的部件在折叠区外
-  const split = useMemo(() => splitWorkParts(parts), [parts]);
+  // 工作段 = 最后一条非空正文之前的全部部件；正文与之后的部件在折叠区外。
+  // **运行中不切正文**（用户 2026-11-15 最终口径：zcode 是直接在总项中出现，
+  // 过程全部在总项里）。pi 的 commentary 文本如果被当成"最终正文"拉到折叠区
+  // 外，就会先以散段出现、下一段文本来了又并回总项——正是用户看到的
+  // "散件出现，然后合并进总项"。运行中把全部部件留在 history：外层头不建、
+  // 内层总项收起并滚动最新动态摘要；跑完后才按最后正文切分。
+  const split = useMemo(() => {
+    if (running && turnWorkOwner) {
+      return {
+        history: parts.map((_, index) => index),
+        following: [] as number[],
+        lastTextIndex: -1,
+      };
+    }
+    return splitWorkParts(parts);
+  }, [parts, running, turnWorkOwner]);
   const status = useMemo(
     () =>
       resolveWorkSegmentStatus(
@@ -472,13 +518,15 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
 
   // 整轮最后一个可见行（正文也参与；待办行不渲染，跳过）——ZCode
   // `getAssistantSummaryTailRowId` 的宿主对应物。只有「组尾行 === 它」且轮
-  // 仍 running 的组是 running 组（收起头滚动当前项）；一旦最终正文流出，
-  // 尾行变成正文，所有组收起头都回到统计文本（ZCode 同判）。
+  // 仍 running 的组是 running 组（滚动当前项）；完成后组收起为总统计。
   const turnTailIndex = useMemo(() => {
     const list = parts as readonly SummaryPartLike[];
     for (let i = list.length - 1; i >= 0; i--) {
       const part = list[i];
       if (part?.type === "tool-call" && isTodoToolName(part.toolName ?? "")) continue;
+      if ((part?.type === "text" || part?.type === "reasoning") && !(part.text ?? "").trim()) {
+        continue;
+      }
       return i;
     }
     return -1;
@@ -524,8 +572,6 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
           defaultOpen={workSegmentDefaultOpen(hasFinalText, running)}
           running={running}
         >
-          {/* ZCode ConversationAssistantWorkContent 的 gap-1：组与组之间的
-              间距由各自组件（组头 + 内容 mt-2）承担，外层不再加导线。 */}
           <div data-slot="aui_assistant-work-items" className="flex flex-col gap-1">
             <WorkItems
               indices={history}

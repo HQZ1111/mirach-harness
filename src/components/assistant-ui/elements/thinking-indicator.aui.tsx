@@ -19,6 +19,19 @@ export function ThreadThinkingIndicator() {
   // 计时永久消失（实测）。ZCode 的 blockedByInteraction 只针对当前轮的
   // 交互；宿主拿不到"当前轮"归属，宁可与交互卡同屏也不隐藏计时。
   const visible = isRunning;
+  // 计时起点 = 当前 run 的 assistant 消息 createdAt（= RUN_STARTED 时刻）。
+  // 只在挂载时从 0 起算会让**重启/切换会话后恢复的运行轮**从 0 重新计时
+  // （ZCode 的 initialElapsedMs 来自 workStatus.durationMs）。
+  const runStartedAt = useAuiState((s) => {
+    const messages = s.thread.messages;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message?.role !== "assistant") continue;
+      const at = message.createdAt;
+      return at instanceof Date ? at.getTime() : undefined;
+    }
+    return undefined;
+  });
 
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -26,16 +39,21 @@ export function ThreadThinkingIndicator() {
       setElapsed(0);
       return;
     }
-    setElapsed(0);
+    const base =
+      runStartedAt !== undefined
+        ? Math.max(0, Math.round((Date.now() - runStartedAt) / 1000))
+        : 0;
+    setElapsed(base);
     const timer = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(timer);
-  }, [visible]);
+  }, [visible, runStartedAt]);
 
   if (!visible) return null;
   return (
     <ThinkingIndicator
       label="工作中"
-      elapsed={elapsed > 0 ? formatWorkDuration(elapsed * 1000) : undefined}
+      // ZCode 的 ChatLoading 恒显示时长（0 秒也渲染）；不再用 elapsed>0 门。
+      elapsed={formatWorkDuration(elapsed * 1000)}
     />
   );
 }

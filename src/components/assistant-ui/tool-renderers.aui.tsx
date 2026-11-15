@@ -46,10 +46,6 @@ import {
   ToolSummary,
 } from "@/components/assistant-ui/elements/tool-summary.aui";
 import {
-  WebSearch,
-  type WebSearchResult,
-} from "@/components/assistant-ui/elements/web-search";
-import {
   diffFilename,
   diffFromToolResult,
 } from "@/components/assistant-ui/diff-parse";
@@ -63,7 +59,6 @@ import {
   describeToolCall,
   toolLabelZh,
 } from "@/components/assistant-ui/tool-presentation/tool-presentation";
-import { shortenPath } from "@/components/assistant-ui/tool-presentation/tool-chips";
 
 // ── 形状工具（纯函数，原 thread.aui 内联版迁移）────────────────────────
 
@@ -130,41 +125,12 @@ const stringArg = (args: unknown, ...keys: string[]): string | undefined => {
   return undefined;
 };
 
-/** web_search 结果严格解析（数组或 {results:[...]}；任何一项不符整体 null）。 */
-const parseWebSearchResults = (result: unknown): readonly WebSearchResult[] | null => {
-  let items: unknown = result;
-  if (typeof result === "string") {
-    try {
-      items = JSON.parse(result);
-    } catch {
-      return null;
-    }
-  }
-  if (isPlainRecord(items) && items.results !== undefined) items = items.results;
-  if (!Array.isArray(items)) return null;
-  const out: WebSearchResult[] = [];
-  for (const item of items) {
-    if (!isPlainRecord(item)) return null;
-    const title =
-      typeof item.title === "string" && item.title
-        ? item.title
-        : typeof item.url === "string"
-          ? item.url
-          : null;
-    if (!title) return null;
-    let domain = typeof item.domain === "string" && item.domain ? item.domain : null;
-    if (!domain && typeof item.url === "string") {
-      try {
-        domain = new URL(item.url).hostname;
-      } catch {
-        domain = null;
-      }
-    }
-    if (!domain) return null;
-    out.push({ title, domain });
-  }
-  return out;
-};
+/** 中文正文判定（CJK 统一表意文字 + 扩展 A）。执行摘要优先显示中文
+ *  description（模型用中文描述时），英文 description 退回 command——
+ * pi 的模型常写英文 description，直接显示会让「已执行 Run radio tests」
+ * 这类英文夹在中文界面里（用户 2026-11-15："执行摘要能变成中文吗"）。 */
+const CJK_PATTERN = /[\u3400-\u9FFF\uF900-\uFAFF]/;
+const isChineseText = (value: string): boolean => CJK_PATTERN.test(value);
 
 // ── 正文块 ──────────────────────────────────────────────────────────
 
@@ -410,7 +376,12 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
   if (toolName === "bash" || toolName === "powershell") {
     const description = stringArg(args, "description");
     const command = stringArg(args, "command", "cmd", "script");
-    const summaryText = description ?? command;
+    // ZCode execute.tsx:275 只对 Bash 取 description；powershell 摘要恒用
+    // 原始 command。宿主再加一道语言偏好：英文 description 不显示，退回
+    // command（命令本身语言中立），中文 description 保留。
+    const chineseDescription =
+      description !== undefined && isChineseText(description) ? description : undefined;
+    const summaryText = (toolName === "bash" ? chineseDescription : undefined) ?? command;
     if (summaryText !== undefined) {
       const text = toolResultText(result);
       return summary({
@@ -418,7 +389,7 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
         secondaryText: (
           <code className="truncate font-sans text-muted-foreground/70">{summaryText}</code>
         ),
-        hideSecondaryWhenOpen: description === undefined,
+        hideSecondaryWhenOpen: toolName !== "bash" || chineseDescription === undefined,
         canToggle: true,
         content: (
           <ToolBody>
@@ -442,8 +413,10 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
       icon: <CircleHelpIcon />,
       kindLabelOverride: running ? "正在询问" : "已询问",
       primaryText: `${count} 个问题`,
-      canToggle: true,
-      content: (
+      // ZCode ask-question.tsx: `canToggle={!isRunning}`——运行中不可展开
+      // （答案还没产生，展开只会露出"参数缺失"占位）。
+      canToggle: !running,
+      content: running ? undefined : (
         <div className="border-border ml-2 space-y-2 border-l pl-3.5">
           {answers.length > 0 ? (
             answers.map((entry, index) => (
@@ -477,23 +450,31 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     });
   }
 
-  // 5b. read / ls / image → 只读行（ZCode read 不可展开：正文在侧栏文件预览）
-  // 摘要 = 文件图标 + 文件名（tooltip 全路径）；read/image 的文件名 chip
-  // 可点 → 代码查看器。ls 是目录，不挂预览入口（预览面板只读文件）。
+  // 5b. read / ls / image → 只读行（ZCode read.tsx：kind 已读取、放大镜图标、
+  // primary = **文件名**（完整路径只进 tooltip），不可展开；右键/侧栏看正文）。
   if (toolName === "read" || toolName === "ls" || toolName === "image") {
     const path = stringArg(args, "path", "file_path", "filePath");
     const chip = path ? (
       <>
         {toolName === "ls" ? (
           <FolderOpenIcon className="size-4 shrink-0" />
+        ) : toolName === "read" ? (
+          <SearchIcon className="size-4 shrink-0" />
         ) : (
           <FileTextIcon className="size-4 shrink-0" />
         )}
-        <span className="min-w-0 truncate">{shortenPath(path)}</span>
+        <span className="min-w-0 truncate">{summaryFileLeafName(path)}</span>
       </>
     ) : null;
     return summary({
-      icon: toolName === "ls" ? <FolderOpenIcon /> : <FileTextIcon />,
+      icon:
+        toolName === "ls" ? (
+          <FolderOpenIcon />
+        ) : toolName === "read" ? (
+          <SearchIcon />
+        ) : (
+          <FileTextIcon />
+        ),
       primaryText:
         path === undefined ? undefined : toolName === "ls" ? (
           <span
@@ -591,33 +572,33 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     });
   }
 
-  // 5e. web_search / websearch（rpi 扩展名）→ 搜索卡；结果解析失败回退
-  // 参数/结果（不静默丢内容）
+  // 5e. 网页搜索（web_search / websearch）→ ZCode `SearchToolCallBlock`：
+  // 单行「已搜索 <query>」（运行中「正在搜索」），**不可展开**——ZCode 不在
+  // 消息里铺结果卡（结果由模型消费）。旧宿主版 WebSearch 卡要求 JSON 结果，
+  // 而 rpi 的 websearch 返回纯文本（"Found 8 web reference(s)…"），解析失败
+  // 时退化成参数/结果原文 JSON——用户报的「网页搜索显示没打通」即此。
   if (toolName === "web_search" || toolName === "websearch") {
-    const query = stringArg(args, "query", "q", "search_query");
-    const results = parseWebSearchResults(toolResultText(result));
+    const query =
+      stringArg(args, "query", "q", "search_query", "searchQuery", "pattern") ?? "";
+    return summary({
+      icon: <SearchIcon />,
+      // ZCode search.tsx:22/82：主文本是完整句「查找 {query}」，不是裸 query
+      // （kind 词仍是 正在搜索/已搜索）。
+      primaryText: query ? `查找 ${query}` : undefined,
+      canToggle: false,
+    });
+  }
+
+  // 5e-2. 网页抓取（webfetch / web_fetch / fetch）→ ZCode
+  // `WebFetchToolCallBlock`：单行「网页抓取 <url>」（运行中「正在抓取」），
+  // primaryText 必须是 URL——prompt 不能替代目标地址（ZCode 注释原话）。
+  if (["webfetch", "web_fetch", "fetch"].includes(toolName)) {
+    const url = stringArg(args, "url") ?? "";
     return summary({
       icon: <GlobeIcon />,
-      primaryText: query,
-      canToggle: true,
-      content: (
-        <ToolBody>
-          {results !== null || result === undefined ? (
-            <WebSearch
-              query={query ?? ""}
-              results={results ?? []}
-              visibleResults={results?.length ?? 0}
-              searching={running}
-              cycle={0}
-            />
-          ) : (
-            <>
-              <ParamsBlock args={args} />
-              <ResultBlock result={result} failed={row.failed} />
-            </>
-          )}
-        </ToolBody>
-      ),
+      kindLabelOverride: running ? "正在抓取" : "网页抓取",
+      primaryText: url || undefined,
+      canToggle: false,
     });
   }
 

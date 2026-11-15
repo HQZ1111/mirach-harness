@@ -142,6 +142,9 @@ export function ComposerWired() {
   const aui = useAui()
   const value = input.value
   const isRunning = useAuiState((s) => s.thread.isRunning)
+  // 运行中仍可提交（排队），附件也算内容——不能只看文本
+  const composerAttachmentCount = useAuiState((s) => s.composer.attachments.length)
+  const canQueueWhileRunning = value.trim().length > 0 || composerAttachmentCount > 0
   const threadId = useAuiState((s) => s.threadListItem.id)
   const setText = input.setText
   const slash = useSlashMatches(value, COMMANDS)
@@ -398,6 +401,13 @@ export function ComposerWired() {
         setDismissed(value)
       }
     }
+    // ZCode：运行中 Enter = 排队后续修改（placeholder 同款）。核心的默认
+    // Enter 提交在 running && !capabilities.queue 时直接 return——这里绕过
+    // 原语禁用，直接 composer.send() → runtime.onNew 走本地队列。
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && isRunning) {
+      e.preventDefault()
+      aui.composer.send()
+    }
   }
 
   return (
@@ -449,7 +459,9 @@ export function ComposerWired() {
                 className="max-h-40 min-h-[40px] w-full resize-none bg-transparent p-0 text-[14px] leading-[20px] text-(--text) outline-none placeholder:text-(--text-4)"
                 enterKeyHint="send"
                 onKeyDown={onInputKeyDown}
-                placeholder="输入消息，/ 指令，@ 成员…"
+                placeholder={
+                  isRunning ? '继续输入以排队后续修改' : '输入消息，/ 指令，@ 成员…'
+                }
                 rows={1}
               />
             )}
@@ -528,9 +540,23 @@ export function ComposerWired() {
                 {/* 右侧原 Ring 已撤（2026-11-01）：上下文入口统一到模型选择器
                     左侧的明细按钮（同一信息的第二个入口是噪声）。 */}
                 {isRunning ? (
-                  <ComposerPrimitive.Cancel asChild>
-                    <ComposerSend aria-label="停止生成" idle={false} streaming />
-                  </ComposerPrimitive.Cancel>
+                  canQueueWhileRunning ? (
+                    /* ZCode（9444 源码 showStopControl = canStop && !hasDraftToSubmit）：
+                       运行中**有草稿时只显示发送/排队**，停止交给 Esc（或清空草稿
+                       后的停止钮）。不能同时放两个黑按钮（用户实报"两个发送按钮"）。
+                       这里用普通 onClick 直接调 composer.send：核心的 Send 原语在
+                       running && !capabilities.queue 时是 disabled 的。 */
+                    <ComposerSend
+                      aria-label="排队消息"
+                      idle={false}
+                      streaming={false}
+                      onClick={() => aui.composer.send()}
+                    />
+                  ) : (
+                    <ComposerPrimitive.Cancel asChild>
+                      <ComposerSend aria-label="停止生成" idle={false} streaming />
+                    </ComposerPrimitive.Cancel>
+                  )
                 ) : (
                   <ComposerPrimitive.Send asChild>
                     <ComposerSend aria-label="发送" idle={!value.trim()} streaming={false} />

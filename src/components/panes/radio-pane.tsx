@@ -32,13 +32,15 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import {
+  Check,
   ExternalLink,
   Loader2,
   Pause,
   Play,
-  Pin,
+  Plus,
   Radio as RadioIcon,
   SkipForward,
+  Trash2,
   Volume2,
   VolumeX,
   X,
@@ -47,6 +49,7 @@ import { atom, type WritableAtom } from 'nanostores'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { RowButton } from '@/components/ui/row-button'
 import { SearchField } from '@/components/ui/search-field'
 import { Tip } from '@/components/ui/tip'
@@ -67,8 +70,8 @@ export interface Station {
 
 const NIGHTRIDE = 'https://stream.nightride.fm/'
 
-/** 上游 `PRESETS` 逐字搬运（7 台）。 */
-export const PRESET_STATIONS: readonly Station[] = [
+/** 海外预设台（上游 hermes 的 7 台原样保留，2026-11-15 改名）。 */
+const OVERSEAS_PRESET_STATIONS: readonly Station[] = [
   {
     id: 'chillsynth',
     name: 'Chillsynth',
@@ -126,6 +129,84 @@ export const PRESET_STATIONS: readonly Station[] = [
     homepage: 'https://gamingnow.net/eve-radio/',
   },
 ] as const
+
+/**
+ * 国内电台预设（2026-11-15 用户：“搞些国内的放进去”）。
+ *
+ * 地址与名字取自 Radio Browser 的 `country=China&order=votes` 实测结果
+ * （不是手写/记忆值），并已在本机验过可达性：首字节 0.2–2.3s、
+ * 稳定 ~13.5 KB/s——**比境外预设台明显稳定**，所以排在列表最前。
+ *
+ * 流由蜻蜓 FM（qingting / qtfm 同一 CDN 的两个域名）提供，统一 64k mp3。
+ */
+export const CN_PRESET_STATIONS: readonly Station[] = [
+  {
+    id: 'cn-cnr1',
+    name: '中国之声',
+    description: 'CNR-1 · 新闻',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qingting.fm/live/15318317/64k.mp3',
+    homepage: 'https://www.qingting.fm/radios/15318317/',
+  },
+  {
+    id: 'cn-guangdong-music',
+    name: '广东音乐之声',
+    description: '音乐',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qtfm.cn/live/1260/64k.mp3',
+  },
+  {
+    id: 'cn-beijing-news',
+    name: '北京新闻广播',
+    description: '94.5 FM · 新闻',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qtfm.cn/live/339/64k.mp3',
+  },
+  {
+    id: 'cn-guangdong-traffic',
+    name: '广东交通之声',
+    description: '羊城交通广播',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qtfm.cn/live/1262/64k.mp3',
+  },
+  {
+    id: 'cn-guangdong-stock',
+    name: '广东股市广播',
+    description: '财经',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qtfm.cn/live/4847/64k.mp3',
+  },
+  {
+    id: 'cn-huaiji-music',
+    name: '怀集音乐之声',
+    description: '音乐',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qingting.fm/live/4804/64k.mp3',
+  },
+  {
+    id: 'cn-intl-news',
+    name: '国际新闻',
+    description: '资讯 · 新闻',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qtfm.cn/live/20500172/64k.mp3',
+  },
+  {
+    id: 'cn-anhui-story',
+    name: '安徽小说评书广播',
+    description: '评书 · 故事',
+    provider: '蜻蜓 FM',
+    url: 'https://lhttp.qtfm.cn/live/1951/64k.mp3',
+  },
+]
+
+/**
+ * 列表展示顺序：国内台在前、海外台在后。
+ *
+ * 理由（实测不是主观偏好）：境内 CDN 首字节 0.2–2.3s 且带宽稳定，
+ * 境外台在本机首字节 2–5.7s、速度贴在 128kbps 临界值上波动——
+ * 用户报的“一直断”主要就来自后者。预设顺序 = 首选可用性的提示。
+ */
+export const PRESET_STATIONS: readonly Station[] = [...CN_PRESET_STATIONS, ...OVERSEAS_PRESET_STATIONS]
 
 /** Radio Browser 的元数据端点（上游 `Signal` 组件的 `endpoints` 表）。 */
 export const METADATA_ENDPOINTS: Record<string, string> = {
@@ -186,6 +267,58 @@ export function uniqueStations(items: readonly Station[]): Station[] {
     urls.add(item.url)
     return true
   })
+}
+
+/**
+ * 用户自选列表（`favorites`）的增/删纯函数。
+ *
+ * 语义（2026-11-15 用户：“搜索的电台要能加到列表，列表里的要能删除”）：
+ * - 列表**只装用户自己加/置顶的台**，预设台不算“已在列表”（它们永远在
+ *   预设区）；同名/同 url 不重复加。
+ * - 删除按同 id 或同 url 命中（镜像改写 url 的同一个台也能删干净）。
+ */
+export function addToMyStations(list: readonly Station[], item: Station): Station[] {
+  if (!isValidStation(item)) return [...list]
+  const exists = list.some((value) => isSameStation(value, item))
+  // 已存在就原样返回（同一引用，让 React 跳过重渲）
+  return exists ? (list as Station[]) : [...list, item]
+}
+
+export function removeFromMyStations(list: readonly Station[], item: Station): Station[] {
+  const next = list.filter((value) => !isSameStation(value, item))
+  return next.length === list.length ? (list as Station[]) : next
+}
+
+/** 该台是否已在自选列表里（UI 决定星标亮不亮 / 显示“加入”还是“已在列表”）。 */
+export function inMyStations(list: readonly Station[], item: Station): boolean {
+  return list.some((value) => isSameStation(value, item))
+}
+
+/**
+ * 已隐藏的预设台 id 集合（用户 2026-11-15：“预设电台怎么不能删除”）。
+ *
+ * 预设台是**内置常量**（代码里的 `PRESET_STATIONS`），不能真从源码删；
+ * 所以删除 = 记进隐藏集，列表渲染时过滤掉。隐藏是可恢复的：清空该集合
+ * （或以后加“恢复默认电台”入口）即全部回来。
+ */
+export function hidePreset(hidden: readonly string[], item: Station): string[] {
+  if (hidden.includes(item.id)) return hidden as string[]
+  return [...hidden, item.id]
+}
+
+export function unhidePreset(hidden: readonly string[], item: Station): string[] {
+  const next = hidden.filter((id) => id !== item.id)
+  return next.length === hidden.length ? (hidden as string[]) : next
+}
+
+/** 过滤掉被隐藏的预设台（保留非预设项，顺序不变）。 */
+export function visiblePresets<T extends { id: string }>(
+  presets: readonly T[],
+  hidden: readonly string[],
+): T[] {
+  if (hidden.length === 0) return [...presets]
+  const blocked = new Set(hidden)
+  return presets.filter((item) => !blocked.has(item.id))
 }
 
 /** Radio Browser 的一个返回行（只声明用到的字段）。 */
@@ -314,6 +447,93 @@ export function brailleTrace(samples: readonly number[], rows = 2): string[] {
 export function flatTrace(width: number, rows = 2): string[] {
   return brailleTrace(new Array<number>(width * 2).fill(0), rows)
 }
+
+// ── 艺人主页解析（上游 `artistProfile` / `resolveArtist` / `resolveMusicBrainzArtist`） ──
+
+/** 艺人名归一（上游 `normalizedArtist`）：NFKC + 去空白 + 小写。 */
+export function normalizedArtist(name: string): string {
+  return name.normalize('NFKC').trim().toLowerCase()
+}
+
+/**
+ * 从 MusicBrainz 的 url-rels 里挑一个艺人主页（上游 `artistProfile`）。
+ *
+ * 优先级：Spotify artist 页 → bandcamp 子域首页 → official homepage。
+ * Spotify 链接必须是 `/artist/<22 位 id>` 形态（专辑/单曲页一律不要——
+ * 上游注释：绝不给歌曲结果或搜索页当艺人页）。
+ */
+export function artistProfile(relations: unknown): null | string {
+  if (!Array.isArray(relations)) return null
+  const links: { href: string; rank: number }[] = []
+  for (const item of relations as { ended?: unknown; type?: unknown; url?: { resource?: unknown } }[]) {
+    if (item?.ended) continue
+    const href = httpsUrlOrNull(item?.url?.resource)
+    if (!href) continue
+    const url = new URL(href)
+    if (url.hostname === 'open.spotify.com' && /^\/artist\/[a-zA-Z0-9]{22}\/?$/.test(url.pathname)) {
+      links.push({ href, rank: 0 })
+      continue
+    }
+    if (item.type === 'bandcamp' && /^[^.]+\.bandcamp\.com$/.test(url.hostname) && url.pathname === '/') {
+      links.push({ href, rank: 1 })
+      continue
+    }
+    if (
+      item.type === 'official homepage' &&
+      !['open.spotify.com', 'bandcamp.com'].includes(url.hostname)
+    ) {
+      links.push({ href, rank: 2 })
+    }
+  }
+  return links.sort((a, b) => a.rank - b.rank)[0]?.href ?? null
+}
+
+/**
+ * Apple Music 艺人搜索结果 → 主页 URL（上游 `resolveArtist` 的前半段）。
+ * 只接受**唯一**的精确同名匹配；歧义或无匹配返回 null（不猜）。
+ */
+export function appleArtistProfile(payload: unknown, artist: string): null | string {
+  const results = (payload as { results?: unknown } | null)?.results
+  if (!Array.isArray(results)) return null
+  const matches = (results as { wrapperType?: unknown; artistName?: unknown; artistLinkUrl?: unknown }[]).filter(
+    (item) => item?.wrapperType === 'artist' && typeof item.artistName === 'string' && normalizedArtist(item.artistName) === normalizedArtist(artist),
+  )
+  if (matches.length !== 1) return null
+  const href = httpsUrlOrNull(matches[0]!.artistLinkUrl)
+  if (!href) return null
+  const url = new URL(href)
+  // 只认 /<lang>/artist/<slug>/<id> 的艺人页（上游同正则）
+  if (url.hostname !== 'music.apple.com' || !/^\/[a-z]{2}\/artist\/[^/]+\/\d+$/.test(url.pathname)) return null
+  url.search = ''
+  return url.href
+}
+
+/**
+ * MusicBrainz 艺人搜索 → 主页 URL（上游 `resolveMusicBrainzArtist`）。
+ *
+ * 判据比 Apple 更严：**恰好一条** 100 分精确同名，且返回条数不能正好是
+ * 请求的 5 条（那意味着结果被截断，可能还有更匹配的没回来）。
+ *
+ * 返回 `{ id }` 或 null；真正取 url-rels 由调用方发第二枪（两段请求）。
+ */
+export function musicBrainzArtistId(payload: unknown, artist: string): null | string {
+  const artists = (payload as { artists?: unknown } | null)?.artists
+  if (!Array.isArray(artists)) return null
+  const list = artists as { id?: unknown; name?: unknown; score?: unknown }[]
+  const matches = list.filter(
+    (item) => typeof item.name === 'string' && normalizedArtist(item.name) === normalizedArtist(artist),
+  )
+  if (matches.length !== 1 || matches[0]!.score !== 100 || list.length === 5) return null
+  const id = matches[0]!.id
+  return typeof id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id) ? id : null
+}
+
+/** MusicBrainz 艺人检索的查询串（上游 `artistRequest` 的 path 构造）。 */
+export function musicBrainzArtistQuery(artist: string): string {
+  const escaped = artist.replace(/[+\-!(){}[\]^"~*?:\\/&|]/g, '\\$&')
+  const params = new URLSearchParams({ query: `artist:"${escaped}"`, fmt: 'json', limit: '5' })
+  return `artist/?${params.toString()}`
+}
 // ═══════════════════════════════════════════════════════════════════════════════
 // §2 播放内核（原 radio-player.ts）——Audio + WebAudio 分析 + 跨窗互斥
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -326,7 +546,20 @@ const STORAGE = {
   station: 'mirach.radio.station',
   volume: 'mirach.radio.volume',
   artistRequestAt: 'mirach.radio.artistRequestAt',
+  hiddenPresets: 'mirach.radio.hiddenPresets',
 } as const
+
+/** 艺人主页缓存的键前缀（上游类比 React Query 的一天缓存）。 */
+const ARTIST_CACHE_PREFIX = 'mirach.radio.artistProfile.'
+
+/**
+ * 首次连接超时窗口（含首字节等待）。
+ *
+ * 2026-11-15 实测：境外流首字节 2–5.7s，旧值 15s 在慢网下不够；国内台
+ * 只要 0.2–2.3s。放宽到 25s——它只管制「连不上」，不管播起来之后的卡顿
+ * （卡顿不再重连，见 `waiting` 处理）。
+ */
+const CONNECT_TIMEOUT_MS = 25_000
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -394,6 +627,8 @@ export interface RadioPlayerOptions {
 export class RadioPlayer {
   readonly station: WritableAtom<Station>
   readonly favorites: WritableAtom<Station[]>
+  /** 被用户删除的预设台 id（内置台不能真删，用隐藏集表达）。 */
+  readonly hiddenPresets: WritableAtom<string[]>
   readonly volume: WritableAtom<number>
   readonly status: WritableAtom<RadioStatus>
   readonly meterMode: WritableAtom<MeterMode>
@@ -408,6 +643,8 @@ export class RadioPlayer {
   private readonly plainStreams = new Set<string>()
   private generation = 0
   private playGeneration = -1
+  /** 本轮是否真的播起来过（区分「首次连接慢」与「播放中卡顿」）。 */
+  private hasPlayed = false
   private timeout: null | ReturnType<typeof setTimeout> = null
   private disposed = false
   private lastVolume: number
@@ -425,6 +662,11 @@ export class RadioPlayer {
     const savedFavorites = readJson<unknown>(STORAGE.favorites, [])
     this.favorites = atom(
       Array.isArray(savedFavorites) ? savedFavorites.filter(isValidStation) : ([] as Station[]),
+    )
+
+    const savedHidden = readJson<unknown>(STORAGE.hiddenPresets, [])
+    this.hiddenPresets = atom(
+      Array.isArray(savedHidden) ? savedHidden.filter((id): id is string => typeof id === 'string') : [],
     )
 
     const savedStation = readJson<unknown>(STORAGE.station, null)
@@ -494,6 +736,9 @@ export class RadioPlayer {
     const token = this.generation
     this.station.set(next)
     writeJson(STORAGE.station, next)
+    // 新一轮播放：重置「已播起来」标志（否则重连后首个 waiting 会被当成
+    // 播放中卡顿而永不超时）
+    this.hasPlayed = false
     this.status.set('connecting')
     this.channel?.postMessage({ type: 'play', sender: this.windowId })
 
@@ -525,6 +770,7 @@ export class RadioPlayer {
       if (this.timeout) clearTimeout(this.timeout)
       this.timeout = null
       this.playGeneration = token
+      this.hasPlayed = true
       this.status.set('live')
       this.meterLoop.start()
     })
@@ -532,15 +778,32 @@ export class RadioPlayer {
     element.addEventListener('pause', () => {
       if (current() && element.paused && !element.ended) this.status.set('paused')
     })
+    // `waiting` = 缓冲不足/网速慢，**不是连接失败**。
+    //
+    // 2026-11-15 修「一直断」：旧版把 waiting 一律当成失败定时器，15s 没
+    // 恢复就 fail() → metered 流会重走 play(next, false)，而那是 stop() +
+    // 全新 new Audio()，等于整台重连。慢流（首字节 2–5.7s、带宽贴在码率
+    // 临界值）本来就频繁 waiting，于是陷入「重连 → 又 waiting → 再重连」
+    // 的循环，用户看到的正是「一直断」。
+    //
+    // 正解：只给**首次连接**设超时（下面 element.src 之前那一次）；
+    // 已经播起来之后的卡顿交给浏览器自己的缓冲策略，状态只降到 connecting
+    // 供 UI 显示，**不重连、不销毁流**。
     element.addEventListener('waiting', () => {
       if (!current()) return
+      if (this.hasPlayed) {
+        // 播放中卡顿：保留元素与已缓冲数据，只反映状态
+        this.status.set('connecting')
+        return
+      }
+      // 还没播起来：属于首次连接慢，沿用连接超时窗口
       this.status.set('connecting')
       if (this.timeout) clearTimeout(this.timeout)
-      this.timeout = setTimeout(fail, 15_000)
+      this.timeout = setTimeout(fail, CONNECT_TIMEOUT_MS)
     })
     element.addEventListener('error', fail)
     element.addEventListener('ended', fail)
-    this.timeout = setTimeout(fail, 15_000)
+    this.timeout = setTimeout(fail, CONNECT_TIMEOUT_MS)
     element.src = next.url
 
     try {
@@ -631,14 +894,51 @@ export class RadioPlayer {
   }
 
   /** 置顶/取消置顶（上游 `favorite()`）。 */
+  /** 把台加入自选列表（搜索结果的“加入”动作）。 */
+  addStation(item: Station): void {
+    const next = addToMyStations(this.favorites.get(), item)
+    if (next === this.favorites.get()) return
+    this.favorites.set(next)
+    writeJson(STORAGE.favorites, next)
+    // 加入列表 = 该台不应再算“被隐藏”（否则从预设区删过再加回来会不可见）
+    this.hiddenPresets.set(unhidePreset(this.hiddenPresets.get(), item))
+    writeJson(STORAGE.hiddenPresets, this.hiddenPresets.get())
+  }
+
+  /** 从自选列表删除（列表行的“删除”动作）。 */
+  removeStation(item: Station): void {
+    const next = removeFromMyStations(this.favorites.get(), item)
+    if (next !== this.favorites.get()) {
+      this.favorites.set(next)
+      writeJson(STORAGE.favorites, next)
+    }
+    // 删的正是当前在播的台：继续播（不因删列表项而断），只是不再可重选
+  }
+
+  /**
+   * 删除一个**预设台**（用户 2026-11-15：“预设电台怎么不能删除”）。
+   *
+   * 预设是编译进代码的常量，不能真删——所以“删除”= 记进 `hiddenPresets`，
+   * 列表渲染时过滤掉。持久化表达用户意图，下次启动仍然隐藏。
+   */
+  hidePreset(item: Station): void {
+    const next = hidePreset(this.hiddenPresets.get(), item)
+    if (next === this.hiddenPresets.get()) return
+    this.hiddenPresets.set(next)
+    writeJson(STORAGE.hiddenPresets, next)
+  }
+
+  /** 恢复全部被隐藏的预设台（供以后加“恢复默认电台”入口）。 */
+  restorePresets(): void {
+    if (this.hiddenPresets.get().length === 0) return
+    this.hiddenPresets.set([])
+    writeJson(STORAGE.hiddenPresets, [])
+  }
+
+  /** 星标切换（行内图标）：已在列表→删，不在→加。 */
   toggleFavorite(item: Station): void {
-    const currentList = this.favorites.get()
-    const exists = currentList.some((value) => value.url === item.url || value.id === item.id)
-    const nextList = exists
-      ? currentList.filter((value) => !(value.url === item.url || value.id === item.id))
-      : [...currentList, item]
-    this.favorites.set(nextList)
-    writeJson(STORAGE.favorites, nextList)
+    if (inMyStations(this.favorites.get(), item)) this.removeStation(item)
+    else this.addStation(item)
   }
 
   // ── 目录检索 ────────────────────────────────────────────────────────────
@@ -684,6 +984,66 @@ export class RadioPlayer {
     const raw = typeof source?.title === 'string' ? source.title : ''
     const credit = trackCredit(raw ? source : null)
     return { ...credit, raw }
+  }
+
+  /**
+   * 艺人名 → 主页 URL（上游 `resolveArtist`）。
+   *
+   * Apple 公开搜索优先（无需 key，直接给艺人页），失败/歧义再问 MusicBrainz。
+   * **歧义或没匹配一律 null** —— UI 就保持纯文本，不做"猜一个"的死链接。
+   */
+  async resolveArtist(artist: string, signal: AbortSignal): Promise<null | string> {
+    if (!artist) return null
+    const cached = readJson<null | string>(`${ARTIST_CACHE_PREFIX}${artist}`, null)
+    if (cached) return cached
+    const params = new URLSearchParams({ term: artist, entity: 'musicArtist', limit: '10' })
+    let resolved: null | string = null
+    try {
+      const payload = await fetchJson(`https://itunes.apple.com/search?${params.toString()}`, signal)
+      resolved = appleArtistProfile(payload, artist)
+    } catch (e) {
+      if (signal.aborted) throw e
+      // Apple 不可用不是错误：继续走 MusicBrainz（上游同结构）
+      console.error('[radio] Apple 艺人检索失败', e)
+    }
+    resolved ??= await this.resolveMusicBrainzArtist(artist, signal)
+    // 结果缓存一天（上游 staleTime/gcTime 86400000）
+    if (resolved) writeJson(`${ARTIST_CACHE_PREFIX}${artist}`, resolved)
+    return resolved
+  }
+
+  /** MusicBrainz 两段请求（搜索 → 取 url-rels），带跨窗限速（上游 `artistRequest`）。 */
+  private async resolveMusicBrainzArtist(artist: string, signal: AbortSignal): Promise<null | string> {
+    const id = await this.musicBrainzFetch(musicBrainzArtistQuery(artist), signal).then((payload) =>
+      musicBrainzArtistId(payload, artist),
+    )
+    if (!id) return null
+    const profile = await this.musicBrainzFetch(`artist/${id}?inc=url-rels&fmt=json`, signal)
+    return artistProfile((profile as { relations?: unknown } | null)?.relations)
+  }
+
+  /**
+   * MusicBrainz 请求本体：`navigator.locks` + 持久时间戳做 1.1s 跨窗限速
+   * （上游同款；MusicBrainz 匿名限速约 1 req/s，超了会 503）。
+   */
+  private async musicBrainzFetch(path: string, signal: AbortSignal): Promise<unknown> {
+    const run = async () => {
+      const last = readJson<number>(STORAGE.artistRequestAt, 0)
+      const delay = Math.max(0, 1100 - (Date.now() - last))
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
+      signal.throwIfAborted()
+      writeJson(STORAGE.artistRequestAt, Date.now())
+      const response = await fetch(`https://musicbrainz.org/ws/2/${path}`, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+        credentials: 'omit',
+        headers: { 'User-Agent': 'MirachRadio/1.0 (https://github.com/mirach-harness)' },
+      })
+      if (!response.ok) throw new Error(`Artist lookup: HTTP ${response.status}`)
+      return response.json() as Promise<unknown>
+    }
+    // 无 navigator.locks（旧运行时）时直接跑：限速仍由持久时间戳保证
+    if (typeof navigator === 'undefined' || !navigator.locks) return run()
+    return navigator.locks.request('mirach:radio:artist-lookup', { signal }, run)
   }
 
   // ── 波形 ────────────────────────────────────────────────────────────────
@@ -825,7 +1185,6 @@ function Waveform({ player, compact = false }: { player: RadioPlayer; compact?: 
   return (
     <div
       className="radio-waveform"
-      data-compact={compact}
       data-active={active}
       data-meter-mode={mode}
       aria-hidden
@@ -896,26 +1255,133 @@ function SmallAction({
 
 // ── 选台列表 ────────────────────────────────────────────────────────────────
 
+/**
+ * 选台列表悬停滑动指示块（照宿主 `SessionListHoverPill` 模式，2026-11-15
+ * 用户定稿："鼠标放上去是滑动的那个组件"）。
+ *
+ * **纯视觉层**：不动点击/置顶/键盘任何逻辑——挂在列表滚动容器里做末个子
+ * 节点（行是 relative 定位、后绘制盖其上），事件委托监听 `.radio-row`，
+ * 把绝对定位指示块滑到悬停行。
+ *
+ * 挂载点是**滚动容器**（不是 inner list）：abs 子元素随内容滚动 → top 必须
+ * 加 `root.scrollTop` 才能钉在行上（宿主 2026-10-14 CDP 实测结论）。
+ *
+ * 动画纪律（同宿主）：只在"已钉在某行上"时开位移过渡；进场/退场只做透明度
+ * 淡变，否则重新进入列表时 pill 会从上一处静止位置"飞"过来。
+ */
+function StationListHoverPill() {
+  const ref = useRef<HTMLDivElement | null>(null)
+  const [state, setState] = useState({ top: 0, left: 0, width: 0, height: 0, visible: false })
+  const shownRef = useRef(false)
+  const [sliding, setSliding] = useState(false)
+
+  useEffect(() => {
+    const el = ref.current
+    const root = el?.parentElement ?? null
+    if (!root) return
+
+    const onOver = (event: Event) => {
+      const row = (event.target as HTMLElement | null)?.closest('.radio-row') as HTMLElement | null
+      // 非行面（行间隙/空态文案/底部署名）不隐藏也不动作——只认行，
+      // 离开容器才灭（宿主同语义：逐行滑过时不许闪断）。
+      if (!row || !root.contains(row)) return
+      const rootRect = root.getBoundingClientRect()
+      const rowRect = row.getBoundingClientRect()
+      const next = {
+        top: Math.round(rowRect.top - rootRect.top + root.scrollTop),
+        left: Math.round(rowRect.left - rootRect.left),
+        width: Math.round(rowRect.width),
+        height: Math.round(rowRect.height),
+        visible: true,
+      }
+      // 同行内子元素间移动 = 同坐标 → 跳过重渲（pointerover 每换子元素都发）
+      setState((prev) =>
+        prev.visible &&
+        prev.top === next.top &&
+        prev.left === next.left &&
+        prev.width === next.width &&
+        prev.height === next.height
+          ? prev
+          : next,
+      )
+      setSliding(shownRef.current)
+      shownRef.current = true
+    }
+
+    const onLeave = () => {
+      shownRef.current = false
+      setState((prev) => (prev.visible ? { ...prev, visible: false } : prev))
+    }
+
+    root.addEventListener('pointerover', onOver)
+    root.addEventListener('pointerleave', onLeave)
+    return () => {
+      root.removeEventListener('pointerover', onOver)
+      root.removeEventListener('pointerleave', onLeave)
+    }
+  }, [])
+
+  return (
+    <div
+      ref={ref}
+      aria-hidden
+      className="radio-hover-pill"
+      style={{
+        top: state.top,
+        left: state.left,
+        width: state.width,
+        height: state.height,
+        opacity: state.visible ? 1 : 0,
+        transition: sliding
+          ? 'top 180ms var(--ease-out, ease-out), left 140ms var(--ease-out, ease-out), width 140ms var(--ease-out, ease-out), height 140ms var(--ease-out, ease-out), opacity 80ms var(--ease-out, ease-out)'
+          : 'opacity 100ms var(--ease-out, ease-out)',
+      }}
+    />
+  )
+}
+
 function StationRow({
   station,
   current,
   status,
-  pinned,
+  action,
   onSelect,
-  onToggleFavorite,
+  onAction,
 }: {
   station: Station
   current: boolean
   status: RadioStatus
-  pinned: boolean
+  /**
+   * 行尾动作（用户 2026-11-15：搜索的台能加入列表、列表里的能删除、
+   * 预设台也能删除）：
+   * - `add`    = 搜索结果（不在列表）→ 加入我的电台
+   * - `added`  = 已在我的电台（搜索命中）→ 不可再点，显示勾作为反馈
+   * - `remove` = 我的电台行 → 从列表删除
+   * - `preset` = 预设电台 → 删除（隐藏）该预设台
+   */
+  action: 'add' | 'added' | 'remove' | 'preset'
   onSelect: () => void
-  onToggleFavorite: () => void
+  onAction?: () => void
 }) {
   const active = status === 'live' || status === 'connecting'
   const failed = current && status === 'error'
   const Icon = failed ? RadioIcon : current && active ? Pause : Play
+
+  // 动作面文案：加入 = 副标题强调（主操作），删除 = 危险动作用中性灰避免抢眼
+  const ACTION: Record<
+    'add' | 'added' | 'remove' | 'preset',
+    { icon: typeof Plus; label: string }
+  > = {
+    add: { icon: Plus, label: `加入我的电台: ${station.name}` },
+    added: { icon: Check, label: `已在我的电台: ${station.name}` },
+    remove: { icon: X, label: `从我的电台移除: ${station.name}` },
+    preset: { icon: Trash2, label: `删除预设电台（可恢复）: ${station.name}` },
+  }
+  const spec = ACTION[action]
+  const ActionIcon = spec.icon
+
   return (
-    <div className="radio-row" data-current={current} data-pinned={pinned}>
+    <div className="radio-row" data-current={current} data-action={action}>
       <RowButton
         className="radio-row-main"
         aria-current={current ? 'true' : undefined}
@@ -931,19 +1397,27 @@ function StationRow({
           {station.description ? <span className="radio-row-desc">{station.description}</span> : null}
         </span>
       </RowButton>
-      <SmallAction
-        label={`${pinned ? '取消置顶' : '置顶'}: ${station.name}`}
-        icon={Pin}
-        pressed={pinned}
-        className="radio-row-pin"
-        onClick={onToggleFavorite}
-      />
+      {/* 行尾动作：加入 = 实心小胶囊（主操作）；已加入 = 勾勾（不可点）；
+          删除 = 悬停才现的中性图标（不抢眼） */}
+      {action === 'added' ? (
+        <span className="radio-row-added" title={`已在我的电台: ${station.name}`} aria-hidden>
+          <Check className="size-3" />
+        </span>
+      ) : (
+        <SmallAction
+          label={spec.label}
+          icon={ActionIcon}
+          className="radio-row-action"
+          onClick={() => onAction?.()}
+        />
+      )}
     </div>
   )
 }
 
 function StationList({ player }: { player: RadioPlayer }) {
   const favorites = useAtom(player.favorites)
+  const hiddenPresets = useAtom(player.hiddenPresets)
   const station = useAtom(player.station)
   const status = useStatus(player)
   const [search, setSearch] = useState('')
@@ -952,6 +1426,12 @@ function StationList({ player }: { player: RadioPlayer }) {
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<null | string>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
+  // 删除确认（用户 2026-11-15：“删除要有确认弹窗啊”）：待确认的台 + 它的类型
+  // （预设台删除影响更大，文案要说明“可在搜索里重新加入”）。
+  const [pendingDelete, setPendingDelete] = useState<null | {
+    station: Station
+    kind: 'preset' | 'mine'
+  }>(null)
   const text = search.trim()
 
   // 350ms 防抖（上游 setQuery 延迟同值）
@@ -994,7 +1474,7 @@ function StationList({ player }: { player: RadioPlayer }) {
 
   const localMatches = useMemo(() => {
     const lowered = text.toLowerCase()
-    const pool = uniqueStations([...favorites, ...PRESET_STATIONS])
+    const pool = [...favorites, ...PRESET_STATIONS]
     if (!lowered) return pool
     return pool.filter((item) =>
       [item.name, item.description, item.provider].some((value) =>
@@ -1003,12 +1483,66 @@ function StationList({ player }: { player: RadioPlayer }) {
     )
   }, [favorites, text])
 
-  const items = useMemo(
-    () => uniqueStations([...localMatches, ...(query === text ? remote : [])]),
-    [localMatches, query, remote, text],
+  // 搜索结果（不在本地命中里的才进远程区，防重复）
+  const remoteItems = useMemo(() => {
+    const rows = query === text ? remote : []
+    return rows.filter(
+      (item) => !inMyStations(favorites, item) && !PRESET_STATIONS.some((p) => isSameStation(p, item)),
+    )
+  }, [favorites, query, remote, text])
+
+  // 「我的电台」区：自选列表（可删）；未搜索时显示全部，搜索时过滤
+  const myStations = useMemo(() => {
+    const lowered = text.toLowerCase()
+    return lowered
+      ? favorites.filter((item) =>
+          [item.name, item.description, item.provider].some((value) =>
+            value?.toLowerCase().includes(lowered),
+          ),
+        )
+      : favorites
+  }, [favorites, text])
+
+  // 「预设」区：搜索时只显示命中，不搜索时全部显示。
+  // **已加入“我的电台”的不在此区重复展示**（否则同一台会出现两行）；
+  // **被用户删掉的预设台也不显示**（`hiddenPresets`）。
+  const presetItems = useMemo(
+    () =>
+      visiblePresets(
+        localMatches.filter(
+          (item) =>
+            PRESET_STATIONS.some((p) => isSameStation(p, item)) && !inMyStations(favorites, item),
+        ),
+        hiddenPresets,
+      ),
+    [favorites, hiddenPresets, localMatches],
   )
 
   const pending = text.length >= 2 && (text !== query || searching)
+  const hasAnything = myStations.length > 0 || remoteItems.length > 0 || presetItems.length > 0
+
+  const renderRow = (item: Station, action: 'add' | 'added' | 'remove' | 'preset') => (
+    <StationRow
+      key={item.id}
+      station={item}
+      current={isSameStation(item, station)}
+      status={status}
+      action={action}
+      onSelect={() => {
+        if (isSameStation(item, station)) player.toggle()
+        else void player.play(item)
+      }}
+      onAction={
+        action === 'remove'
+          ? () => setPendingDelete({ station: item, kind: 'mine' })
+          : action === 'preset'
+            ? () => setPendingDelete({ station: item, kind: 'preset' })
+            : action === 'add'
+              ? () => player.addStation(item)
+              : undefined
+      }
+    />
+  )
 
   return (
     <div className="radio-stations">
@@ -1023,37 +1557,72 @@ function StationList({ player }: { player: RadioPlayer }) {
         />
       </div>
       <div className="radio-list" ref={listRef}>
-        {items.map((item) => (
-          <StationRow
-            key={item.id}
-            station={item}
-            current={isSameStation(item, station)}
-            status={status}
-            pinned={favorites.some((value) => isSameStation(value, item))}
-            onSelect={() => {
-              if (isSameStation(item, station)) player.toggle()
-              else void player.play(item)
-            }}
-            onToggleFavorite={() => player.toggleFavorite(item)}
-          />
-        ))}
+        {/* 悬停滑动指示块（宿主 SessionListHoverPill 同模式）：首子节点、
+            行在其后绘制盖上来 */}
+        <StationListHoverPill />
+
+        {/* ① 我的电台（自选列表；每行带删除） */}
+        {myStations.length > 0 ? (
+          <>
+            <div className="radio-section">我的电台</div>
+            {myStations.map((item) => renderRow(item, 'remove'))}
+          </>
+        ) : null}
+
+        {/* ② 搜索结果（带“加入”按钮） */}
+        {remoteItems.length > 0 ? (
+          <>
+            <div className="radio-section">搜索结果</div>
+            {remoteItems.map((item) => renderRow(item, 'add'))}
+          </>
+        ) : null}
+
+        {/* ③ 预设电台（带“钉到我的电台”） */}
+        {presetItems.length > 0 ? (
+          <>
+            <div className="radio-section">预设电台</div>
+            {presetItems.map((item) => renderRow(item, 'preset'))}
+          </>
+        ) : null}
+
         {searchError ? (
           <div className="radio-note" role="status">
             {searchError}
           </div>
         ) : null}
-        {!pending && !searchError && text && items.length === 0 ? (
+        {!pending && !searchError && !hasAnything ? (
           <div className="radio-note" role="status">
-            没有找到电台。
-          </div>
-        ) : null}
-        {!text && items.length === 0 ? (
-          <div className="radio-note" role="status">
-            还没有置顶电台。搜索一个台名开始，例如 jazz、ambient 或 house。
+            {text ? '没有找到电台。' : '还没有自己的电台。搜索一个台名，点右侧 ＋ 加入列表。'}
           </div>
         ) : null}
       </div>
-      <div className="radio-credit">搜索由 Radio Browser 提供</div>
+
+      {/* 删除确认弹窗（用户 2026-11-15：“删除要有确认弹窗啊”）。
+          复用宿主 `ui/confirm-dialog`：打开即聚焦确认、Enter 确认、Esc 取消、
+          destructive 样式——不另造一套弹窗。 */}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onClose={() => setPendingDelete(null)}
+        destructive
+        title={
+          pendingDelete
+            ? `${pendingDelete.kind === 'preset' ? '删除' : '移除'}「${pendingDelete.station.name}」？`
+            : ''
+        }
+        description={
+          pendingDelete?.kind === 'preset'
+            ? '这台将从预设列表里隐藏。以后仍可在搜索框里找到它（或搜到同名台），点「加入」重新加回。'
+            : '这台将从「我的电台」里移除。预设电台不受影响，可在预设区重新加入。'
+        }
+        confirmLabel={pendingDelete?.kind === 'preset' ? '删除' : '移除'}
+        cancelLabel="取消"
+        dismissOnConfirm
+        onConfirm={() => {
+          if (!pendingDelete) return
+          if (pendingDelete.kind === 'preset') player.hidePreset(pendingDelete.station)
+          else player.removeStation(pendingDelete.station)
+        }}
+      />
     </div>
   )
 }
@@ -1067,6 +1636,7 @@ function TrackLine({ player }: { player: RadioPlayer }) {
   const mode = useAtom(player.meterMode)
   const [credit, setCredit] = useState<null | { artist: string; title: string; raw: string }>(null)
   const [failed, setFailed] = useState(false)
+  const [artistUrl, setArtistUrl] = useState<null | string>(null)
 
   useEffect(() => {
     if (status !== 'live') {
@@ -1106,12 +1676,60 @@ function TrackLine({ player }: { player: RadioPlayer }) {
       ? credit?.raw || (mode === 'activity' ? '正在播放 · 无法显示波形' : '')
       : STATUS_LABEL[status]
 
+  // 艺人主页解析（上游 useQuery：只在播且有艺人时跑；结果缓存一天）。
+  // 只在**确切匹配**时变成链接；歧义/找不到保持纯文本（不造死链接）——
+  // 上游注释：Missing or ambiguous matches stay plain text, with no dead
+  // link or reserved icon gap。
+  const artist = credit?.artist ?? ''
+  useEffect(() => {
+    if (!artist) {
+      setArtistUrl(null)
+      return
+    }
+    const controller = new AbortController()
+    let cancelled = false
+    void player
+      .resolveArtist(artist, controller.signal)
+      .then((href) => {
+        if (!cancelled) setArtistUrl(href)
+      })
+      .catch((e: unknown) => {
+        if (cancelled || controller.signal.aborted) return
+        // 规矩 11：解析失败可见；UI 退纯文本
+        console.error('[radio] 艺人主页解析失败', artist, e)
+        setArtistUrl(null)
+      })
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [artist, player])
+
   return (
     <div className="radio-track" data-track={Boolean(credit?.raw)} role="status">
       {status === 'connecting' ? (
         <Loader2 className="size-3 animate-spin" aria-label="正在连接" />
       ) : null}
-      {credit?.artist ? <span className="radio-track-artist">{credit.artist}</span> : null}
+      {credit?.artist ? (
+        artistUrl ? (
+          <a
+            className="radio-track-artist radio-track-artist-link"
+            href={artistUrl}
+            rel="noreferrer noopener"
+            target="_blank"
+            title={`访问艺人主页: ${credit.artist}`}
+            onClick={(event) => {
+              event.preventDefault()
+              void openExternal(artistUrl)
+            }}
+          >
+            {credit.artist}
+            <ExternalLink className="radio-track-artist-icon" aria-hidden />
+          </a>
+        ) : (
+          <span className="radio-track-artist">{credit.artist}</span>
+        )
+      ) : null}
       {credit?.artist ? (
         <span className="radio-track-separator" aria-hidden>
           —
@@ -1171,45 +1789,68 @@ function Transport({ player }: { player: RadioPlayer }) {
 // ── 面板入口 ────────────────────────────────────────────────────────────────
 
 /**
- * 版式（2026-11-15 用户定稿）：**选台列表占满整个面板，播放器沉到底部
- * 单独一条元素区**——不是右侧分栏。
+ * 版式（2026-11-15 用户定稿）：**播放器在顶部**，选台列表占满剩余高度。
  *
  * ```
  * ┌────────────────────────────────────┐
- * │ 搜索电台…                          │
- * │ ● Nightride        ♪  Synthwave    │
- * │   Chillsynth                       │
- * │   …                                │
+ * │ ⣿⣷⣦⣤⣴⣦⣷ 波形（整宽，两层余辉）      │  ← .radio-playerbar
+ * │ 中国之声   Artist — Title            │
+ * │ ⏯ ⏭  ──── 🔊 ────  🌐          ✕ │
  * ├────────────────────────────────────┤
- * │ ⣿⣷⣦⣤ 波形（整宽，两层余辉）        │  ← .radio-playerbar
- * │ Nightride · Artist — Title  ⏯ ⏭ 🔊 ──  🌐 ✕ │
+ * │ 搜索电台…                           │
+ * │ ● 中国之声                          │
+ * │   广东音乐之声        ← 列表占满       │
+ * │   …                                 │
  * └────────────────────────────────────┘
  * ```
  */
 export function RadioPane({ onClose }: { onClose: () => void }) {
-  // 播放器随面板生命周期存活；关闭面板 = 停止播放并释放音频资源（上游
-  // `ctx.onDispose` 同语义：关窗即停，没有后台音频服务）。
-  const [player] = useState(() => new RadioPlayer())
+  // 播放器**必须在 effect 里建**，不能用 `useState(() => new RadioPlayer())`。
+  // 理由（2026-11-15 实机复现「点播放没反应、状态恒为 paused」）：开发期
+  // StrictMode 会挂载 → 卸载 → 再挂载，而 `useState` 初始化器创建的实例在
+  // 重挂载后**被原样复用**——可它已经被上一轮 cleanup 的 dispose() 置为
+  // disposed，于是 `play()` 开头的 `if (this.disposed) return` 直接吞掉整个
+  // 播放。改成 effect 内建实例：每轮挂载拿到全新播放器，卸载时真正释放。
+  const [player, setPlayer] = useState<null | RadioPlayer>(null)
+
+  useEffect(() => {
+    const instance = new RadioPlayer()
+    setPlayer(instance)
+    return () => {
+      setPlayer(null)
+      instance.dispose()
+    }
+  }, [])
+
+  // 首帧（effect 尚未跑）只渲染骨架：hook 顺序稳定由 RadioPaneBody 承担。
+  if (!player) {
+    return <div className="radio-pane" data-slot="radio-pane" data-status="paused" />
+  }
+
+  return <RadioPaneBody player={player} onClose={onClose} />
+}
+
+/** 播放器就绪后的面板主体（所有读 atom 的 hook 都在这里，顺序稳定）。 */
+function RadioPaneBody({ player, onClose }: { player: RadioPlayer; onClose: () => void }) {
   const station = useAtom(player.station)
   const status = useStatus(player)
   const active = status === 'live' || status === 'connecting'
-
-  useEffect(() => () => player.dispose(), [player])
 
   const onToggle = useCallback(() => player.toggle(), [player])
 
   return (
     <div className="radio-pane" data-slot="radio-pane" data-status={status}>
-      <StationList player={player} />
+      {/* 播放条在**顶部**（用户 2026-11-15：“组件还是放在顶部吧”），两行独立区：
+          第 1 行 = 整宽波形；第 2 行 = 台名/曲目；第 3 行 = 传输钮 + 音量 + 关闭。 */}
       <div className="radio-playerbar" data-slot="radio-playerbar">
         <Waveform player={player} />
-        <div className="radio-playerbar-row">
-          <div className="radio-playerbar-meta">
-            <span className="radio-bar-name" title={`${station.name} · ${STATUS_LABEL[status]}`}>
-              {station.name}
-            </span>
-            <TrackLine player={player} />
-          </div>
+        <div className="radio-playerbar-line">
+          <span className="radio-bar-name" title={`${station.name} · ${STATUS_LABEL[status]}`}>
+            {station.name}
+          </span>
+          <TrackLine player={player} />
+        </div>
+        <div className="radio-playerbar-line radio-playerbar-controls">
           <SmallAction
             label={active ? '暂停电台' : '播放电台'}
             icon={active ? Pause : Play}
@@ -1221,6 +1862,7 @@ export function RadioPane({ onClose }: { onClose: () => void }) {
           <SmallAction label="关闭电台面板" icon={X} className="radio-playerbar-close" onClick={onClose} />
         </div>
       </div>
+      <StationList player={player} />
     </div>
   )
 }

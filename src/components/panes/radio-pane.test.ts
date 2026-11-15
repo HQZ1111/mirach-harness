@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  addToMyStations,
+  appleArtistProfile,
+  artistProfile,
   brailleTrace,
   DEFAULT_DIRECTORY_SERVERS,
   directorySearchPath,
@@ -8,11 +11,19 @@ import {
   flatTrace,
   httpsUrlOrNull,
   isValidStation,
+  hidePreset,
+  inMyStations,
   isSameStation,
   mapDirectoryRows,
   METADATA_ENDPOINTS,
+  musicBrainzArtistId,
+  musicBrainzArtistQuery,
+  normalizedArtist,
   pickSource,
   PRESET_STATIONS,
+  removeFromMyStations,
+  unhidePreset,
+  visiblePresets,
   streamUrlOrNull,
   trackCredit,
   uniqueStations,
@@ -25,9 +36,22 @@ import {
  * 预设台地址、URL 校验口径、目录映射的丢弃规则、波形编码。
  */
 describe('radio-stations · 预设台', () => {
-  it('7 个预设台与上游同 id/同流地址', () => {
-    expect(PRESET_STATIONS).toHaveLength(7)
-    expect(PRESET_STATIONS.map((s) => s.id)).toEqual([
+  it('15 个预设台：国内 8 台在前，上游 7 台在后', () => {
+    expect(PRESET_STATIONS).toHaveLength(15)
+    // 国内台优先（2026-11-15 用户："搞些国内的放进去"）——实测它们首字节
+    // 0.2–2.3s、带宽稳定，而境外台贴在码率临界值上波动
+    expect(PRESET_STATIONS.slice(0, 8).map((s) => s.id)).toEqual([
+      'cn-cnr1',
+      'cn-guangdong-music',
+      'cn-beijing-news',
+      'cn-guangdong-traffic',
+      'cn-guangdong-stock',
+      'cn-huaiji-music',
+      'cn-intl-news',
+      'cn-anhui-story',
+    ])
+    // 上游 7 台原样保留在后
+    expect(PRESET_STATIONS.slice(8).map((s) => s.id)).toEqual([
       'chillsynth',
       'nightride',
       'darksynth',
@@ -36,9 +60,10 @@ describe('radio-stations · 预设台', () => {
       'paradise-mellow',
       'eve-radio',
     ])
-    expect(PRESET_STATIONS[0]!.url).toBe('https://stream.nightride.fm/chillsynth.mp3')
-    expect(PRESET_STATIONS[4]!.url).toBe('https://stream.radioparadise.com/aac-128')
-    expect(PRESET_STATIONS[6]!.url).toBe('https://media01.gamingnow.net:8010/erweb.mp3')
+    expect(PRESET_STATIONS[0]!.url).toBe('https://lhttp.qingting.fm/live/15318317/64k.mp3')
+    expect(PRESET_STATIONS[8]!.url).toBe('https://stream.nightride.fm/chillsynth.mp3')
+    expect(PRESET_STATIONS[12]!.url).toBe('https://stream.radioparadise.com/aac-128')
+    expect(PRESET_STATIONS[14]!.url).toBe('https://media01.gamingnow.net:8010/erweb.mp3')
   })
 
   it('每个预设台都过 isValidStation（流地址合法）', () => {
@@ -214,5 +239,155 @@ describe('radio-stations · braille 波形', () => {
     const flat = flatTrace(6, 2).join('')
     const wave = brailleTrace([0, 1, -1, 1, -1, 1, -1, 1, -1, 1, -1, 1], 2).join('')
     expect(wave).not.toBe(flat)
+  })
+})
+describe('radio-pane · 艺人主页解析（上游 artistProfile / resolveArtist）', () => {
+  const spotify = 'https://open.spotify.com/artist/0123456789abcdefghijkl'
+  const mbRel = (type: string, resource: string, ended = false) => ({ type, ended, url: { resource } })
+
+  it('优先级：Spotify 艺人页 > bandcamp > official homepage', () => {
+    const relations = [
+      mbRel('official homepage', 'https://artist.example/'),
+      mbRel('bandcamp', 'https://artist.bandcamp.com/'),
+      mbRel('streaming', spotify),
+    ]
+    expect(artistProfile(relations)).toBe(spotify)
+  })
+
+  it('Spotify 只认 /artist/<22 位>，专辑/单曲/搜索页一律不要', () => {
+    const album = mbRel('streaming', 'https://open.spotify.com/album/0123456789abcdefghijkl')
+    expect(artistProfile([album])).toBeNull()
+    const search = mbRel('streaming', 'https://open.spotify.com/search/foo')
+    expect(artistProfile([search])).toBeNull()
+  })
+
+  it('bandcamp 必须是根路径的子域首页（不含 .bandcamp.com 主站）', () => {
+    expect(artistProfile([mbRel('bandcamp', 'https://a.bandcamp.com/')])).toBe('https://a.bandcamp.com/')
+    expect(artistProfile([mbRel('bandcamp', 'https://a.bandcamp.com/album/x')])).toBeNull()
+    expect(artistProfile([mbRel('bandcamp', 'https://bandcamp.com/')])).toBeNull()
+  })
+
+  it('official homepage 排除 spotify/bandcamp 自身', () => {
+    expect(artistProfile([mbRel('official homepage', 'https://open.spotify.com/x')])).toBeNull()
+    expect(artistProfile([mbRel('official homepage', 'https://artist.example/')])).toBe(
+      'https://artist.example/',
+    )
+  })
+
+  it('已结束（ended）的关系和非法输入被跳过', () => {
+    expect(artistProfile([mbRel('official homepage', 'https://a.example/', true)])).toBeNull()
+    expect(artistProfile(null)).toBeNull()
+    expect(artistProfile('nope')).toBeNull()
+  })
+
+  it('艺人名归一：NFKC + trim + 小写', () => {
+    expect(normalizedArtist('  Ｋraftwerk ')).toBe('kraftwerk')
+  })
+
+  it('Apple 只接受唯一精确同名匹配，并剥掉查询串', () => {
+    const payload = {
+      results: [
+        { wrapperType: 'artist', artistName: 'Kraftwerk', artistLinkUrl: 'https://music.apple.com/de/artist/kraftwerk/12345?uo=4' },
+      ],
+    }
+    expect(appleArtistProfile(payload, 'kraftwerk')).toBe('https://music.apple.com/de/artist/kraftwerk/12345')
+  })
+
+  it('Apple 歧义（两条同名）返回 null，不猜', () => {
+    const same = { wrapperType: 'artist', artistName: 'Nirvana', artistLinkUrl: 'https://music.apple.com/us/artist/nirvana/1' }
+    expect(appleArtistProfile({ results: [same, { ...same, artistLinkUrl: 'https://music.apple.com/us/artist/nirvana/2' }] }, 'Nirvana')).toBeNull()
+  })
+
+  it('Apple 结果里只要艺人（wrapperType=artist），歌曲结果不用', () => {
+    const song = { wrapperType: 'track', artistName: 'Kraftwerk', artistLinkUrl: 'https://music.apple.com/de/artist/kraftwerk/12345' }
+    expect(appleArtistProfile({ results: [song] }, 'Kraftwerk')).toBeNull()
+  })
+
+  it('MusicBrainz：必须恰好一条 100 分精确同名，且结果不能正好 5 条', () => {
+    const id = 'a1b2c3d4-1111-2222-3333-444455556666'
+    const ok = { artists: [{ id, name: 'Kraftwerk', score: 100 }] }
+    expect(musicBrainzArtistId(ok, 'Kraftwerk')).toBe(id)
+    // 分数不是 100 → 不认
+    expect(musicBrainzArtistId({ artists: [{ id, name: 'Kraftwerk', score: 99 }] }, 'Kraftwerk')).toBeNull()
+    // 正好 5 条 → 可能被截断，不认
+    const five = { artists: [...new Array(4)].map((_, i) => ({ id, name: `X${i}`, score: 50 })).concat({ id, name: 'Kraftwerk', score: 100 }) }
+    expect(musicBrainzArtistId(five, 'Kraftwerk')).toBeNull()
+  })
+
+  it('MusicBrainz 非法 uuid 返回 null', () => {
+    expect(musicBrainzArtistId({ artists: [{ id: 'not-a-uuid', name: 'A', score: 100 }] }, 'A')).toBeNull()
+  })
+
+  it('MusicBrainz 查询串对特殊字符做转义', () => {
+    const query = musicBrainzArtistQuery('AC/DC')
+    expect(query.startsWith('artist/?')).toBe(true)
+    // 斜杠被转义成 \/（Lucene 查询语法要求），解码后仍是转义形态
+    expect(decodeURIComponent(query)).toContain('artist:"AC\\/DC"')
+    expect(query).toContain('fmt=json')
+    expect(query).toContain('limit=5')
+  })
+})
+
+describe('radio-pane · 我的电台增删（用户：搜索的能加入、列表里的能删除）', () => {
+  const a: Station = { id: 'a', name: 'A', url: 'https://x/1' }
+  const b: Station = { id: 'b', name: 'B', url: 'https://x/2' }
+
+  it('加入：追加到末尾', () => {
+    expect(addToMyStations([], a)).toEqual([a])
+    expect(addToMyStations([a], b)).toEqual([a, b])
+  })
+
+  it('加入：同 id 或同 url 不重复（返回原引用，跳过重渲）', () => {
+    const list = [a]
+    expect(addToMyStations(list, { ...a, name: 'A2' })).toBe(list)
+    expect(addToMyStations(list, { id: 'z', name: 'Z', url: 'https://x/1' })).toBe(list)
+  })
+
+  it('加入：非法台（url 不过校验）被忽略', () => {
+    const list = [a]
+    expect(addToMyStations(list, { id: 'x', name: 'X', url: 'http://insecure.example/s' })).toEqual([a])
+  })
+
+  it('删除：按同 id 或同 url 命中，其余保序', () => {
+    expect(removeFromMyStations([a, b], a)).toEqual([b])
+    expect(removeFromMyStations([a, b], { id: 'other', name: 'X', url: 'https://x/1' })).toEqual([b])
+  })
+
+  it('删除：未命中时返回原引用', () => {
+    const list = [a]
+    expect(removeFromMyStations(list, b)).toBe(list)
+  })
+
+  it('inMyStations 判定同 id 或同 url', () => {
+    expect(inMyStations([a], { ...a, name: 'A2' })).toBe(true)
+    expect(inMyStations([a], b)).toBe(false)
+  })
+})
+
+describe('radio-pane · 预设台删除（用户：预设电台怎么不能删除）', () => {
+  const a: Station = { id: 'p1', name: 'P1', url: 'https://x/1' }
+  const b: Station = { id: 'p2', name: 'P2', url: 'https://x/2' }
+
+  it('预设是内置常量：删除 = 记进隐藏集，不篡改源数据', () => {
+    const before = PRESET_STATIONS.length
+    const hidden = hidePreset([], a)
+    expect(hidden).toEqual(['p1'])
+    // 源常量不受影响
+    expect(PRESET_STATIONS.length).toBe(before)
+  })
+
+  it('重复隐藏同一台不会产生重复 id（返回原引用）', () => {
+    const hidden = ['p1']
+    expect(hidePreset(hidden, a)).toBe(hidden)
+  })
+
+  it('visiblePresets 过滤掉隐藏项，保留其余顺序', () => {
+    expect(visiblePresets([a, b], ['p1'])).toEqual([b])
+    expect(visiblePresets([a, b], [])).toEqual([a, b])
+  })
+
+  it('unhidePreset 恢复指定台', () => {
+    expect(unhidePreset(['p1', 'p2'], a)).toEqual(['p2'])
+    expect(unhidePreset(['p2'], a)).toEqual(['p2'])
   })
 })

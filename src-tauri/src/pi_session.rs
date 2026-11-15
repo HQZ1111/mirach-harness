@@ -810,6 +810,30 @@ impl PiEngine {
         })
     }
 
+    /// main lane 是否仍有活动 run。
+    ///
+    /// RUN_FINISHED 事件到达 ≠ prompt 返回：引擎在收尾（落盘/广播排空）期间
+    /// lane 仍是 busy，此时再 POST 会得到 "Lane main already has an active
+    /// run operation"（2026-11-15 用户实报）。前端在提交与队列 drain 前先
+    /// 查这个（`AgentHarness::snapshot().active`），把消息留在本地队列，
+    /// 等 lane 真正空闲再发。
+    pub fn lane_busy(&self) -> Result<bool, String> {
+        // 无活动会话 = 没有 lane 可忙（New Chat 首条消息前）——这不是
+        // 错误降级，是"没有运行"的定义；真正的 harness 错误仍传播。
+        let live = match self.live() {
+            Ok(live) => live,
+            Err(_) => return Ok(false),
+        };
+        self.shared.rt.block_on(async {
+            let snapshot = live
+                .harness
+                .snapshot()
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(snapshot.active.is_some())
+        })
+    }
+
     // ── 扩展 UI 对话框（rpi runtime action 17：ask / permission）──────────────
     //
     // 真源 = 会话级 `UiDialogMailbox`（`HarnessLive::reload.ui_dialog`，

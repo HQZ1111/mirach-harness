@@ -124,6 +124,12 @@ interface TerminalSessionRT {
   pendingSize: TerminalSize | null
   lastSentSize: TerminalSize | null
   resizeInFlight: boolean
+  /** xterm.open 已执行（隐藏面板延迟到可见时，见 ensureSpawned） */
+  opened: boolean
+  /** PTY 已启动（延迟启动的幂等闸门，见 createSession 的 ensureSpawned） */
+  spawnStarted: boolean
+  /** 有效尺寸就绪后 fit+spawn；面板隐藏/零尺寸时由布局回调重试 */
+  ensureSpawned: (() => void) | null
   // ── Windows 输入法 composed text 兜底（ZCode 同源状态） ──
   inputFallbacks: PendingTerminalInputFallback[]
   keydownCandidate: TerminalInputFallbackKeydownCandidate | null
@@ -253,7 +259,9 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       const fitAddon = new FitAddon()
       term.loadAddon(fitAddon)
       term.loadAddon(new ClipboardAddon())
-      term.open(hostEl)
+      // term.open 延迟到面板真正可见（ensureSpawned）——隐藏/零尺寸时
+      // open 会让 xterm 的滚动同步 rAF 与 dispose 竞态（实测 boot 期
+      // "Cannot read properties of undefined (reading 'dimensions')"）。
 
       const rt: TerminalSessionRT = {
         key,
@@ -272,6 +280,9 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
         pendingSize: null,
         lastSentSize: null,
         resizeInFlight: false,
+        opened: false,
+        spawnStarted: false,
+        ensureSpawned: null,
         inputFallbacks: [],
         keydownCandidate: null,
         recentHandled: [],
@@ -392,9 +403,11 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       })
 
       // Windows 输入法兜底：composed text 留在 textarea 里而 xterm 没写完
-      // 时补写一次（只收窄到 Windows——Wayland 下会和 onData 重复）
-      const textarea = IS_WINDOWS ? term.textarea : undefined
-      if (textarea) {
+      // 时补写一次（只收窄到 Windows——Wayland 下会和 onData 重复）。
+      // textarea 在 term.open 之后才存在，故由 ensureSpawned 调用。
+      const attachTextareaFallback = () => {
+        const textarea = IS_WINDOWS ? term.textarea : undefined
+        if (!textarea) return
         const handleInput = (event: Event) => {
           const e = event as InputEvent
           if (e.inputType !== 'insertText' || !e.data || !e.composed) return
@@ -429,11 +442,13 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
         rt.detachTextareaInput = () => textarea.removeEventListener('input', handleInput, true)
       }
 
-      // 先 fit 用真实 cols/rows 启动 PTY；此后排队的 resize 由 id 就绪 flush
-      fitAndQueueResize(rt)
-      const initial = rt.lastSentSize ?? { cols: term.cols, rows: term.rows }
-
-      void (async () => {
+      // ── 延迟启动（对齐 ZCode isVisible 语义）─────────────────────────────
+      // 面板在后台/隐藏时容器是 0×0，xterm 只能按内置默认 80×24 fit。
+      // 若此时就 spawn，PTY 先用 24 行启动、可见后 resize 到 60+ 行，
+      // ConPTY/PSReadLine 会重绘旧屏——表现为 banner 与提示符重复出现、
+      // 内容被推到屏幕中部（2026-11-15 用户实锤「终端文字全挤在一起」）。
+      // 所以：**只有拿到真实尺寸才 spawn**；隐藏时由布局回调重试。
+      const spawnPty = async (initial: TerminalSize) => {
         try {
           const spawned = await spawnTerminal({ cols: initial.cols, rows: initial.rows, cwd })
           if (rt.cancelled) {
@@ -510,7 +525,36 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
           rt.term.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`)
           setTabState(key, { status: 'error', error: message })
         }
-      })()
+      }
+
+      /** 容器有真实尺寸才 open+启动；否则等 ResizeObserver/可见性回调重试。 */
+      const ensureSpawned = () => {
+        if (rt.cancelled || rt.spawnStarted) return
+        const c = containerRef.current
+        if (!c || c.clientWidth <= 0 || c.clientHeight <= 0) return
+        rt.spawnStarted = true
+        if (!rt.opened) {
+          try {
+            term.open(rt.hostEl)
+            rt.opened = true
+          } catch (err) {
+            // 失败必须可见（规矩 12）：页签转 error，退出条给"重新打开"
+            console.error('[terminal] open failed:', err)
+            rt.exited = true
+            setTabState(key, {
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err),
+            })
+            return
+          }
+          attachTextareaFallback()
+        }
+        fitAndQueueResize(rt)
+        const initial = rt.lastSentSize ?? { cols: term.cols, rows: term.rows }
+        void spawnPty(initial)
+      }
+      rt.ensureSpawned = ensureSpawned
+      ensureSpawned()
     },
     [fitAndQueueResize, flushResize, setTabState],
   )
@@ -609,6 +653,8 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
     const raf = requestAnimationFrame(() => {
       // 一帧内可能已被关闭/重启（term 已 dispose，读 cols 会炸）
       if (rt.cancelled) return
+      // 隐藏期间创建的页签：hostEl 归属活动签后才有真实尺寸，此时补启动
+      rt.ensureSpawned?.()
       fitAndQueueResize(rt)
       rt.term.focus()
     })
@@ -627,7 +673,10 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
         const rt = activeKeyRef.current
           ? sessionsRef.current.get(activeKeyRef.current)
           : undefined
-        if (rt) fitAndQueueResize(rt)
+        if (rt) {
+          rt.ensureSpawned?.()
+          fitAndQueueResize(rt)
+        }
       })
     })
     ro.observe(container)
@@ -649,6 +698,7 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       if (!rt) return
       requestAnimationFrame(() => {
         if (rt.cancelled) return
+        rt.ensureSpawned?.()
         fitAndQueueResize(rt)
         rt.term.focus()
       })

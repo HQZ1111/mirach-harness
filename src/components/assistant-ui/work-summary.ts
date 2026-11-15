@@ -26,7 +26,11 @@
  *    类别（统计时并入执行数，图标优先级最低）。
  * 2. **边界**（`groupConsecutiveAssistantSummaries`）：正文、子代理 /
  *    委托工具、未归类工具（submit_plan、MCP、工具目录查询…）、图片/文件
- *    部件——都中断当前组。
+ *    部件——都中断当前组。**宿主偏差（2026-11-15 用户定稿）**：pi 在每个
+ *    工具批次前都写一段 commentary 正文，严格按 ZCode 断组会把一轮切成
+ *    十几个「已执行 N 命令」组头、思考全被折叠藏掉。故宿主把**非空正文
+ *    视为组内普通行（不断组）**；子代理/未归类工具仍是边界（语义边界，
+ *    不是排版边界）。空文本/空思考直接剔除。
  * 3. **组内 ≥2 才成组**（ZCode 渲染层判 `items.length < 2` 时摊平为单行；
  *    宿主已不建分段组，这条仅保留为扫描语义）。
  * 4. **统计**（`formatAssistantSummaryStatistics`）：explore 计**调用数**；
@@ -182,6 +186,20 @@ export function buildWorkSummaryItems(
     const part = parts[index];
     if (!part) continue;
     if (part.type === 'tool-call' && isTodoToolName(part.toolName ?? '')) continue;
+    // 空文本 / 空思考不是可见行（ZCode 在扫描前把流式空 reasoning 与空
+    // assistantText 剔除）。它们既不渲染，也**不能切断连续摘要组**——
+    // 否则每个空 delta 都会多开一个组头，把「已查阅 N 项，已执行 M 命令」
+    // 的总项拆碎。
+    if ((part.type === 'text' || part.type === 'reasoning') && !(part.text ?? '').trim()) {
+      continue;
+    }
+    if (part.type === 'text') {
+      // 非空正文：不断组，作为组内普通行（见模块头「宿主偏差」）。没有
+      // 当前组时按边界行内联（正文后面才开始工具段）。
+      if (current) current.indices.push(index);
+      else items.push({ kind: 'part', key: `part:${index}`, index });
+      continue;
+    }
     if (isSummaryRow(part)) {
       if (!current) current = { indices: [] };
       current.indices.push(index);

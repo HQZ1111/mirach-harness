@@ -86,7 +86,7 @@ describe('buildWorkSummaryItems（连续摘要组扫描）', () => {
     expect(items[0]).toMatchObject({ kind: 'rows', indices: [0, 1, 2, 3, 4] })
   })
 
-  it('正文 / 未归类工具 / 子代理是边界，切开摘要段', () => {
+  it('子代理 / 未归类工具是边界；非空正文并进当前组（宿主偏差：不再切碎总项）', () => {
     const parts = [
       tool('read'),
       text('中间正文'),
@@ -101,9 +101,9 @@ describe('buildWorkSummaryItems（连续摘要组扫描）', () => {
       'part',
       'rows',
       'part',
-      'rows',
-      'part',
     ])
+    expect(items[0]).toMatchObject({ kind: 'rows', indices: [0, 1, 2] })
+    expect(items[2]).toMatchObject({ kind: 'rows', indices: [4] })
   })
 
   it('待办工具被剔除：不渲染、也不断组', () => {
@@ -111,6 +111,28 @@ describe('buildWorkSummaryItems（连续摘要组扫描）', () => {
     const items = buildWorkSummaryItems(parts, [0, 1, 2])
     expect(items).toHaveLength(1)
     expect(items[0]).toMatchObject({ kind: 'rows', indices: [0, 2] })
+  })
+
+  it('空文本 / 空思考不渲染也不断组（流式空 delta 不再拆碎总项）', () => {
+    const parts = [
+      tool('read'),
+      text(''),
+      tool('bash'),
+      reasoning({ text: '' }),
+      tool('grep'),
+      text('   '),
+      tool('edit', { args: { path: 'a.ts' } }),
+    ]
+    const items = buildWorkSummaryItems(parts, [0, 1, 2, 3, 4, 5, 6])
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ kind: 'rows', indices: [0, 2, 4, 6] })
+  })
+
+  it('非空正文并进当前组（宿主偏差：一轮只保留一个总项）', () => {
+    const parts = [tool('read'), text('x'), tool('bash')]
+    const items = buildWorkSummaryItems(parts, [0, 1, 2])
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ kind: 'rows', indices: [0, 1, 2] })
   })
 
   it('单个可归类行也是 rows 项（渲染层再摊平成普通行）', () => {

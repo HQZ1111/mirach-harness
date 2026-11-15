@@ -36,7 +36,8 @@
  *
  * 纯展示组件；统计/活动项/图标的选择全在 `work-summary.ts` 的纯函数里。
  */
-import { useId, useState, type FC, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FC, type ReactNode } from "react";
+import { useScrollLock } from "@assistant-ui/react";
 import { BrainIcon, ChevronRightIcon } from "lucide-react";
 import {
   Collapsible,
@@ -53,8 +54,17 @@ export interface ConsecutiveSummaryGroupProps {
   statisticsIcon?: ReactNode;
   /** 收起态的替代内容（纯 change 组的文件折叠摘要）。 */
   collapsedStatistics?: ReactNode;
+  /** 初始展开态。ZCode 默认收起；宿主在**非运行态**默认展开——否则组内
+   *  思考/正文全被收起藏掉（用户 2026-11-15："思考也不见了"），而运行态
+   *  仍保持收起，让尾组头滚动当前项。 */
+  defaultOpen?: boolean;
   /** 该组是整轮尾组且轮仍在跑（ZCode `tailRowId === lastRowId && taskRunning`）。 */
   groupRunning: boolean;
+  /** 组内是否有**活动项**（流式思考 / 运行中工具）。ZCode 的
+   *  `getActiveAssistantSummaryItem(...) !== undefined`：展开 + 运行 + 无活动项
+   *  时统计文本扫光（工具间隙），与"有活动项"是两种不同形态——不能用
+   *  `activeSummary` 是否存在代替（收起头始终有 `current = active ?? last`）。 */
+  hasActiveItem?: boolean;
   /** 当前活动项（收起态滚动的摘要节点）的内容 key——变化才翻滚。 */
   activeKey?: string;
   /** 当前活动项的内容版本（同一 key 内流式更新/状态变化原位刷新）。 */
@@ -68,23 +78,60 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
   statistics,
   statisticsIcon,
   collapsedStatistics,
+  defaultOpen = false,
   groupRunning,
+  hasActiveItem,
   activeKey,
   activeRefreshVersion,
   activeSummary,
   children,
 }) => {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const prevDefaultOpenRef = useRef(defaultOpen);
+  // 折叠/展开时锁住 thread viewport：内容高度变化会让自动跟随滚动跳一下，
+  // 和动画叠在一起就是"闪烁一下"。与 reasoning 的 disclosure 同一机制。
+  const lockScroll = useScrollLock(rootRef, 240);
+  // 运行中展开、完成后收起（ZCode 实测：流式时组头 + 行都在，收尾后只剩
+  // 一行总统计）。不能只靠初始 state——同一实例跨 running→completed 时
+  // 必须跟随一次，否则会停在上一种形态。
+  useEffect(() => {
+    // 只有 defaultOpen 真的翻转（运行结束自动收起）才锁滚动；初次挂载不锁，
+    // 否则会话水合时每个组都会锁 240ms，把自动滚动卡住。
+    if (prevDefaultOpenRef.current !== defaultOpen) {
+      prevDefaultOpenRef.current = defaultOpen;
+      lockScroll();
+    }
+    setOpen(defaultOpen);
+  }, [defaultOpen, lockScroll]);
+  // 收起动画期间先保留统计文本，动画结束后再切“滚动当前项”。否则点收起
+  // 的同一帧里 header 从统计瞬间换成滚动内容，看起来会闪一下（用户实报）。
+  const [rollingReady, setRollingReady] = useState(!open);
+  useEffect(() => {
+    if (open) {
+      setRollingReady(false);
+      return;
+    }
+    // 折叠内容动画 = 0.2s（tw-animate-css collapsible-up 默认）；留 40ms
+    // 余量再切滚动头，避免动画尾帧与头内容交换撞在一起（闪烁）。
+    const timer = window.setTimeout(() => setRollingReady(true), 240);
+    return () => window.clearTimeout(timer);
+  }, [open]);
   const contentId = useId();
-  const hasActiveItem = activeSummary !== undefined;
-  // 收起 + 运行中（仅整轮尾组）：组头换成当前项摘要的滚动队列。ZCode
-  // `current = active ?? last`——没有活动项时滚动最后一项，而不是切回统计。
-  const rolling = !open && groupRunning && activeSummary !== undefined;
+  // ZCode：`current = active ?? last`——收起头永远有可滚动内容，故滚动与否
+  // 只由「尾组 + 收起」决定；`hasActiveItem` 只控制展开态的统计扫光。
+  const rolling =
+    rollingReady && !open && groupRunning && activeSummary !== undefined;
+  const activePresent = hasActiveItem ?? (activeSummary !== undefined);
 
   return (
+    <div ref={rootRef} className="min-w-0">
     <Collapsible
       open={open}
-      onOpenChange={setOpen}
+      onOpenChange={(next) => {
+        lockScroll();
+        setOpen(next);
+      }}
       className="min-w-0"
       data-consecutive-summary-group
       data-group-running={groupRunning ? "1" : "0"}
@@ -101,12 +148,16 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
+            lockScroll();
             setOpen((value) => !value);
           }}
           className="summary-hover-text group/tool-summary flex w-fit max-w-full min-w-0 cursor-pointer items-center gap-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {rolling ? (
-            <div className="pointer-events-none flex min-w-0 items-center">
+            <div
+              className="pointer-events-none flex min-w-0 items-center [&_button]:pointer-events-none"
+              inert
+            >
               <QueuedSummaryContent
                 contentKey={activeKey ?? ""}
                 contentRefreshVersion={activeRefreshVersion}
@@ -128,7 +179,7 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
                 className={cn(
                   "min-w-0 truncate text-muted-foreground",
                   groupRunning &&
-                    !hasActiveItem &&
+                    !activePresent &&
                     "shimmer motion-reduce:animate-none",
                 )}
               >
@@ -174,6 +225,7 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
         </div>
       </CollapsibleContent>
     </Collapsible>
+    </div>
   );
 };
 
