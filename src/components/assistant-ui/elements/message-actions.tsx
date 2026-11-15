@@ -52,7 +52,13 @@ export function MessageActions({
   className,
   ...props
 }: MessageActionsProps) {
-  const buttonClassName = cn(ghostButton, "size-7");
+  // ZCode 实测（CDP 9444）：动作钮 24×24、圆角 6px、图标 14px、容器 gap 4px、
+  // 常态 text-foreground（不是 ghostButton 的 /45 淡灰）。本工程根字号 15px，
+  // size-7 得 26.25px、rounded-full 是圆的，全都对不上，故写死像素。
+  const buttonClassName = cn(
+    ghostButton,
+    "size-[24px] shrink-0 rounded-[6px] text-foreground hover:text-foreground",
+  );
 
   return (
     <div
@@ -74,14 +80,14 @@ export function MessageActions({
         <CopyIcon
           className={cn(
             iconSwap,
-            "size-3.5",
+            "size-[14px]",
             copied ? iconSwapOut : iconSwapIn,
           )}
         />
         <CheckIcon
           className={cn(
             iconSwap,
-            "size-3.5",
+            "size-[14px]",
             copied ? iconSwapIn : iconSwapOut,
           )}
         />
@@ -132,7 +138,7 @@ export function MessageActions({
         >
           <RefreshCwIcon
             className={cn(
-              "size-3.5",
+              "size-[14px]",
               regenerating && "animate-spin motion-reduce:animate-none",
             )}
           />

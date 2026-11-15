@@ -156,3 +156,6 @@ body.in-browser { background: var(--surface); }
 .win-dot[data-dot-role='maximize'] { --dot-color: var(--win-dot-maximize); }
 .win-dot[data-dot-role='minimize'] { --dot-color: var(--win-dot-minimize); }
 .win-dot[data-dot-role='sidebar'] { --dot-color: var(--win-dot-sidebar); }
+
+/* ZCode 图标线宽 = lucide 1.5（默认 2 在截图里明显更粗） */
+.lucide { stroke-width: 1.5; } /* lucide-stroke-15 */

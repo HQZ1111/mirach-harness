@@ -391,7 +391,7 @@ export function ComposerWired() {
               {/* 左组（2026-11-01 用户："不在加号后面在中间了"）：ComposerToolbar
                   是 justify-between——附件钮与模式钮必须包成一个组才贴左，
                   否则第二个子元素被推到行中 */}
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-[4px]">
                 <ComposerPrimitive.AddAttachment asChild>
                   <ComposerAttachButton aria-label="添加附件" />
                 </ComposerPrimitive.AddAttachment>
@@ -423,7 +423,9 @@ export function ComposerWired() {
                 )}
                 <ModelSelector
                   align="end"
-                  className="rounded-full"
+                  // ZCode 实测（9444）：模型触发器 28 高、圆角 8、14px 字、px-2；
+                  // 不是胶囊（旧值 rounded-full 会盖掉组件内的 rounded-md）。
+                  className="h-[28px] rounded-[8px] px-2 text-[14px]"
                   effort={currentEffort ?? ''}
                   models={models}
                   value={currentModel ?? undefined}

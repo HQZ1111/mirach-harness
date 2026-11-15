@@ -70,7 +70,7 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
         data-slot="aui_work-segment-trigger"
         data-history-open={String(defaultOpen || userOpen)}
         disabled={defaultOpen}
-        className="group/history-message text-muted-foreground focus-visible:ring-ring inline-flex max-w-full items-center gap-2 rounded text-left text-sm outline-none focus-visible:ring-2"
+        className="group/history-message text-muted-foreground focus-visible:ring-ring inline-flex max-w-full items-center gap-2 text-left text-sm outline-none focus-visible:ring-2"
       >
         <span
           className={cn(

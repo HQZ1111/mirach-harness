@@ -30,7 +30,10 @@ export const TooltipIconButton = forwardRef<
             size="icon"
             {...rest}
             className={cn(
-              "aui-button-icon size-6 p-1 active:scale-90",
+              // 24×24 / 6px 圆角 = ZCode 动作钮实测（9444：size-6 + rounded-md，
+              // 图标 14）。本工程根字号 15px，size-6 只剩 22.5px、rounded-md
+              // 只有 5.625px，故写死像素（同为"消半像素"口径）。
+              "aui-button-icon size-[24px] rounded-[6px] p-[4px] active:scale-90",
               className,
             )}
             ref={ref}

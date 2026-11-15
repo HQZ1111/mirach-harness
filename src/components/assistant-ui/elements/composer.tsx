@@ -406,7 +406,7 @@ export function ComposerActions({
   return (
     <div
       data-slot="composer-actions"
-      className={cn("flex items-center gap-1.5", className)}
+      className={cn("flex items-center gap-[4px]", className)}
       {...props}
     />
   );
@@ -424,7 +424,9 @@ export function ComposerAttachButton({
       disabled={!props.onClick}
       className={cn(
         ghostButton,
-        "pressable-sm size-8 disabled:pointer-events-none disabled:opacity-30",
+        // ZCode 实测（9444）：附件钮 28×28、圆角 8px（不是圆形），图标 16。
+        // 本工程根字号 15px，size-8 会得 30px，故写死像素。
+        "pressable-sm size-[28px] rounded-[8px] disabled:pointer-events-none disabled:opacity-30",
         className,
       )}
       {...props}
@@ -449,7 +451,8 @@ export function ComposerModelTrigger({
       aria-expanded={open}
       data-slot="composer-model-trigger"
       className={cn(
-        "text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground/90 dark:hover:bg-foreground/[0.09] flex h-8 items-center gap-1.5 rounded-full px-3 text-[12.5px] transition-colors",
+        // ZCode：模型触发器 28 高、圆角 8、14px 字（不是胶囊）。
+        "text-foreground/55 hover:bg-foreground/[0.06] hover:text-foreground/90 dark:hover:bg-foreground/[0.09] flex h-[28px] items-center gap-1.5 rounded-[8px] px-2 text-[14px] transition-colors",
         className,
       )}
       {...props}
@@ -569,7 +572,8 @@ export function ComposerContext({
         aria-label="Context usage"
         className={cn(
           ghostButton,
-          "size-8",
+          // ZCode 实测：上下文钮 28×28、圆角 8px。
+          "size-[28px] rounded-[8px]",
           warn && "text-red-500 dark:text-red-400",
         )}
       >
@@ -613,9 +617,9 @@ export function ComposerVoiceButton({
         active
           ? cn(
               inkButton,
-              "pressable-sm flex size-8 items-center justify-center rounded-full",
+              "pressable-sm flex size-[28px] items-center justify-center rounded-full",
             )
-          : cn(ghostButton, "pressable-sm size-8"),
+          : cn(ghostButton, "pressable-sm size-[28px]"),
         className,
       )}
       {...props}
@@ -644,7 +648,7 @@ export function ComposerSend({
       aria-label={streaming ? "Stop generating" : "Send message"}
       data-slot="composer-send"
       className={cn(
-        "pressable-sm grid size-8 place-items-center rounded-full",
+        "pressable-sm grid size-[28px] place-items-center rounded-full",
         streaming || !idle
           ? inkButton
           : "bg-foreground/[0.06] text-foreground/30 dark:bg-foreground/[0.09] transition-colors",

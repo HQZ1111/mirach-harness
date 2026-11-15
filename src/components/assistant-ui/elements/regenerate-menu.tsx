@@ -45,7 +45,7 @@ export function RegenerateMenu({
           onClick={() => onOpenChange(!open)}
           className={cn(
             ghostButton,
-            "size-7 self-start",
+            "size-[24px] shrink-0 rounded-[6px] text-foreground hover:text-foreground",
             open && "bg-foreground/[0.06] text-foreground/90",
           )}
         >

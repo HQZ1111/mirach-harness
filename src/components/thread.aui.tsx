@@ -1296,12 +1296,12 @@ const SpokenActionBar: FC = () => {
       className="aui-spoken-action-bar text-muted-foreground flex shrink-0 gap-1"
     >
       <ActionBarPrimitive.Copy asChild>
-        <TooltipIconButton tooltip="Copy" className="size-6">
+        <TooltipIconButton tooltip="Copy" className="size-[24px]">
           <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+            <CheckIcon className="size-[14px] animate-in zoom-in-50 fade-in duration-200 ease-out" />
           </AuiIf>
           <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+            <CopyIcon className="size-[14px] animate-in zoom-in-75 fade-in duration-150" />
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>
@@ -1736,7 +1736,7 @@ const AssistantActionBar: FC<{
     <ActionBarPrimitive.Root
       hideWhenRunning
       autohide="not-last"
-      className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 -ms-1 flex gap-1 duration-200"
+      className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in col-start-3 row-start-2 flex gap-1 duration-200"
     >
       <MessageActions
         copied={isCopied}
@@ -1760,7 +1760,7 @@ const AssistantActionBar: FC<{
           aria-pressed={readAloudOpen}
           onClick={onReadAloudToggle}
         >
-          <Volume2Icon />
+          <Volume2Icon className="size-[14px]" />
         </TooltipIconButton>
       )}
       <ActionBarMorePrimitive.Root>
@@ -1864,7 +1864,11 @@ const UserMessage: FC = () => {
       <UserMessageAttachments />
 
       <div className="aui-user-message-content-wrapper col-start-2 min-w-0">
-        <div className="aui-user-message-content bg-muted text-foreground rounded-[24px] rounded-tr-[6px] border border-border px-[16px] py-[12px] text-[14px] leading-[21px] wrap-break-word empty:hidden">
+        {/* ZCode 实测（9444）：气泡四角统一 24px、无描边、py-12/px-16、
+            text-ui-base 14/21。此前照旧版记的 24 + top-right 6 与 1px 描边
+            都和现状不符（现在 ZCode 的 rounded-tr-xs 被 rounded-xl 覆盖，
+            border 宽度为 0）。 */}
+        <div className="aui-user-message-content bg-muted text-foreground rounded-[24px] px-[16px] py-[12px] text-[14px] leading-[21px] wrap-break-word empty:hidden">
           <MessagePrimitive.Parts
             components={{ File: UserFilePart, Image: UserImagePart, Quote: QuoteBlock }}
           />
@@ -1982,11 +1986,15 @@ const UserActionBar: FC = () => {
         className="aui-user-action-copy"
         onClick={onCopy}
       >
-        {copied ? <CheckIcon /> : <CopyIcon />}
+        {copied ? (
+          <CheckIcon className="size-[14px]" />
+        ) : (
+          <CopyIcon className="size-[14px]" />
+        )}
       </TooltipIconButton>
       <ActionBarPrimitive.Edit asChild>
         <TooltipIconButton tooltip="编辑" className="aui-user-action-edit">
-          <PencilIcon />
+          <PencilIcon className="size-[14px]" />
         </TooltipIconButton>
       </ActionBarPrimitive.Edit>
       <TooltipIconButton
@@ -1995,7 +2003,7 @@ const UserActionBar: FC = () => {
         disabled={!forkable}
         onClick={onFork}
       >
-        <GitBranchIcon />
+        <GitBranchIcon className="size-[14px]" />
       </TooltipIconButton>
     </ActionBarPrimitive.Root>
   );
