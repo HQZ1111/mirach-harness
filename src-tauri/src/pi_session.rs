@@ -243,6 +243,24 @@ fn session_cache_key(path: &Path) -> PathBuf {
 /// header 丢失。rpi 的 `find_session_metadata` 只收录能解析出 header 的
 /// 文件，于是报 "No session found for session <path>"，看起来像"切工作区
 /// 失败"，实际是文件损坏。预检把真实原因带出来（UI 红条可见）。
+/// rpi-permission-gate 的启用面（扩展 README：`--permission-gate` 或
+/// `RPI_PERMISSION_GATE=1`；`--bypass` 优先）。宿主只读 env：本进程内扩展
+/// 读的是同一份环境变量，因此可用于「当前模式」展示。
+///
+/// **只读**：gate 在扩展/会话构建时读 env，宿主没有运行时切换面
+/// （`set_approval_mode` 恒 Err）；把它当成可切换开关就是假入口。
+fn permission_gate_enabled() -> bool {
+    match std::env::var("RPI_PERMISSION_GATE") {
+        Ok(value) => {
+            let value = value.trim();
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
 fn preflight_session_file(path: &str) -> Result<(), String> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)
@@ -1279,11 +1297,19 @@ impl PiEngine {
     /// 无活动会话 = 默认快照（不是错误：mode-switch 挂载即轮询，首启时没有
     /// 会话是预期态）。
     pub fn mode_state(&self) -> Result<serde_json::Value, String> {
-        let Some(live) = self.live_opt()? else {
-            return crate::pi_plugin_state::mode_wire(None);
+        // rpi 的「模式」= plan-mode 插件条目（planMode）+ 启动期权限闸开关
+        // （permissionGate，RPI_PERMISSION_GATE=1 → bash/write/edit 每次确认）。
+        // 该开关**只读**：扩展在会话构建时读 env，宿主没有运行时切换面。
+        let gate = permission_gate_enabled();
+        let mut wire = match self.live_opt()? {
+            None => crate::pi_plugin_state::mode_wire(None)?,
+            Some(live) => {
+                let data = self.latest_plugin_entry(&live, crate::pi_plugin_state::PLAN_ENTRY)?;
+                crate::pi_plugin_state::mode_wire(data.as_ref())?
+            }
         };
-        let data = self.latest_plugin_entry(&live, crate::pi_plugin_state::PLAN_ENTRY)?;
-        crate::pi_plugin_state::mode_wire(data.as_ref())
+        wire["permissionGate"] = serde_json::json!(gate);
+        Ok(wire)
     }
 
     pub fn set_approval_mode(&self, _mode: &str) -> Result<(), String> {

@@ -38,6 +38,7 @@ import {
 import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assistant-ui/elements/attachment.aui'
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
+import { PermissionModeChip } from '@/components/assistant-ui/permission-mode-chip'
 import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
 import {
   modelCatalogStore,
@@ -395,32 +396,32 @@ export function ComposerWired() {
                 <ComposerPrimitive.AddAttachment asChild>
                   <ComposerAttachButton aria-label="添加附件" />
                 </ComposerPrimitive.AddAttachment>
-                {/* 模式切换钮已移除（2026-11-15）：rpi 没有 always-ask /
-                    write / yolo 审批三态（set_approval_mode 恒 Err），计划模式
-                    进入/退出也由 rpi-plan-mode 插件自己完成（set_plan_mode 恒
-                    Err）——留着就是假入口。计划状态在活动面板的待办分区可见。 */}
+                {/* ZCode 同位的模式芯片（计划/确认/自主/完全访问）。rpi 只有
+                    plan-mode 插件态 + permission-gate 启动开关，没有运行时
+                    切换面——芯片只读展示当前真实模式，菜单里其余态置灰并
+                    标注原因（不造假开关）。 */}
+                <PermissionModeChip />
               </div>
               <ComposerActions>
                 {/* 上下文明细按钮（ZCode 同位：模型选择器左侧；2026-11-01
                     用户："模型选择的左边加个上下文的按钮"）。点击弹明细卡
-                    （Input/Cached/Output/Reasoning 分解）。**常驻**：无用量
-                    显示空态（– / 窗口），不隐藏——用户追问"上下文按钮呢"。
-                    窗口缺失（无模型目录条目）仍不渲染。 */}
-                {currentContextWindow !== undefined && currentContextWindow > 0 && (
-                  <ContextDisplay.Button
-                    modelContextWindow={currentContextWindow}
-                    usage={
-                      usage
-                        ? {
-                            totalTokens: usage.totalTokens,
-                            inputTokens: usage.inputTokens,
-                            cachedInputTokens: usage.cachedInputTokens,
-                            outputTokens: usage.outputTokens,
-                          }
-                        : undefined
-                    }
-                  />
-                )}
+                    （Input/Cached/Output/Reasoning 分解）。**常驻**：窗口未知
+                    （models.json 没写 contextWindow，rpi 返回 0）也渲染——环
+                    显示 0%，弹层写明"窗口未知"并指到设置；隐藏等于用户永远
+                    看不到入口（2026-11-15 用户："zcode 中都能显示"）。 */}
+                <ContextDisplay.Button
+                  modelContextWindow={currentContextWindow ?? 0}
+                  usage={
+                    usage
+                      ? {
+                          totalTokens: usage.totalTokens,
+                          inputTokens: usage.inputTokens,
+                          cachedInputTokens: usage.cachedInputTokens,
+                          outputTokens: usage.outputTokens,
+                        }
+                      : undefined
+                  }
+                />
                 <ModelSelector
                   align="end"
                   // ZCode 实测（9444）：模型触发器 28 高、圆角 8、14px 字、px-2；

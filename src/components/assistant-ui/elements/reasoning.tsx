@@ -40,7 +40,7 @@ function useReasoningOptional() {
 
 // 2026-11-15：去掉 mb-4 / py-1.5。ZCode 的思考行是工作区里的普通摘要行，
 // 垂直节奏由父容器 gap 决定；自带外边距会让组内出现 20px 空档（"乱的"）。
-const reasoningVariants = cva("aui-reasoning-root mb-0 w-full", {
+const reasoningVariants = cva("aui-reasoning-root mb-0 flex w-full flex-col", {
   variants: {
     variant: {
       // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）
@@ -344,7 +344,7 @@ function ReasoningTrigger({
           「正在思考」挤成多行。 */}
       <span
         data-slot="reasoning-trigger-label"
-        className="aui-reasoning-trigger-label-wrapper shrink-0 whitespace-nowrap leading-none"
+        className="aui-reasoning-trigger-label-wrapper shrink-0 whitespace-nowrap"
       >
         {thinkingMessage}
       </span>
@@ -473,7 +473,9 @@ function ReasoningText({
       ref={scrollRef}
       data-slot="reasoning-text"
       className={cn(
-        "aui-reasoning-text relative z-0 max-h-[240px] overflow-y-auto pe-1 ps-6 pt-2 pb-2 leading-relaxed text-pretty",
+        // ZCode 实测：内容容器 pt-3、正文 14/21（text-ui-base 继承行高）；
+        // 旧值 leading-relaxed（22.75px）+ pt-2/pb-2 比 ZCode 松。
+        "aui-reasoning-text relative z-0 max-h-[240px] overflow-y-auto pe-1 ps-6 pt-3 text-[14px] leading-[21px] text-pretty",
         "transform-gpu transition-[transform,opacity] ease-[cubic-bezier(0.32,0.72,0,1)]",
         "motion-reduce:animate-none",
         "group-data-open/collapsible-content:animate-in",

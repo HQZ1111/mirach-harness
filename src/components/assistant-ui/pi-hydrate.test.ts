@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { convertTurnMessage, hydratePiMessages } from './pi-hydrate'
+import { convertTurnMessage, hydratePiMessages, usageFromPiMessages } from './pi-hydrate'
 import type { TurnMessage, TurnPart } from './turn-actor'
 
 const user = (text: string, timestamp: number) => ({ role: 'user', content: text, timestamp })
@@ -181,5 +181,59 @@ describe('convertTurnMessage：投影到 assistant-ui', () => {
   it('无 createdAt 的实时消息不带 metadata', () => {
     const converted = convertTurnMessage({ id: 'run-1', role: 'assistant', content: '' })
     expect(converted.metadata).toBeUndefined()
+  })
+})
+
+describe('usageFromPiMessages：历史会话的上下文用量', () => {
+  const assistant = (usage: Record<string, unknown>) => ({
+    kind: 'message',
+    role: 'assistant',
+    content: [],
+    usage,
+    timestamp: 1000,
+  })
+
+  it('取最后一条 assistant 的 usage（input/output/cacheRead/cacheWrite/total + cost）', () => {
+    const usage = usageFromPiMessages([
+      assistant({
+        input: 10,
+        output: 2,
+        cacheRead: 3,
+        cacheWrite: 4,
+        totalTokens: 19,
+        cost: { total: 0.5 },
+      }),
+      { kind: 'message', role: 'user', content: [] },
+      assistant({
+        input: 100,
+        output: 20,
+        cacheRead: 30,
+        cacheWrite: 40,
+        totalTokens: 190,
+        cost: { total: 1.25 },
+      }),
+    ])
+    expect(usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedInputTokens: 30,
+      cacheWriteTokens: 40,
+      totalTokens: 190,
+      costUsd: 1.25,
+    })
+  })
+
+  it('全零 usage 返回 null（provider 没回传，不把 0 当真实用量）', () => {
+    expect(
+      usageFromPiMessages([
+        assistant({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }),
+      ]),
+    ).toBeNull()
+  })
+
+  it('没有 assistant / 没有 usage 返回 null', () => {
+    expect(usageFromPiMessages([])).toBeNull()
+    expect(usageFromPiMessages([{ role: 'user', content: [] }])).toBeNull()
+    expect(usageFromPiMessages([{ role: 'assistant', content: [] }])).toBeNull()
   })
 })

@@ -23,7 +23,7 @@ import { useActorRef, useSelector } from '@xstate/react'
 import { useStore } from 'zustand'
 
 import { turnMachine, type TurnContext, type TurnMessage, type TurnUsage } from './turn-actor'
-import { convertTurnMessage, hydratePiMessages } from './pi-hydrate'
+import { convertTurnMessage, hydratePiMessages, usageFromPiMessages } from './pi-hydrate'
 import { approvalBridge } from './approval-bridge'
 import {
   branchBridge,
@@ -468,7 +468,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           if (st?.sessionId) {
             const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
             if (cancelled) return
-            actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+            actorRef.send({
+              type: 'HYDRATE',
+              messages: hydratePiMessages(history ?? []),
+              usage: usageFromPiMessages(history ?? []),
+            })
             // 滚动位置恢复请求（挂载水合成功路径）：视口（thread.aui 侧）
             // 消费后按持久化位置恢复阅读位
             threadScrollBridge.getState().requestRestore(st.sessionId)

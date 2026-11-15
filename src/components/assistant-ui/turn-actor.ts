@@ -182,7 +182,7 @@ export type TurnEvent =
   /** 新会话（New Chat）：清空全部轮次态（§7-4 会话切换） */
   | { type: 'RESET' }
   /** 打开历史会话：注入 pi 会话历史（真相在 pi，机器只收投影快照） */
-  | { type: 'HYDRATE'; messages: TurnMessage[] }
+  | { type: 'HYDRATE'; messages: TurnMessage[]; usage?: TurnUsage | null }
   /** 用户中断已成功（pi_interrupt IPC 返回后）——置 interrupted 标记，
    * run 结束后 StoppedRun 据此展示中断态 */
   | { type: 'CANCEL_MARK' }
@@ -495,12 +495,13 @@ export const turnMachine = setup({
     })),
     hydrate: assign(({ event }) => {
       if (event.type !== 'HYDRATE') return {}
-      // 历史会话的用量未知——pi_get_messages 的消息 usage 后续可聚合
+      // 历史会话的用量 = pi 最后一条 assistant 的 usage（runtime 用
+      // usageFromPiMessages 提取；provider 未回传时为 null）。
       return {
         messages: event.messages,
         currentRunId: null,
         error: null,
-        usage: null,
+        usage: event.usage ?? null,
         compaction: null,
         interrupted: false,
       }

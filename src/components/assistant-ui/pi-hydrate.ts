@@ -24,7 +24,7 @@
  * 是两条路径的共用出口。
  */
 import type { ThreadMessageLike } from '@assistant-ui/react'
-import type { TurnMessage, TurnPart } from './turn-actor'
+import type { TurnMessage, TurnPart, TurnUsage } from './turn-actor'
 
 const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
@@ -161,6 +161,50 @@ function closeOpenTextParts(parts: TurnPart[], endedAt: number): void {
     if (part.completedAt !== undefined) continue
     parts[i] = { ...part, completedAt: endedAt }
   }
+}
+
+/** 历史消息 → ContextDisplay 的用量快照：取**最后一条带非零 usage 的
+ *  assistant**（pi 每条 assistant 都带 usage；input 已含历史，最后一条即
+ *  当前上下文规模）。全零 = provider 没回传用量（DS 代理实测），返回 null，
+ *  不把 0 当真实用量展示。
+ *
+ *  RUN_FINISHED.usage 的字段口径见 agui.rs：input/output/cacheRead/cacheWrite/
+ *  totalTokens 原样映射；costUsd 取 cost.total。 */
+export function usageFromPiMessages(
+  messages: readonly unknown[],
+): TurnUsage | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const record = messages[i]
+    if (typeof record !== 'object' || record === null) continue
+    const msg = record as Record<string, unknown>
+    if (msg.role !== 'assistant') continue
+    const raw = msg.usage
+    if (typeof raw !== 'object' || raw === null) continue
+    const u = raw as Record<string, unknown>
+    const num = (key: string): number | undefined =>
+      typeof u[key] === 'number' ? (u[key] as number) : undefined
+    const cost =
+      typeof u.cost === 'object' && u.cost !== null
+        ? (u.cost as Record<string, unknown>).total
+        : undefined
+    const usage: TurnUsage = {
+      inputTokens: num('input'),
+      outputTokens: num('output'),
+      cachedInputTokens: num('cacheRead'),
+      cacheWriteTokens: num('cacheWrite'),
+      totalTokens: num('totalTokens'),
+      ...(typeof cost === 'number' ? { costUsd: cost } : {}),
+    }
+    const nonZero = [
+      usage.inputTokens,
+      usage.outputTokens,
+      usage.cachedInputTokens,
+      usage.cacheWriteTokens,
+      usage.totalTokens,
+    ].some((n) => (n ?? 0) > 0)
+    return nonZero ? usage : null
+  }
+  return null
 }
 
 /** pi Message JSON → 聊天投影（真相在 pi）——**模块级纯函数**（会话静态

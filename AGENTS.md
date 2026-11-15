@@ -2531,8 +2531,24 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
     **控件 28×28**：附件/上下文/模型触发器圆角 8（非胶囊），语音/发送圆形；
     模型触发器 14px 字、padding 0 6 0 8；工具行 gap 4。
   - 「工作中」= ChatLoadingOrbs（105 点球面→Z 字形，8240ms）。
-  - 图标线宽 lucide **1.5**（本工程根字号 15px，`size-6/7/8` 分别只有
+  - **思考正文 = 纯文本**（ZCode `reasoning.tsx`：`whitespace-pre-wrap`，
+    `text-ui-base` 14/21；**不要套 MarkdownText**——段落会吃到 `p` 的
+    mb16 + leading-24.5，用户实报"思考的内容分段的间距有点大"）。工作区
+    每一行（思考/工具/询问）实测都是 **21px 高、行间 gap 4px**；reasoning
+    根容器必须 `flex flex-col`，否则 inline-flex 触发基线行盒，行高变 25。
+  - **图标线宽 lucide 1.5**（本工程根字号 15px，`size-6/7/8` 分别只有
     22.5/26.25/30px，对 ZCode 的 24/28 全部要写死像素）。
+  - **上下文用量环常驻**：窗口未知（models.json 没写 `contextWindow`）也渲染，
+    环上叠 `?`、弹层写"窗口未知"+ 指向设置；用量从 pi 最后一条带非零 usage
+    的 assistant 提取（`usageFromPiMessages` → `HYDRATE.usage`，历史会话也
+    有数）。**总量唯一来源 = models.json 的 contextWindow**（设置 → 模型 →
+    服务商 表单的「上下文长度」写 models[0]）；ZCode 有自家 registry，rpi 没有，
+    不要编默认值。
+  - **模式芯片只读**：ZCode 四态（计划/变更前确认/自主/完全访问），rpi 只有
+    `rpi-plan-mode` 插件条目（宿主 `set_plan_mode` 恒 Err）与
+    `rpi-permission-gate` 的启动开关（`--permission-gate` /
+    `RPI_PERMISSION_GATE=1`，bash/write/edit 每次经扩展 UI 确认；无运行时
+    切换面）。芯片展示当前真实态，其余态置灰并标注原因——不造假开关。
 - **流式投影铁律**：同一 tool 边界内只保留一个 text part，thinking 一律插到
   该 text part 之前（对齐 pi 落盘 `[thinking, text]`）；否则 live 的
   `text→thinking→text` 会和完成后形状不一致（用户："思考和结论穿插"）。

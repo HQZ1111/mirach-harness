@@ -451,35 +451,52 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
   usage,
   className,
 }) => {
-  if (modelContextWindow <= 0) return null;
   const totalTokens = usage?.totalTokens ?? 0;
   const hasUsage = totalTokens > 0;
+  const windowKnown = modelContextWindow > 0;
   const percent = hasUsage ? getUsagePercent(totalTokens, modelContextWindow) : 0;
   const segments = hasUsage ? getContextSegments(usage) : [];
+  // ZCode 的 aria-label = "上下文已用 825,450 / 总量 1,000,000"。窗口未知
+  // （models.json 没写 contextWindow）时不编造总量，明说"窗口未知"。
+  const usageLabel = windowKnown
+    ? `上下文已用 ${totalTokens.toLocaleString('en-US')} / 总量 ${modelContextWindow.toLocaleString('en-US')}`
+    : `上下文已用 ${totalTokens.toLocaleString('en-US')} / 窗口未知`;
 
   return (
     <Popover align="center" side="top" sideOffset={8}>
       <PopoverTrigger>
         <button
           type="button"
-          aria-label="上下文明细"
+          aria-label={usageLabel}
           className={cn(
-            "text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground grid size-8 place-items-center rounded-full transition-colors",
+            // ZCode 实测（9444）：28×28、圆角 8（不是圆形）。
+            "text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground grid size-[28px] place-items-center rounded-[8px] transition-colors",
             percent > 85 && "text-red-500 dark:text-red-400",
             className,
           )}
         >
-          <RingSvg percent={percent} />
+          <span className="relative grid place-items-center">
+            <RingSvg percent={percent} />
+            {/* 窗口未知时环恒为 0%，看起来像坏掉——叠一个 "?" 明示"总量
+                未知"，同时不编造百分比。 */}
+            {!windowKnown && (
+              <span className="text-muted-foreground absolute text-[9px] leading-none font-medium">
+                ?
+              </span>
+            )}
+          </span>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-56 p-3 text-xs">
         {hasUsage ? (
           <div>
             <div className="flex items-baseline justify-between gap-6 whitespace-nowrap">
-              <span className={getPercentColor(percent)}>{Math.round(percent)}% full</span>
+              <span className={windowKnown ? getPercentColor(percent) : "text-muted-foreground"}>
+                {windowKnown ? `${Math.round(percent)}% full` : "窗口未知"}
+              </span>
               <span className="font-mono tabular-nums">
-                {formatTokenCount(Math.min(totalTokens, modelContextWindow))} /{" "}
-                {formatTokenCount(modelContextWindow)}
+                {formatTokenCount(totalTokens)} /{" "}
+                {windowKnown ? formatTokenCount(modelContextWindow) : "?"}
               </span>
             </div>
             <div className="bg-muted mt-2.5 h-1 overflow-hidden rounded-full">
@@ -507,13 +524,19 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
                 ))}
               </div>
             )}
+            {!windowKnown && (
+              <p className="text-muted-foreground/70 mt-2 text-[11px] leading-4">
+                服务商未配置上下文窗口（models.json 的 contextWindow），
+                无法算占用百分比。
+              </p>
+            )}
           </div>
         ) : (
           <div>
             <div className="flex items-baseline justify-between gap-6 whitespace-nowrap">
               <span className="text-muted-foreground">暂无用量记录</span>
               <span className="font-mono tabular-nums">
-                – / {formatTokenCount(modelContextWindow)}
+                – / {windowKnown ? formatTokenCount(modelContextWindow) : "?"}
               </span>
             </div>
             <p className="text-muted-foreground/70 mt-2 text-[11px] leading-4">

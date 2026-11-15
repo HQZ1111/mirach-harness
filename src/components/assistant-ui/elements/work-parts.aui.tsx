@@ -178,7 +178,11 @@ const ReasoningLeaf: FC = () => {
       <ReasoningTrigger active={streaming} streamingText={part.text} />
       <ReasoningContent aria-busy={streaming}>
         <ReasoningText>
-          <MarkdownText />
+          {/* ZCode 的思考正文是**纯文本 + whitespace-pre-wrap**（reasoning.tsx
+              注释：thought 很长且流式追加，走 Markdown 每 chunk 重解析会卡）。
+              此前这里渲染 MarkdownText，段落被套上 p 的 mb-16 + leading-24.5，
+              用户实报"思考的内容分段的间距有点大"。 */}
+          {part.text}
         </ReasoningText>
       </ReasoningContent>
     </ReasoningRoot>
