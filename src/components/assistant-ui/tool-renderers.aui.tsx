@@ -1,0 +1,516 @@
+"use client";
+
+/**
+ * 工具调用分流：pi 工具部件 → ZCode 式摘要行 + 按需展开正文
+ * （ZCode `ToolCallBlocks/resolveRenderer.ts` + `renderers/*.tsx` 的宿主口径，
+ * 2026-11-15）。
+ *
+ * ## 分流顺序（对照 ZCode resolveToolCallRenderer）
+ *
+ * 1. 子代理委托结果（rpi-subagents 的 `delegate_task`）→ 专用卡；
+ * 2. `subagent` → 子代理行（ZCode agent.tsx 单行形态）；
+ * 3. 工具目录查询 → 搜索行；`submit_plan` → 计划卡（不用摘要行，ZCode 的
+ *    plan-guidance 也是独立卡）；
+ * 4. **todo 工具不渲染**（ZCode `showTodoToolCalls` 默认 false：待办在状态
+ *    面板有专区分区，消息流里重复一条是噪声）；
+ * 5. 按工具名分派：bash（终端）/ read|ls（读取）/ grep|find|ast_grep|lsp
+ *    （搜索）/ edit|hashline_edit|ast_edit|write（更改）/ web_search（搜索卡）；
+ * 6. 其余按 presentation 兜底（图标 + 中文动词 + 目标 chip + 参数/结果）。
+ *
+ * 失败不换卡：状态词「执行失败」红显 + 虚线下划线 tooltip（错误原文可复制），
+ * 正文照常展开（ZCode `showFailureStatus` 同款）。
+ */
+import {
+  useToolCallElapsed,
+  type ToolCallMessagePartComponent,
+  type ToolCallMessagePartProps,
+} from "@assistant-ui/react";
+import {
+  FilePenIcon,
+  FilePlusIcon,
+  FileTextIcon,
+  FolderOpenIcon,
+  GlobeIcon,
+  ListChecksIcon,
+  SearchIcon,
+  SquareTerminalIcon,
+} from "lucide-react";
+import { type ReactNode } from "react";
+import { AgentPlan } from "@/components/assistant-ui/elements/agent-plan";
+import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
+import { DelegationCard, parseDelegationResult } from "@/components/assistant-ui/elements/delegation-card";
+import { SubagentLine } from "@/components/assistant-ui/elements/subagent-line";
+import {
+  ToolBody,
+  ToolDiffStat,
+  ToolSummary,
+} from "@/components/assistant-ui/elements/tool-summary.aui";
+import {
+  WebSearch,
+  type WebSearchResult,
+} from "@/components/assistant-ui/elements/web-search";
+import {
+  diffFilename,
+  diffFromToolResult,
+} from "@/components/assistant-ui/diff-parse";
+import { parsePlanSteps, planReviewState } from "@/components/assistant-ui/plan-parse";
+import {
+  describeToolCall,
+  toolLabelZh,
+} from "@/components/assistant-ui/tool-presentation/tool-presentation";
+import { shortenPath } from "@/components/assistant-ui/tool-presentation/tool-chips";
+
+// ── 形状工具（纯函数，原 thread.aui 内联版迁移）────────────────────────
+
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** pi `ToolOutput` 的序列化形状（tools.rs:303，camelCase）。流式
+ * （agui.rs 原样透传）与水合（pi-hydrate 同形构造）共用。 */
+const isToolOutputLike = (
+  result: unknown,
+): result is { content: unknown[]; details?: unknown; isError?: boolean } =>
+  isPlainRecord(result) && Array.isArray(result.content);
+
+/** 工具结果文本化：ToolOutput 对象拼 content 文本、string 原样、其余 JSON。 */
+export const toolResultText = (result: unknown): string => {
+  if (typeof result === "string") return result;
+  if (result === undefined || result === null) return "";
+  if (isToolOutputLike(result)) {
+    return result.content
+      .map((b) =>
+        typeof b === "string"
+          ? b
+          : typeof (b as { text?: unknown })?.text === "string"
+            ? (b as { text: string }).text
+            : "",
+      )
+      .join("");
+  }
+  try {
+    return JSON.stringify(result, null, 2) ?? String(result);
+  } catch {
+    return String(result);
+  }
+};
+
+/** 类别词（ZCode 各 renderer 的 kindLabel，中文与上游 zh-CN 逐一对照）。 */
+const KIND_LABELS: Record<string, { running: string; done: string }> = {
+  // rpi-tools 的壳工具两个（bash.rs / powershell.rs，Windows 上 powershell
+  // 承担对象操作，两者都是「命令 + 输出」的终端行）
+  bash: { running: "正在执行", done: "已执行" },
+  powershell: { running: "正在执行", done: "已执行" },
+  read: { running: "正在读取", done: "已读取" },
+  image: { running: "正在读取", done: "已读取" },
+  ls: { running: "正在读取", done: "已读取" },
+  grep: { running: "正在搜索", done: "已搜索" },
+  find: { running: "正在搜索", done: "已搜索" },
+  ast_grep: { running: "正在搜索", done: "已搜索" },
+  lsp: { running: "正在搜索", done: "已搜索" },
+  web_search: { running: "正在搜索", done: "已搜索" },
+  edit: { running: "正在编辑", done: "已编辑" },
+  hashline_edit: { running: "正在编辑", done: "已编辑" },
+  ast_edit: { running: "正在编辑", done: "已编辑" },
+  write: { running: "正在写入", done: "已写入" },
+};
+
+const stringArg = (args: unknown, ...keys: string[]): string | undefined => {
+  if (!isPlainRecord(args)) return undefined;
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+};
+
+/** web_search 结果严格解析（数组或 {results:[...]}；任何一项不符整体 null）。 */
+const parseWebSearchResults = (result: unknown): readonly WebSearchResult[] | null => {
+  let items: unknown = result;
+  if (typeof result === "string") {
+    try {
+      items = JSON.parse(result);
+    } catch {
+      return null;
+    }
+  }
+  if (isPlainRecord(items) && items.results !== undefined) items = items.results;
+  if (!Array.isArray(items)) return null;
+  const out: WebSearchResult[] = [];
+  for (const item of items) {
+    if (!isPlainRecord(item)) return null;
+    const title =
+      typeof item.title === "string" && item.title
+        ? item.title
+        : typeof item.url === "string"
+          ? item.url
+          : null;
+    if (!title) return null;
+    let domain = typeof item.domain === "string" && item.domain ? item.domain : null;
+    if (!domain && typeof item.url === "string") {
+      try {
+        domain = new URL(item.url).hostname;
+      } catch {
+        domain = null;
+      }
+    }
+    if (!domain) return null;
+    out.push({ title, domain });
+  }
+  return out;
+};
+
+// ── 正文块 ──────────────────────────────────────────────────────────
+
+const CommandLine: React.FC<{ command: string }> = ({ command }) => (
+  <div className="bg-muted/40 rounded-lg px-2.5 py-1.5 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
+    <span className="text-muted-foreground/60 select-none">$ </span>
+    {command}
+  </div>
+);
+
+const OutputBlock: React.FC<{ text: string; running: boolean }> = ({
+  text,
+  running,
+}) => {
+  if (text.length === 0) {
+    if (running) {
+      return (
+        <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+          <span className="bg-muted-foreground/60 size-1.5 animate-pulse rounded-full" />
+          等待输出…
+        </p>
+      );
+    }
+    return <p className="text-muted-foreground text-xs">没有输出。</p>;
+  }
+  return (
+    <pre
+      data-slot="aui_tool-output"
+      data-running={running ? "1" : "0"}
+      className="text-foreground/80 max-h-72 overflow-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap"
+    >
+      {text}
+    </pre>
+  );
+};
+
+/** 参数表（ZCode fallback 的 ParameterValue：扁平对象用两列 dl）。 */
+const ParamsBlock: React.FC<{ args: unknown }> = ({ args }) => {
+  if (args === undefined) return null;
+  const entries = isPlainRecord(args) ? Object.entries(args) : null;
+  if (entries !== null && entries.length === 0) return null;
+  if (
+    entries !== null &&
+    entries.every(([, value]) => value === null || typeof value !== "object")
+  ) {
+    return (
+      <dl className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-1 text-xs">
+        {entries.map(([key, value]) => (
+          <div key={key} className="contents">
+            <dt className="text-muted-foreground min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {key}
+            </dt>
+            <dd className="min-w-0 font-mono whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {typeof value === "string" ? value : (JSON.stringify(value) ?? String(value))}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  return (
+    <pre className="text-foreground/80 max-h-60 overflow-auto font-mono text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">
+      {JSON.stringify(args, null, 2)}
+    </pre>
+  );
+};
+
+const ResultBlock: React.FC<{ result: unknown; failed: boolean }> = ({
+  result,
+  failed,
+}) => {
+  const text = toolResultText(result);
+  if (text.length === 0) return null;
+  return (
+    <pre
+      data-slot="aui_tool-result"
+      className={
+        failed
+          ? "max-h-60 overflow-auto font-mono text-xs whitespace-pre-wrap text-red-600 dark:text-red-400"
+          : "text-foreground/80 max-h-60 overflow-auto font-mono text-xs whitespace-pre-wrap [overflow-wrap:anywhere]"
+      }
+    >
+      {text}
+    </pre>
+  );
+};
+
+// ── 通用摘要行 ──────────────────────────────────────────────────────
+
+interface RowModel {
+  toolId: string;
+  running: boolean;
+  failed: boolean;
+  statusLabel: string | undefined;
+  errorText: string | undefined;
+}
+
+const buildRowModel = (
+  part: ToolCallMessagePartProps,
+  elapsedMs: number | undefined,
+): RowModel => {
+  const statusType = part.status?.type;
+  const failed = part.isError === true || statusType === "incomplete";
+  const errorText = failed ? toolResultText(part.result) || undefined : undefined;
+  // 状态词只在「失败 / 等待审批 / 运行中耗时」出现——ZCode 的
+  // `showStatusLabel` 默认 false：成功态由类别词的时态表达（已执行），
+  // 再挂一个「已执行」就是同一句话说两遍。
+  const statusLabel = failed
+    ? "执行失败"
+    : statusType === "requires-action"
+      ? "等待中"
+      : statusType === "running" && elapsedMs !== undefined
+        ? `${(elapsedMs / 1000).toFixed(1)}s`
+        : undefined;
+  return {
+    toolId: part.toolCallId,
+    running: statusType === "running",
+    failed,
+    statusLabel,
+    errorText,
+  };
+};
+
+/** 计划卡（ZCode plan-guidance 独立卡）：步骤来自 pi 的自由文本计划。 */
+const PlanCard: React.FC<{
+  steps: readonly string[];
+  result: unknown;
+}> = ({ steps, result }) => {
+  // pi 没有「第几步在跑」的信息：未审完 → 全部待办（activeIndex 0 会让首步
+  // 显示为进行中，语义不符）；审完 → 全部完成。
+  const activeIndex = planReviewState(result) === "auto_approved" ? steps.length : 0;
+  return (
+    <AgentPlan
+      steps={steps}
+      activeIndex={activeIndex}
+      data-slot="aui-submit-plan"
+      className="max-w-none"
+    />
+  );
+};
+
+// ── 分流 ────────────────────────────────────────────────────────────
+
+export const PiToolUI: ToolCallMessagePartComponent = (part) => {
+  const { toolName, args, result, status } = part;
+  const running = status?.type === "running";
+  const elapsedMs = useToolCallElapsed();
+  const row = buildRowModel(part, elapsedMs);
+
+  // 1. 子代理委托结果（结果里带 rpi-delegation JSON）→ 专用卡
+  const delegation = parseDelegationResult(result);
+  if (delegation !== null) {
+    return <DelegationCard result={delegation} running={running} />;
+  }
+
+  // 2. subagent 工具 → 子代理行
+  if (toolName === "subagent") {
+    return (
+      <SubagentLine
+        args={isPlainRecord(args) ? args : undefined}
+        result={result}
+        isError={row.failed}
+        running={running}
+        toolId={row.toolId}
+      />
+    );
+  }
+
+  // 3. submit_plan → 计划卡（步骤解析失败落回摘要行）
+  if (toolName === "submit_plan") {
+    const plan = stringArg(args, "plan");
+    const parsed = parsePlanSteps(plan);
+    if (parsed !== null) {
+      return <PlanCard steps={parsed.steps} result={result} />;
+    }
+  }
+
+  // 4. todo 工具不在消息流渲染（状态面板有待办分区）
+  if (toolName === "todo") return null;
+
+  const kind = KIND_LABELS[toolName];
+  const pres = describeToolCall({
+    name: toolName,
+    args,
+    status: running ? "running" : "success",
+  });
+  const kindLabel = kind ? (running ? kind.running : kind.done) : toolLabelZh(pres.phrase, running);
+
+  const summary = (opts: {
+    icon: ReactNode;
+    primaryText?: ReactNode;
+    secondaryText?: ReactNode;
+    hideSecondaryWhenOpen?: boolean;
+    diffCount?: ReactNode;
+    canToggle: boolean;
+    content?: ReactNode;
+  }) => (
+    <ToolSummary
+      toolId={row.toolId}
+      toolName={toolName}
+      icon={opts.icon}
+      kindLabel={kindLabel}
+      primaryText={opts.primaryText}
+      secondaryText={opts.secondaryText}
+      hideSecondaryWhenOpen={opts.hideSecondaryWhenOpen}
+      diffCount={opts.diffCount}
+      statusLabel={row.statusLabel}
+      failed={row.failed}
+      statusTooltip={row.errorText}
+      running={row.running}
+      canToggle={opts.canToggle}
+      title={pres.label}
+      content={opts.content}
+    />
+  );
+
+  // 5a. bash / powershell → 终端行（类别词 + 命令；正文 = 命令 + 输出）
+  if (toolName === "bash" || toolName === "powershell") {
+    const command = stringArg(args, "command");
+    if (command !== undefined) {
+      const text = toolResultText(result);
+      return summary({
+        icon: <SquareTerminalIcon />,
+        secondaryText: command,
+        hideSecondaryWhenOpen: true,
+        canToggle: true,
+        content: (
+          <ToolBody>
+            <CommandLine command={command} />
+            <OutputBlock text={text} running={running} />
+          </ToolBody>
+        ),
+      });
+    }
+  }
+
+  // 5b. read / ls / image → 只读行（ZCode read 不可展开：正文在侧栏文件预览）
+  if (toolName === "read" || toolName === "ls" || toolName === "image") {
+    const path = stringArg(args, "path", "file_path", "filePath");
+    return summary({
+      icon: toolName === "ls" ? <FolderOpenIcon /> : <FileTextIcon />,
+      primaryText: path ? shortenPath(path) : undefined,
+      canToggle: false,
+    });
+  }
+
+  // 5c. grep / find / ast_grep / lsp → 搜索行（不可展开，摘要即全部）
+  if (["grep", "find", "ast_grep", "lsp"].includes(toolName)) {
+    const query = stringArg(args, "pattern", "query", "glob", "symbol");
+    return summary({
+      icon: <SearchIcon />,
+      primaryText: query,
+      canToggle: false,
+    });
+  }
+
+  // 5d. 写文件类 → 更改行（文件 chip + diff 计数；正文 = diff / 参数 + 结果）
+  const diff = diffFromToolResult(toolName, result);
+  if (["edit", "hashline_edit", "ast_edit", "write"].includes(toolName)) {
+    const path = stringArg(args, "path", "file_path", "filePath");
+    return summary({
+      icon: toolName === "write" ? <FilePlusIcon /> : <FilePenIcon />,
+      primaryText: path ? shortenPath(path) : undefined,
+      diffCount:
+        diff === null ? undefined : (
+          <ToolDiffStat added={diff.additions} removed={diff.deletions} />
+        ),
+      canToggle: true,
+      content: (
+        <ToolBody>
+          {diff !== null ? (
+            <CodeDiff
+              filename={diffFilename(args)}
+              additions={diff.additions}
+              deletions={diff.deletions}
+              lines={diff.lines}
+              cycle={0}
+              className="max-w-none"
+            />
+          ) : (
+            <>
+              <ParamsBlock args={args} />
+              <ResultBlock result={result} failed={row.failed} />
+            </>
+          )}
+        </ToolBody>
+      ),
+    });
+  }
+
+  // 5e. web_search → 搜索卡（结果解析失败落回参数/结果）
+  if (toolName === "web_search") {
+    const query = stringArg(args, "query", "q", "search_query");
+    const results = parseWebSearchResults(toolResultText(result));
+    return summary({
+      icon: <GlobeIcon />,
+      primaryText: query,
+      canToggle: true,
+      content: (
+        <ToolBody>
+          {results !== null || result === undefined ? (
+            <WebSearch
+              query={query ?? ""}
+              results={results ?? []}
+              visibleResults={results?.length ?? 0}
+              searching={running}
+              cycle={0}
+            />
+          ) : (
+            <>
+              <ParamsBlock args={args} />
+              <ResultBlock result={result} failed={row.failed} />
+            </>
+          )}
+        </ToolBody>
+      ),
+    });
+  }
+
+  // 5f. 工具目录查询（ToolSearch/LocalToolSearch：query 为 `select:a,b` 形式）
+  if (toolName === "ToolSearch" || toolName === "LocalToolSearch") {
+    const query = stringArg(args, "query") ?? "";
+    const selection = /^select:(.+)$/i.exec(query);
+    const label = selection
+      ? selection[1]!
+          .split(",")
+          .map((name) => name.trim())
+          .filter(Boolean)
+          .join(", ")
+      : query;
+    return summary({
+      icon: <ListChecksIcon />,
+      primaryText: label || undefined,
+      canToggle: false,
+    });
+  }
+
+  // 6. 兜底：presentation 动词 + 目标 chip + 参数/结果（ZCode FallbackToolCallBlock）
+  const PresIcon = pres.icon;
+  return summary({
+    icon: <PresIcon />,
+    primaryText: pres.chip,
+    canToggle: args !== undefined || result !== undefined,
+    content: (
+      <ToolBody>
+        <ParamsBlock args={args} />
+        <ResultBlock result={result} failed={row.failed} />
+        {args === undefined && result === undefined ? (
+          <p className="text-muted-foreground text-xs">
+            {running ? "等待结果" : "暂无结果"}
+          </p>
+        ) : null}
+      </ToolBody>
+    ),
+  });
+};

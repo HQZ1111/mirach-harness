@@ -23,11 +23,13 @@ import { describeToolCall, toolLabelZh } from "./tool-presentation/tool-presenta
 export type ToolFamily = "explore" | "execute" | "changes" | "other";
 
 /** pi 工具名 → ZCode 的 identity.family（只列分组需要的那几族）。 */
-const FILE_READ = new Set(["read", "ls"]);
+const FILE_READ = new Set(["read", "ls", "image"]);
 const SEARCH = new Set(["grep", "find", "ast_grep", "lsp"]);
 const WEB_FETCH = new Set(["web_search"]);
 const FILE_WRITE = new Set(["write", "edit", "hashline_edit", "ast_edit"]);
-const SHELL = new Set(["bash"]);
+// rpi-tools 的壳工具两个：bash.rs / powershell.rs（Windows 上后者承担对象操作）。
+// ZCode 的 shell family 同样覆盖多壳——两者都算「终端」组。
+const SHELL = new Set(["bash", "powershell"]);
 
 type ShellFamily = "file-read" | "search" | "web-fetch" | "file-write" | "shell" | "other";
 

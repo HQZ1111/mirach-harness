@@ -59,6 +59,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
+import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import {
   Bell,
   BookOpen,
@@ -85,6 +86,14 @@ import {
 } from 'lucide-react'
 
 import { activateBundledPlugins, usePluginContributions } from '@/contrib/plugins'
+import { Switch } from '@/components/ui/switch'
+import { SegmentedControl } from '@/components/ui/segmented-control'
+import {
+  loadAppPrefs,
+  updateAppPrefs,
+  type AppPrefs,
+  type KeepAwakeMode,
+} from '@/lib/app-prefs'
 import pkg from '../../../package.json'
 import { inTauri } from '@/lib/tauri-window'
 import { GatewaySettings } from '@/app/settings/gateway-settings'
@@ -859,7 +868,7 @@ const NAV_GROUPS: readonly NavGroup[] = [
         { id: 'custom-endpoints', label: '自定义端点' },
         { id: 'defaults', label: '默认模型' },
       ] },
-      { icon: Brain, id: 'memory', label: '记忆' },
+      { icon: Brain, id: 'memory', label: '记忆与上下文' },
       {
         icon: Globe,
         id: 'browser-control',
@@ -1036,6 +1045,31 @@ function SetPlaceholder({ note }: { note: string }) {
   )
 }
 
+/** 「常规」页的偏好行（标签 + 说明 + 右侧控件）。与 set-acct-field 同构，
+    只是三处重复的卡片行不再复制粘贴。disabled 只用于**确实没有数据面**的
+    项（引擎无该原语）——给死开关加透明度，不伪造可用性。 */
+function SetPrefRow({
+  label,
+  desc,
+  disabled = false,
+  children,
+}: {
+  label: string
+  desc: string
+  disabled?: boolean
+  children: ReactNode
+}) {
+  return (
+    <div className="set-acct-field" style={disabled ? { opacity: 0.55 } : undefined}>
+      <div className="set-acct-field-text">
+        <span className="set-acct-field-label">{label}</span>
+        <p className="set-acct-field-desc">{desc}</p>
+      </div>
+      <div className="set-acct-field-control">{children}</div>
+    </div>
+  )
+}
+
 export function SettingsOverlay({
   onClose,
   variant = 'overlay',
@@ -1140,6 +1174,13 @@ export function SettingsOverlay({
   const [uiTimezone, setUiTimezone] = useState<string>(() => readTimezone())
   // 时区清单在挂载时算一次（Intl.supportedValuesOf 约 400 项，重算无意义）
   const [uiTimezoneOptions] = useState<string[]>(() => timezoneOptions())
+  // ── 应用级偏好（2026-11-15，常规节）：真相在 Rust app-prefs.json ──
+  // null = 载入中；错误可见（描述 IPC 原文），不拿默认值冒充已加载。
+  const [appPrefs, setAppPrefs] = useState<AppPrefs | null>(null)
+  const [appPrefsError, setAppPrefsError] = useState<string | null>(null)
+  const [appPrefsSaved, setAppPrefsSaved] = useState<string | null>(null)
+  // 最大智能体步数输入草稿（与引擎 settings 数字字段分开：这是 app prefs）
+  const [stepsDraft, setStepsDraft] = useState('')
   /** 右栏固定 inset 头的标题（beui Inset header 形态：当前视图名）。
       从 NAV_ITEMS 取——节名只有一个真相源，不在 JSX 里重复写字面值。 */
   const activeSectionLabel =
@@ -1353,6 +1394,56 @@ export function SettingsOverlay({
     setExtraFeedback((prev) => ({ ...prev, [ui]: { saved: null, error: msg } }))
   }, [])
 
+  /** 应用级偏好的合并写（常规节）：成功才更新本地投影（不用乐观值）。
+      失败 → 红条 + console.error，不静默回滚成"看起来成功"。 */
+  const writeAppPrefs = useCallback(
+    (patch: Partial<AppPrefs>, saved: string) => {
+      setAppPrefsError(null)
+      setAppPrefsSaved(null)
+      void updateAppPrefs(patch)
+        .then((next) => {
+          setAppPrefs(next)
+          setAppPrefsSaved(saved)
+        })
+        .catch((e) => {
+          console.error('[app-prefs] 偏好写入失败', patch, e)
+          setAppPrefsError(describeIpcError(e))
+        })
+    },
+    [],
+  )
+
+  /** 最大智能体步数：本地校验后写 app prefs（0 = 不设上限）。 */
+  const commitSteps = useCallback(() => {
+    if (appPrefs === null) return
+    const raw = stepsDraft.trim()
+    const value = Number(raw)
+    if (raw === '' || !Number.isInteger(value) || value < 0 || value > 100000) {
+      setAppPrefsSaved(null)
+      setAppPrefsError('最大智能体步数必须是 0（不设上限）到 100000 之间的整数')
+      return
+    }
+    if (value === appPrefs.maxAgentSteps) return
+    writeAppPrefs({ maxAgentSteps: value }, '已保存：下一次 run 生效')
+  }, [appPrefs, stepsDraft, writeAppPrefs])
+
+  /** 会话存储目录选择（常规节与「会话管理」同写 settings.json 的
+      sessionDir；两个入口读写同一份引擎配置，不另造第二真相）。 */
+  const pickSessionDir = useCallback(async () => {
+    try {
+      const picked = await openDirectoryDialog({
+        directory: true,
+        multiple: false,
+        title: '选择会话存储目录',
+      })
+      if (typeof picked !== 'string' || picked.length === 0) return // 取消 = 无操作
+      await writeKey('sessions', null, K_SESSION_DIR, picked.replace(/\\/g, '/'))
+    } catch (e) {
+      console.error('[settings] 会话目录选择/写入失败', e)
+      rejectExtra('sessions', describeIpcError(e))
+    }
+  }, [writeKey, rejectExtra])
+
   /** 文档被某个非队列路径整体替换后，把四节的"已保存"一并标陈旧（陈旧
       徽标 = 假装成功）。 */
   const clearExtraSaved = useCallback(() => {
@@ -1416,6 +1507,19 @@ export function SettingsOverlay({
       } catch (e) {
         console.error('[pi] 引擎版本获取失败', e)
         if (!cancelled) setEngineVersion(describeIpcError(e))
+      }
+    })()
+    // 应用级偏好（常规节）：与引擎 settings.json 无关的一份独立真相。
+    void (async () => {
+      try {
+        const prefs = await loadAppPrefs()
+        if (!cancelled) {
+          setAppPrefs(prefs)
+          setStepsDraft(String(prefs.maxAgentSteps))
+        }
+      } catch (e) {
+        console.error('[app-prefs] 偏好读取失败', e)
+        if (!cancelled) setAppPrefsError(describeIpcError(e))
       }
     })()
     return () => {
@@ -2036,7 +2140,10 @@ export function SettingsOverlay({
                   </option>
                   {models.map((m) => (
                     <option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
-                      {m.name || m.id} — {m.provider} · {m.contextWindow.toLocaleString()} tokens
+                      {m.name || m.id} — {m.provider} ·{' '}
+                      {typeof m.contextWindow === 'number'
+                        ? `${m.contextWindow.toLocaleString()} tokens`
+                        : '上下文窗口未知'}
                     </option>
                   ))}
                 </select>
@@ -2320,19 +2427,150 @@ export function SettingsOverlay({
           </section>
           )}
 
-          {/* ── 记忆（Agent 控制 / 记忆）：上下文压缩就是 pi 的记忆管理面
-              （compaction 决定"记多久、留多少、怎么摘要"），故旧「压缩」
-              节原样并入本节。结构化段：vendor config.rs:359-371
-              CompactionSettings + 顶层 compaction_mode，config.rs:231-234/
-              1085-1089；枚举值见 compaction.rs 的 serde 表示——开关/
-              数字/枚举，逐笔组装完整文档整体写回。 ── */}
+          {/* ── 记忆与上下文（Agent 控制）：hermes「Memory & Context」整节的
+              移植（2026-11-15 用户要求，结构/字段/默认值照抄 hermes
+              settings/constants.ts 的 memory 段与 memory/ 子目录）。
+
+              映射真相（不造假）：
+                · 持久记忆 / 用户档案 / 记忆提供方 / 预算 / 外部提供方连接
+                  —— rpi 内核没有持久记忆原语（无 memory 工具、插件库也没有
+                  memory 包，MEMORY.md/USER.md 不存在），整组按 hermes 结构
+                  保留并禁用，每行写清缺什么。
+                · 上下文引擎（compressor/default/custom）—— rpi 只有压缩器
+                  一种实现，固定只读。
+                · 自动压缩 / 预留空间 / 保留近期 tokens / 摘要形态 —— rpi
+                  compaction 真实字段，可写（原「压缩」节内容，保留在
+                  「引擎实现」小节）。
+                · hermes 的百分比阈值 / target_ratio / protect_last_n /
+                  Codex 自动提高 / 压缩模型超时 —— rpi 用绝对 token 数表达
+                  且无独立压缩模型，禁用并说明替代字段。 ── */}
           {activeSection === 'memory' && (
           <section className="set-section">
-            <h4 className="set-sub-title">上下文压缩</h4>
+            <h4 className="set-sub-title">记忆层</h4>
             <p className="set-hint">
-              上下文逼近模型上限时 pi 自动压缩历史。改动写入 settings.json 的{' '}
-              <span className="set-code">compaction</span> 对象与顶层{' '}
-              <span className="set-code">compaction_mode</span>；未设置的键 = pi
+              hermes 的持久记忆（MEMORY.md / USER.md + 外部记忆提供方）在 rpi
+              引擎里没有对应原语：rpi 只有会话历史与压缩器，没有 memory 工具
+              或记忆提供方协议。下组按 hermes 的字段面完整保留，禁用状态即
+              引擎现状——不是隐藏，也不是假开关。
+            </p>
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <SetPrefRow
+                  label="当前记忆提供方"
+                  desc="hermes 读取 GET /api/memory 判断当前记忆提供方是否就绪；宿主没有该接口。"
+                >
+                  <span className="set-row-miss">无 — 仅内置记忆（rpi 无记忆提供方）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  label="内置层"
+                  desc="hermes 的内置记忆层（MEMORY.md / USER.md，默认开启）；rpi 会话构建不读取任何记忆文件。"
+                >
+                  <span className="set-row-miss">不可用</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="记忆提供方"
+                  desc="hermes 支持内置与外部提供方（mem0 等，经 gateway + OAuth）；rpi 无该协议面。"
+                >
+                  <span className="set-code">内置（不可用）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="持久记忆"
+                  desc="hermes：保存可跨会话复用的长期记忆。rpi 无 memory 工具，无法自动写入。"
+                >
+                  <Switch aria-label="持久记忆" disabled />
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="用户档案"
+                  desc="hermes：维护用户偏好档案。rpi 无对应存储与注入面。"
+                >
+                  <Switch aria-label="用户档案" disabled />
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="记忆预算"
+                  desc="hermes 默认 2200 字符；记忆层不可用，故无预算可配。"
+                >
+                  <span className="set-code">2200（hermes 默认）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="档案预算"
+                  desc="hermes 默认 1375 字符；档案层不可用，故无预算可配。"
+                >
+                  <span className="set-code">1375（hermes 默认）</span>
+                </SetPrefRow>
+              </div>
+            </div>
+
+            <h4 className="set-sub-title">上下文</h4>
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <SetPrefRow
+                  label="上下文引擎"
+                  desc="hermes 可选 compressor / default / custom；rpi 只有压缩器一种实现。"
+                >
+                  <span className="set-code">compressor（固定）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  label="自动压缩"
+                  desc="上下文逼近模型上限时自动压缩历史（rpi compaction.enabled）。"
+                >
+                  {settingsParsed !== null && !('error' in settingsParsed) ? (
+                    <SetBoolField
+                      onWrite={(v) => writeCompactionKey(K_ENABLED, v)}
+                      read={readField(settingsParsed.doc, 'compaction', K_ENABLED)}
+                      unsetLabel="未设置（默认：启用）"
+                    />
+                  ) : (
+                    <span className="set-hint">settings.json 解析失败，见「安全与数据 · 安全」。</span>
+                  )}
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="压缩阈值"
+                  desc="hermes 是上下文窗口百分比（默认 0.50）；rpi 用绝对 reserve_tokens 表达同一个触发点，见下方引擎字段。"
+                >
+                  <span className="set-code">50%（hermes 默认）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="压缩目标"
+                  desc="hermes target_ratio（默认 0.20，压低到窗口的 20%）；rpi 无该比例参数，摘要长度由模型预算决定。"
+                >
+                  <span className="set-code">0.20（hermes 默认）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="保护近期消息"
+                  desc="hermes protect_last_n（默认 20 条）；rpi 用 keep_recent_tokens 保护近期内容（按 token 而非条数），见下方引擎字段。"
+                >
+                  <span className="set-code">20 条（hermes 默认）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="Codex 压缩自动提高"
+                  desc="仅 hermes 的 ChatGPT Codex OAuth 路由；rpi 无该路由与阈值自动提高逻辑。"
+                >
+                  <Switch aria-label="Codex 压缩自动提高" disabled />
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="压缩模型超时"
+                  desc="hermes 的辅助压缩模型调用超时（默认 120 秒）；rpi 压缩复用主模型，没有独立压缩模型与超时。"
+                >
+                  <span className="set-code">120 秒（hermes 默认）</span>
+                </SetPrefRow>
+              </div>
+            </div>
+
+            <h4 className="set-sub-title">引擎实现（rpi compaction 真实字段）</h4>
+            <p className="set-hint">
+              上下两组的阈值/保护窗在 rpi 侧的等价表达。改动写入 settings.json
+              的 <span className="set-code">compaction</span> 对象与顶层{' '}
+              <span className="set-code">compaction_mode</span>；未设置的键 = rpi
               内置默认（enabled 启用、reserve_tokens 16384、
               keep_recent_tokens 20000、mode text、compaction_mode summary）。
             </p>
@@ -2348,14 +2586,7 @@ export function SettingsOverlay({
               )
             ) : settingsParsed !== null && !('error' in settingsParsed) ? (
               <>
-                <SetField name="enabled">
-                  <SetBoolField
-                    onWrite={(v) => writeCompactionKey(K_ENABLED, v)}
-                    read={readField(settingsParsed.doc, 'compaction', K_ENABLED)}
-                    unsetLabel="未设置（默认：启用）"
-                  />
-                </SetField>
-                <SetField name="reserve_tokens" note="压缩前预留的空间（tokens）">
+                <SetField name="reserve_tokens" note="压缩前预留的空间（tokens）——对应 hermes 的压缩阈值：触发点 = 上下文窗口 − 本值">
                   <SetNumField
                     {...numDraftFor('compaction.reserve_tokens')}
                     max={U32_MAX}
@@ -2365,7 +2596,7 @@ export function SettingsOverlay({
                     read={readField(settingsParsed.doc, 'compaction', K_RESERVE_TOKENS)}
                   />
                 </SetField>
-                <SetField name="keep_recent_tokens" note="压缩时保留的近期对话（tokens）">
+                <SetField name="keep_recent_tokens" note="压缩时保留的近期对话（tokens）——对应 hermes 的保护近期消息（按 token 而非条数）">
                   <SetNumField
                     {...numDraftFor('compaction.keep_recent_tokens')}
                     max={U32_MAX}
@@ -2413,6 +2644,7 @@ export function SettingsOverlay({
             {compactionSaved !== null && <span className="set-saved">{compactionSaved}</span>}
           </section>
           )}
+
 
           {/* ── 安全（安全与数据 / 安全）：两块共用一节——
               ①提供方凭据（旧「提供方凭据」节）：pi_auth_status 状态列表；
@@ -3475,7 +3707,12 @@ export function SettingsOverlay({
                （用户 2026-10-25 定稿：偏好卡不要，语言与时区搬到这里）。
                语言只留中文 / 英文；时区默认「使用设备时区」。
                生效范围如实标注：选择持久化 + 驱动 <html lang> 与日期格式，
-               界面文案本身仍是硬编码中文（i18n 未建）。 ── */}
+               界面文案本身仍是硬编码中文（i18n 未建）。
+               下方「启动与窗口 / 电源与快捷键 / 链接 / 智能体限制 / 数据
+               存储 / 引擎固定限制」是 2026-11-15 按 ZCode 常规页选项补齐：
+               可接线的接真行为（app-prefs.json / settings.json sessionDir /
+               引擎 env），引擎编译期常量如实标「固定」，没有原语的项明确
+               禁用并说明原因——不造假开关。 ── */}
           {activeSection === 'general' && (
           <section className="set-section">
             <h4 className="set-sub-title" style={{ margin: 0 }}>偏好</h4>
@@ -3536,6 +3773,246 @@ export function SettingsOverlay({
               语言选择会记住并驱动日期/时间格式与 <code className="set-code">&lt;html lang&gt;</code>；
               界面文案目前仍是中文（宿主 i18n 尚未建立）。
             </p>
+
+            {/* ── 启动与窗口（应用级偏好） ── */}
+            <h4 className="set-sub-title">启动与窗口</h4>
+            {appPrefs === null ? (
+              appPrefsError === null ? (
+                <p className="set-hint">正在读取应用偏好…</p>
+              ) : (
+                <div className="set-err">{appPrefsError}</div>
+              )
+            ) : (
+              <div className="set-acct-card">
+                <div className="set-acct-card-body">
+                  <SetPrefRow
+                    label="启动时恢复上次会话"
+                    desc="启动后自动打开上次的会话；关闭则每次启动都是新会话。"
+                  >
+                    <Switch
+                      aria-label="启动时恢复上次会话"
+                      checked={appPrefs.restoreLastSession}
+                      onCheckedChange={(v) =>
+                        writeAppPrefs({ restoreLastSession: v }, '已保存')
+                      }
+                    />
+                  </SetPrefRow>
+                  <SetPrefRow
+                    label="关闭窗口时隐藏到托盘"
+                    desc="点 ✕ 隐藏到系统托盘；关闭则点 ✕ 直接退出应用。"
+                  >
+                    <Switch
+                      aria-label="关闭窗口时隐藏到托盘"
+                      checked={appPrefs.closeToTray}
+                      onCheckedChange={(v) =>
+                        writeAppPrefs({ closeToTray: v }, '已保存')
+                      }
+                    />
+                  </SetPrefRow>
+                  <SetPrefRow
+                    disabled
+                    label="文件检查点"
+                    desc="rpi 引擎没有文件快照原语：checkpoint_* 只记录会话回滚点，不能撤销文件改动，因此没有可接线的对象。"
+                  >
+                    <Switch aria-label="文件检查点" disabled />
+                  </SetPrefRow>
+                  <SetPrefRow
+                    disabled
+                    label="手机推送通知"
+                    desc="宿主没有移动端 / 推送通道（通知仅本机 OS）。"
+                  >
+                    <Switch aria-label="手机推送通知" disabled />
+                  </SetPrefRow>
+                </div>
+              </div>
+            )}
+
+            {/* ── 电源与快捷键 ── */}
+            <h4 className="set-sub-title">电源与快捷键</h4>
+            {appPrefs !== null && (
+              <div className="set-acct-card">
+                <div className="set-acct-card-body">
+                  <SetPrefRow
+                    label="保持电脑唤醒"
+                    desc="运行期间 = 仅智能体执行任务时阻止系统睡眠；始终 = 应用运行期间一直阻止。"
+                  >
+                    <SegmentedControl<KeepAwakeMode>
+                      onChange={(id) => writeAppPrefs({ keepAwake: id }, '已保存')}
+                      options={[
+                        { id: 'off', label: '关闭' },
+                        { id: 'run', label: '运行期间' },
+                        { id: 'always', label: '始终' },
+                      ]}
+                      sizing="content"
+                      value={appPrefs.keepAwake}
+                    />
+                  </SetPrefRow>
+                  <SetPrefRow
+                    label="禁用 F12 开发者工具"
+                    desc="拦截页面级 F12。发布构建本身不开放开发者工具，该开关主要影响开发构建。"
+                  >
+                    <Switch
+                      aria-label="禁用 F12 开发者工具"
+                      checked={appPrefs.disableF12}
+                      onCheckedChange={(v) =>
+                        writeAppPrefs({ disableF12: v }, '已保存')
+                      }
+                    />
+                  </SetPrefRow>
+                </div>
+              </div>
+            )}
+
+            {/* ── 链接 ── */}
+            <h4 className="set-sub-title">链接</h4>
+            {appPrefs !== null && (
+              <div className="set-acct-card">
+                <div className="set-acct-card-body">
+                  <SetPrefRow
+                    label="始终在外部浏览器打开链接"
+                    desc="http(s) 链接交系统默认浏览器；关闭则维持应用内行为。"
+                  >
+                    <Switch
+                      aria-label="始终在外部浏览器打开链接"
+                      checked={appPrefs.openLinksExternally}
+                      onCheckedChange={(v) =>
+                        writeAppPrefs({ openLinksExternally: v }, '已保存')
+                      }
+                    />
+                  </SetPrefRow>
+                </div>
+              </div>
+            )}
+
+            {/* ── 智能体限制 ── */}
+            <h4 className="set-sub-title">智能体限制</h4>
+            {appPrefs !== null && (
+              <div className="set-acct-card">
+                <div className="set-acct-card-body">
+                  <SetPrefRow
+                    label="最大智能体步数"
+                    desc="单次 run 的智能体步数上限（写入引擎的 RPI_MAX_TURNS_PER_RUN，下一次 run 生效）；0 = 不设上限，默认 100。"
+                  >
+                    <input
+                      aria-label="最大智能体步数"
+                      className="set-input"
+                      min={0}
+                      max={100000}
+                      onBlur={commitSteps}
+                      onChange={(e) => setStepsDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key !== 'Enter') return
+                        e.preventDefault()
+                        commitSteps()
+                      }}
+                      style={{ width: 120 }}
+                      type="number"
+                      value={stepsDraft}
+                    />
+                  </SetPrefRow>
+                  <SetPrefRow
+                    label="API 重试次数"
+                    desc="写入 settings.json 的 retry.maxRetries（与「模型」节同一字段）。"
+                  >
+                    {settingsParsed !== null && !('error' in settingsParsed) ? (
+                      <SetNumField
+                        {...numDraftFor('retry.max_retries')}
+                        max={U32_MAX}
+                        onReject={(msg) => rejectNum('retry', msg)}
+                        onWrite={(v) => writeRetryKey(K_MAX_RETRIES, v)}
+                        placeholder="默认 3"
+                        read={readField(settingsParsed.doc, 'retry', K_MAX_RETRIES)}
+                      />
+                    ) : (
+                      <span className="set-hint">settings.json 解析失败，见「安全与数据 · 安全」。</span>
+                    )}
+                  </SetPrefRow>
+                </div>
+              </div>
+            )}
+            {retryError !== null && <div className="set-err">{retryError}</div>}
+            {retrySaved !== null && <span className="set-saved">{retrySaved}</span>}
+
+            {/* ── 数据存储 ── */}
+            <h4 className="set-sub-title">数据存储</h4>
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <SetPrefRow
+                  label="数据存储路径"
+                  desc="rpi 会话根目录（写入 settings.json 的 sessionDir）。与「会话管理」节同一字段；相对路径相对工作区。"
+                >
+                  <button
+                    aria-label="选择数据存储目录"
+                    className="set-select"
+                    onClick={() => void pickSessionDir()}
+                    style={{ cursor: 'pointer' }}
+                    type="button"
+                  >
+                    选择文件夹…
+                  </button>
+                </SetPrefRow>
+              </div>
+            </div>
+            {settingsParsed !== null && !('error' in settingsParsed) && (
+              <p className="set-hint">
+                当前：
+                <code className="set-code">
+                  {
+                    textFieldView(
+                      readField(settingsParsed.doc, null, K_SESSION_DIR),
+                    ).committed || '默认（<workspace>/.rpi/sessions）'
+                  }
+                </code>
+              </p>
+            )}
+            {extraFeedback.sessions.error !== null && (
+              <div className="set-err">{extraFeedback.sessions.error}</div>
+            )}
+            {extraFeedback.sessions.saved !== null && (
+              <span className="set-saved">{extraFeedback.sessions.saved}</span>
+            )}
+
+            {/* ── 引擎固定限制（只读：rpi 编译期常量，无运行期配置面） ── */}
+            <h4 className="set-sub-title">引擎固定限制</h4>
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <SetPrefRow
+                  disabled
+                  label="终端输出上限"
+                  desc="rpi-tools 的 bash 输出截断常量（truncate.rs DEFAULT_MAX_BYTES），引擎编译期固定。"
+                >
+                  <span className="set-code">50 KB（51200 字节）</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="文件分页上限"
+                  desc="read 工具的 head 截断常量（DEFAULT_MAX_LINES）。"
+                >
+                  <span className="set-code">2000 行</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="行长度上限"
+                  desc="grep 匹配行截断常量（GREP_MAX_LINE_LENGTH，与 ZCode 默认 2000 不同）。"
+                >
+                  <span className="set-code">500 字符</span>
+                </SetPrefRow>
+                <SetPrefRow
+                  disabled
+                  label="检查点上限"
+                  desc="无文件检查点原语；会话检查点（rpi-checkpoints）无数量上限。"
+                >
+                  <span className="set-code">不适用</span>
+                </SetPrefRow>
+              </div>
+            </div>
+
+            {appPrefsError !== null && (
+              <div className="set-err">{appPrefsError}</div>
+            )}
+            {appPrefsSaved !== null && (
+              <span className="set-saved">{appPrefsSaved}</span>
+            )}
           </section>
           )}
 

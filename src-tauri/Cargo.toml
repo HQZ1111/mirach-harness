@@ -28,6 +28,9 @@ rpi-agent = { path = "../../pi-rust-main/crates/rpi-agent" }
 rpi-ai = { path = "../../pi-rust-main/crates/rpi-ai" }
 rpi-harness = { path = "../../pi-rust-main/crates/rpi-harness" }
 rpi-tools = { path = "../../pi-rust-main/crates/rpi-tools" }
+# 应用级偏好（app_prefs.rs）：保持电脑唤醒 = SetThreadExecutionState
+# （Win32_System_Power）。只取这一个 feature，避免把整个 win32 元数据拖进来。
+windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["sync", "time", "net", "macros"] }

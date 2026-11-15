@@ -87,6 +87,11 @@ mod terminal;
 // 窗口几何存档（window-state.json，hermes 语义：尺寸/位置/最大化记忆）
 mod window_state;
 
+// 应用级偏好（2026-11-15）：设置页「常规」里不属于引擎配置的开关——
+// 关窗→托盘 / 保持唤醒 / 启动恢复 / 最大步数。真相在进程内（关窗回调
+// 要同步读），文件 = app_data_dir/app-prefs.json
+mod app_prefs;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -423,6 +428,9 @@ fn wire_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, close_acti
 
     let win = window.clone();
     let app_for_state = app.clone();
+    // 关窗时读应用级偏好（closeToTray）。必须在 setup 里先 manage
+    // AppPrefsState，否则这里会拿到 Err——见 setup 开头。
+    let app_for_close = app.clone();
     let state_gen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     // 用 Arc 包住（`on_window_event` 的回调是 Fn，会被多次调用；直接
     // clone 一个闭包值在 Fn 里是 move-out，E0507）
@@ -452,6 +460,22 @@ fn wire_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, close_acti
     window.on_window_event(move |event| match event {
         WindowEvent::CloseRequested { api, .. } => match close_action {
             CloseAction::HideToTray => {
+                // 设置页「常规 / 关闭窗口时隐藏到托盘」的运行时读取点。
+                // 偏好缺失（极早关窗竞态）时按既有行为隐藏，但必须留痕——
+                // 不静默改行为。
+                let to_tray = match app_prefs::close_to_tray(&app_for_close) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("[close-tray] 偏好读取失败，按默认隐藏处理：{e}");
+                        true
+                    }
+                };
+                if !to_tray {
+                    eprintln!("[close-tray] closeToTray=false → 退出应用");
+                    persist();
+                    app_for_close.exit(0);
+                    return;
+                }
                 eprintln!("[close-tray] CloseRequested fired, preventing + hiding");
                 api.prevent_close();
                 // 立即刷存档（防抖窗口内退出不丢几何）
@@ -1282,6 +1306,10 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
+            // ── 应用级偏好最先进状态 ──
+            // 关窗回调（wire_window）要同步读 closeToTray；保持唤醒的专用
+            // 线程也在这里起步。文件损坏 → setup 失败（不静默重置）。
+            app.manage(app_prefs::init(app.handle())?);
             // ── ⓪ **最先**设 DWM 外观，再动几何 ──
             //
             // `apply_window_chrome`（直角 + 无描边）必须**尽早**调用：
@@ -1439,6 +1467,9 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_agui_endpoint,
+            app_prefs::app_prefs_get,
+            app_prefs::app_prefs_set,
+            app_prefs::app_keep_awake_run,
             pi_open_settings_window,
             pi_close_settings_window,
             pi_get_state,

@@ -8,7 +8,7 @@
  * 各自完整渲染，可独立展开）。摘要逻辑在 `tool-grouping.ts` 的纯函数里
  * （有单测）。子项失败**不**把父级标成失败——父级是阶段容器。
  */
-import { useMemo, type FC, type PropsWithChildren } from "react";
+import { useMemo, useState, type FC, type PropsWithChildren } from "react";
 import {
   ChevronRightIcon,
   FilePenIcon,
@@ -52,20 +52,30 @@ export const ToolFamilyGroup: FC<ToolFamilyGroupProps> = ({
   children,
 }) => {
   const parts = useAuiState((s) => s.message.parts);
+  // ZCode ConsecutiveSummaryGroup：**收起且进行中**才滚动显示最新子动作；
+  // 展开或已结束显示统计（`open ? statistics : …`）。展开时统计用「完成态」
+  // 口径（N 个命令 / N 个文件）——进行中展开看到的是「已进行到哪」，
+  // 不是进行中的单条动作。
+  const [open, setOpen] = useState(false);
 
-  const summary = useMemo(() => {
-    const tools: FamilyChildTool[] = [];
+  const tools = useMemo(() => {
+    const out: FamilyChildTool[] = [];
     for (const index of indices) {
       const part = parts[index];
       if (part?.type !== "tool-call") continue;
-      tools.push({
+      out.push({
         toolName: part.toolName,
         args: part.args,
         statusType: part.status?.type,
       });
     }
-    return buildFamilySummary(family, tools, running);
-  }, [family, parts, indices, running]);
+    return out;
+  }, [parts, indices]);
+
+  const summary = useMemo(
+    () => buildFamilySummary(family, tools, running && !open),
+    [family, tools, running, open],
+  );
 
   const meta = FAMILY_META[family];
 
@@ -73,18 +83,21 @@ export const ToolFamilyGroup: FC<ToolFamilyGroupProps> = ({
     <Collapsible
       data-slot="tool-family-group"
       data-family={family}
+      data-group-running={running ? "1" : "0"}
+      open={open}
+      onOpenChange={setOpen}
       className="aui-tool-family-group group/family w-full"
     >
       <CollapsibleTrigger
         data-slot="tool-family-trigger"
-        className="aui-tool-family-trigger group/trigger flex w-fit max-w-full origin-left items-center gap-2 py-1.5 text-sm transition-[color,scale] active:scale-[0.98]"
+        className="aui-tool-family-trigger group/trigger flex w-fit max-w-full origin-left items-center gap-2 self-start text-sm transition-[color] focus-visible:ring-2 focus-visible:ring-ring"
       >
-        <meta.icon className="size-[var(--size-icon-md)] shrink-0 opacity-60" />
+        <meta.icon className="text-muted-foreground group-hover/trigger:text-foreground size-[var(--size-icon-md)] shrink-0" />
         <span
           data-slot="tool-family-label"
           className={cn(
-            "shrink-0 font-medium whitespace-nowrap",
-            running
+            "shrink-0 font-normal whitespace-nowrap",
+            running && !open
               ? "shimmer motion-reduce:animate-none"
               : "text-muted-foreground",
           )}
@@ -99,10 +112,13 @@ export const ToolFamilyGroup: FC<ToolFamilyGroupProps> = ({
             primaryText={
               <span className="inline-block min-w-max">{summary.text}</span>
             }
-            enabled={running}
+            enabled={running && !open}
           />
         </span>
-        <ChevronRightIcon className="size-[var(--size-icon-md)] shrink-0 opacity-0 transition-[opacity,transform] duration-200 group-hover/trigger:opacity-100 group-data-open/trigger:rotate-90 group-data-open/trigger:opacity-100 motion-reduce:transition-none" />
+        <ChevronRightIcon
+          aria-hidden
+          className="text-muted-foreground/60 size-[var(--size-icon-md)] shrink-0 opacity-0 transition-[opacity,transform] duration-200 group-hover/trigger:opacity-100 group-data-open/trigger:rotate-90 group-data-open/trigger:opacity-100 motion-reduce:transition-none"
+        />
       </CollapsibleTrigger>
       <CollapsibleContent
         data-slot="tool-family-content"
@@ -113,8 +129,16 @@ export const ToolFamilyGroup: FC<ToolFamilyGroupProps> = ({
           "data-closed:fill-mode-forwards data-closed:pointer-events-none",
         )}
       >
-        {/* ZCode：父组内容 = 左导线 + 子工具列表；子项不重复画图标。 */}
-        <div className="border-border/60 mt-1 ms-2 flex flex-col gap-1 border-l ps-3.5">
+        {/* ZCode：父组内容 = 左导线 + 子工具列表；组内子项**不重复画图标**
+            （`[&_[data-summary-leading-icon]]:hidden`），内容限高可滚
+            （`max-h-[calc(16lh+30*var(--spacing))]` → 16 行 + 间距）。 */}
+        <div
+          data-slot="tool-family-children"
+          className={cn(
+            "border-border/60 mt-2 ml-2 flex max-h-[calc(16lh+7.5rem)] flex-col gap-2 overflow-y-auto border-l pl-4",
+            "[&_[data-summary-leading-icon]]:hidden",
+          )}
+        >
           {children}
         </div>
       </CollapsibleContent>

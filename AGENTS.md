@@ -2432,6 +2432,52 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
 - **底栏已撤除**（用户定稿）；**主对话调色层 MainTint 已整体删除**（2026-10-21）。
   `.assistant-thread-pane` 的 `position: relative` 保留（活动面板浮卡需要定位祖先）。
 
+## 2026-11-15 轮次：设置页常规 / 记忆与上下文 / 对话显示 / 新建项目
+
+- **设置页白屏根因（已修）**：`pi_list_models` 漏 `contextWindow` → 默认
+  模型下拉执行 `m.contextWindow.toLocaleString()` 抛 TypeError → 整个设置
+  浮层被 React 卸载。Rust 已补字段；前端对缺失值显示「上下文窗口未知」，
+  不再让单条坏数据显示炸整页。
+- **常规页（ZCode 选项）**：真相 = `<app_data_dir>/app-prefs.json`
+  （`src-tauri/src/app_prefs.rs`，8 单测）。真接线：关窗→托盘（窗口事件
+  运行时读）、保持唤醒（专用线程持 `SetThreadExecutionState`；「运行期间」
+  由 runtime 的 `setRunActive` 信号驱动）、最大智能体步数
+  （`RPI_MAX_TURNS_PER_RUN`，下一次 run 生效）、F12 拦截、http(s) 外链交
+  系统浏览器、数据存储路径（settings.json `sessionDir`，文件夹选择器）。
+  引擎固定项（终端 50KB / 2000 行 / 500 字符 / 检查点）只读如实标注；
+  文件检查点 / 手机推送禁用并写明引擎缺什么。
+- **启动恢复上次会话**：runtime 挂载时**仅当引擎无活动会话**才
+  `pi_open_session(lastSessionPath)`（页面 reload/HMR 时 live 优先）；
+  切会话/新建后由 sessionCatalog 订阅写 lastSessionPath，New Chat 清空。
+- **记忆与上下文（hermes 整节移植）**：导航改名；记忆层（当前/已选提供方、
+  内置层 MEMORY.md/USER.md、持久记忆、用户档案、2200/1375 预算）+ 上下文
+  （compressor、自动压缩、阈值 0.50、target 0.20、protect_last_n 20、
+  Codex 自动提高、压缩超时 120 秒）+ rpi compaction 真实字段。rpi 没有
+  持久记忆/memory 工具/外部提供方协议 → 记忆层与 hermes 特有百分比字段
+  禁用并注明；`compaction.enabled`、`reserveTokens`、`keepRecentTokens`、
+  `mode`、`compactionMode` 真写。
+- **对话显示（ZCode 流程）**：`tool-summary.aui.tsx`（摘要行 + 展开记忆 +
+  running→completed 自动收起 + 收起后 300ms 卸载 children + 失败红字虚线
+  tooltip + Enter/Space）、`tool-renderers.aui.tsx`（bash/powershell 终端行、
+  read/ls/image 只读、grep/find 搜索、edit/write diff、web_search、
+  submit_plan；todo 不进消息流）、`tool-family-group` 分组契约（收起+运行中
+  滚动最新子动作，展开/结束显示统计）、`stream-reveal.ts`（drain 300ms /
+  24 字每帧 / 48ms 提交，`prefers-reduced-motion` 直出）。子代理行复用同一
+  摘要外壳。
+- **新建项目文件夹流程**：ZCode ProjectEditor 语义（选目录 → 保存前
+  `stat` 校验存在且是目录 → 建会话）；`workspace-session-registry.ts` 把
+  跨会话根的新建行登记进 localStorage，`refreshThreads` 合并；取消零副作用；
+  错误写 `sessionWorkspaceStore.error` 且菜单关闭后仍可见；首次选目录把
+  侧栏分组切到「项目」。
+- **跨工作区打开 + writer lease 泄漏（真 bug，已修）**：rpi 的 JSONL writer
+  lease 在 HarnessLive 被替换后仍被引擎内部任务持有——实测 A→B 后切回 A
+  必报 `writer lease is already held`（TUI 用 `set_session` 原地换会话规避，
+  宿主重建 harness 的路径无法释放）。宿主新增 **retired 缓存**：切走/丢弃
+  的 HarnessLive 不 drop，再次打开同路径直接复用；同时 `open_session` 按
+  `<cwd>/.rpi/sessions/<enc>/file.jsonl` 反推工作区 cwd（跨工作区打开）。
+  实测 A→B→A→B→A 五次切换全通。注意：retired 表无上限，进程内打开的会话
+  数 = 常驻 harness 数（每个很小，重启即清）。
+
 ## 已知的环境陷阱
 
 0. **C 盘空间布局（2026-11-14 满盘处置，别再往 C 盘堆缓存）**：C 盘曾只剩
@@ -2475,6 +2521,15 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
     `<style>`，全部静默回退内置值。
 12. **CEF 相关坑已随换栈消失**（不再需要 CEF 二进制同目录、RemoteDebugging、
     `Local State` 清理等）。若将来重新评估 CEF，重读该 runtime crate 的文档。
+13. **vite preview 服务的是 `%TEMP%\mirach-dist`，不是仓库 `dist`**（2026-11-15
+    实锤）：常驻预览命令是 `vite preview --outDir %TEMP%\mirach-dist --port
+    1430`。往仓库 `dist` 构建**不会生效**——页面仍加载旧 hash，改了前端看不到
+    （本次设置页白屏修复因此多绕一轮）。判定：页面 `script[type=module].src`
+    的 hash 是否存在于被服务目录。构建必须带
+    `--outDir "%TEMP%\mirach-dist" --emptyOutDir`。
+14. **改 Rust 后 `cargo build` 会因运行中的 exe 报 os error 5**：先
+    `taskkill /IM mirach-harness.exe /F` 再 build；重启时 WorkingDirectory
+    设为 `src-tauri\target\debug`（CEF/WebView2 依赖文件在同目录）。
 
 ## 架构（详见 `docs/architecture.md`）
 

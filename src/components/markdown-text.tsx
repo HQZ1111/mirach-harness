@@ -18,6 +18,7 @@ import { type FC, memo, useMemo, useRef } from "react";
 import type { TextMessagePartProps } from "@assistant-ui/react";
 
 import { SyntaxHighlighter } from "@/components/shiki/syntax-highlighter";
+import { STREAM_REVEAL_DEFAULTS } from "@/components/assistant-ui/stream-reveal";
 import { cn } from "@/lib/utils";
 
 type MarkdownTextProps = Partial<TextMessagePartProps> & {
@@ -56,6 +57,10 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
       rehypePlugins={[rehypeKatex]}
       className="aui-md"
       components={markdownComponents}
+      // 平滑逐字揭示（stream-animate 参数对齐，见 assistant-ui/stream-reveal.ts）：
+      // 逐字铺开 + 限制提交频率，避免每个 SSE chunk 一次性贴上来、也避免
+      // 每帧重跑 Markdown 解析。prefers-reduced-motion 时框架自动整段直出。
+      smooth={STREAM_REVEAL_DEFAULTS}
       defer
     />
   );

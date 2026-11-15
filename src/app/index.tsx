@@ -5,8 +5,15 @@
  *   - ?win=hud   → app/hud/（骨架已建，待接）
  */
 
+import { AppPrefsBoot } from '@/app/app-prefs-boot'
 import { DockviewShell } from '@/components/layout/dockview-shell'
 
 export function App() {
-  return <DockviewShell />
+  return (
+    <>
+      {/* 应用级偏好守卫（F12 拦截 / 外链外部打开）：不渲染 UI，只装监听。 */}
+      <AppPrefsBoot />
+      <DockviewShell />
+    </>
+  )
 }

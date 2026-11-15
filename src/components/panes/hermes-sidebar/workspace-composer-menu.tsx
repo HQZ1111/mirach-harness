@@ -76,6 +76,9 @@ export function WorkspaceComposerMenu() {
   const activeId = useStore(sessionCatalog, (s) => s.activeId)
   const entries = useStore(sessionCatalog, (s) => s.entries)
   const pendingCwd = useStore(sessionCatalog, (s) => s.pendingCwd)
+  // 新建工作区失败（目录不存在/不可读/pi 报错）必须可见：菜单项点击后
+  // 菜单已关闭，错误只能挂在 chip 行上（不塞回菜单内容里）。
+  const storeError = useStore(sessionWorkspaceStore, (s) => s.error)
   const cwd = sessionProjectCwd(
     activeId ? entries[activeId] : undefined,
     pendingCwd,
@@ -94,6 +97,7 @@ export function WorkspaceComposerMenu() {
 
   // 选择即建会话（见文件头「选择即建会话」）：请求-执行桥，真相在 runtime。
   const createIn = (dir: string) => {
+    setDialogError(null)
     sessionWorkspaceStore.getState().requestCreate(dir)
   }
 
@@ -115,8 +119,10 @@ export function WorkspaceComposerMenu() {
   if (activeId !== null) return null
 
   const title = cwd ? pathLeaf(cwd) : '选择文件夹'
+  const error = dialogError ?? storeError
 
   return (
+    <div className="flex min-w-0 max-w-full flex-col items-start gap-1">
     <ContextMenu align="start" anchor="trigger" side="top" sideOffset={6}>
       <ContextMenuAnchor>
         <button
@@ -159,11 +165,6 @@ export function WorkspaceComposerMenu() {
           </div>
         </div>
         <div className="flex min-h-0 flex-col p-1">
-          {dialogError !== null && (
-            <div role="alert" className="text-destructive px-2 py-2 text-[12px]">
-              {dialogError}
-            </div>
-          )}
           <div className="max-h-60 min-h-0 overflow-y-auto">
             {visible.map((r) => (
               <ContextMenuCheckboxItem
@@ -201,5 +202,17 @@ export function WorkspaceComposerMenu() {
         </div>
       </ContextMenuContent>
     </ContextMenu>
+    {/* 错误挂在 chip 行上而不是菜单内容里：菜单项点击即关闭，塞在里面的
+        错误用户永远看不到（旧实现的可见性缺口）。取消不产生错误。 */}
+    {error !== null && (
+      <div
+        role="alert"
+        data-slot="workspace-composer-error"
+        className="text-destructive max-w-full px-1 text-[12px] leading-snug break-all"
+      >
+        {error}
+      </div>
+    )}
+    </div>
   )
 }

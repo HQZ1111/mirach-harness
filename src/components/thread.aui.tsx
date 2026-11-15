@@ -62,28 +62,10 @@ import { MessageActions, type Reaction } from "@/components/assistant-ui/element
 import { MessageBranches } from "@/components/assistant-ui/elements/message-branches";
 import { MessageTiming, type TimingStat } from "@/components/assistant-ui/elements/message-timing";
 import { StoppedRun } from "@/components/assistant-ui/elements/stopped-run";
-import { TerminalBlock } from "@/components/assistant-ui/elements/terminal-block";
-import { ToolCall } from "@/components/assistant-ui/elements/tool-call";
-import { ToolError } from "@/components/assistant-ui/elements/tool-error";
-import { ToolFallback } from "@/components/assistant-ui/elements/tool-fallback.aui";
-import { WebSearch, type WebSearchResult } from "@/components/assistant-ui/elements/web-search";
+import { PiToolUI } from "@/components/assistant-ui/tool-renderers.aui";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
 import { QuoteBlock } from "@/components/assistant-ui/elements/quote.aui";
 import { MessageStallIndicator } from "@/components/assistant-ui/elements/message-stall-indicator";
-import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
-import { AgentPlan } from "@/components/assistant-ui/elements/agent-plan";
-import {
-  parsePlanSteps,
-  planReviewState,
-} from "@/components/assistant-ui/plan-parse";
-import {
-  describeToolCall,
-  toolLabelZh,
-} from "@/components/assistant-ui/tool-presentation/tool-presentation";
-import {
-  diffFilename,
-  diffFromToolResult,
-} from "@/components/assistant-ui/diff-parse";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -96,8 +78,6 @@ import {
 import { TurnNavigator } from "@/components/assistant-ui/elements/turn-navigator.aui";
 import { SelectionToolbar } from "@/components/assistant-ui/elements/selection-toolbar.aui";
 import { ConversationFind } from "@/components/assistant-ui/elements/conversation-find.aui";
-import { SubagentLine } from "@/components/assistant-ui/elements/subagent-line";
-import { DelegationCard, parseDelegationResult } from "@/components/assistant-ui/elements/delegation-card";
 import { TurnFileSummary } from "@/components/assistant-ui/elements/turn-file-summary";
 import { TimelineMarkerRow, bucketMarkers } from "@/components/assistant-ui/elements/timeline-marker";
 import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-store";
@@ -122,7 +102,6 @@ import {
   unstable_useThreadMessageIds,
   useAui,
   useAuiState,
-  useToolCallElapsed,
   type FileMessagePartComponent,
   type ImageMessagePartComponent,
   type TextMessagePartComponent,
@@ -660,291 +639,12 @@ const CheckpointBar: FC = () => {
   );
 };
 
-// ── 工具渲染分流（pi 默认工具的结构化渲染）────────────────────────────
-// 形状严格解析：args/result 不符时回退通用 ToolFallback——渲染选择非吞错
-// （回退仍完整可见 args/result，不丢信息）。
-
-/** 工具主要参数摘要（bash.command / web_search.query / 路径类优先） */
-const summarizeArgs = (args: unknown): string => {
-  if (args && typeof args === "object" && !Array.isArray(args)) {
-    const a = args as Record<string, unknown>;
-    const primary = a.command ?? a.query ?? a.q ?? a.path ?? a.file ?? a.url;
-    if (typeof primary === "string" && primary) return primary;
-  }
-  try {
-    const s = JSON.stringify(args);
-    if (typeof s === "string") return s.length > 80 ? `${s.slice(0, 80)}…` : s;
-  } catch {
-    // 不可序列化参数走 String()——展示用途，无数据流
-  }
-  return String(args);
-};
-
-/** 工具结果文本化（两种形状都认，2026-11-03 统一后流式与水合都是
- * ToolOutput 对象；字符串是旧投影残留，保留兼容）：
- * - string 原样；
- * - ToolOutput 对象 `{content: blocks, details?, isError}` → blocks 拼文本；
- * - 其余 JSON 格式化（失败 String()）。 */
-const toolResultText = (result: unknown): string => {
-  if (typeof result === "string") return result;
-  if (result === undefined || result === null) return "";
-  if (isToolOutputLike(result)) {
-    return result.content
-      .map((b) =>
-        typeof b === "string"
-          ? b
-          : typeof (b as { text?: unknown })?.text === "string"
-            ? (b as { text: string }).text
-            : "",
-      )
-      .join("");
-  }
-  try {
-    return JSON.stringify(result, null, 2) ?? String(result);
-  } catch {
-    return String(result);
-  }
-};
-
-/** pi `ToolOutput` 的序列化形状（tools.rs:303，camelCase）。流式
- * （agui.rs:318 原样透传）与水合（pi-hydrate 同形构造）共用。 */
-const isToolOutputLike = (
-  result: unknown,
-): result is { content: unknown[]; details?: unknown; isError?: boolean } =>
-  typeof result === "object" &&
-  result !== null &&
-  Array.isArray((result as { content?: unknown }).content);
-
-/** web_search 结果严格解析：数组或 {results:[...]},单项 {title|url,
- * domain|url}；任何一项不符整体返回 null（回退通用渲染） */
-const parseWebSearchResults = (
-  result: unknown,
-): readonly WebSearchResult[] | null => {
-  let items: unknown = result;
-  if (typeof result === "string") {
-    try {
-      items = JSON.parse(result);
-    } catch {
-      return null;
-    }
-  }
-  if (items && typeof items === "object" && !Array.isArray(items)) {
-    const r = (items as { results?: unknown }).results;
-    if (r !== undefined) items = r;
-  }
-  if (!Array.isArray(items)) return null;
-  const out: WebSearchResult[] = [];
-  for (const item of items) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-    const it = item as { title?: unknown; url?: unknown; domain?: unknown };
-    const title =
-      typeof it.title === "string" && it.title
-        ? it.title
-        : typeof it.url === "string"
-          ? it.url
-          : null;
-    if (!title) return null;
-    let domain = typeof it.domain === "string" && it.domain ? it.domain : null;
-    if (!domain && typeof it.url === "string") {
-      try {
-        domain = new URL(it.url).hostname;
-      } catch {
-        domain = null;
-      }
-    }
-    if (!domain) return null;
-    out.push({ title, domain });
-  }
-  return out;
-};
-
-// 通用工具卡（官方 tool-call 元素）：折叠面板 + Request/Result
-const GenericToolCall: FC<{
-  toolName: string;
-  argsText?: string;
-  args: unknown;
-  result: unknown;
-  running: boolean;
-}> = ({ toolName, argsText, args, result, running }) => {
-  const [open, setOpen] = useState(false);
-  // 官方 useToolCallElapsed：读 part.timing，运行中每秒 tick；无 timing
-  // 时 undefined（不显示——不编造时长）。
-  const elapsedMs = useToolCallElapsed();
-  // 工具呈现（openhuman toolPresentation 移植）：真实动词（"读取文件" /
-  // "正在搜索代码"）+ 目标 chip（路径缩短 / URL 清洗）。未知工具走兜底。
-  const pres = describeToolCall({
-    name: toolName,
-    args,
-    status: running ? "running" : "success",
-  });
-  const label = toolLabelZh(pres.phrase, running);
-  const chipText = pres.chip;
-  return (
-    <ToolCall
-      label={label}
-      activeLabel={
-        elapsedMs === undefined
-          ? `正在${label}`
-          : `正在${label} · ${(elapsedMs / 1000).toFixed(1)}s`
-      }
-      query={chipText ?? ""}
-      request={argsText || JSON.stringify(args ?? {}, null, 1)}
-      result={toolResultText(result)}
-      running={running}
-      open={open}
-      onOpenChange={setOpen}
-    />
-  );
-};
-
-// 分流器：isError → tool-error（attempt 1/1，前端不自动重试，Retry/Skip
-// 保持模板的禁用态）；bash → terminal-block；web_search → web-search；
-// 其余 → 通用 tool-call；形状不符 → ToolFallback（官方完整回退，
-// 含 argsText 与审批面）。
-const PiToolUI: ToolCallMessagePartComponent = (part) => {
-  const { toolName, args, result, status, isError, argsText } = part;
-  const running = status?.type === "running";
-
-  // 子代理委托卡（2026-11-15）：rpi-subagents 的 `delegate_task`（以及
-  // orchestrator 的同类结果）在 ToolOutput.content[0].text 里给
-  // `{kind:"rpi-delegation", …}` JSON。**先于 subagent 行与 isError 分流**
-  // ——同一工具跑完后用专用卡（role/status/turns/report/sessionId），
-  // 解析失败（null）照常落到下面的通用路径（不编造字段）。
-  const delegation = parseDelegationResult(result);
-  if (delegation !== null) {
-    return <DelegationCard result={delegation} running={running} />;
-  }
-
-  // subagent（pi 子代理工具，subagents.rs:440）：单行摘要（ZCode agent.tsx
-  // 的 collapsed 形态——bot 图标 + "子代理" + agent 名 + 任务摘要）。ZCode
-  // 不可展开（详情在它的侧栏子会话面板）；宿主没有下钻面，展开 = 看工具
-  // 输出（唯一详情面，不放假下钻）。失败态走行内「失败」字（ZCode 同：
-  // showFailureStatus 在摘要行上，不换错误卡）——**先于 isError 分流**。
-  if (toolName === "subagent") {
-    return (
-      <SubagentLine
-        args={args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined}
-        result={result}
-        isError={isError === true}
-        running={running}
-      />
-    );
-  }
-
-  if (isError === true) {
-    return (
-      <ToolError
-        name={toolName}
-        target={summarizeArgs(args)}
-        message={toolResultText(result)}
-        attempt={1}
-        maxAttempts={1}
-        retrying={false}
-      />
-    );
-  }
-
-  if (toolName === "bash") {
-    const command =
-      args && typeof args === "object" && !Array.isArray(args)
-        ? (args as Record<string, unknown>).command
-        : undefined;
-    // 形状契约：command 为 string、result 为 string / ToolOutput 对象 / 未到
-    // ——其余（畸形容器）回退通用卡
-    if (
-      typeof command === "string" &&
-      (result === undefined || typeof result === "string" || isToolOutputLike(result))
-    ) {
-      const text = toolResultText(result);
-      const lines = text.length > 0 ? text.split("\n") : [];
-      return (
-        <TerminalBlock
-          command={command}
-          lines={lines}
-          visibleCount={lines.length}
-          done={!running}
-        />
-      );
-    }
-    return <ToolFallback {...part} />;
-  }
-
-  // edit / hashline_edit：pi 的 details.diff 是自研格式（+行号/‑行号/上下文），
-  // 解析成官方 code-diff 元素。write 整体覆盖无 diff（回退通用卡，不编造）。
-  const diff = diffFromToolResult(toolName, result);
-  if (diff !== null) {
-    return (
-      <CodeDiff
-        filename={diffFilename(args)}
-        additions={diff.additions}
-        deletions={diff.deletions}
-        lines={diff.lines}
-        cycle={0}
-        className="max-w-none"
-      />
-    );
-  }
-
-  if (toolName === "web_search") {    const query =
-      args && typeof args === "object" && !Array.isArray(args)
-        ? (args as Record<string, unknown>).query ?? (args as Record<string, unknown>).q
-        : undefined;
-    if (typeof query === "string" && query) {
-      // web_search 的结果 JSON 在 content 文本里（ToolOutput 形状经
-      // toolResultText 取文本；两种形状都能解析）
-      const results = parseWebSearchResults(toolResultText(result));
-      // 运行中（result 未到）即可渲染搜索条；结果解析失败回退通用
-      if (results || result === undefined) {
-        return (
-          <WebSearch
-            query={query}
-            results={results ?? []}
-            visibleResults={results?.length ?? 0}
-            searching={running}
-            cycle={0}
-          />
-        );
-      }
-    }
-    return <ToolFallback {...part} />;
-  }
-
-  // submit_plan：pi 的 plan 是自由文本（无结构化步骤数组），按列表标记
-  // 提取步骤；提取不到就回退通用卡（不假装有计划）。
-  if (toolName === "submit_plan") {
-    const planArg =
-      args && typeof args === "object" && !Array.isArray(args)
-        ? (args as Record<string, unknown>).plan
-        : undefined;
-    const parsed = parsePlanSteps(planArg);
-    if (parsed !== null) {
-      const review = planReviewState(result);
-      // pi 没有"第几步在跑"的信息：未审完 → 全部待办（activeIndex 0 表示
-      // 第 0 步进行中会让首步显示转圈，语义不符）；审完 → 全部完成。
-      // agent-plan 的 activeIndex 语义是"已完成数"，故：pending=0（全待办）、
-      // auto_approved=steps.length（全完成）。
-      const activeIndex = review === "auto_approved" ? parsed.steps.length : 0;
-      return (
-        <AgentPlan
-          steps={parsed.steps}
-          activeIndex={activeIndex}
-          data-slot="aui-submit-plan"
-          className="max-w-none"
-        />
-      );
-    }
-  }
-
-  return (
-    <GenericToolCall
-      toolName={toolName}
-      argsText={argsText}
-      args={args}
-      result={result}
-      running={running}
-    />
-  );
-};
+// ── 工具渲染分流 ─────────────────────────────────────────────────────
+// 工具部件的分流与摘要行渲染搬到 `tool-renderers.aui.tsx`（ZCode
+// `ToolCallBlocks/resolveRenderer.ts` + `renderers/*.tsx` 的宿主口径，
+// 2026-11-15）：摘要行（图标/类别词/参数 chip/状态/耗时/diff 计数）
+// + 按需展开正文（命令/输出/参数/结果/diff/搜索卡），失败红显不换卡。
+// `PiToolUI` 仍是 `ToolFallback` 槽位的默认值（注册工具 UI 优先）。
 
 // ── message-timing（官方元素）：run 级 usage 展示。轮次机只归并 run 级
 // 快照（RUN_FINISHED.usage，替换语义——不按消息归并），因此只在最后一条
@@ -1786,8 +1486,10 @@ const RegenerateMenuWired: FC = () => {
 
 const AssistantMessage: FC = () => {
   const {
-    // 工具渲染默认 = PiToolUI 分流（bash/web_search/isError/通用；形状
-    // 不符回退官方 ToolFallback）——消费者传入的 ToolFallback 槽位仍优先
+    // 工具渲染默认 = PiToolUI 分流（ZCode 口径：摘要行 + 按需展开正文，
+    // bash/powershell 终端、read/ls/image 只读行、grep 系搜索行、
+    // edit/write diff、web_search 搜索卡、submit_plan 计划卡、其余
+    // presentation 兜底）——消费者传入的 ToolFallback 槽位仍优先
     ToolFallback: ToolFallbackComponent = PiToolUI,
     ReasoningGroup,
     TaskGroup: TaskGroupComponent,

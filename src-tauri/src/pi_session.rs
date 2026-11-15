@@ -170,6 +170,15 @@ struct EngineShared {
     cwd: PathBuf,
     /// 会话在场态（None = 未创建/已 discard）
     live: Mutex<Option<Arc<HarnessLive>>>,
+    /// 切走/丢弃但**仍持有 writer lease** 的会话（2026-11-15）。
+    ///
+    /// rpi 的 JSONL storage 在 acquire_writer_lease 后，即使 HarnessLive 被
+    /// 替换也仍被引擎内部任务引用（实测：切到 B 再切回 A 必撞 "writer lease
+    /// is already held"）。TUI 用 set_session 原地换会话规避；宿主重建
+    /// harness 的路径无法释放旧 lease，故把旧 HarnessLive 留在本表里复用：
+    /// 再次打开同一路径时直接重新激活，不重新 acquire。进程退出时随 OS
+    /// 句柄一起释放。
+    retired: Mutex<HashMap<PathBuf, Arc<HarnessLive>>>,
     model_line: Mutex<String>,
 }
 
@@ -202,6 +211,31 @@ fn default_workspace() -> PathBuf {
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+/// 会话文件路径 → 它的工作区根。
+///
+/// rpi 的会话布局：`<cwd>/.rpi/sessions/<encoded-cwd>/<ts>_<id>.jsonl`。
+/// 侧栏「选择文件夹」建的会话落在所选 cwd 的会话根里，而 `open_session`
+/// 原先始终用**活动会话的 cwd** 去查——跨工作区切换必然 "No session
+/// found"。形状不符（自定义 sessionDir、旧布局、直接放在根下）→ None，
+/// 调用方沿用活动 cwd（不猜）。
+fn workspace_from_session_path(path: &Path) -> Option<PathBuf> {
+    let sessions = path.parent()?.parent()?; // .../<cwd>/.rpi/sessions
+    if sessions.file_name()? != "sessions" {
+        return None;
+    }
+    let agent_dir = sessions.parent()?;
+    if agent_dir.file_name()? != ".rpi" {
+        return None;
+    }
+    agent_dir.parent().map(Path::to_path_buf)
+}
+
+/// retired 缓存的键：规范化为绝对路径，避免 `C:/x` 与 `C:\x` 被当成两个
+/// 会话。canonicalize 失败（文件刚被删）时保留原样——查不到即未命中。
+fn session_cache_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 impl PiEngine {
     pub fn new() -> Self {
         let approvals = Arc::new(ApprovalRegistry::new());
@@ -211,6 +245,7 @@ impl PiEngine {
                 rt: PiRuntime::new(),
                 cwd: default_workspace(),
                 live: Mutex::new(None),
+                retired: Mutex::new(HashMap::new()),
                 model_line: Mutex::new("引擎待启动".into()),
             }),
             approvals,
@@ -375,11 +410,28 @@ impl PiEngine {
             .lock()
             .map_err(|_| "锁中毒".to_string())?
             .replace(Arc::new(live));
-        if let Some(previous) = previous {
-            previous.reload.ui_dialog.cancel_all();
-        }
+        self.retire_previous(previous)?;
         self.approvals.cleanup();
         self.asks.cleanup();
+        Ok(())
+    }
+
+    /// 把活动会话移入 retired 缓存（不 drop：见 EngineShared::retired 注释）。
+    /// 没有 session_path 的在场态（不应存在）直接丢弃。
+    fn retire_previous(&self, previous: Option<Arc<HarnessLive>>) -> Result<(), String> {
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        previous.reload.ui_dialog.cancel_all();
+        let Some(path) = previous.session_path.clone() else {
+            return Ok(());
+        };
+        let key = session_cache_key(&path);
+        self.shared
+            .retired
+            .lock()
+            .map_err(|_| "retired 会话表锁中毒".to_string())?
+            .insert(key, previous);
         Ok(())
     }
 
@@ -519,7 +571,52 @@ impl PiEngine {
                 }
             });
         }
-        let live = self.build_harness(&self.shared.cwd, Some(path))?;
+        // 之前切走/丢弃的同一会话：重新激活缓存的在场态（lease 仍在我们
+        // 手里，重建会撞 "writer lease is already held"——见 retired 注释）。
+        let cached = self
+            .shared
+            .retired
+            .lock()
+            .map_err(|_| "retired 会话表锁中毒".to_string())?
+            .remove(&session_cache_key(Path::new(path)));
+        if let Some(cached) = cached {
+            let id = self.shared.rt.block_on(async {
+                cached
+                    .harness
+                    .session()
+                    .get_metadata()
+                    .await
+                    .map(|m| m.id)
+                    .map_err(|e| format!("会话元数据读取失败: {e}"))
+            })?;
+            *self
+                .shared
+                .model_line
+                .lock()
+                .map_err(|_| "锁中毒".to_string())? =
+                format!("{}/{}", cached.provider, cached.model_id);
+            // 当前活动会话也要进 retired——否则它被直接 drop，lease 泄漏，
+            // 下次切回它必撞 "already held"（实测切换链 A→B→A→B）。
+            let previous = self
+                .shared
+                .live
+                .lock()
+                .map_err(|_| "锁中毒".to_string())?
+                .replace(cached);
+            self.retire_previous(previous)?;
+            self.approvals.cleanup();
+            self.asks.cleanup();
+            return Ok(id);
+        }
+        // 跨工作区打开（2026-11-15 侧栏「选择文件夹」会话）：rpi 的
+        // `--session <id>` 只在 `default_session_dir(cwd)` 里查找——用活动
+        // 会话的 cwd 去开别的工作区的文件必然 "No session found"。
+        // 会话文件形状 = `<cwd>/.rpi/sessions/<encoded-cwd>/<ts>_<id>.jsonl`，
+        // 反推出它自己的工作区再 build。形状不符（自定义 sessionDir /
+        // 旧布局）→ 继续用活动 cwd（旧行为，错误仍会由引擎传播）。
+        let cwd = workspace_from_session_path(Path::new(path))
+            .unwrap_or_else(|| self.shared.cwd.clone());
+        let live = self.build_harness(&cwd, Some(path))?;
         let id = self.shared.rt.block_on(async {
             match live.harness.session().get_metadata().await {
                 Ok(m) => m.id,
@@ -543,9 +640,9 @@ impl PiEngine {
             .lock()
             .map_err(|_| "锁中毒".to_string())?
             .take();
-        if let Some(previous) = previous {
-            previous.reload.ui_dialog.cancel_all();
-        }
+        // 不 drop：同进程内再次打开该会话必须复用（lease 释放在引擎侧不可
+        // 达），见 EngineShared::retired。
+        self.retire_previous(previous)?;
         self.approvals.cleanup();
         self.asks.cleanup();
         Ok(())
@@ -1013,6 +1110,11 @@ impl PiEngine {
                     "provider": m.provider,
                     "id": m.id,
                     "name": m.name,
+                    // 设置页默认模型列表要显示上下文窗口（模型选择器同用）。
+                    // 2026-11-15 白屏根因：这里漏了该字段 → 前端
+                    // `m.contextWindow.toLocaleString()` 抛 TypeError，
+                    // 整个设置浮层被 React 卸成白屏。
+                    "contextWindow": m.context_window,
                 }));
             }
         }
@@ -1705,7 +1807,9 @@ impl PiEngine {
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
-        *self.shared.live.lock().map_err(|_| "锁中毒".to_string())? = Some(Arc::new(live));
+        // 走 install_live：旧活动会话进 retired（保住 writer lease），
+        // 否则 bot 会话建立后切回旧会话必撞 lease。
+        self.install_live(live)?;
         Ok(id)
     }
 
@@ -2428,5 +2532,39 @@ mod tests {
         // null 值 = Err（前端只会在 cancelled=true 时省略 value）
         assert!(approval_answer_value(&ui, None).is_err());
         assert!(approval_answer_value(&ui, Some(&serde_json::json!("Yes"))).is_ok());
+    }
+
+    #[test]
+    fn workspace_from_session_path_matches_rpi_layout() {
+        let p = Path::new(
+            r"C:\work\proj\.rpi\sessions\--C--work-proj--\2026-01-01T00-00-00-000Z_id.jsonl",
+        );
+        assert_eq!(
+            workspace_from_session_path(p),
+            Some(PathBuf::from(r"C:\work\proj"))
+        );
+    }
+
+    #[test]
+    fn workspace_from_session_path_accepts_home_root() {
+        let p = Path::new(r"C:\Users\a\.rpi\sessions\--C--Users-a--\x.jsonl");
+        assert_eq!(
+            workspace_from_session_path(p),
+            Some(PathBuf::from(r"C:\Users\a"))
+        );
+    }
+
+    #[test]
+    fn workspace_from_session_path_rejects_other_layouts() {
+        // 不是 .rpi/sessions 布局：不猜 cwd（调用方沿用活动 cwd）。
+        assert_eq!(workspace_from_session_path(Path::new(r"C:\tmp\x.jsonl")), None);
+        assert_eq!(
+            workspace_from_session_path(Path::new(r"C:\custom\sessions\--x--\x.jsonl")),
+            None
+        );
+        assert_eq!(
+            workspace_from_session_path(Path::new(r"C:\w\.rpi\sessions\x.jsonl")),
+            None
+        );
     }
 }

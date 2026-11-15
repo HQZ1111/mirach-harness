@@ -847,7 +847,7 @@ mod tests {
     //! 全部同步断言（oneshot 用 try_recv，不依赖 tokio rt feature 进 dev）。
 
     use super::*;
-    use rpi_ai::types::{Api, AssistantMessage, AssistantMessageEvent, Usage};
+    use rpi_ai::types::{Api, AssistantMessage, AssistantMessageEvent};
     use rpi_agent::message::AgentMessage;
 
     // ---------- 样本助手 ----------

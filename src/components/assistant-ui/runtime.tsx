@@ -46,6 +46,15 @@ import { askBridge } from './ask-bridge'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import { sessionCatalog, sessionDisplayName, hydrateSessionMeta } from '@/components/panes/session-manage/session-catalog'
+import { cachedAppPrefs, loadAppPrefs, setRunActive, updateAppPrefs } from '@/lib/app-prefs'
+import {
+  mergeWorkspaceSessionRows,
+  resolveSessionPath,
+  workspaceSessionIndex,
+  type SessionPathResolution,
+} from '@/components/panes/session-manage/workspace-session-registry'
+import { sidebarViewStore } from '@/components/panes/session-manage/sidebar-view'
+import { fsList } from '@/lib/fs'
 import {
   activeSessionCwd,
   reviewStore,
@@ -131,7 +140,27 @@ interface ThreadListRow {
   id: string
   title?: string
   custom?: Record<string, unknown>
-}/** 渲染错误兜底：归约链路的任何意外不得白屏整个应用（只隔离聊天树）。 */
+}
+
+/** fs_list 错误码 → 用户可见的工作区错误（ZCode 对不存在/非目录的
+ * `project.directory-required` 同语义：选择即建会话前先证伪目标目录；
+ * 空目录是合法工作区，只有读不了/不存在/不是目录才是错误）。 */
+function describeWorkspaceDirectoryError(code: string, cwd: string): string {
+  switch (code) {
+    case 'ENOENT':
+      return `文件夹不存在：${cwd}`
+    case 'EACCES':
+      return `没有访问权限：${cwd}`
+    case 'ENOTDIR':
+      return `不是文件夹：${cwd}`
+    case 'invalid-path':
+      return `文件夹路径无效：${cwd}`
+    default:
+      return `无法读取文件夹（${code}）：${cwd}`
+  }
+}
+
+/** 渲染错误兜底：归约链路的任何意外不得白屏整个应用（只隔离聊天树）。 */
 class RuntimeBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
   static getDerivedStateFromError(error: Error) {
@@ -234,6 +263,31 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     sessionCatalog.getState().setActive(currentThreadId)
   }, [currentThreadId])
 
+  // 「运行期间」保持唤醒（设置 → 常规）：run 开始/结束把活动信号发给 Rust
+  // 的 keep-awake 线程。其它模式（关闭/始终）下该信号无效果。
+  useEffect(() => {
+    void setRunActive(isRunning).catch((e) =>
+      console.error('[app-prefs] run 活动信号发送失败（保持唤醒可能未按预期工作）', e),
+    )
+  }, [isRunning])
+
+  // 记录「上次打开的会话」（设置 → 常规 → 启动时恢复上次会话）。
+  // 目录/登记表可能晚于 currentThreadId 就绪，故订阅 catalog 变化再试；
+  // 写盘只在值变化时发生（cached 比对），避免每个会话切换都落一次文件。
+  useEffect(() => {
+    const persist = (): void => {
+      if (!currentThreadId) return
+      const path = sessionCatalog.getState().entries[currentThreadId]?.path
+      if (typeof path !== 'string' || path.length === 0) return
+      if (cachedAppPrefs()?.lastSessionPath === path) return
+      void updateAppPrefs({ lastSessionPath: path }).catch((e) =>
+        console.error('[app-prefs] 记录上次会话失败（启动恢复将使用旧路径）', e),
+      )
+    }
+    persist()
+    return sessionCatalog.subscribe(persist)
+  }, [currentThreadId])
+
   // 派生标题（首条用户消息——侧栏/双行块/页签名同源的"自动命名"）：pi
   // 无名时前端即时显示，消息流变化即重算写入 catalog。
   const firstUserText = firstUserMessageText(messages)
@@ -241,12 +295,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!currentThreadId || !derivedTitle) return
     sessionCatalog.getState().setDerivedTitle(currentThreadId, derivedTitle)
+    // 选择文件夹新建的会话不在 pi_list_sessions（会话根按 cwd 分裂），
+    // 派生标题必须进登记表才能跨重启保住侧栏行名。
+    workspaceSessionIndex.getState().setTitle(currentThreadId, derivedTitle)
   }, [currentThreadId, derivedTitle])
 
   const refreshThreads = useCallback(async () => {
     try {
       const metas = await invoke<PiSessionMeta[]>('pi_list_sessions')
-      const rows = (metas ?? []).map((m) => ({
+      const rows: ThreadListRow[] = (metas ?? []).map((m) => ({
         status: 'regular' as const,
         id: m.id,
         title: m.name ?? undefined,
@@ -261,11 +318,32 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           timestamp: m.timestamp,
         },
       }))
+      // 选择文件夹建的会话在别的会话根里（pi_list_sessions 只扫启动
+      // 目录）——登记表补行；活动登记会话的 messageCount 以 pi 真值
+      // 回填（行尾"N 条消息"不长期停在 0）。
+      const activeId = currentThreadIdRef.current
+      if (activeId && workspaceSessionIndex.getState().entries[activeId]) {
+        try {
+          const st = await invoke<{ messageCount?: unknown }>('pi_get_state')
+          if (typeof st?.messageCount === 'number' && Number.isFinite(st.messageCount)) {
+            workspaceSessionIndex
+              .getState()
+              .updateStats(activeId, st.messageCount, Date.now())
+          }
+        } catch (e) {
+          // 行仍可见（登记表的旧统计），但错误必须可见——不冒充已刷新。
+          console.error('[pi] 工作区会话状态读取失败（行统计保持登记值）', e)
+        }
+      }
+      const merged = mergeWorkspaceSessionRows(
+        rows,
+        Object.values(workspaceSessionIndex.getState().entries),
+      )
       // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
       // 侧栏 threads（assistant-ui）title 用统一显示名。
-      sessionCatalog.getState().ingest(rows, currentThreadIdRef.current)
+      sessionCatalog.getState().ingest(merged, currentThreadIdRef.current)
       setThreads(
-        rows.map((r) => ({
+        merged.map((r) => ({
           ...r,
           title: sessionDisplayName(sessionCatalog.getState().entries[r.id]),
         })),
@@ -355,10 +433,39 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         await refreshThreads()
         if (cancelled) return
         try {
-          const st = await invoke<{ sessionId: string | null }>('pi_get_state')
+          let st: { sessionId: string | null } | null = null
+          try {
+            st = await invoke<{ sessionId: string | null }>('pi_get_state')
+          } catch (e) {
+            // 区分"正常无会话"（pi_get_state 报 no active session——首启预期
+            // 域状态：threadId 置空 = ThreadList 高亮 New Chat）与真错误
+            // （mutex 中毒/pi 内部错误）：真错误交给外层 catch 可见，不伪装
+            // "无会话"（禁止兜底）。
+            if (!String(e).includes('no active session')) throw e
+          }
           if (cancelled) return
-          setCurrentThreadId(st.sessionId)
-          if (st.sessionId) {
+          // 冷启动恢复（设置 → 常规 → 启动时恢复上次会话）：**仅当引擎当前
+          // 没有活动会话时**才恢复——页面 reload / HMR 时 live 会话优先，
+          // 不能被上次记录覆盖。打开失败保持空态，错误必须可见。
+          if (!st?.sessionId) {
+            try {
+              const prefs = await loadAppPrefs()
+              if (cancelled) return
+              if (prefs.restoreLastSession && prefs.lastSessionPath) {
+                await invoke('pi_open_session', { path: prefs.lastSessionPath })
+                if (cancelled) return
+                st = await invoke<{ sessionId: string | null }>('pi_get_state')
+              }
+            } catch (e) {
+              console.error(
+                '[runtime] 恢复上次会话失败（文件被删 / 锁冲突？）——保持新会话空态',
+                e,
+              )
+            }
+          }
+          if (cancelled) return
+          setCurrentThreadId(st?.sessionId ?? null)
+          if (st?.sessionId) {
             const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
             if (cancelled) return
             actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
@@ -370,15 +477,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             void timelineMarkerBridge.getState().refresh(st.sessionId)
           }
         } catch (e) {
-          // 区分"正常无会话"（pi_get_state 报 no active session——首启预期
-          // 域状态：threadId 置空 = ThreadList 高亮 New Chat）与真错误
-          // （mutex 中毒/pi 内部错误）：真错误保持当前状态并 console 可见，
-          // 不伪装"无会话"（禁止兜底）。泄漏路径的 es 由 cleanup close。
-          if (String(e).includes('no active session')) {
-            setCurrentThreadId(null)
-          } else {
-            console.error('[runtime] hydrate 失败', e)
-          }
+          // 真错误（pi_get_state 非"无会话"失败 / 水合失败）：保持当前状态并
+          // console 可见，不伪装成功。泄漏路径的 es 由 cleanup close。
+          console.error('[runtime] hydrate 失败', e)
         }
         // 审批挂起列表（§4.4 挂载拉取）
         approvalBridge
@@ -781,10 +882,21 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
 
   // ── 「选择工作区新建会话」执行器（session-workspace 请求桥，branch/
   //    checkpoint 同款请求-执行形态）──
-  // pi_new_session（working_directory 透传 SessionOptions）→ pi_get_state
-  // 取 sessionId → RESET（新会话无历史）+ currentThreadId 采纳 + 列表刷新。
-  // 守卫照抄 switchToThread：prompt 持锁跨整个 run，先 pi_interrupt。
-  // 任一步失败 console.error 并丢弃请求（不排队重试——用户重选即可）。
+  // 顺序 = ZCode ProjectEditor.browse/save 的本地同构（
+  // packages/ui/src/project-sidebar/ProjectEditor.tsx:217-261 先选目录、
+  // :262-368 再校验+保存）：
+  //   ① fs_list 证明目标存在且是可读目录（ZCode `project.directory-required`，
+  //      services/src/project/index.ts:212-216；空目录合法）
+  //   ② pi_new_session（working_directory 透传 SessionOptions）
+  //   ③ pi_get_state 取 sessionId + messageCount
+  //   ④ 定位会话文件（会话根按 cwd 分裂，pi_list_sessions 扫不到）并登记
+  //   ⑤ RESET + 采纳 + refreshThreads（登记行随 pi 列表一起进侧栏）
+  // 失败一律写 sessionWorkspaceStore.error（composer 工作区行可见），
+  // 不排队假装成功；pendingCwd 只在建会话期间存在，成功/失败都清掉。
+  // 同一目录已有会话仍新建会话：ZCode 的项目创建走 service.saveProject
+  // 且不带 reuseExistingRoot（ProjectEditor.tsx:344-352），只有系统
+  // "打开文件夹"才复用项目（useRootWorkspaceActions.ts:608）——mirach 的
+  // 等价动作（本入口）按"新建"语义，复用入口不存在。
   const workspaceRequest = useStore(sessionWorkspaceStore, (s) => s.request)
   const handledWorkspaceSeqRef = useRef(0)
   const workspaceBusyRef = useRef(false)
@@ -799,24 +911,77 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     handledWorkspaceSeqRef.current = workspaceRequest.seq
     workspaceBusyRef.current = true
     const { seq, cwd } = workspaceRequest
+    // 先亮出将落到的目录（等待 IPC 期间 chip/tab 立即有反馈），失败回滚。
     sessionCatalog.getState().setPendingCwd(cwd)
     void (async () => {
+      const fail = (message: string): void => {
+        sessionWorkspaceStore.getState().failRequest(seq, message)
+        sessionCatalog.getState().setPendingCwd(null)
+      }
       try {
-        if (!(await interruptIfRunning())) return
-        await invoke('pi_new_session', { cwd })
-        const st = await invoke<{ sessionId: string | null }>('pi_get_state')
-        if (typeof st?.sessionId !== 'string' || st.sessionId.length === 0) {
-          console.error('[pi] 工作区新建会话后 pi_get_state 无 sessionId——不采纳', st)
+        const listing = await fsList(cwd)
+        if (listing.error) {
+          const message = describeWorkspaceDirectoryError(listing.error, cwd)
+          console.error(`[pi] 工作区不可用（${listing.error}）：${cwd}`)
+          fail(message)
           return
         }
+        if (!(await interruptIfRunning())) {
+          fail('当前会话无法中断——未新建工作区会话')
+          return
+        }
+        await invoke('pi_new_session', { cwd })
+        const st = await invoke<{ sessionId: string | null; messageCount?: unknown }>(
+          'pi_get_state',
+        )
+        if (typeof st?.sessionId !== 'string' || st.sessionId.length === 0) {
+          console.error('[pi] 工作区新建会话后 pi_get_state 无 sessionId——不采纳', st)
+          fail('pi 没有返回新会话 id——未切换到该文件夹')
+          return
+        }
+        let resolution: SessionPathResolution = { root: '', path: null, reason: '未定位' }
+        try {
+          resolution = await resolveSessionPath(cwd, st.sessionId)
+        } catch (e) {
+          console.error(`[pi] 工作区会话文件定位失败（${cwd} / ${st.sessionId}）`, e)
+        }
+        if (!resolution.path) {
+          // 会话是真的（引擎已切过去），但缺 path 会让该行的打开/删除
+          // 动作明确失败——错误必须可见，不能默默展示一个坏行。
+          console.error(`[pi] 工作区会话文件未定位：${resolution.reason ?? '未知原因'}`)
+        }
+        const now = Date.now()
+        workspaceSessionIndex.getState().register({
+          id: st.sessionId,
+          cwd,
+          ...(resolution.path ? { path: resolution.path } : {}),
+          messageCount:
+            typeof st.messageCount === 'number' && Number.isFinite(st.messageCount)
+              ? st.messageCount
+              : 0,
+          createdAtMs: now,
+          lastModifiedMs: now,
+        })
         actorRef.send({ type: 'RESET' })
         setCurrentThreadId(st.sessionId)
+        // ZCode 侧栏按项目分组；mirach 默认"更新时间"分组下新工作区没有
+        // 可见的组头。仅在默认分组时切到"项目"（用户显式选过 status
+        // 等自定义分组时不覆盖）。
+        if (sidebarViewStore.getState().grouping === 'date') {
+          sidebarViewStore.getState().setGrouping('project')
+        }
         await refreshThreads()
         resetSessionScopedBridges(st.sessionId)
         // 新会话——分支条/fork 点投影清空（同 New Chat 语义）
         branchBridge.getState().requestRefresh()
+        // 会话行已带 cwd 才丢 pendingCwd；refresh 失败时保留它让 tab 仍
+        // 显示真实工作区（New Chat/删除活动会话会清，不会遗留到下一个会话）。
+        if (sessionCatalog.getState().entries[st.sessionId]?.cwd) {
+          sessionCatalog.getState().setPendingCwd(null)
+        }
       } catch (e) {
         console.error(`[pi] 在工作区新建会话失败（${cwd}）——保持当前会话`, e)
+        fail(`新建文件夹会话失败：${e instanceof Error ? e.message : String(e)}`)
       } finally {
         sessionWorkspaceStore.getState().clearRequest(seq)
       }
@@ -1051,6 +1216,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         await invoke('pi_discard_session')
         actorRef.send({ type: 'RESET' })
         setCurrentThreadId(null)
+        // 新会话不继承上一个文件夹（"新建会话"按钮语义不变）；否则
+        // chip/tab 会显示一个下一次懒创建根本不会落到的目录。
+        sessionCatalog.getState().setPendingCwd(null)
+        // 启动恢复也不应回到刚被丢弃的会话：清上次会话记录（下一次发送
+        // 建出新会话后会重新写入）。写盘失败可见，不影响 New Chat 本身。
+        void updateAppPrefs({ lastSessionPath: null }).catch((e) =>
+          console.error('[app-prefs] 清除上次会话记录失败（启动恢复可能回到旧会话）', e),
+        )
         await refreshThreads()
         resetSessionScopedBridges(null)
         // 无活动会话——分支条/fork 点投影清空（refresh 命中 no active
@@ -1071,6 +1244,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       try {
         await invoke('pi_rename_session', { name: newTitle })
+        // 选择文件夹建的会话不在 pi_list_sessions：名字同步进登记表，
+        // 否则刷新后该行又变回 New Chat。
+        workspaceSessionIndex.getState().setTitle(id, newTitle)
         await refreshThreads()
       } catch (e) {
         console.error('[pi] 会话重命名失败', e)
@@ -1092,11 +1268,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           await invoke('pi_discard_session')
           actorRef.send({ type: 'RESET' })
           setCurrentThreadId(null)
+          sessionCatalog.getState().setPendingCwd(null)
           resetSessionScopedBridges(null)
           // 无活动会话——分支条/fork 点投影清空（同 New Chat 语义）
           branchBridge.getState().requestRefresh()
         }
         await invoke('pi_delete_session', { path })
+        // 删除成功：登记表同步移除，否则 refreshThreads 会把这行补回来。
+        workspaceSessionIndex.getState().remove(id)
         // 删除成功清该会话的滚动位置记忆（内存 + 持久化）
         clearThreadScroll(id)
         await refreshThreads()
