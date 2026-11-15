@@ -2541,11 +2541,16 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
   - **上下文用量环常驻**：窗口未知（models.json 没写 `contextWindow`）也渲染，
     环上叠 `?`、弹层写"窗口未知"；用量从 pi 最后一条带非零 usage 的 assistant
     提取（`usageFromPiMessages` → `HYDRATE.usage`，历史会话也有数）。
-    **总量唯一来源 = models.json 的 contextWindow**（ZCode 有自家 registry，
-    rpi 没有）。弹层**就地可设**：输入 tokens → `pi_get_models_config` →
-    `pi_set_models_config` → `modelCatalogStore.reload()`（环/百分比立刻更新；
-    注意它同时影响引擎压缩阈值，且当前 activity 会话的 in-memory model 要重开
-    才生效）。**不要编默认值**。
+    **总决定价链**：models.json 的显式 `contextWindow` 永远优先（用户在环弹层/
+    设置页写的值）→ 否则宿主侧 **model registry**（`src-tauri/src/
+    model_registry.rs`，拉 https://models.dev/api.json 的 `limit.context`）
+    回填；目录缓存 `<app_data_dir>/model-registry.json`，启动后台刷新（TTL
+    24h），`pi_refresh_model_registry` 可强制刷新。回填点两处：
+    ①`pi_list_models` 响应（UI/设置页）；②`build_harness_with` 里
+    `resolved.model.context_window`（引擎压缩阈值 `should_compact` 也吃到
+    真实窗口——**只改内存 model，不写用户配置**）。目录里没有的模型保持
+    未知（不编默认值）。实测：models.dev 有 2581 条；`deepseek-v4.1-flash`
+    → 1,048,576，`deepseek-v4.1-flash-1017` → 1,000,000（显式配置优先）。
   - **模式芯片 = 计划 / 完全访问两态，可切换**：`pi_run_command`
     （宿主新 IPC）直接调扩展 slash command `/plan start|exit`，与 rpi-cli
     RPC `execute_command` 同一 handler 契约（snapshot.commands() + handler +

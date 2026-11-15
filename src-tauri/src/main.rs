@@ -76,6 +76,10 @@ mod pi_voice_live;
 // v1/realtime，握手头持 key；事件/音频经 emit 广播，2026-11-12）
 mod pi_voice_moss;
 
+// 宿主侧模型目录（models.dev 镜像）：rpi 没有内置 registry，contextWindow
+// 只来自 models.json；这里补一份公开目录，list_models/会话构建时回填 0。
+mod model_registry;
+
 // 会话管理元数据持久化真相层（session_meta.rs 模块头有生产级裁定）：
 // pinned/archived/水位/折叠存 app_data_dir/session-meta.json（原子写）
 mod session_meta;
@@ -906,6 +910,21 @@ fn pi_list_models(
     state.engine.list_models()
 }
 
+/// 强制刷新宿主侧模型目录（models.dev）。返回 {count, fetchedAt}；
+/// 网络失败 = Err（错误可见，不清空已有缓存）。
+#[tauri::command(async)]
+async fn pi_refresh_model_registry(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let count = model_registry::refresh(&app, true).await?;
+    let (fetched_at, cached) = model_registry::status();
+    Ok(serde_json::json!({
+        "count": count,
+        "cached": cached,
+        "fetchedAt": fetched_at,
+    }))
+}
+
 // ── 扩展 UI 请求（§4.4 审批/问题卡）：请求经 SSE CUSTOM 到前端卡，
 //    应答走 IPC 回灌 oneshot。──
 
@@ -1324,6 +1343,17 @@ fn main() {
             // 关窗回调（wire_window）要同步读 closeToTray；保持唤醒的专用
             // 线程也在这里起步。文件损坏 → setup 失败（不静默重置）。
             app.manage(app_prefs::init(app.handle())?);
+            // 宿主侧模型目录：先同步载入磁盘缓存（不阻塞 UI），再后台拉取
+            // models.dev（TTL 24h；失败只记日志，沿用缓存/空目录）。
+            model_registry::init(app.handle());
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = model_registry::refresh(&handle, false).await {
+                        eprintln!("[model-registry] 刷新失败（沿用缓存）: {e}");
+                    }
+                });
+            }
             // ── ⓪ **最先**设 DWM 外观，再动几何 ──
             //
             // `apply_window_chrome`（直角 + 无描边）必须**尽早**调用：
@@ -1510,6 +1540,7 @@ fn main() {
             pi_set_thinking_level,
             pi_interrupt,
             pi_list_models,
+            pi_refresh_model_registry,
             pi_pending_approvals,
             pi_extension_ui_response,
             pi_mode_state,

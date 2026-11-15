@@ -331,8 +331,16 @@ impl PiEngine {
         model: Option<&str>,
     ) -> Result<HarnessLive, String> {
         let (harness, events, reload, resolved_provider, model_id, id) = self.shared.rt.block_on(async {
-            let resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
+            let mut resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
                 .map_err(|e| format!("模型解析失败: {e}"))?;
+            // 宿主侧模型目录：models.json 缺 contextWindow（0）时用
+            // models.dev 的值补进**本次会话的 model**——引擎的压缩阈值
+            // （should_compact 只看 >0）也吃到真实窗口；不写用户配置。
+            if resolved.model.context_window == 0 {
+                if let Some(context_window) = crate::model_registry::lookup(&resolved.model.id) {
+                    resolved.model.context_window = context_window;
+                }
+            }
             let mut args = rpi_cli::args::Args::default();
             if let Some(p) = session_path {
                 args.session = Some(p.to_string());
@@ -1180,6 +1188,13 @@ impl PiEngine {
                 })?;
             for m in models {
                 // provider_to_models 已把缺省 name 落成 id（上游语义），这里照搬。
+                // contextWindow：models.json 显式值优先；缺省 0 时用宿主侧
+                // models.dev 目录回填（rpi 没有内置 registry）。
+                let context_window = if m.context_window > 0 {
+                    m.context_window
+                } else {
+                    crate::model_registry::lookup(&m.id).unwrap_or(0)
+                };
                 rows.push(serde_json::json!({
                     "provider": m.provider,
                     "id": m.id,
@@ -1188,7 +1203,7 @@ impl PiEngine {
                     // 2026-11-15 白屏根因：这里漏了该字段 → 前端
                     // `m.contextWindow.toLocaleString()` 抛 TypeError，
                     // 整个设置浮层被 React 卸成白屏。
-                    "contextWindow": m.context_window,
+                    "contextWindow": context_window,
                 }));
             }
         }
