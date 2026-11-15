@@ -61,6 +61,52 @@ const COMMENTARY_LIMIT = 2_000 // 协议上限：append ≤2000 Unicode 字符
 const UPLINK_RATE = 16_000 // 上行 16kHz S16LE
 const FRAME_MS = 64 // 采集聚合粒度（约 1024 样本/帧）
 
+/** 采集 Worklet（内联 Blob 模块）：每 1024 个输入样本 post 一次 Float32
+ *  单声道。`process` 返回 true 保持节点存活；无输入时直接返回，不 post。 */
+const MOSS_MIC_WORKLET_SOURCE = `
+class MossMicProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super()
+    this.buf = new Float32Array(1024)
+    this.n = 0
+  }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0]
+    if (!ch || ch.length === 0) return true
+    let off = 0
+    while (off < ch.length) {
+      const take = Math.min(ch.length - off, this.buf.length - this.n)
+      this.buf.set(ch.subarray(off, off + take), this.n)
+      this.n += take
+      off += take
+      if (this.n === this.buf.length) {
+        this.port.postMessage(this.buf.slice(0))
+        this.n = 0
+      }
+    }
+    return true
+  }
+}
+registerProcessor('moss-mic-processor', MossMicProcessor)
+`
+
+/**
+ * S16LE PCM → base64（上行帧载荷）。
+ *
+ * 必须按 **字节**（Uint8Array 视图）编码，不能把 Int16Array 采样值直接交给
+ * `String.fromCharCode`：值 > 255（正常语音几乎必然）会生成 Latin1 之外的
+ * 字符，`btoa` 抛 InvalidCharacterError——2026-11-15 真机日志实锤，是
+ * "说话没反应"的最终根因（上行 0 帧）。
+ */
+export function pcm16ToBase64(pcm16: Int16Array): string {
+  const bytes = new Uint8Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
 export class MossLiveSession {
   sessionId: string | null = null
   activeDelegationId: string | null = null
@@ -70,8 +116,16 @@ export class MossLiveSession {
   private unlisteners: UnlistenFn[] = []
   private micStream: MediaStream | null = null
   private micCtx: AudioContext | null = null
-  private processor: ScriptProcessorNode | null = null
+  private micWorklet: AudioWorkletNode | null = null
+  private micSink: GainNode | null = null
   private playbackCtx: AudioContext | null = null
+  /** 首帧上行日志只打一次（排查"说话没反应"时确认采集真的在跑）。 */
+  private firstUplinkLogged = false
+  /** 页面卸载时关 WS（reload 不走 React cleanup，否则 Rust 侧会话泄漏）。 */
+  private pageCloseHandler = (): void => {
+    if (this.handle === null) return
+    void invoke('pi_voice_moss_close', { handle: this.handle }).catch(() => undefined)
+  }
   private inputEnabled = false
   private muted = false
   private finalized = false
@@ -137,6 +191,9 @@ export class MossLiveSession {
 
     const opened = await invoke<{ handle: number }>('pi_voice_moss_open')
     this.handle = opened.handle
+    // 页面 reload/关闭不会走 stop()：显式关 WS，避免 Rust 侧句柄与采集图
+    // 在页面消失后继续存活（同类问题：原 ScriptProcessor 的音频图也泄漏）。
+    window.addEventListener('pagehide', this.pageCloseHandler)
 
     // 会话挂载：client delegation（委托经宿主回路：thread append → 回读 →
     // commentary 回报）
@@ -159,49 +216,83 @@ export class MossLiveSession {
 
   private sendAudioFrame(pcm16: Int16Array): void {
     if (this.handle === null) return
-    // Int16 → base64（分块构造，避免 spread 栈限制）
-    let binary = ''
-    for (let i = 0; i < pcm16.length; i += 0x8000) {
-      binary += String.fromCharCode(...pcm16.subarray(i, i + 0x8000))
+    if (!this.firstUplinkLogged) {
+      this.firstUplinkLogged = true
+      console.info('[moss-live] 首帧上行已发送', { samples: pcm16.length })
     }
-    const b64 = btoa(binary)
+    const b64 = pcm16ToBase64(pcm16)
     void invoke('pi_voice_moss_send_audio', { handle: this.handle, audio: b64 }).catch((e) =>
       console.error('[moss-live] 音频帧发送失败', e),
     )
   }
 
-  // ── 采集：getUserMedia → AudioContext → 线性重采样 16k → Int16 聚合 ──
+  // ── 采集：getUserMedia → AudioWorklet → 线性重采样 16k → Int16 聚合 ──
+  //
+  // **为什么不是 ScriptProcessorNode**（2026-11-15 真机实锤）：当前
+  // WebView2 里 `createScriptProcessor` 的 `onaudioprocess` **一次都不触发**
+  // （独立最小复现：context running、track live，2 秒 0 回调），上行因此
+  // 永远是 0 帧——用户在应用里说话 MOSS 完全听不到（PowerShell WSS 协议
+  // 测试正常，问题在采集端）。AudioWorklet 同一环境 2 秒 747 次回调，
+  // 故改用 Worklet。
+  //
+  // Worklet 源内联为 Blob URL（不新增静态资源文件；CSP 允许 blob:）。
+  // 每 1024 个输入样本（48k ≈ 21ms）post 一次，避免 128 样本/条的
+  // postMessage 风暴。
   private openGraph(): void {
-    void navigator.mediaDevices
-      .getUserMedia({
+    void (async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
         audio: { autoGainControl: true, echoCancellation: true, noiseSuppression: true },
       })
-      .then((stream) => {
-        if (this.finalized) {
-          stream.getTracks().forEach((t) => t.stop())
-          return
-        }
-        this.micStream = stream
-        this.micCtx = new AudioContext()
-        this.playbackCtx = new AudioContext()
-        const source = this.micCtx.createMediaStreamSource(stream)
-        // ScriptProcessorNode 虽弃用但在 WebView2 稳定可用；AudioWorklet
-        // 需独立模块文件，v1 用它（延迟 = 4096/48000 ≈ 85ms，够用）
-        this.processor = this.micCtx.createScriptProcessor(4096, 1, 1)
-        this.processor.onaudioprocess = (e) => {
-          if (!this.inputEnabled || this.muted || this.finalized) return
-          const input = e.inputBuffer.getChannelData(0)
-          this.upsampleTo16k(input, this.micCtx!.sampleRate)
-        }
-        source.connect(this.processor)
-        this.processor.connect(this.micCtx.destination)
+      if (this.finalized) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
+      this.micStream = stream
+      const ctx = new AudioContext()
+      this.micCtx = ctx
+      this.playbackCtx = new AudioContext()
+      // 采集上下文必须 running；创建后显式 resume（WebView2 实测可能
+      // 初始 suspended，ScriptProcessor 时代就是被这个静默吞掉采集）。
+      await ctx.resume()
+      const moduleUrl = URL.createObjectURL(
+        new Blob([MOSS_MIC_WORKLET_SOURCE], { type: 'application/javascript' }),
+      )
+      try {
+        await ctx.audioWorklet.addModule(moduleUrl)
+      } finally {
+        URL.revokeObjectURL(moduleUrl)
+      }
+      if (this.finalized) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
+      const source = ctx.createMediaStreamSource(stream)
+      const worklet = new AudioWorkletNode(ctx, 'moss-mic-processor')
+      worklet.port.onmessage = (e: MessageEvent) => {
+        if (!this.inputEnabled || this.muted || this.finalized) return
+        const samples = e.data
+        if (!(samples instanceof Float32Array) || samples.length === 0) return
+        this.upsampleTo16k(samples, ctx.sampleRate)
+      }
+      // 静音 sink：WorkletNode 必须接下游才会被音频图拉动；gain=0 不发声。
+      const sink = ctx.createGain()
+      sink.gain.value = 0
+      source.connect(worklet)
+      worklet.connect(sink)
+      sink.connect(ctx.destination)
+      this.micWorklet = worklet
+      this.micSink = sink
+      console.info('[moss-live] 麦克风采集已启动', {
+        sampleRate: ctx.sampleRate,
+        state: ctx.state,
+        track: stream.getAudioTracks()[0]?.label,
       })
-      .catch((e) => {
-        this.handlers.onError(
-          e instanceof DOMException ? `麦克风不可用：${e.message}` : String(e),
-          true,
-        )
-      })
+    })().catch((e) => {
+      this.handlers.onError(
+        e instanceof DOMException ? `麦克风不可用：${e.message}` : String(e),
+        true,
+      )
+    })
   }
 
   /** 线性插值降采样到 16k → S16LE → 聚合整帧上行。 */
@@ -477,6 +568,9 @@ export class MossLiveSession {
   }
 
   private teardown(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pagehide', this.pageCloseHandler)
+    }
     this.unlisteners.forEach((u) => u())
     this.unlisteners = []
     this.playQueue.forEach((p) => {
@@ -488,10 +582,14 @@ export class MossLiveSession {
     })
     this.playQueue = []
     this.doneRuns.clear()
-    if (this.processor) {
-      this.processor.onaudioprocess = null
-      this.processor.disconnect()
-      this.processor = null
+    if (this.micWorklet) {
+      this.micWorklet.port.onmessage = null
+      this.micWorklet.disconnect()
+      this.micWorklet = null
+    }
+    if (this.micSink) {
+      this.micSink.disconnect()
+      this.micSink = null
     }
     this.micStream?.getTracks().forEach((t) => t.stop())
     this.micStream = null
