@@ -1575,7 +1575,12 @@ const AssistantMessage: FC = () => {
         data-slot="aui_assistant-message-footer"
         data-turn-tail={isTurnTail ? "1" : "0"}
         data-has-parts={hasParts ? "1" : "0"}
-        className={cn("ms-2 flex items-center", ACTION_BAR_HEIGHT)}
+        // ZCode `ConversationAssistantTextActions`：与正文同 x（无缩进）、
+        // 整条 h24、gap4，且默认 opacity-0，悬停 assistant turn 才显形。
+        className={cn(
+          "flex items-center gap-[4px] opacity-0 transition-opacity group-hover/turn:opacity-100",
+          ACTION_BAR_HEIGHT,
+        )}
       >
       {/* **空消息不挂操作条**（2026-11-02）：`RUN_STARTED` 会无条件 push
           一条 `content: ''` 的 assistant 消息，run 直接失败（如
@@ -1595,7 +1600,7 @@ const AssistantMessage: FC = () => {
 
       {/* 朗读面板（官方 read-aloud 元素）：footer 朗读钮展开，挂消息底部 */}
       {readAloudOpen && (
-        <ReadAloudPanel className="ms-2 mt-1 w-full max-w-none rounded-xl" />
+        <ReadAloudPanel className="mt-1 w-full max-w-none rounded-xl" />
       )}
     </MessagePrimitive.Root>
   );
@@ -1970,7 +1975,7 @@ const UserActionBar: FC = () => {
       autohide="always"
       // ZCode `MessageActions` 是**横排**（复制 → 编辑），旧实现 `flex-col`
       // 把两枚钮竖着叠在气泡左侧。
-      className="aui-user-action-bar-root text-muted-foreground flex items-center gap-1"
+      className="aui-user-action-bar-root text-muted-foreground mt-[4px] flex items-center gap-[4px]"
     >
       <TooltipIconButton
         tooltip={copied ? "已复制" : "复制"}
