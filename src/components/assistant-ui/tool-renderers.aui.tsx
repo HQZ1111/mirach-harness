@@ -434,12 +434,13 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
   }
 
   // 5d. 写文件类 → 更改行（ZCode EditToolCallBlock）：文件 chip + diff 计数；
-  // 正文 = diff（edit 系）或参数/结果（write 无 diff）
+  // 正文 = details.diff（edit 系 + 2026-11-15 后的 write），旧引擎的 write
+  // 没有 diff 时回退参数/结果
   if (["edit", "hashline_edit", "ast_edit", "write"].includes(toolName)) {
     const path = stringArg(args, "path", "file_path", "filePath");
     const diff = diffFromToolResult(toolName, result);
-    // 行数：edit 系取 details.diff；write 无 diff，按写入内容行数计新增
-    // （数据来源与口径见 work-summary.ts::changedFileOf）
+    // 行数：优先 details.diff（真实增删）；旧引擎 write 无 diff 时按写入
+    // 内容行数计新增（数据来源与口径见 work-summary.ts::changedFileOf）
     const file = changedFileOf({ type: "tool-call", toolName, args, result });
     const additions = diff?.additions ?? file?.additions ?? 0;
     const removals = diff?.deletions ?? file?.removed ?? 0;

@@ -245,9 +245,10 @@ export interface SummaryChangedFile {
  * change 工具 → 文件清单（数据面实测）：
  * - `edit` / `hashline_edit` / `ast_edit`：路径取 args.path，行数取
  *   `ToolOutput.details.diff`（pi tools.rs 的 generate_diff_string）；
- * - `write`：pi 的 WriteTool **不产 diff**（整文件覆盖），路径取 args.path，
- *   `additions` = 写入内容行数（args.content 按行切分，写入语义 = 全为新增），
- *   `removed` = 0；无 content 时行数记 0（不编造）。
+ * - `write`：2026-11-15 引擎补丁后同样产 `details.diff`（写前读旧内容），
+ *   优先按真实 diff 计数；旧引擎/读不到旧内容（`details.diff_skipped`）时
+ *   回退：`additions` = 写入内容行数（写入语义 = 全为新增），`removed` = 0；
+ *   无 content 时行数记 0（不编造）。
  * - 参数里没有路径 → null（调用方计 unresolved）。
  */
 export function changedFileOf(part: SummaryPartLike): SummaryChangedFile | null {

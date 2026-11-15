@@ -1,7 +1,7 @@
 /**
  * pi 工具 diff → 官方 code-diff 元素的形状（纯函数，可单测）。
  *
- * 数据源：pi `edit` / `hashline_edit` 的 `ToolOutput.details.diff`
+ * 数据源：rpi `edit` / `hashline_edit` / `write` 的 `ToolOutput.details.diff`
  * （`tools.rs::generate_diff_string` 的输出，**不是** unified diff）。格式：
  * ```
  *  +{新行号} 行文本      ← 新增
@@ -12,8 +12,9 @@
  * 行号列宽由 pi 按最大行号算（`diff_line_num_width`），所以解析**不能**按
  * 固定宽度切——按「首字符 + 跳过空白 + 行号 + 空格」的宽松规则取文本部分。
  *
- * `write` 工具**没有** diff（整体覆盖，见 tools.rs WriteTool 无 generate_diff）——
- * 本解析器返回 null，调用方回退通用卡（不编造 diff）。
+ * `write` 在 2026-11-15 的引擎补丁后也产 `details.diff`（写前读旧内容，
+ * 写后 generate_diff_string），所以与 edit 走同一解析；旧引擎没有该字段时
+ * `extractDiffText` 返回 null，调用方回退通用卡（不编造 diff）。
  */
 import type { DiffLine } from './elements/code-diff'
 
@@ -84,8 +85,12 @@ export function diffFromToolResult(
   toolName: string,
   result: unknown,
 ): ParsedDiff | null {
-  // 只有这些工具产 diff（tools.rs 实锤：WriteTool 无 generate_diff）
-  if (toolName !== 'edit' && toolName !== 'hashline_edit') return null
+  // edit 系 + write：rpi 的 WriteTool 现在也产 details.diff（写前读到旧内容，
+  // 写后 generate_diff_string；2026-11-15 上游补丁）。旧版本引擎的 write
+  // 仍不带 diff，extractDiffText 返回 null → 调用方回退到参数/结果视图。
+  if (toolName !== 'edit' && toolName !== 'hashline_edit' && toolName !== 'write') {
+    return null
+  }
   const text = extractDiffText(result)
   if (text === null) return null
   return parsePiDiff(text)
