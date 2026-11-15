@@ -1820,6 +1820,30 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
      新增任何"从第二个源补状态"的路径（水合、插件投影、重放）都必须
      按自然键幂等。
 
+## MOSS Live 真机协议（2026-11-15，key 配置后 E2E 实锤）
+
+- **官方参考**：`https://platform.moss.cn/docs/reference/moss-live`（HTML 里
+  内嵌协议表，可直接 WebFetch/Invoke-WebRequest 抓，不用 JS 渲染）。
+- **握手顺序（缺一步就"聆听中但说话没反应"）**：
+  `attach_session`（`delegation:{type:"client"}`）→ **`media.mode`
+  `{binary_protocol:"tagged-v1"}`** → `mic_state {enabled:true}` → 上行
+  二进制 `0x00 + PCM16 16kHz mono`（每个 WS binary 帧一个 0x00 前缀）。
+  **不声明 media.mode 时服务端静默忽略所有二进制音频帧**（连接保持、
+  不报错）——这是真机"说话没反应"的根因（已修 lib/moss-live.ts 的
+  session_attached 分支）。可选 `video.state {source:"camera"}`（视频），
+  `media.configure` 可改格式（默认 PCM16 16k 上行 / 48k 下行）。
+- **下行**：文本事件 `action`（`input.transcript.updated/done`、
+  `response.audio.started/context`、`response.audio.done`…）；二进制
+  **无前缀** PCM16 48k（桥 base64 后 `moss-live://audio`）。持续发静音帧
+  （官方要求，vad 靠连续性）；播放中保持采集支持 barge-in。
+- **实测链路**（PowerShell 复刻同协议 + 合成语音）：补 media.mode 前 0
+  事件；补后 `input.speech.started → input.transcript.updated(流式) →
+  done → response.audio.started → 二进制音频块`。应用内 CDP：mic
+  getUserMedia 正常（3 个输入设备）、btoa 帧持续产生；`pi_voice_live_status`
+  `mode:moss-live/mossAvailable:true`。
+- **key 落点**：`~/.rpi/agent/settings.json` 的 `voice.moss_live.api_key`
+  （只写不读）+ `voice.voice_chat_mode:"moss-live"`。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换
