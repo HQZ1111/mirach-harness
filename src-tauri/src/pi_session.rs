@@ -750,15 +750,37 @@ impl PiEngine {
         let mut rx = live.events.resubscribe();
         on_start();
         self.shared.rt.block_on(async move {
-            // 排水任务：broadcast 事件并发转发到 on_event（prompt_text await
-            // 到整轮结束；结束后 sender 关闭、任务自然退出）
+            // 排水任务：broadcast 事件并发转发到 on_event。
+            //
+            // **必须显式停（2026-11-15 实锤：回复文本重复/穿插）**：旧实现
+            // `drain.await` 等 sender 关闭，但 rpi 的 broadcast sender 在 run
+            // 结束后并不保证关闭——任务永久挂起并继续订阅**后续 run** 的
+            // 事件，每跑一轮多一个订阅者，于是同一 delta 被推送 N 次（实测
+            // buffer 里相邻同 delta 对 314 组、UI 出现"这是这是这是这是…"）。
+            // prompt 返回后给尾部事件一个短窗口，然后发停止信号并排空队列。
+            let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
             let drain = tokio::spawn(async move {
-                while let Ok(ev) = rx.recv().await {
-                    on_event(ev);
+                loop {
+                    tokio::select! {
+                        ev = rx.recv() => match ev {
+                            Ok(ev) => on_event(ev),
+                            Err(_) => break,
+                        },
+                        _ = stop_rx.changed() => {
+                            // 停止：把已经进 broadcast 队列的事件排空再退出
+                            while let Ok(ev) = rx.try_recv() {
+                                on_event(ev);
+                            }
+                            break;
+                        }
+                    }
                 }
             });
             let result = AgentLane::prompt_text(harness.as_ref(), text, images).await;
-            // 尾部事件泵完再返回（TURN_END/AGENT_END 已在流里）
+            // TURN_END/AGENT_END 在 prompt 返回前已 emit；30ms 让广播线程把
+            // 尾部事件交付完，再停 drain（绝不 await 到 sender 关闭）。
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let _ = stop_tx.send(true);
             let _ = drain.await;
             result.map(|_| ()).map_err(|e| e.to_string())
         })
