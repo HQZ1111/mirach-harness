@@ -2492,6 +2492,39 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
   实测 A→B→A→B→A 五次切换全通。注意：retired 表无上限，进程内打开的会话
   数 = 常驻 harness 数（每个很小，重启即清）。
 
+## ZCode 逆向对照环境（2026-11-15，继续对齐对话 UI 时必用）
+
+不再靠读源码猜。ZCode 桌面版支持用环境变量隔离出**第二个实例**并开 CDP：
+
+```powershell
+$env:ZCODE_DESKTOP_APPLICATION_NAME='ZCode Debug'
+$env:ZCODE_DESKTOP_USER_DATA_DIR='E:\zcode-debug-profile'
+$env:ZCODE_DESKTOP_SESSION_DATA_DIR='E:\zcode-debug-profile\session'
+Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-port=9444'
+```
+
+- 关键：ZCode main 会 `app.setPath("userData", runtimeUserDataPath)`
+  （desktopRuntimeEnv.ts:72-82），所以只传 Electron `--user-data-dir` **无效**，
+  必须用上面三个 `ZCODE_DESKTOP_*` 环境变量；否则单实例锁直接 `app.quit()`。
+- 该实例与正式 ZCode 共用 `~/.zcode` 任务数据，但不抢窗口/单实例锁；
+  只读对照用，别在里面发消息（会写用户任务数据）。
+- CDP 端口 9444；`set CDP_PORT=9444` 后可直接用 `scripts/cdp.mjs eval/shot`。
+- 已实测的 ZCode 基准值（2026-11-15）：
+  - 正文字号 14px / 行高 24.5px（`text-ui-base leading-[1.75]`），段落 mb16，
+    h1/h2 18/16px·行高 28·mt24/mb16，列表 my12/pl20/行距 6。
+  - 工作段头 14/21、pb8、border .9px；header→组 20；组内容 mt8、
+    rail ml8+pl16、gap8、`max-h 16lh+30*--spacing`。
+  - user 气泡 14/21、padding 12/16、radius 24（右上 6）。
+  - composer radius 32 / padding 12 / gap 12 / border .5；输入 14/20、min-h40。
+  - assistant action bar h24、gap4、与正文同 x、默认 opacity-0 悬停显形。
+  - 「工作中」= ChatLoadingOrbs（105 点球面→Z 字形，8240ms）。
+- **流式投影铁律**：同一 tool 边界内只保留一个 text part，thinking 一律插到
+  该 text part 之前（对齐 pi 落盘 `[thinking, text]`）；否则 live 的
+  `text→thinking→text` 会和完成后形状不一致（用户："思考和结论穿插"）。
+  `prompt_inner` 的 drain 必须在 prompt 返回后显式停（watch 信号），
+  不能等 broadcast sender 关闭——旧 drain 会继续订阅后续 run，同一 delta
+  被推 N 次（实测 314 组重复）。
+
 ## 已知的环境陷阱
 
 0. **C 盘空间布局（2026-11-14 满盘处置，别再往 C 盘堆缓存）**：C 盘曾只剩
