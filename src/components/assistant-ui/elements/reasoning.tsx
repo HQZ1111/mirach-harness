@@ -38,7 +38,9 @@ function useReasoningOptional() {
   return useContext(ReasoningContext);
 }
 
-const reasoningVariants = cva("aui-reasoning-root mb-4 w-full", {
+// 2026-11-15：去掉 mb-4 / py-1.5。ZCode 的思考行是工作区里的普通摘要行，
+// 垂直节奏由父容器 gap 决定；自带外边距会让组内出现 20px 空档（"乱的"）。
+const reasoningVariants = cva("aui-reasoning-root mb-0 w-full", {
   variants: {
     variant: {
       // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）
@@ -328,7 +330,7 @@ function ReasoningTrigger({
     <CollapsibleTrigger
       data-slot="reasoning-trigger"
       className={cn(
-        "aui-reasoning-trigger group/trigger text-muted-foreground inline-flex max-w-full min-w-0 items-center gap-2 self-start py-1.5 text-sm transition-colors",
+        "aui-reasoning-trigger group/trigger text-muted-foreground inline-flex max-w-full min-w-0 items-center gap-2 self-start py-0 text-sm transition-colors",
         className,
       )}
       {...props}

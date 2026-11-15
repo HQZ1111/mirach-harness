@@ -28,7 +28,10 @@ export interface QueuedImage {
 
 export interface QueuedMessage {
   id: string
+  /** 显示文本（乐观用户消息 / 队列面板）。 */
   text: string
+  /** 实际发给引擎的文本（语音委托的隐藏 note/上下文；缺省 = text）。 */
+  submission?: string
   images?: QueuedImage[]
   /** 乐观用户消息的 image data URL（drain 时经 USER_SUBMIT images 进投影） */
   imageDataUrls?: string[]

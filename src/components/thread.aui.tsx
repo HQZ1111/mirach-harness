@@ -419,7 +419,7 @@ const StoppedRunBanner: FC = () => {
 // 归约清 error 后自动消失。onRetry = 重刷最后一条 assistant（与 Reload
 // 同一机制：message.reload → startRun → onReload）。
 const RunErrorBar: FC = () => {
-  const { error } = useErrorBridge();
+  const { error, retryable } = useErrorBridge();
   const aui = useAui();
   if (!error) return null;
   const onRetry = () => {
@@ -434,10 +434,10 @@ const RunErrorBar: FC = () => {
   return (
     <ErrorState
       data-slot="aui_run-error-bar"
-      title="运行出错"
+      title={retryable ? "运行出错" : "会话打开失败"}
       detail={error}
       retrying={false}
-      onRetry={onRetry}
+      onRetry={retryable ? onRetry : undefined}
       className="mt-1 w-full max-w-none"
     />
   );

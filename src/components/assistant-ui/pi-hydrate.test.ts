@@ -131,6 +131,19 @@ describe('hydratePiMessages：按 turn 合并连续 assistant 消息', () => {
     ])
     expect(out[0]?.content).toBe('ab')
   })
+
+  it('旧语音委托的 note/context 从显示内容中剥掉，只留 spoken prompt', () => {
+    const raw = [
+      '[Note: this message is a delegation from a live spoken conversation. The text is a voice transcript (it may contain mis-hearings; use the latest intent). Answer in plain conversational sentences, keep it short, no markdown.]',
+      '',
+      '[Spoken context, oldest first]',
+      '[object Object]',
+      '',
+      '帮我列出当前目录的文件',
+    ].join('\n')
+    const out = hydratePiMessages([{ role: 'user', content: raw, timestamp: 1 }])
+    expect(out[0]?.content).toBe('帮我列出当前目录的文件')
+  })
 })
 
 describe('convertTurnMessage：投影到 assistant-ui', () => {

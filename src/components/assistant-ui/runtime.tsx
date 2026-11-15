@@ -1024,7 +1024,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         ? { images: next.imageDataUrls }
         : {}),
     })
-    postRun(next.text, next.images)
+    postRun(next.submission ?? next.text, next.images)
     void refreshThreads()
   }, [actorRef, postRun, refreshThreads])
 
@@ -1200,6 +1200,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         // 给出引擎原文（例：会话文件缺 header 被 rpi 报成 No session found）。
         errorBridge.getState().setError(
           `无法打开会话：${e instanceof Error ? e.message : String(e)}`,
+          false,
         )
       }
     },
@@ -1321,6 +1322,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     onNew: async (m) => {
       const raw = m.content
       const text = (typeof raw === 'string' ? raw : raw.map((c) => (c.type === 'text' ? c.text : '')).join('')).trim()
+      // 语音委托：UI 文本只有用户说的话；隐藏 note/上下文经 runConfig 传入，
+      // 只用于发给引擎（0.12 起 runConfig.custom 是宿主自定义字段的通道）。
+      const voiceSubmission =
+        typeof m.runConfig?.custom?.voiceSubmission === 'string'
+          ? m.runConfig.custom.voiceSubmission
+          : null
+      const submission = voiceSubmission ?? text
       // canSend 保证：走到这里要么有文本、要么带附件。纯附件无文本不满足
       // POST 契约（message 必填）——抛 MessageNotSentError 让草稿回到
       // composer（静默丢附件 = 兜底，禁止）
@@ -1353,6 +1361,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         sessionQueue.getState().enqueue({
           id: `queued-${++queuedSeq}`,
           text,
+          ...(submission !== text ? { submission } : {}),
           ...(images.length > 0 ? { images, imageDataUrls } : {}),
         })
         return
@@ -1363,7 +1372,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         messageId: `user-${Date.now()}`,
         ...(imageDataUrls.length > 0 ? { images: imageDataUrls } : {}),
       })
-      postRun(text, images)
+      postRun(submission, images)
       // 首条消息触发会话创建 → 线程列表出现当前会话
       void refreshThreads()
     },

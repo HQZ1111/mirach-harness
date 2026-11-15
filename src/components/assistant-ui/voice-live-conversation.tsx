@@ -113,7 +113,14 @@ export const VoiceLiveConversationDrive: FC = () => {
           '',
           pend.prompt,
         ].join('\n')
-        aui.thread.append({ content: [{ type: 'text', text: submission }] })
+        // **UI 只显示用户真正说的那句话**（pend.prompt）；内部 note/上下文走
+        // runConfig.custom.voiceSubmission 交给 onNew 发给引擎。旧实现把
+        // note 和 context 直接写进消息内容，聊天区会出现 English note 和
+        // "[object Object]"（2026-11-15 用户："对话还乱"）。
+        aui.thread.append({
+          content: [{ type: 'text', text: pend.prompt }],
+          runConfig: { custom: { voiceSubmission: submission } },
+        })
         return
       }
 

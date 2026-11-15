@@ -174,7 +174,7 @@ const ReasoningLeaf: FC = () => {
   if (!part || part.type !== "reasoning") return null;
   if (streaming && part.text.length === 0) return null;
   return (
-    <ReasoningRoot streaming={streaming}>
+    <ReasoningRoot streaming={streaming} variant="ghost">
       <ReasoningTrigger active={streaming} streamingText={part.text} />
       <ReasoningContent aria-busy={streaming}>
         <ReasoningText>

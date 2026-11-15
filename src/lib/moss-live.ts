@@ -457,9 +457,24 @@ export class MossLiveSession {
         const id = data.delegation?.id
         if (id) {
           this.activeDelegationId = id
+          // 协议 context 是 [{role, content}] 对象数组（实测），不是 string[]。
+          // 直接 join 会显示 "[object Object]"；归一成可读行（role: content）。
+          const rawContext: unknown[] = Array.isArray(data.context) ? data.context : []
+          const context = rawContext.map((entry) => {
+            if (typeof entry === 'string') return entry
+            if (entry && typeof entry === 'object') {
+              const item = entry as { role?: unknown; content?: unknown }
+              const content =
+                typeof item.content === 'string' ? item.content : JSON.stringify(item)
+              return typeof item.role === 'string' && item.role
+                ? `${item.role}: ${content}`
+                : content
+            }
+            return String(entry)
+          })
           this.handlers.onDelegation(id, {
             objective: data.objective ?? '',
-            context: data.context ?? [],
+            context,
           })
         }
         return

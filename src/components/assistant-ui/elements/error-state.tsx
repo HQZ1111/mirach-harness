@@ -12,7 +12,8 @@ export interface ErrorStateProps extends Omit<
   title: string;
   detail: string;
   retrying: boolean;
-  onRetry: () => void;
+  /** 缺省 = 不提供重试钮（会话打开失败等不可重试错误）。 */
+  onRetry?: () => void;
 }
 
 export function ErrorState({
@@ -63,14 +64,16 @@ export function ErrorState({
           {detail}
         </p>
       </div>
-      <button
-        type="button"
-        onClick={onRetry}
-        className="ms-auto flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 dark:text-red-400"
-      >
-        <RefreshCwIcon className="size-[var(--size-icon-sm)]" />
-        Retry
-      </button>
+      {onRetry ? (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="ms-auto flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 dark:text-red-400"
+        >
+          <RefreshCwIcon className="size-[var(--size-icon-sm)]" />
+          Retry
+        </button>
+      ) : null}
     </div>
   );
 }

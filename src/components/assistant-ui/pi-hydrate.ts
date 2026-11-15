@@ -28,6 +28,20 @@ import type { TurnMessage, TurnPart } from './turn-actor'
 
 const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
+/** 旧版语音委托把内部 note + spoken context 直接写进了 user 消息内容，
+ *  聊天区会显示英文 note 和 "[object Object]"（2026-11-15 用户："乱"）。
+ *  新的委托只把用户那句话放进消息、其余走 runConfig；这里对**历史**做显示
+ *  清洗：note 开头的消息只保留最后一个空行块（真正的 spoken prompt）。 */
+const LEGACY_VOICE_NOTE_PREFIX =
+  '[Note: this message is a delegation from a live spoken conversation.'
+
+function cleanLegacyVoiceUserText(text: string): string {
+  if (!text.startsWith(LEGACY_VOICE_NOTE_PREFIX)) return text
+  const blocks = text.split(/\n{2,}/)
+  const prompt = blocks.at(-1)?.trim()
+  return prompt || text
+}
+
 /** pi Message 的最小形状（hydrate 输入；字段缺失时按类型收窄）。 */
 interface PiMessageLike {
   role?: string
@@ -181,7 +195,7 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
         parts.length === 0
           ? ''
           : parts.length === 1 && parts[0]!.type === 'text'
-            ? parts[0]!.text
+            ? cleanLegacyVoiceUserText(parts[0]!.text)
             : parts
       out.push({
         id: `hydrate-${i}-user`,

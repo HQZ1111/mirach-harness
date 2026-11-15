@@ -8,12 +8,15 @@ import { createStore, useStore } from 'zustand'
 
 interface ErrorBridgeState {
   error: string | null
-  setError: (error: string | null) => void
+  /** 是否提供「Retry」（RUN_ERROR = 可重试；会话打开失败 = 不可重试）。 */
+  retryable: boolean
+  setError: (error: string | null, retryable?: boolean) => void
 }
 
 export const errorBridge = createStore<ErrorBridgeState>(() => ({
   error: null,
-  setError: (error) => errorBridge.setState({ error }),
+  retryable: true,
+  setError: (error, retryable = true) => errorBridge.setState({ error, retryable }),
 }))
 
 export const useErrorBridge = () => useStore(errorBridge)
