@@ -34,6 +34,10 @@ export const useAttachmentSrc = () => {
   const { file, src } = useAuiState(
     useShallow((s): { file?: File; src?: string } => {
       if (s.attachment.type !== "image") return {};
+      // 宿主扩展字段：原生选择器构造的 File 是空壳（字节不进 JS），data
+      // URL 预读后挂在附件元数据上——优先用它，否则空 File 会渲染成裂图。
+      const preloaded = (s.attachment as { dataUrl?: string }).dataUrl;
+      if (preloaded) return { src: preloaded };
       if (s.attachment.file) return { file: s.attachment.file };
       const src = s.attachment.content?.filter((c) => c.type === "image")[0]
         ?.image;

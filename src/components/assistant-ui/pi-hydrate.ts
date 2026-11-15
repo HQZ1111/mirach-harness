@@ -357,6 +357,26 @@ export function convertTurnMessage(m: TurnMessage): ThreadMessageLike {
     role: m.role,
     ...(m.createdAt ? { createdAt: m.createdAt } : {}),
     ...(Object.keys(custom).length > 0 ? { metadata: { custom } } : {}),
+    // 文件引用附件（视频/音频/文档）：assistant-ui 的 message attachments
+    // 通道（UserMessageAttachments 渲染 chip）。content 必须给空数组——
+    // fromThreadMessageLike 会对它做 map。size/kind/sourcePath 是宿主扩展
+    // 字段（`...att` 原样存活），chip 用来显示类型/大小，消息 sent 后也会
+    // 保留在乐观投影里。
+    ...(m.attachments && m.attachments.length > 0
+      ? {
+          attachments: m.attachments.map((a) => ({
+            id: a.id,
+            type: a.kind === 'image' ? 'image' : a.kind === 'document' ? 'document' : 'file',
+            name: a.name,
+            contentType: a.mime,
+            content: [],
+            status: { type: 'complete' as const },
+            kind: a.kind,
+            size: a.size,
+            sourcePath: a.path,
+          })) as unknown as ThreadMessageLike['attachments'],
+        }
+      : {}),
     content:
       typeof m.content === 'string'
         ? m.content

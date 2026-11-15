@@ -117,15 +117,20 @@ export function PermissionModeChip({
           type="button"
           aria-label="切换模式"
           aria-haspopup="menu"
+          title={currentLabel}
           className={cn(
             // ZCode 实测（9444）：28 高、圆角 8、14px 字、px-2、图标 16。
-            'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground flex h-[28px] items-center gap-1.5 rounded-[8px] px-2 text-[14px] transition-colors',
+            'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground flex h-[28px] shrink-0 items-center gap-1.5 rounded-[8px] px-2 text-[14px] transition-colors',
+            // 窄卡片（ZCode ChatModeSwitchControl / V4ComposerModeSwitch 同款）：
+            // 文字与下拉箭头一起收掉，触发器收成 28×28 正方形、只留盾牌图标。
+            // 断点 = 卡片自身宽度 36rem（ZCode 的 @xl/composer），不是窗口宽度。
+            '@max-xl/composer:size-[28px] @max-xl/composer:justify-center @max-xl/composer:gap-0 @max-xl/composer:px-0',
             className,
           )}
         >
           <ShieldAlertIcon className="size-[16px] shrink-0" />
-          <span className="whitespace-nowrap">{currentLabel}</span>
-          <ChevronDownIcon className="size-[12px] shrink-0 opacity-50" />
+          <span className="whitespace-nowrap @max-xl/composer:hidden">{currentLabel}</span>
+          <ChevronDownIcon className="size-[12px] shrink-0 opacity-50 @max-xl/composer:hidden" />
         </button>
       </PopoverTrigger>
       <PopoverContent

@@ -32,6 +32,9 @@ export interface SessionRowMeta {
   readonly createdMs?: number
   /** 消息条数（pi SessionMeta.messageCount；未读水位/用量过期键用）。 */
   readonly messageCount?: number
+  /** 项目归属（`pi_sessions_index.projectId`：显式映射优先、否则 cwd 落在
+   *  项目根内推断；缺省 = 无归属）。project 分组按它分组。 */
+  readonly projectId?: string
 }
 
 /** 最后活跃降序（同毫秒按 id 稳定排序——避免每次渲染顺序抖动） */

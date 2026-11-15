@@ -387,7 +387,7 @@ function ModelSelectorValue({
     return (
       <span
         data-slot="model-selector-value"
-        className={cn("text-muted-foreground", className)}
+        className={cn("text-muted-foreground truncate", className)}
       >
         {placeholder}
       </span>
@@ -407,7 +407,14 @@ function ModelSelectorValue({
       {selectedModel.icon && <ModelIcon>{selectedModel.icon}</ModelIcon>}
       <span className="truncate font-medium">{selectedModel.name}</span>
       {effortName && (
-        <span className="text-muted-foreground min-w-7.5 truncate text-center">
+        /* 窄 composer（@max-xl/composer = 卡片 < 36rem）只留模型名：思考
+           档位是长文本里最先让位的——ZCode 在卡片窄于 36rem 时就是只显示
+           图标/名称（ThoughtLevelCycleControl / ConfigSelect 的 label
+           可见性规则）。这里用容器查询由 CSS 决定，不引入 JS 测量。 */
+        <span
+          data-slot="model-selector-effort"
+          className="text-muted-foreground min-w-7.5 truncate text-center @max-xl/composer:hidden"
+        >
           {effortName}
         </span>
       )}

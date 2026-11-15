@@ -1,31 +1,32 @@
 "use client";
 
 /**
- * 助手消息工作区渲染（2026-11-15 重写：ZCode 对话工作区的完整复刻）。
+ * 助手消息工作区渲染（2026-11-15 重写：ZCode 对话工作区的完整复刻；
+ * 同日恢复 ZCode 的**两层工作过程结构**）。
  *
- * ## 一个 turn 一个工作段
+ * ## 两层结构（ZCode 源码事实）
  *
- * ZCode 的 turn = 一条 user 行 + 其后全部 assistant 行；工作段（可折叠的
- * 「已工作 N 分 M 秒」）**整轮只有一个**，折叠区里是「最后一条非空正文之前
- * 的全部部件」（含中间正文），最后正文留在折叠区外（
- * `conversationTurnWorkSegments.ts` 的 assistantHistoryRows / followingRows）。
+ * 1. **外层（每 turn 一个）**：`WorkSegmentGroup` —
+ *    `AssistantHistoryStatus` 同款，只有状态/时长（`已停止` / `已工作 N` /
+ *    `已处理`），**运行中不建头**（`ConversationTurnGroup.tsx:540-630`）；
+ *    running 时内容恒开，运行反馈只有轮尾 ChatLoading 一处。
+ * 2. **内层（按连续摘要行分段）**：`SummaryRunView` → `ConsecutiveSummaryGroup`
+ *    （`ToolSummaryRow.tsx:261-381`）。组头是统计
+ *    「已查阅 N 项，已执行 M 命令，已修改 K 文件」；组内 < 2 直接平铺；
+ *    正文/子代理/未归类工具是边界，组之间内联渲染
+ *    （`conversationAssistantWorkItems.ts:157-178`）。只有「组尾行 ==
+ *    整轮尾行且轮 running」的尾组，收起头才滚动当前活动项。
  *
  * 宿主对应物：历史会话在 `pi-hydrate.ts` 里把连续 assistant 消息合并成一条
  * TurnMessage（实时路径 run 本来就是一条），故本文件按**一条消息**切分：
  * `splitWorkParts` 找到最后一条非空 text 部件，它之前的一切进工作段。
  *
- * ## 组内：连续摘要组（不是旧的「族组」）
- *
- * `work-summary.ts::buildWorkSummaryItems` 扫出「连续可归类行」的运行段：
- * 思考 + explore/run/change 工具。长度 ≥ 2 的运行段合成一个
- * `ConsecutiveSummaryGroup`，组头是跨族统计
- * 「已查阅 20 项，已执行 134 命令，已修改 4 文件」；长度 1 摊平成普通行。
- * 正文 / 子代理 / 未归类工具 / 图片是边界（ZCode 同款）。
- *
- * ## 叶子机制（与官方逐条对齐，见旧版模块头，未变）
+ * ## 叶子机制（与官方逐条对齐，未变）
  *
  * part scope（PartByIndexProvider 的公开 API 复刻）、注册工具 UI 优先、
  * data 渲染器具名优先、indicator 判据 —— 全部保留。
+ * 文件 chip（组头折叠 change 摘要）点击走 `openFileFromToolPath` → 预览
+ * 面板（代码查看器）。
  */
 
 import { useMemo, type ComponentType, type FC, type PropsWithChildren, type ReactNode } from "react";
@@ -51,15 +52,17 @@ import {
   classifySummaryCategory,
   formatSummaryStatistics,
   isSubagentToolName,
+  isTailSummaryGroup,
+  isTodoToolName,
   summaryChangeFiles,
   summaryIconIndex,
   summaryFileLeafName,
   type SummaryPartLike,
-  type WorkSummaryItem,
 } from "@/components/assistant-ui/work-summary";
 import {
   resolveWorkSegmentStatus,
   splitWorkParts,
+  workSegmentDefaultOpen,
   type WorkPartLike,
 } from "@/components/assistant-ui/work-segment";
 import { SummaryPreviewContext } from "@/components/assistant-ui/summary-preview-context";
@@ -67,6 +70,7 @@ import {
   CollapsedChangeLabel,
   ConsecutiveSummaryGroup,
 } from "@/components/assistant-ui/elements/summary-group.aui";
+import { openFileFromToolPath } from "@/components/assistant-ui/open-file";
 import { WorkSegmentGroup } from "@/components/assistant-ui/elements/work-segment.aui";
 import {
   ReasoningContent,
@@ -74,7 +78,7 @@ import {
   ReasoningText,
   ReasoningTrigger,
 } from "@/components/assistant-ui/elements/reasoning.aui";
-import { TypingIndicator } from "@/components/assistant-ui/elements/typing-indicator";
+import { resolveReasoningStreamingSummary } from "@/components/assistant-ui/elements/reasoning";
 import { File } from "@/components/file";
 import { Image } from "@/components/image";
 import { MarkdownText } from "@/components/markdown-text";
@@ -100,6 +104,12 @@ export interface AssistantWorkPartsSlots {
   ReasoningGroup?: ComponentType<PropsWithChildren<{ group: WorkGroupPart }>>;
   /** 自定义任务分组槽位（保留兼容；默认不提供）。 */
   TaskGroup?: ComponentType<{ group: WorkGroupPart }>;
+  /**
+   * 本消息是否是该 turn 的工作段宿主（= 轮尾有正文的 assistant）。
+   * 一个 turn 只允许一个总折叠块：轮内更早的 assistant 段（引擎理论上
+   * 不产；水合路径已合并）逐项平铺，不再各出一个组头。
+   */
+  turnWorkOwner?: boolean;
 }
 
 // ── part scope（PartByIndexProvider 的公开 API 复刻）──────────────────
@@ -233,7 +243,6 @@ const PartLeafAt: FC<{ index: number; slots: AssistantWorkPartsSlots }> = ({
 interface RenderCtx {
   parts: readonly SummaryPartLike[];
   slots: AssistantWorkPartsSlots;
-  running: boolean;
 }
 
 /** 组头代表图标（ZCode 取原工具 renderer 的图标；宿主按类别给 lucide）。 */
@@ -255,16 +264,33 @@ function statisticsIconFor(part: SummaryPartLike | undefined): ReactNode {
   return <SearchIcon className="size-4" />;
 }
 
-/** 收起态组头滚动的当前项摘要（ZCode 用摘要预览上下文渲染同一套行）。 */
+/**
+ * 收起态组头滚动的当前项摘要（ZCode 用摘要预览上下文渲染同一套行）。
+ *
+ * 思考行显示**流式末行**（ZCode `resolveReasoningStreamingSummary`）：这
+ * 就是「折叠时头部显示当前正在跑的内容」；工具行走原摘要行的 preview
+ * 分支（图标 + 类别词 + 参数 chip + 状态词）。
+ */
 const SummaryPreviewRow: FC<{ index: number; ctx: RenderCtx }> = ({ index, ctx }) => {
   const part = ctx.parts[index];
   if (!part) return null;
   if (part.type === "reasoning") {
     const streaming = part.status?.type === "running";
+    const summary = streaming
+      ? resolveReasoningStreamingSummary(part.text ?? "")
+      : null;
     return (
       <span className="inline-flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
         <BrainIcon className="size-4 shrink-0" />
-        <span className={streaming ? "shimmer" : undefined}>思考</span>
+        <span className={streaming ? "shrink-0 shimmer motion-reduce:animate-none" : "shrink-0"}>
+          思考
+        </span>
+        {summary ? (
+          <>
+            <span className="shrink-0">·</span>
+            <span className="min-w-0 truncate">{summary.text}</span>
+          </>
+        ) : null}
       </span>
     );
   }
@@ -277,23 +303,46 @@ const SummaryPreviewRow: FC<{ index: number; ctx: RenderCtx }> = ({ index, ctx }
   );
 };
 
+/** 收起态组头滚动项的动画 key：思考按流式末行滚动，其余按项身份。 */
+function previewKeyFor(part: SummaryPartLike | undefined, index: number): string {
+  if (part?.type === "reasoning" && part.status?.type === "running") {
+    const line = resolveReasoningStreamingSummary(part.text ?? "");
+    return `reasoning:${index}:${line?.key ?? ""}`;
+  }
+  return `summary:${index}`;
+}
+
+/**
+ * 一段连续摘要行 → `ConsecutiveSummaryGroup`（ZCode
+ * `ConversationAssistantWorkContent` 的 group 分支）。
+ *
+ * - 组内 < 2：**直接渲染该行，不建组头**（ZCode `items.length < 2`）；
+ * - `groupRunning = 轮仍 running && 组尾行 == 整轮尾行`（ZCode
+ *   `tailRowId === lastRowId && taskRunning`）——只有尾组可滚动当前项，
+ *   其余组收起恒显示统计；
+ * - 统计只在这里产生（外层头只有时长/状态）。
+ */
 const SummaryRunView: FC<{
   indices: readonly number[];
   ctx: RenderCtx;
-  /** 该运行段是工作段的尾段（ZCode `tailRowId === lastRowId`）。 */
-  isTail: boolean;
-}> = ({ indices, ctx, isTail }) => {
-  // 组内 < 2：单行保持普通摘要行（ZCode 三处 builder 的 length === 1 分支）
+  running: boolean;
+  /** 整轮最后一个可见行（正文也参与）；组尾等于它才是 running 组。 */
+  turnTailIndex: number;
+}> = ({ indices, ctx, running, turnTailIndex }) => {
   if (indices.length < 2) {
     return <PartLeafAt index={indices[0]!} slots={ctx.slots} />;
   }
-  // 工具暂时全部结束不代表结构闭合：只有整轮尾组可继续翻滚（ZCode 同款）
-  const groupRunning = ctx.running && isTail;
+  const groupRunning = isTailSummaryGroup({
+    running,
+    groupLastIndex: indices[indices.length - 1]!,
+    turnTailIndex,
+  });
   const completed = !groupRunning;
   const statistics = formatSummaryStatistics(ctx.parts, indices, completed);
   const iconIndex = summaryIconIndex(ctx.parts, indices);
   const activeIndex = activeSummaryIndex(ctx.parts, indices);
   const currentIndex = activeIndex ?? indices[indices.length - 1]!;
+  const currentPart = ctx.parts[currentIndex];
   const changes = summaryChangeFiles(ctx.parts, indices);
   const collapsedStatistics =
     changes && changes.files.length === 1 && changes.unresolved === 0 && changes.files[0] ? (
@@ -302,16 +351,20 @@ const SummaryRunView: FC<{
         fileName={summaryFileLeafName(changes.files[0].path)}
         additions={changes.files[0].additions}
         removed={changes.files[0].removed}
+        onOpen={() => openFileFromToolPath(changes.files[0]!.path)}
       />
     ) : undefined;
 
   return (
     <ConsecutiveSummaryGroup
       statistics={statistics}
-      statisticsIcon={statisticsIconFor(iconIndex === undefined ? undefined : ctx.parts[iconIndex])}
+      statisticsIcon={statisticsIconFor(
+        iconIndex === undefined ? undefined : ctx.parts[iconIndex],
+      )}
       collapsedStatistics={collapsedStatistics}
       groupRunning={groupRunning}
-      activeKey={`summary:${currentIndex}`}
+      activeKey={previewKeyFor(currentPart, currentIndex)}
+      activeRefreshVersion={currentPart}
       activeSummary={<SummaryPreviewRow index={currentIndex} ctx={ctx} />}
     >
       {indices.map((index) => (
@@ -321,18 +374,26 @@ const SummaryRunView: FC<{
   );
 };
 
-/** 一段部件（工作段内或折叠区外）→ 摘要组 / 单行。 */
-const WorkItems: FC<{ indices: readonly number[]; ctx: RenderCtx }> = ({
-  indices,
-  ctx,
-}) => {
-  const items = useMemo<WorkSummaryItem[]>(
-    () => buildWorkSummaryItems(ctx.parts, indices),
+/**
+ * 工作段内的渲染项 → 连续摘要组 / 平铺单行。
+ *
+ * `buildWorkSummaryItems` 只把**连续**摘要行合成 `rows` 项；正文、子代理、
+ * 未归类工具、图片是边界（`part` 项），在组之间内联渲染。待办行在扫描时
+ * 剔除（不渲染、不断组）。
+ */
+const WorkItems: FC<{
+  indices: readonly number[];
+  ctx: RenderCtx;
+  running: boolean;
+  turnTailIndex: number;
+}> = ({ indices, ctx, running, turnTailIndex }) => {
+  const items = useMemo(
+    () => buildWorkSummaryItems(ctx.parts as readonly SummaryPartLike[], indices),
     [ctx.parts, indices],
   );
   return (
     <>
-      {items.map((item, position) =>
+      {items.map((item) =>
         item.kind === "part" ? (
           <PartLeafAt key={item.key} index={item.index} slots={ctx.slots} />
         ) : (
@@ -340,7 +401,8 @@ const WorkItems: FC<{ indices: readonly number[]; ctx: RenderCtx }> = ({
             key={item.key}
             indices={item.indices}
             ctx={ctx}
-            isTail={position === items.length - 1}
+            running={running}
+            turnTailIndex={turnTailIndex}
           />
         ),
       )}
@@ -377,10 +439,10 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
   ToolFallback,
   ReasoningGroup,
   TaskGroup,
+  turnWorkOwner = true,
 }) => {
   const parts = useAuiState((s) => s.message.parts);
   const running = useAuiState((s) => s.message.status?.type === "running");
-  const toolUIs = useAuiState((s) => s.tools.toolUIs);
   const bounds = useWorkBounds();
 
   const slots = useMemo<AssistantWorkPartsSlots>(
@@ -390,8 +452,8 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
     [ToolFallback, ReasoningGroup, TaskGroup],
   );
   const ctx = useMemo<RenderCtx>(
-    () => ({ parts: parts as readonly SummaryPartLike[], slots, running }),
-    [parts, slots, running],
+    () => ({ parts: parts as readonly SummaryPartLike[], slots }),
+    [parts, slots],
   );
 
   // 工作段 = 最后一条非空正文之前的全部部件；正文与之后的部件在折叠区外
@@ -408,27 +470,69 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
   const history = useMemo(() => [...split.history], [split]);
   const following = useMemo(() => [...split.following], [split]);
 
-  // 官方 shouldShowIndicator('no-text')：running 且末部件不是 text/reasoning
-  const showIndicator = running
-    ? (() => {
-        const last = parts[parts.length - 1];
-        return last === undefined || (last.type !== "text" && last.type !== "reasoning");
-      })()
-    : false;
+  // 整轮最后一个可见行（正文也参与；待办行不渲染，跳过）——ZCode
+  // `getAssistantSummaryTailRowId` 的宿主对应物。只有「组尾行 === 它」且轮
+  // 仍 running 的组是 running 组（收起头滚动当前项）；一旦最终正文流出，
+  // 尾行变成正文，所有组收起头都回到统计文本（ZCode 同判）。
+  const turnTailIndex = useMemo(() => {
+    const list = parts as readonly SummaryPartLike[];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const part = list[i];
+      if (part?.type === "tool-call" && isTodoToolName(part.toolName ?? "")) continue;
+      return i;
+    }
+    return -1;
+  }, [parts]);
 
-  // 没有最终正文 → 全折叠且默认展开（ZCode assistantHistoryDefaultOpen 分支）
+  // 运行中的唯一指示器是轮尾 ChatLoading（orbs + 工作中 + 计时，见
+  // ThreadThinkingIndicator）。ZCode 没有第二个 inline typing dots——
+  // 这里不再渲染 TypingIndicator，避免出现两处“正在生成”。
+
+  // 没有最终正文 → 强制展开且不可收起（ZCode assistantHistoryDefaultOpen 分支）
   const hasFinalText = split.lastTextIndex >= 0;
+
+  // 非轮尾段：不建外层工作段（一个 turn 只能有一个外层头），但内层连续
+  // 摘要组照常。引擎实时路径一个 run 一条 assistant 消息、水合路径已合并
+  // 连续 assistant，这个分支只在持有旧快照/未来引擎拆分时才走。
+  const allPartIndices = useMemo(
+    () => (turnWorkOwner ? [] : parts.map((_, index) => index)),
+    [parts, turnWorkOwner],
+  );
+  if (!turnWorkOwner) {
+    return (
+      <>
+        <div
+          data-slot="aui_assistant-work-flat"
+          className="flex flex-col gap-5"
+        >
+          <WorkItems
+            indices={allPartIndices}
+            ctx={ctx}
+            running={running}
+            turnTailIndex={turnTailIndex}
+          />
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
       {history.length > 0 ? (
         <WorkSegmentGroup
           status={status}
-          defaultOpen={!hasFinalText}
+          defaultOpen={workSegmentDefaultOpen(hasFinalText, running)}
           running={running}
         >
+          {/* ZCode ConversationAssistantWorkContent 的 gap-1：组与组之间的
+              间距由各自组件（组头 + 内容 mt-2）承担，外层不再加导线。 */}
           <div data-slot="aui_assistant-work-items" className="flex flex-col gap-1">
-            <WorkItems indices={history} ctx={ctx} />
+            <WorkItems
+              indices={history}
+              ctx={ctx}
+              running={running}
+              turnTailIndex={turnTailIndex}
+            />
           </div>
         </WorkSegmentGroup>
       ) : null}
@@ -443,17 +547,16 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
           )}
         >
           <PartLeafAt index={split.lastTextIndex} slots={slots} />
-          {following.length > 0 ? <WorkItems indices={following} ctx={ctx} /> : null}
+          {following.length > 0 ? (
+            <WorkItems
+              indices={following}
+              ctx={ctx}
+              running={running}
+              turnTailIndex={turnTailIndex}
+            />
+          ) : null}
         </div>
       ) : null}
-      {showIndicator && (
-        <span
-          data-slot="aui_assistant-message-indicator"
-          className="inline-flex items-center py-1"
-        >
-          <TypingIndicator variant="bare" />
-        </span>
-      )}
     </>
   );
 };

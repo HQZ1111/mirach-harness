@@ -30,6 +30,7 @@ import {
   EyeIcon,
   FileDiffIcon,
   FolderOpenIcon,
+  RadioIcon,
   SquareTerminalIcon,
   type LucideIcon,
 } from 'lucide-react'
@@ -37,7 +38,7 @@ import {
 import { buttonVariants } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
-export type OpenPageKind = 'files' | 'terminal' | 'preview' | 'review'
+export type OpenPageKind = 'files' | 'terminal' | 'preview' | 'review' | 'radio'
 
 const ACTIONS: readonly {
   kind: OpenPageKind
@@ -49,6 +50,9 @@ const ACTIONS: readonly {
   { kind: 'preview', icon: EyeIcon, label: '预览', description: '预览打开的文件。' },
   { kind: 'terminal', icon: SquareTerminalIcon, label: '终端', description: '运行命令和查看输出。' },
   { kind: 'review', icon: FileDiffIcon, label: '审查', description: '查看代码变更与差异。' },
+  // 电台（2026-11-15）：hermes radio 插件的宿主形态——上游是桌面端状态栏
+  // 插件，宿主已撤除底栏，改落窗格（打开页 + 标签条 + 号两个入口）。
+  { kind: 'radio', icon: RadioIcon, label: '电台', description: '听直播电台，可搜索与置顶。' },
 ]
 
 /** SidePaneLauncherRow 逐类对齐（PluginUiLauncherItems.tsx:216）。 */

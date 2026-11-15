@@ -56,7 +56,6 @@ import {
 } from "@/components/assistant-ui/speech-adapter";
 import { EmptyState, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
 import { ErrorState } from "@/components/assistant-ui/elements/error-state";
-import { GuardrailNotice } from "@/components/assistant-ui/elements/guardrail-notice";
 import { ConnectionState } from "@/components/assistant-ui/elements/connection-state";
 import { MessageActions, type Reaction } from "@/components/assistant-ui/elements/message-actions";
 import { MessageBranches } from "@/components/assistant-ui/elements/message-branches";
@@ -79,7 +78,7 @@ import { TurnNavigator } from "@/components/assistant-ui/elements/turn-navigator
 import { SelectionToolbar } from "@/components/assistant-ui/elements/selection-toolbar.aui";
 import { ConversationFind } from "@/components/assistant-ui/elements/conversation-find.aui";
 import { TurnFileSummary } from "@/components/assistant-ui/elements/turn-file-summary";
-import { TimelineMarkerRow, bucketMarkers } from "@/components/assistant-ui/elements/timeline-marker";
+import { TimelineMarkerRow, MarkerDivider, bucketMarkers, compactionRowView } from "@/components/assistant-ui/elements/timeline-marker";
 import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-store";
 import {
   groupMessagesIntoTurns,
@@ -109,6 +108,7 @@ import {
 } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
+  ArchiveIcon,
   AudioLinesIcon,
   CheckIcon,
   ChevronLeftIcon,
@@ -252,11 +252,14 @@ const parseTurnState = (raw: unknown): TurnStateProjection | null => {
   return raw as TurnStateProjection;
 };
 
-// 压缩横幅（官方 guardrail-notice 元素，挂 thread 顶部）：CUSTOM
-// name=compaction 经轮次机归约进 context.compaction → adapter state 到达。
-// explanation = reason 或 tokensBefore→tokensAfter；errorMessage 红字独立
-// 行（模板无该槽位，宿主补一行 destructive 文本）。start 相标题“压缩中”。
-const CompactionBanner: FC = () => {
+// 上下文压缩行（ZCode `ConversationTimelineMarkerDivider` 的 compact 形态）：
+// CUSTOM name=compaction 经轮次机归约进 context.compaction → adapter state
+// 到达。2026-11-15 从顶部的 guardrail 横幅改成对话内的分隔线行（与历史
+// compaction marker 同一壳体）：running 隐藏图标 + 文案流光；失败红字、
+// 中断琥珀色；标题后缀 `tokensBefore → tokensAfter`。
+const LiveCompactionRow: FC<{ hasTailCompactMarker: boolean }> = ({
+  hasTailCompactMarker,
+}) => {
   const raw = useAuiState((s) => s.thread.state);
   const st = parseTurnState(raw);
   const c = st?.compaction;
@@ -264,37 +267,30 @@ const CompactionBanner: FC = () => {
     !c ||
     (c.phase !== "start" && c.phase !== "end")
   ) {
-    if (c) console.error("[aui] compaction 投影形状非法——横幅不渲染", c);
+    if (c) console.error("[aui] compaction 投影形状非法——分隔线不渲染", c);
     return null;
   }
-  const explanationParts: string[] = [];
-  if (typeof c.reason === "string" && c.reason) {
-    explanationParts.push(c.reason);
-  } else if (
-    typeof c.tokensBefore === "number" &&
-    typeof c.tokensAfter === "number"
-  ) {
-    explanationParts.push(`${c.tokensBefore} → ${c.tokensAfter} tokens`);
-  }
-  const explanation =
-    explanationParts.join(" · ") || "对话上下文已自动压缩，较早的内容已摘要收拢。";
-  const errorMessage =
-    typeof c.errorMessage === "string" && c.errorMessage ? c.errorMessage : null;
+  // 完成后历史 marker 已是真源（同壳同文案），实时快照不再重复一条；
+  // 运行中（start）仍必须显示，旧 marker 不能盖住新的压缩进度。
+  if (hasTailCompactMarker && c.phase === "end") return null;
+  const view = compactionRowView({
+    phase: c.phase,
+    ...(typeof c.reason === "string" ? { reason: c.reason } : {}),
+    ...(typeof c.tokensBefore === "number" ? { tokensBefore: c.tokensBefore } : {}),
+    ...(typeof c.tokensAfter === "number" ? { tokensAfter: c.tokensAfter } : {}),
+    ...(typeof c.aborted === "boolean" ? { aborted: c.aborted } : {}),
+    ...(typeof c.errorMessage === "string" ? { errorMessage: c.errorMessage } : {}),
+  });
   return (
-    <div
-      data-slot="aui_compaction-banner"
-      className="flex w-full flex-col gap-1 pt-2"
-    >
-      <GuardrailNotice
-        title={c.phase === "start" ? "上下文压缩中" : "上下文已压缩"}
-        explanation={explanation}
-        policy="compaction"
-        alternatives={[]}
-        className="w-full max-w-none"
+    <div data-slot="aui_compaction-row">
+      <MarkerDivider
+        kind="compact"
+        label={view.label}
+        icon={<ArchiveIcon aria-hidden className="size-[var(--size-icon-sm)] shrink-0" />}
+        running={view.running}
+        tone={view.tone}
+        {...(view.detail === undefined ? {} : { detail: view.detail })}
       />
-      {errorMessage && (
-        <p className="text-destructive px-1 text-xs">{errorMessage}</p>
-      )}
     </div>
   );
 };
@@ -819,6 +815,11 @@ const MessageTurnList: FC = () => {
   // `beforeMessageIndex === ids.length` 的标记落在**全部消息之后**（最后
   // 一轮收尾后的模型切换，为下一轮准备的）——挂在列表末尾，不静默丢弃。
   const tailMarkers = buckets.get(ids.length);
+  // 压缩完成后会话条目会落成 tail compact marker（`pi_get_timeline_markers`
+  // 在 run 收尾后刷新）；此时实时投影还挂着同一事件的 end 快照。两者同壳，
+  // 保留历史 marker（真源），隐掉实时行，避免末尾两条「已压缩」。
+  const hasTailCompactMarker =
+    tailMarkers?.some((m) => m.marker.kind === "compact") === true;
   return (
     <>
       {turns.map((turn, turnIndex) => {
@@ -860,6 +861,10 @@ const MessageTurnList: FC = () => {
           prevModel={m.prevModel}
         />
       ))}
+      {/* 压缩事件（CUSTOM name=compaction）：发生在轮外、没有消息下标，
+          落在列表末尾（= 最新事件的位置），与历史 compact marker 同一壳体。
+          end 相在有 tail marker 时由组件自己让位（避免末尾重复）。 */}
+      <LiveCompactionRow hasTailCompactMarker={hasTailCompactMarker} />
     </>
   );
 };
@@ -1083,10 +1088,6 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
               <SessionLineBar />
             </>
           )}
-
-          {/* 压缩横幅（官方 guardrail-notice 元素）：CUSTOM name=compaction
-              经轮次机 → adapter state 到达；挂 thread 消息区顶部 */}
-          <CompactionBanner />
 
           {/* 计划审批卡已删（2026-11-15）：rpi-plan-mode 没有宿主审批闸
               （plan_mode_complete 直接存盘退出，Rust `pi_decide_plan` 恒 Err，
@@ -1548,6 +1549,7 @@ const AssistantMessage: FC = () => {
           ToolFallback={ToolFallbackComponent}
           ReasoningGroup={ReasoningGroup}
           TaskGroup={TaskGroupComponent}
+          turnWorkOwner={isTurnTail}
         />
         <MessageError />
       </div>

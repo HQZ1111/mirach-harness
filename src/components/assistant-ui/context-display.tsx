@@ -491,8 +491,9 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
           type="button"
           aria-label={usageLabel}
           className={cn(
-            // ZCode 实测（9444）：28×28、圆角 8（不是圆形）。
-            "text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground grid size-[28px] place-items-center rounded-[8px] transition-colors",
+            // ZCode 实测（9444）：28×28、圆角 8（不是圆形）。shrink-0：
+            // 动作组收缩时窗口钮不得被压小（只有模型触发器让位）。
+            "text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground grid size-[28px] shrink-0 place-items-center rounded-[8px] transition-colors",
             percent > 85 && "text-red-500 dark:text-red-400",
             className,
           )}

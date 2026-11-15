@@ -113,7 +113,11 @@ export function Composer({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
       data-slot="composer"
-      className={cn("relative w-full max-w-lg", className)}
+      /* 宽度容器（2026-11-15）：ZCode `chat-composer-region` 同款
+         `@container/composer`——工具栏的折叠断点查询的是**输入卡片自己的
+         宽度**，不是窗口宽度（composer 跟着对话列变窄，窗口宽不代表卡片宽）。
+         命名容器 composer：下游一律写 `@max-xl/composer:*`。 */
+      className={cn("@container/composer relative w-full max-w-lg", className)}
       {...props}
     />
   );
@@ -393,7 +397,10 @@ export function ComposerToolbar({
   return (
     <div
       data-slot="composer-toolbar"
-      className={cn("flex items-center justify-between", className)}
+      /* min-w-0（2026-11-15）：工具行是 flex 行，必须允许收缩到卡片宽度；
+         默认 min-width:auto 会让内容把整行撑出圆角卡片（用户实测窄宽度
+         右侧按钮被挤出输入框）。 */
+      className={cn("flex min-w-0 items-center justify-between", className)}
       {...props}
     />
   );
@@ -406,7 +413,9 @@ export function ComposerActions({
   return (
     <div
       data-slot="composer-actions"
-      className={cn("flex items-center gap-[4px]", className)}
+      /* min-w-0（2026-11-15）：动作组整体可收缩；组内按钮 shrink-0、只有
+         模型触发器 min-w-0 让位（ZCode 的 trailing/leading 同款分工）。 */
+      className={cn("flex min-w-0 items-center gap-[4px]", className)}
       {...props}
     />
   );
@@ -426,7 +435,7 @@ export function ComposerAttachButton({
         ghostButton,
         // ZCode 实测（9444）：附件钮 28×28、圆角 8px（不是圆形），图标 16。
         // 本工程根字号 15px，size-8 会得 30px，故写死像素。
-        "pressable-sm size-[28px] rounded-[8px] disabled:pointer-events-none disabled:opacity-30",
+        "pressable-sm size-[28px] shrink-0 rounded-[8px] disabled:pointer-events-none disabled:opacity-30",
         className,
       )}
       {...props}
@@ -617,9 +626,9 @@ export function ComposerVoiceButton({
         active
           ? cn(
               inkButton,
-              "pressable-sm flex size-[28px] items-center justify-center rounded-full",
+              "pressable-sm flex size-[28px] shrink-0 items-center justify-center rounded-full",
             )
-          : cn(ghostButton, "pressable-sm size-[28px]"),
+          : cn(ghostButton, "pressable-sm size-[28px] shrink-0"),
         className,
       )}
       {...props}
@@ -648,7 +657,7 @@ export function ComposerSend({
       aria-label={streaming ? "Stop generating" : "Send message"}
       data-slot="composer-send"
       className={cn(
-        "pressable-sm grid size-[28px] place-items-center rounded-full",
+        "pressable-sm grid size-[28px] shrink-0 place-items-center rounded-full",
         streaming || !idle
           ? inkButton
           : "bg-foreground/[0.06] text-foreground/30 dark:bg-foreground/[0.09] transition-colors",

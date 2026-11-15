@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::{Query, Request, State},
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{header, HeaderName, HeaderValue, Method, StatusCode},
     middleware,
     response::{IntoResponse, Sse},
@@ -27,6 +27,8 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 const BUFFER_CAP: usize = 2000;
 const AGUI_VERSION: &str = "v0.4";
+/// POST /ag-ui 请求体上限（默认 2MB 装不下 base64 图片；见 router 注释）
+const AGUI_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct AguiState {
     pub engine: crate::pi_session::PiEngine,
@@ -825,6 +827,11 @@ pub fn router(state: Arc<AguiState>) -> Router {
         .route("/ag-ui", post(agui_run))
         .route("/ag-ui/stream", get(agui_stream))
         .route("/healthz", get(healthz))
+        // POST 体上限：axum `Json` 默认 2MB——一张普通截图（base64 后
+        // 1.33 倍）就会撞 413，前端只看到"消息没发出去"（2026-11-15
+        // 图片发的根因之一）。图片走 base64 原生通道，这里放宽到 64MB；
+        // 前端 native 图片单张上限 24MB（attachments.ts），仍有充足余量。
+        .layer(DefaultBodyLimit::max(AGUI_MAX_BODY_BYTES))
         .layer(cors)
         // 层序：后加的在外层最先执行——Host 校验先于 CORS；坏 Host 的
         // 403 不带 CORS 头也无所谓（rebinding 攻击请求本就不受 CORS 保护）。

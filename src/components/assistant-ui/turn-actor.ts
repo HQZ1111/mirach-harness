@@ -9,6 +9,7 @@
  * idle 态 run 外事件透传。
  */
 import { assign, setup } from 'xstate'
+import type { TurnAttachment } from './attachments'
 
 export interface TurnMessage {
   id: string
@@ -22,6 +23,10 @@ export interface TurnMessage {
    * 实时路径不写（外层工作段时长回落到部件计时）。外层「已工作 N 分 M 秒」
    * 的结束边界（ZCode turn.activeMs 同口径）。 */
   completedAt?: number
+  /** 文件引用附件（视频/音频/文档）：图片走 content 的 image part（原生
+   * 多模态），这些没有原生块，只在本轮投影里留 chip + 路径元数据
+   * （convertTurnMessage 映射成 ThreadMessageLike.attachments）。 */
+  attachments?: TurnAttachment[]
 }
 
 /** 结构化内容部件（ThreadMessageLike 兼容形状；args 限 JSON 对象——
@@ -178,7 +183,7 @@ export type AguiEvent = { type: string } & Record<string, unknown>
 
 export type TurnEvent =
   | { type: 'AGUI_EVENT'; event: AguiEvent; id: number }
-  | { type: 'USER_SUBMIT'; text: string; messageId: string; images?: string[] }
+  | { type: 'USER_SUBMIT'; text: string; messageId: string; images?: string[]; files?: TurnAttachment[] }
   /** 新会话（New Chat）：清空全部轮次态（§7-4 会话切换） */
   | { type: 'RESET' }
   /** 打开历史会话：注入 pi 会话历史（真相在 pi，机器只收投影快照） */
@@ -468,6 +473,9 @@ export const turnMachine = setup({
             role: 'user' as const,
             content,
             createdAt: new Date(),
+            ...(event.files && event.files.length > 0
+              ? { attachments: event.files }
+              : {}),
           },
         ]
       },

@@ -41,6 +41,9 @@ import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-fil
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
 import { ReviewPanelHost } from '@/components/panes/review-pane'
+import { RadioPane } from '@/components/panes/radio-pane'
+import { SubagentDetailPane } from '@/components/panes/subagent-detail-pane'
+import { setSubagentDetailOpener } from '@/components/panes/subagent-detail-opener'
 import { MainWorkspacePane } from '@/components/panes/main-workspace-pane'
 import { TerminalPane } from '@/components/panes/terminal-pane'
 import { OpenPage, type OpenPageKind } from '@/components/panes/open-page'
@@ -310,6 +313,36 @@ export function DockviewShell() {
     return () => setPreviewOpener(null)
   }, [])
 
+  // ── 子代理详情链（subagent-detail-opener）：单实例 subagent 面板，
+  // payload 走 params（工具结果/名册真值；rpi 子代理是进程内 ChildAgent，
+  // 没有可切换的会话页——这里只展示它的真实数据） ──
+  useEffect(() => {
+    setSubagentDetailOpener((payload) => {
+      const a = apiRef.current
+      if (!a) {
+        console.error('[dv-shell] 布局 api 不在场——子代理详情放弃')
+        return
+      }
+      const existing = a.getPanel('subagent')
+      if (existing) {
+        a.removePanel(existing)
+      }
+      a.addPanel({
+        id: 'subagent',
+        component: 'subagent',
+        title:
+          payload.name && payload.name !== '子代理'
+            ? `子代理 · ${payload.name}`
+            : '子代理',
+        minimumWidth: RAIL_MIN_WIDTH,
+        params: { region: 'panels', payload },
+        position: panelsDropPosition(a),
+      })
+      if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+    })
+    return () => setSubagentDetailOpener(null)
+  }, [])
+
   // ── 打开页动作（open-page-actions.ts 单源；面板栏标签条 + 号同源） ────────
   const onOpen = useCallback((kind: OpenPageKind) => {
     const a = apiRef.current
@@ -329,9 +362,16 @@ export function DockviewShell() {
       <SessionThreadPane threadId={props.params.threadId} tabName={props.params.tabName} />
     ),
     files: () => <HermesFileTreePane />,
-    terminal: () => <TerminalPane />,
+    terminal: (props: IDockviewPanelProps) => <TerminalPane api={props.api} />,
     review: (props: IDockviewPanelProps) => <ReviewPanelHost {...props} />,
+    // 电台（2026-11-15）：hermes radio 插件改成 dockview 窗格——宿主已撤除
+    // 底栏（用户定稿），所以不再走状态栏注入。播放器随面板挂载/卸载，
+    // 关面板即停止播放并释放音频资源（上游 `ctx.onDispose` 同语义）。
+    radio: (props: IDockviewPanelProps) => <RadioPane onClose={() => props.api.close()} />,
     preview: (props: IDockviewPanelProps) => <HermesPreviewPane filePath={props.params.filePath ?? ''} />,
+    subagent: (props: IDockviewPanelProps) => (
+      <SubagentDetailPane payload={props.params.payload ?? {}} />
+    ),
   }
 
   const onReady = useCallback(

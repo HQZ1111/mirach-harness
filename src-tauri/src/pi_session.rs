@@ -262,27 +262,9 @@ fn permission_gate_enabled() -> bool {
 }
 
 fn preflight_session_file(path: &str) -> Result<(), String> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("会话文件无法打开（{path}）：{e}"))?;
-    let mut first = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut first)
-        .map_err(|e| format!("会话文件读取失败（{path}）：{e}"))?;
-    let line = first.trim();
-    if line.is_empty() {
-        return Err(format!("会话文件为空，缺少 header（{path}）"));
-    }
-    let value: serde_json::Value = serde_json::from_str(line)
-        .map_err(|e| format!("会话文件首行不是合法 JSON——文件已损坏（{path}）：{e}"))?;
-    if value.get("kind").and_then(|v| v.as_str()) != Some("header") {
-        return Err(format!(
-            "会话文件损坏：首行不是 rpi session header（kind={:?}，{path}）。\
-             文件不再可恢复，请新建会话或删除该文件。",
-            value.get("kind")
-        ));
-    }
-    Ok(())
+    // 解析逻辑唯一实现在 session_index.rs（跨根索引复用同一份；错误文案
+    // 保持「损坏 / 缺少 header」锚点）。
+    crate::session_index::read_session_header(Path::new(path)).map(|_| ())
 }
 
 impl PiEngine {
@@ -304,6 +286,11 @@ impl PiEngine {
 
     pub fn approvals(&self) -> Arc<ApprovalRegistry> {
         Arc::clone(&self.approvals)
+    }
+
+    /// 启动工作区根（相对路径的解析基准；与引擎会话根同源）。
+    pub fn workspace_cwd(&self) -> PathBuf {
+        self.shared.cwd.clone()
     }
 
     pub fn asks(&self) -> Arc<AskRegistry> {
@@ -1072,6 +1059,202 @@ impl PiEngine {
             bv.cmp(&av)
         });
         Ok(serde_json::Value::Array(rows))
+    }
+
+    /// 跨根会话索引（`pi_sessions_index` 的宿主侧实现，wire 形状见
+    /// `session_index.rs` 模块头）。
+    ///
+    /// 与 `list_sessions` 的关系：后者只扫当前 cwd 的会话根且 wire 形状被
+    /// 旧调用方钉死，**行为不变**；本方法额外扫 rpi settings 的 sessionDir
+    /// 与每个已登记项目根的默认会话根，并为每条记录带出
+    /// `parentSessionId` / `sourceRoot` / `skipped` 诊断。
+    ///
+    /// - 坏文件（缺 header / 半写 / 快照读失败）进 `skipped`，其余照常。
+    /// - 同一个文件被多个根发现时按规范化路径去重（先到先得）。
+    /// - `name` / `messageCount` 与 `list_sessions` 同源：只读快照
+    ///   （`JsonlSessionStorage::read_snapshot` + `Session::get_name/get_stats`），
+    ///   不抢 writer 租约。
+    /// - settings.json 本身读不出来 = 整命令 Err（全局配置错误，不退回
+    ///   默认根——否则「列表少了某个工作区」无法诊断）。
+    pub fn index_sessions(
+        &self,
+        project_roots: &[String],
+    ) -> Result<crate::session_index::IndexScan, String> {
+        use crate::session_index as si;
+        use std::collections::HashSet;
+
+        let cwd = self.shared.cwd.clone();
+        let settings = rpi_cli::settings::load_settings()
+            .map_err(|e| format!("读 rpi 设置失败，无法确定 sessionDir: {e}"))?;
+
+        let mut roots: Vec<si::ScanRoot> = Vec::new();
+        if let Some(dir) = settings.session_dir.as_ref() {
+            si::push_root(
+                &mut roots,
+                si::resolve_session_path(dir, &cwd),
+                si::RootKind::SessionDir,
+            );
+        }
+        for root in project_roots {
+            let resolved = si::resolve_session_path(Path::new(root), &cwd);
+            // 与 `session_root` 同语义：`default_session_dir` 可能返回
+            // RPI_CODING_AGENT_SESSION_DIR 的相对值，必须相对该工作区解析。
+            let default_dir = rpi_cli::session::default_session_dir(&resolved);
+            si::push_root(
+                &mut roots,
+                si::resolve_session_path(&default_dir, &resolved),
+                si::RootKind::ProjectRoot,
+            );
+        }
+        let workspace_default = rpi_cli::session::default_session_dir(&cwd);
+        si::push_root(
+            &mut roots,
+            si::resolve_session_path(&workspace_default, &cwd),
+            si::RootKind::Workspace,
+        );
+
+        struct Candidate {
+            path: PathBuf,
+            source_root: String,
+            source: si::RootKind,
+            header: si::SessionHeader,
+            modified: u64,
+        }
+
+        let mut skipped: Vec<si::SkippedSession> = Vec::new();
+        let mut root_reports: Vec<si::RootReport> = Vec::new();
+        let mut candidates: Vec<Candidate> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        for root in &roots {
+            let scan = si::scan_root(root);
+            skipped.extend(scan.problems);
+            root_reports.push(scan.report);
+            for path in scan.files {
+                if !seen.insert(si::dedup_key(&path)) {
+                    continue; // 同一个文件被前一个根发现过（根有重叠）
+                }
+                let header = match si::read_session_header(&path) {
+                    Ok(header) => header,
+                    Err(reason) => {
+                        skipped.push(si::SkippedSession {
+                            path: path.to_string_lossy().into_owned(),
+                            root: root.path.clone(),
+                            reason,
+                        });
+                        continue;
+                    }
+                };
+                let metadata = match std::fs::metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(e) => {
+                        skipped.push(si::SkippedSession {
+                            path: path.to_string_lossy().into_owned(),
+                            root: root.path.clone(),
+                            reason: format!("会话文件元数据读取失败: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                let modified = match metadata.modified() {
+                    Ok(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+                        Ok(delta) => delta.as_millis() as u64,
+                        Err(e) => {
+                            skipped.push(si::SkippedSession {
+                                path: path.to_string_lossy().into_owned(),
+                                root: root.path.clone(),
+                                reason: format!("会话文件修改时间早于 Unix 纪元: {e}"),
+                            });
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        skipped.push(si::SkippedSession {
+                            path: path.to_string_lossy().into_owned(),
+                            root: root.path.clone(),
+                            reason: format!("会话文件修改时间读取失败: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                candidates.push(Candidate {
+                    path,
+                    source_root: root.path.clone(),
+                    source: root.kind,
+                    header,
+                    modified,
+                });
+            }
+        }
+
+        // 快照读取（name / messageCount）走引擎运行时；逐项结果带出来，
+        // 错误在 await 之外落 skipped（避免跨 await 的 &mut 借用）。
+        let fs: Arc<dyn rpi_tools::FileSystem> = Arc::new(
+            rpi_tools::os_env::OsExecutionEnv::with_cwd(cwd.clone()),
+        );
+        let enriched = self.shared.rt.block_on(async {
+            let mut out = Vec::with_capacity(candidates.len());
+            for candidate in candidates {
+                let storage = JsonlSessionStorage::read_snapshot(
+                    fs.clone(),
+                    &candidate.path.to_string_lossy(),
+                    Arc::new(SystemClock),
+                    Arc::new(DefaultIdGenerator::new()),
+                )
+                .await;
+                let result = match storage {
+                    Ok(storage) => {
+                        let session = Session::new(
+                            Arc::new(storage)
+                                as Arc<dyn rpi_harness::session::types::SessionStorage>,
+                            None,
+                        );
+                        let name = session.get_name().await.ok().flatten();
+                        match session.get_stats().await {
+                            Ok(stats) => Ok((name, stats.message_count)),
+                            Err(e) => Err(format!("会话统计读取失败: {e}")),
+                        }
+                    }
+                    Err(e) => Err(format!("会话快照读取失败: {e}")),
+                };
+                out.push((candidate, result));
+            }
+            out
+        });
+
+        let mut records: Vec<si::SessionRecord> = Vec::with_capacity(enriched.len());
+        for (candidate, result) in enriched {
+            match result {
+                Ok((name, message_count)) => records.push(si::SessionRecord {
+                    id: candidate.header.id,
+                    path: candidate.path.to_string_lossy().into_owned(),
+                    cwd: candidate.header.cwd,
+                    name,
+                    message_count,
+                    last_modified: candidate.modified,
+                    parent_session_id: candidate.header.parent_session_id,
+                    project_id: None,
+                    source_root: candidate.source_root,
+                    source: candidate.source,
+                }),
+                Err(reason) => skipped.push(si::SkippedSession {
+                    path: candidate.path.to_string_lossy().into_owned(),
+                    root: candidate.source_root,
+                    reason,
+                }),
+            }
+        }
+        records.sort_by(|a, b| {
+            b.last_modified
+                .cmp(&a.last_modified)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        Ok(crate::session_index::IndexScan {
+            sessions: records,
+            skipped,
+            roots: root_reports,
+        })
     }
 
     /// 会话名持久化（rpi set_name fact）。

@@ -84,6 +84,11 @@ mod model_registry;
 // pinned/archived/水位/折叠存 app_data_dir/session-meta.json（原子写）
 mod session_meta;
 
+// 跨工作区会话索引（项目/设置页 P0 数据面）：扫描 settings.sessionDir +
+// 已登记项目根 + 当前 cwd，坏文件进 skipped 可见（session_index.rs 模块头
+// 有 wire 形状与去重/边界裁定）。纯宿主实现，不改引擎。
+mod session_index;
+
 // 终端 PTY 桥（terminal.rs 模块头有事件通道裁定）：终端是系统设施不是
 // Agent 数据——输出/退出走 Tauri Event，控制走 IPC invoke
 mod terminal;
@@ -1012,6 +1017,109 @@ fn pi_list_sessions(
     state.engine.list_sessions()
 }
 
+/// 跨根会话索引（设置页 / 会话管理的 P0 数据面）。
+///
+/// 扫描根 = `settings.sessionDir` + 每个**未软删项目**的
+/// `<root>/.rpi/sessions` + 当前 cwd 的默认会话根（去重见 session_index.rs）。
+/// 与 `pi_list_sessions` 并存：后者行为/形状不变，旧调用方零影响。
+///
+/// 入参（camelCase，均可选）：
+/// - `projectId`: 只返回归属该项目的会话（显式 sessionProjects 优先，否则
+///   按 cwd 落在项目根内推断；项目不存在 → Err）
+/// - `archived`: `true` 只返回 `session_meta.archived` 里的会话；`false`
+///   排除归档；缺省 = 不过滤（前端可自行决定）
+///
+/// 返回形状（完整注释见 `session_index.rs` 模块头）：
+/// `{ sessions: [{id,path,cwd,name,messageCount,lastModified,
+///   parentSessionId,projectId,sourceRoot,source}],
+///   skipped: [{path,root,reason}], roots: [{path,kind,exists,error?}] }`
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_sessions_index(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<agui::AguiState>>,
+    meta_state: tauri::State<'_, session_meta::SessionMetaPath>,
+    project_id: Option<String>,
+    archived: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    use std::collections::HashSet;
+
+    let meta = session_meta::read_for(&app, &meta_state)?;
+    let projects = meta.projects();
+    if let Some(id) = project_id.as_deref() {
+        if !projects.iter().any(|project| project.id == id) {
+            return Err(format!("项目 {id} 不存在"));
+        }
+    }
+    // 只有活跃项目的根参与扫描；软删项目的会话仍可通过显式映射/全部列表
+    // 看到，但不再「顺着根」被重新发现（回收站语义）。
+    let project_roots: Vec<String> = projects
+        .iter()
+        .filter(|project| project.deleted_at.is_none())
+        .flat_map(|project| project.roots.iter().cloned())
+        .collect();
+
+    let scan = state.engine.index_sessions(&project_roots)?;
+    let explicit = meta.session_projects_map();
+    let archived_ids: HashSet<&str> = meta.archived.iter().map(String::as_str).collect();
+    // cwd 归属推断用解析后的绝对根（注册表允许相对路径；扫描侧也按同一
+    // 基准解析，否则相对根永远匹配不上会话 header 里的绝对 cwd）。
+    let cwd = state.engine.workspace_cwd();
+    let resolved_projects: Vec<session_meta::Project> = projects
+        .iter()
+        .map(|project| {
+            let mut project = project.clone();
+            project.roots = project
+                .roots
+                .iter()
+                .map(|root| {
+                    session_index::resolve_session_path(
+                        std::path::Path::new(root),
+                        &cwd,
+                    )
+                    .to_string_lossy()
+                    .into_owned()
+                })
+                .collect();
+            project
+        })
+        .collect();
+    let session_index::IndexScan {
+        sessions: records,
+        skipped,
+        roots,
+    } = scan;
+
+    let mut sessions = Vec::new();
+    for mut record in records {
+        let project = session_index::project_for_session(
+            &resolved_projects,
+            &explicit,
+            &record.id,
+            &record.cwd,
+        );
+        if let Some(filter) = project_id.as_deref() {
+            if project.as_deref() != Some(filter) {
+                continue;
+            }
+        }
+        let is_archived = archived_ids.contains(record.id.as_str());
+        match archived {
+            Some(true) if !is_archived => continue,
+            Some(false) if is_archived => continue,
+            _ => {}
+        }
+        record.project_id = project;
+        sessions.push(record);
+    }
+
+    serde_json::to_value(session_index::IndexScan {
+        sessions,
+        skipped,
+        roots,
+    })
+    .map_err(|e| format!("会话索引序列化失败: {e}"))
+}
+
 /// New Chat 语义：flush 旧会话落盘 + 清空 handle；下一次 POST 按需建新会话
 /// （不立即创建，避免弃用的空会话文件堆积）。
 #[tauri::command(async)]
@@ -1558,6 +1666,7 @@ fn main() {
             pi_set_plan_mode,
             pi_decide_plan,
             pi_list_sessions,
+            pi_sessions_index,
             pi_discard_session,
             pi_new_session,
             pi_create_bot_session,
@@ -1652,15 +1761,23 @@ fn main() {
             fs::fs_git_commit_context,
             fs::fs_git_create_pr,
             fs::fs_read_data_url,
+            fs::fs_stat,
+            fs::attachment_stage,
             fs::fs_write_text_file,
             fs::fs_open_url,
             terminal::terminal_spawn,
+            terminal::terminal_attach,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_kill,
             terminal::terminal_open_url,
             session_meta::session_meta_get,
-            session_meta::session_meta_set
+            session_meta::session_meta_set,
+            session_meta::pi_projects_list,
+            session_meta::pi_projects_save,
+            session_meta::pi_projects_delete,
+            session_meta::pi_projects_restore,
+            session_meta::pi_projects_reorder
         ])
         .manage(session_meta::SessionMetaPath(std::sync::Mutex::new(None)))
         // 运行时 = wry（WebView2）。CDP 端口不在这里配：wry 走

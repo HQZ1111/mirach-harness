@@ -203,8 +203,36 @@ fn mime_for(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("ico") => "image/x-icon",
         Some("bmp") => "image/bmp",
+        Some("heic") => "image/heic",
+        Some("avif") => "image/avif",
         Some("pdf") => "application/pdf",
+        Some("doc") => "application/msword",
+        Some("docx") => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+        Some("xls") => "application/vnd.ms-excel",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("ppt") => "application/vnd.ms-powerpoint",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("m4v") => "video/x-m4v",
+        Some("mkv") => "video/x-matroska",
+        Some("avi") => "video/x-msvideo",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("m4a") => "audio/mp4",
+        Some("aac") => "audio/aac",
+        Some("ogg") | Some("oga") => "audio/ogg",
+        Some("opus") => "audio/opus",
+        Some("flac") => "audio/flac",
+        Some("csv") => "text/csv",
+        Some("tsv") => "text/tab-separated-values",
+        Some("rtf") => "application/rtf",
+        Some("epub") => "application/epub+zip",
         Some("json") => "application/json",
+        Some("jsonl") => "application/jsonl",
         Some("js") | Some("mjs") | Some("cjs") => "text/javascript",
         Some("css") => "text/css",
         Some("html") | Some("htm") => "text/html",
@@ -237,6 +265,92 @@ pub fn fs_read_data_url(path: String) -> Result<String, String> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
 
     Ok(format!("data:{};base64,{}", mime_for(&file), encoded))
+}
+
+/// 附件选择器的单文件元数据（attachments.ts `pickAttachmentFiles` 消费）：
+/// 名字 / 绝对路径 / 字节数 / 推断 MIME。文件不存在或不可读一律 Err。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsStat {
+    name: String,
+    path: String,
+    size: u64,
+    mime: String,
+}
+
+#[tauri::command]
+pub fn fs_stat(path: String) -> Result<FsStat, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("invalid-path".to_string());
+    }
+    let file = PathBuf::from(trimmed);
+    let meta = fs::metadata(&file).map_err(|error| error_code(&error).to_string())?;
+    if !meta.is_file() {
+        return Err("not-a-file".to_string());
+    }
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(trimmed)
+        .to_string();
+    Ok(FsStat {
+        name,
+        path: file.to_string_lossy().into_owned(),
+        size: meta.len(),
+        mime: mime_for(&file).to_string(),
+    })
+}
+
+/// 拖放附件落临时文件的上限（attachments.ts STAGE_MAX_BYTES 同源）。
+const ATTACHMENT_STAGE_MAX_BYTES: usize = 48 * 1024 * 1024;
+
+/// 拖放的非图片附件 → 宿主临时文件，返回绝对路径。
+///
+/// 为什么需要：Tauri 窗口 `dragDropEnabled:false` 时 OS 拖放走 HTML5
+/// File（只有字节、没有路径）；而视频/音频/文档的发送契约是"绝对路径让
+/// 模型用工具读"。这里把字节落盘到 `%TEMP%/mirach-attachments/`，路径随
+/// prompt 引用块发给引擎。文件名只保留可打印安全字符（防路径穿越）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn attachment_stage(name: String, data_base64: String) -> Result<String, String> {
+    if data_base64.is_empty() {
+        return Err("empty attachment".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|error| format!("invalid base64: {error}"))?;
+    if bytes.is_empty() {
+        return Err("empty attachment".to_string());
+    }
+    if bytes.len() > ATTACHMENT_STAGE_MAX_BYTES {
+        return Err(format!(
+            "too-large: {} bytes (max {ATTACHMENT_STAGE_MAX_BYTES})",
+            bytes.len()
+        ));
+    }
+    // 安全文件名：只留字母数字与 . - _ 空格；去掉前导点/分隔符（防 ../）
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim().trim_start_matches('.').trim().to_string();
+    let safe = if safe.is_empty() { "attachment".to_string() } else { safe };
+
+    let dir = std::env::temp_dir().join("mirach-attachments");
+    fs::create_dir_all(&dir).map_err(|error| format!("create temp dir failed: {error}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock: {error}"))?
+        .as_nanos();
+    let path = dir.join(format!("{stamp}-{safe}"));
+    fs::write(&path, bytes).map_err(|error| format!("write staged file failed: {error}"))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// 导出落盘（hermes row.export 的写半边：save 对话框给出目标路径后由

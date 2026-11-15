@@ -17,6 +17,7 @@
  * 不持久化——刷新即消失，与 composer 草稿的丢失语义一致）。
  */
 import { createStore, useStore } from 'zustand'
+import type { TurnAttachment } from './attachments'
 
 /** 排队消息图片载荷（POST /ag-ui images[] 条目：纯 base64 + mimeType）。
  * 与 runtime 的 PiImagePayload 同形状——结构类型直接兼容，避免
@@ -35,6 +36,9 @@ export interface QueuedMessage {
   images?: QueuedImage[]
   /** 乐观用户消息的 image data URL（drain 时经 USER_SUBMIT images 进投影） */
   imageDataUrls?: string[]
+  /** 视频/音频/文档的文件引用（drain 时经 USER_SUBMIT files 进投影；
+   *  路径引用块已在 submission 文本里） */
+  files?: TurnAttachment[]
 }
 
 interface SessionQueueState {

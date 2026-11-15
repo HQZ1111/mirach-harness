@@ -1,8 +1,9 @@
 "use client";
 
 /**
- * 工作段折叠（ZCode `ConversationWorkSegmentFlow` + `AssistantHistoryStatus`
- * 的宿主版，2026-11-03；2026-11-15 改为「一个 turn 一个工作段」）。
+ * 工作段外壳（ZCode `ConversationWorkSegmentFlow` 外层收纳 +
+ * `AssistantHistoryStatus` 的宿主版，2026-11-03；2026-11-15 按 ZCode 源码
+ * 事实恢复为**两层结构的外层**）。
  *
  * ## 折叠的是什么
  *
@@ -12,14 +13,19 @@
  * `conversationTurnWorkSegments.ts`（`assistantHistoryRows` /
  * `assistantFollowingRows`）。
  *
- * ## 状态字与开合规则（ZCode `AssistantHistoryStatus` 同款，纯函数在
- * `work-segment.ts`，逐条单测）
+ * ## 外层只有一个头，且**只有状态/时长**
  *
- * - running → **头部不渲染**、内容展开（运行反馈在轮尾 loading 位）；
- * - completed 带时长 → `已工作 N 分 M 秒`；无时长 → `已处理`；
- * - interrupted → `已停止`；
- * - **没有最终正文**（折叠区外空着）→ 默认展开且不可收起；
- * - 有最终正文 → 默认收起，头部带 chevron（hover/点击展开）。
+ * ZCode `AssistantHistoryStatus`（`ConversationTurnGroup.tsx:540-630`）：
+ * - `shouldShowHistoryStatus = !turnRunning && workStatus && state !== "running"`
+ *   → **运行中不建外层头**；`open = turnRunning || defaultOpen || historyOpen`
+ *   → 运行中过程项始终展开，运行反馈只由轮尾 ChatLoading 承担（不出现
+ *   第二个「工作中」）；
+ * - 完成后：`已停止` / `已工作 {duration}` / `已处理`，`border-b pb-2`，
+ *   位置在所有过程项上面；
+ * - **统计不在这里**——统计属于内层连续摘要组的组头
+ *   （`ConsecutiveSummaryGroup`，见 `summary-group.aui.tsx`）。
+ *
+ * 开合：没有最终正文 → 展开且不可收起；其余完成后默认收起，点击展开。
  */
 import { useState, type FC, type ReactNode } from "react";
 import { ChevronRightIcon } from "lucide-react";
@@ -37,9 +43,9 @@ import {
 
 export interface WorkSegmentGroupProps {
   status: WorkSegmentStatus;
-  /** 折叠区外没有正文（= 全折叠且默认展开，且不可收起）。 */
+  /** 折叠区外没有正文（= 强制展开且不可收起）。 */
   defaultOpen: boolean;
-  /** 轮仍在跑（头部不渲染）。 */
+  /** 轮仍在跑：**不建外层头**，内容恒开。 */
   running: boolean;
   children: ReactNode;
 }
@@ -55,7 +61,8 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
     status.durationMs !== undefined ? formatWorkDuration(status.durationMs) : null;
   const label = workSegmentLabel(status, duration);
 
-  // running：头部不渲染（ZCode shouldShowHistoryStatus），内容恒开
+  // running：外层头不渲染（ZCode shouldShowHistoryStatus），内容恒开；
+  // 运行中的「工作中 + orbs + 计时」只有轮尾 ChatLoading 一处。
   if (running) {
     return (
       <div data-slot="aui_work-segment" data-work-state="running">
@@ -64,43 +71,31 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
     );
   }
 
-  const header = (
-    <div className="border-border/50 flex w-full flex-wrap items-center gap-2 border-b pb-2">
-      <CollapsibleTrigger
-        data-slot="aui_work-segment-trigger"
-        data-history-open={String(defaultOpen || userOpen)}
-        disabled={defaultOpen}
-        className="group/history-message text-muted-foreground focus-visible:ring-ring inline-flex max-w-full items-center gap-2 text-left text-sm outline-none focus-visible:ring-2"
-      >
-        <span
-          className={cn(
-            "min-w-0 truncate",
-            status.state === "interrupted" && "text-amber-600 dark:text-amber-400",
-          )}
-        >
-          {label}
-        </span>
-        {defaultOpen ? null : (
-          <ChevronRightIcon
-            aria-hidden
-            className={cn(
-              // ZCode 实测（9444）：chevron 16×16（size-4 在 16px 根字号下）、
-              // foreground-subtlest/70、展开 rotate-90。本工程 size-4 = 15px。
-              "size-[16px] shrink-0 text-muted-foreground/50 opacity-70 transition-transform",
-              userOpen ? "rotate-90" : "rotate-0",
-            )}
-          />
-        )}
-      </CollapsibleTrigger>
-    </div>
+  const labelNode = (
+    <span
+      className={cn(
+        "min-w-0 truncate",
+        status.state === "interrupted" && "text-amber-600 dark:text-amber-400",
+      )}
+    >
+      {label}
+    </span>
   );
 
+  const headerClassName =
+    "group/history-message text-muted-foreground focus-visible:ring-ring inline-flex max-w-full items-center gap-2 text-left text-sm outline-none focus-visible:ring-2";
+
   // 没有最终正文：常开、不可收起（ZCode 的 assistantHistoryDefaultOpen 分支
-  // 给 onOpenChange=undefined，头部退化成 span）。
+  // 给 onOpenChange=undefined，头部退化成 span）。这里不能渲染
+  // CollapsibleTrigger——没有 Collapsible 上下文时 Radix 直接抛错。
   if (defaultOpen) {
     return (
       <div data-slot="aui_work-segment" data-work-state={status.state}>
-        {header}
+        <div className="border-border/50 flex w-full flex-wrap items-center gap-2 border-b pb-2">
+          <div className={headerClassName} data-history-open="true">
+            {labelNode}
+          </div>
+        </div>
         {/* ZCode ConversationAssistantWorkItems 的 history 容器：pt-5（20px），
             配合头部 pb-2 得到 28px 的「已工作」头→内容间距。 */}
         <div data-slot="aui_work-segment-content" className="pt-5">
@@ -118,7 +113,24 @@ export const WorkSegmentGroup: FC<WorkSegmentGroupProps> = ({
       onOpenChange={setUserOpen}
       className="flex w-full flex-col"
     >
-      {header}
+      <div className="border-border/50 flex w-full flex-wrap items-center gap-2 border-b pb-2">
+        <CollapsibleTrigger
+          data-slot="aui_work-segment-trigger"
+          data-history-open={String(userOpen)}
+          className={headerClassName}
+        >
+          {labelNode}
+          <ChevronRightIcon
+            aria-hidden
+            className={cn(
+              // ZCode 实测（9444）：chevron 16×16（size-4 在 16px 根字号下）、
+              // foreground-subtlest/70、展开 rotate-90。本工程 size-4 = 15px。
+              "size-[16px] shrink-0 text-muted-foreground/50 opacity-70 transition-transform",
+              userOpen ? "rotate-90" : "rotate-0",
+            )}
+          />
+        </CollapsibleTrigger>
+      </div>
       <CollapsibleContent
         data-slot="aui_work-segment-content"
         className={cn(

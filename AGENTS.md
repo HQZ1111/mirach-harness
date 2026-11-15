@@ -2567,6 +2567,17 @@ Start-Process -FilePath 'D:\zcode\ZCode.exe' -ArgumentList '--remote-debugging-p
     即"计划态中切会话"= 插件仍认为 planning，但新 harness 的工具表没被收紧。
     宿主不做 exit+start 补救（会清掉进行中的 plan）；UI 只如实显示状态。
     `RPI_PERMISSION_GATE=1` 是启动期开关（无运行时切换面），芯片如实标注。
+- **2026-11-15 ZCode 对齐批次（逆向结论，全部实测/源码对照）**：
+  - **工作段**：一轮一个总折叠块（`turnWorkOwner` = 轮尾 assistant 才建组）；运行中且收起时组头换成**当前活动项摘要**（思考显示流式末行；工具显示其摘要行；`QueuedSummaryContent` 300ms 翻滚）；完成后收起显示统计/时长；展开逐项平铺（左侧导线、隐藏行首图标）；最终正文恒在折叠区外；无最终正文强制展开。压缩显示改为对话内 `LiveCompactionRow`（正在压缩/已压缩 tokensBefore→tokensAfter/中断/失败四态）。
+  - **标签栏**：`.dv-tab` 允许收缩（ZCode `flex 1 1 9.75rem`、min 60px、max 156px），标题 ellipsis + mask 渐隐；✕ 绝对定位、常态 `visibility:hidden;opacity:0`，hover/`:focus-within` 才显形（active 也不常显）；隐藏 dockview 自绘 `.dv-scrollbar`（只藏原生滚动条不够）；终端 `.term-*` 同款。令牌：`--tab-max-w/-min-w/-fade-offset`。
+  - **输入框窄宽**：composer 根 `@container/composer`；`@max-xl`（<36rem）模式芯片只留盾牌图标、隐藏思考档位、模型名 cap 160px；`@max-sm`（<24rem）模型 cap 96px；其余按钮 `shrink-0`。**模型名宽态 cap 320px**（200px 会把 `deepseek-v4.1-flash-1017` 截断）。motion Popover 内容必须 portal 到 `document.body`（`container-type` 会让 composer 成为 fixed 子元素的 containing block，内联会整体偏移）。
+  - **粒子**：`chat-loading-orbs` 形变目标 Z → **M**（4 段笔画按弧长等距采 105 点，x3..17/y4..16），颜色保持 `--brand`（#006fff）。
+  - **附件**：图片走原生多模态（`POST /ag-ui images[]`，白名单 png/jpeg/webp/gif，单图 24MB）；视频/音频/文档引擎**无原生块**（`rpi_ai::Content` 只有 Text/Thinking/Image/ToolCall）→ 落绝对路径引用进 prompt（`read`/shell 自取），未知类型直接拒绝；POST body limit 64MB；拖放非图片用 `attachment_stage` 落 `%TEMP%\mirach-attachments`；纯附件消息允许发送（旧实现被静默丢掉）。
+  - **bash**：Windows 上 `where bash.exe` 命中 `System32\bash.exe`（WSL stub，UTF-16LE 错误串 → 乱码）。引擎改为候选解析：`settings.shellPath`/`RPI_BASH_PATH` → Git 安装根（含 PATH 上 `git.exe` 反推，覆盖 `D:\Git`）→ PATH 非 WSL bash；WSL 一律拒绝；默认注入 `LANG/LC_ALL=C.UTF-8`（输出仍 UTF-8 优先、控制台代码页回退）。宿主 exe 需重编。
+  - **终端**：spawn → 先 listen → `terminal_attach` 回放 backlog（1MB 有界）→ flush resize → focus；shell 候选 pwsh→powershell→ComSpec→cmd；cwd 取会话工作区（显式目录不存在 = Err）；`TERM=xterm-256color`；Windows IME composed-text 兜底；可见性变化时 fit+focus；页签名 = 项目名 + 最小空位序号。
+  - **状态面板**：补「目标」（`goal-state` 条目，rpi-goal；3s 轮询）与「智能体」（本线程 `delegate_task` 且 `timing.completedAt` 缺席 = 运行中）分区；面板宽 320px（不是 `w-80`=300，根字号 15px）。
+  - **项目/会话索引**：`pi_sessions_index`（跨 `settings.sessionDir` + 项目根 + cwd 扫描，带 skipped/roots 诊断）、`pi_projects_list/save/delete/restore/reorder`（session-meta.json 内 projects/sessionProjects，软删/恢复/重排）；设置页新增「项目」「归档会话」两节；侧栏「移到项目」经 `session_meta_set` 的 sessionProjects 切片持久化（无专用 IPC，写后回读校验）。
+
 - **流式投影铁律**：同一 tool 边界内只保留一个 text part，thinking 一律插到
   该 text part 之前（对齐 pi 落盘 `[thinking, text]`）；否则 live 的
   `text→thinking→text` 会和完成后形状不一致（用户："思考和结论穿插"）。

@@ -1,22 +1,19 @@
 /**
  * 工作段（work segment）纯函数——ZCode `ConversationTurnWorkSegment` /
- * `AssistantHistoryStatus` 的宿主投影（2026-11-03）。
+ * `AssistantHistoryStatus` 的宿主投影（2026-11-03，2026-11-15 按源码事实
+ * 复核两层结构）。
  *
- * ZCode 的口径（`ConversationTurnGroup.tsx:738-904`）：
+ * ZCode 的口径（`ConversationTurnGroup.tsx:540-630` / `:713-821`）：
  * - 折叠的是**中间工作**（reasoning + 工具调用），正文（最终 assistant
  *   文本）在折叠区外；
- * - 头部状态字：interrupted → `已停止`；running → `工作中 {duration}`；
+ * - 外层头部状态字：interrupted → `已停止`；running → `工作中 {duration}`；
  *   completed 带时长 → `已工作 {duration}`；无时长 → `已处理`；
- * - **running 时头部不渲染**（`shouldShowHistoryStatus = !turnRunning &&
- *   state !== "running"`），内容展开——运行反馈在轮尾 loading 位；
- * - 默认开合（`assistantHistoryDefaultOpen`）：异常结束强制开；最后一轮
- *   且 running 开；**没有最终文本时开**（避免「已工作 N 秒」下面空空如也）；
- *   其余关。
+ * - **running 时外层头不渲染**（`shouldShowHistoryStatus = !turnRunning &&
+ *   state !== "running"`），内容展开——运行反馈只在轮尾 loading 位；
+ * - 默认开合（`assistantHistoryDefaultOpen`）：没有最终文本时开（避免
+ *   折叠区空着）；其余关。
  *
- * 宿主的对应物：`group-chainOfThought` 分组（reasoning + 工具调用全部挂在
- * 它下面，正文 text 不分组）——**它就是宿主的工作段**。折叠它 = 折叠中间
- * 工作，正文自然在外。这让折叠成为 GroupedParts 分支里的一个 Collapsible，
- * 不用复刻分组树（`buildGroupTree` 非导出，AGENTS.md 明令禁止复刻）。
+ * 统计属于**内层**连续摘要组（`ConsecutiveSummaryGroup`），不在外层头。
  */
 
 /** 工作段状态。 */

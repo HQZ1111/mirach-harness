@@ -198,6 +198,15 @@
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab {
   align-items: center;
   display: flex;
+  /* ZCode side-pane tab 同款收缩语义（flex 1 1 9.75rem / min-w-15）：
+     空间不足时标签等比收缩（下限 60px），收缩到底仍不够才由标签条
+     横向滚动（箭头 + 两端渐隐）。dockview 默认为 flex-shrink:0（只
+     增不减），长标题场景会把条直接挤成滚动。 */
+  flex-shrink: 1;
+  /* 宽度上限 = ZCode side-pane tab 同值（9.75rem=156px）：长标题在签内
+     省略，不把标签撑宽、不把标签条挤成横向滚动。 */
+  max-width: var(--tab-max-w);
+  min-width: var(--tab-min-w);
   padding: 0 2px;
 }
 /* 自定义签（tabComponent: openTab）外层还有 dockview 的 .dv-react-part
@@ -207,6 +216,9 @@
   align-items: center;
   display: flex;
   height: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-default-tab,
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-open-tab {
@@ -214,7 +226,12 @@
   border-radius: var(--radius-pill);
   display: flex;
   height: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 3px 10px;
+  /* 关闭钮绝对定位在胶囊内的锚点（见下方 ✕ 规则） */
+  position: relative;
   width: auto;
 }
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab.dv-active-tab .dv-default-tab,
@@ -231,6 +248,74 @@
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:not(.dv-active-tab) .dv-default-tab:hover,
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:not(.dv-active-tab) .dv-open-tab:hover {
   background: var(--hover-wash);
+}
+
+/* ── 标签标题截断 + 关闭钮「悬停/聚焦才显形」（2026-11-15，对齐 ZCode
+   G:\ZCode-main\packages\ui\src\app-shell\SidePaneTabTrigger.tsx:149-189）──
+   ZCode 事实行为（逐条对照源码）：
+   ①标题本体 shrink + 容器 overflow-hidden + mask 渐隐，长标题只在签内
+     消失，绝不撑宽标签（tab 固定 flex-basis 156 / min 60）；
+   ②关闭 ✕ absolute right，非 active 时「pointer-events-none opacity-0 +
+     group-hover/group-focus-within 才显形」——窄签也不给 ✕ 留静态位；
+   ③签条 mask 两端渐隐 + 隐藏滚动条（横滚由箭头/程序滚动承载）。
+   dockview 原生是 inactive 保留 visibility 位（占宽）、active 恒显，
+   两处都不符合，这里统一覆盖。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-default-tab .dv-default-tab-content {
+  /* 关闭钮显形时标题右端让出的渐隐带（0 = 不渐隐） */
+  --tab-close-reveal: 0px;
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - var(--tab-close-reveal)),
+    transparent 100%
+  );
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:hover .dv-default-tab .dv-default-tab-content,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:focus-within .dv-default-tab .dv-default-tab-content {
+  --tab-close-reveal: var(--tab-fade-offset);
+}
+/* ✕：绝对定位到胶囊右内缘——不占布局宽度，窄签/长标题也不会被它挤掉
+   文字；常态 visibility:hidden + opacity:0（不显示、不接收指针），
+   hover 或键盘聚焦该签才显形。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-default-tab .dv-default-tab-action {
+  align-items: center;
+  border-radius: var(--radius-control);
+  display: flex;
+  height: var(--tab-close-hit);
+  justify-content: center;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  transition:
+    opacity var(--dur-hover),
+    visibility 0s linear var(--dur-hover);
+  visibility: hidden;
+  width: var(--tab-close-hit);
+}
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:hover .dv-default-tab .dv-default-tab-action,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab:focus-within .dv-default-tab .dv-default-tab-action {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0s;
+  visibility: visible;
+}
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-default-tab .dv-default-tab-action svg {
+  height: var(--tab-close-size);
+  width: var(--tab-close-size);
+}
+/* 自定义「打开」签的标题同款截断（该签无 ✕——根面板不可关） */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-open-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── dockview 主题变量重映射（任务：分隔线去除 + 面板栏标签令牌化）──
@@ -694,6 +779,13 @@
   scrollbar-width: none;
 }
 .dv-tabs-container::-webkit-scrollbar {
+  display: none;
+}
+/* dockview 自绘的滚动条（scrollbars !== 'native' 时 = .dv-scrollable 里
+   那颗 4px 横条，hover 变实色）同样不在标签条出现——ZCode 的标签条只有
+   「两端渐隐 + 箭头」，没有可见滚动条。滚动本身仍由 .dv-tabs-container
+   的 scrollLeft 承载（箭头 scrollBy / 程序滚动不受影响）。 */
+.dv-tabs-and-actions-container .dv-scrollable > .dv-scrollbar {
   display: none;
 }
 

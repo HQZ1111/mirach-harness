@@ -82,6 +82,13 @@ export interface ToolSummaryProps {
   title?: string;
   /** 展开后的正文；`canToggle === false` 时不渲染。 */
   content?: ReactNode;
+  /**
+   * 整行激活动作（ZCode `ToolSummaryRow` 的 `action` 分支）：不可展开的
+   * 摘要行整行可点，打开详情面板（宿主子代理详情等）。
+   */
+  onActivate?: () => void;
+  /** onActivate 的无障碍标签（缺省取 title）。 */
+  activateLabel?: string;
   className?: string;
 }
 
@@ -102,6 +109,8 @@ export const ToolSummary: FC<ToolSummaryProps> = ({
   autoOpen = false,
   title,
   content,
+  onActivate,
+  activateLabel,
   className,
 }) => {
   const [isOpen, setIsOpen] = useState(() => toolSummaryOpenState.get(toolId) ?? false);
@@ -293,6 +302,32 @@ export const ToolSummary: FC<ToolSummaryProps> = ({
             />
           </div>
         </CollapsibleTrigger>
+      ) : onActivate ? (
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label={activateLabel ?? title ?? "打开详情"}
+          title={title}
+          onClick={onActivate}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            onActivate();
+          }}
+          className="summary-hover-text group/tool-summary focus-visible:ring-ring inline-flex w-full max-w-full cursor-pointer items-center gap-2 text-left text-sm outline-none transition-colors focus-visible:ring-2"
+        >
+          <SummaryContent
+            icon={icon}
+            kindLabel={kindLabel}
+            running={running}
+            primaryText={primaryText}
+            secondaryText={secondaryText}
+            diffCount={diffCount}
+            statusWord={statusWord}
+            isOpen={false}
+            canToggle={false}
+          />
+        </div>
       ) : (
         <div
           title={title}

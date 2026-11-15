@@ -573,7 +573,15 @@ export function PopoverContent({
 
   // goo 表面（SVG 粘性滤镜 + 形变）已抽到 goo-layer.tsx —— 与右键菜单
   // 共用同一份实现（2026-10-26 用户："所有的弹窗效果归拢成一个"）。
-  return (
+  //
+  // **必须 portal 到 body**（2026-11-15）：GooSurface 根是
+  // `position: fixed` + 视口坐标（usePopoverPortalPosition 用
+  // getBoundingClientRect，origin 也是视口系）。留作内联节点时，任何带
+  // layout containment 的祖先（composer 的 `@container/composer` 就是）
+  // 都会成为 fixed 的包含块 → 整个面板按"卡片左上角 + 视口坐标"偏移，
+  // 弹层飞到别处。外部点击检测本来就按"面板在 portal、两棵树都参与"写的
+  // （见 ignoreContent 上方注释），portal 是原设计。
+  return createPortal(
     <GooSurface
       clampX={clampX}
       contentClassName={cn(
@@ -599,6 +607,7 @@ export function PopoverContent({
       visible={Boolean(layout) && !closedAtRest}
     >
       {children}
-    </GooSurface>
+    </GooSurface>,
+    document.body,
   );
 }

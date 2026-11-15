@@ -12,10 +12,8 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState, type Reac
 import {
   AssistantRuntimeProvider,
   MessageNotSentError,
-  SimpleImageAttachmentAdapter,
   useExternalStoreRuntime,
   type AppendMessage,
-  type AttachmentAdapter,
   type SpeechSynthesisAdapter,
 } from '@assistant-ui/react'
 import { invoke } from '@tauri-apps/api/core'
@@ -23,6 +21,12 @@ import { useActorRef, useSelector } from '@xstate/react'
 import { useStore } from 'zustand'
 
 import { turnMachine, type TurnContext, type TurnMessage, type TurnUsage } from './turn-actor'
+import {
+  collectAttachmentPlan,
+  composePrompt,
+  piAttachmentAdapter,
+  type PiImagePayload,
+} from './attachments'
 import { convertTurnMessage, hydratePiMessages, usageFromPiMessages } from './pi-hydrate'
 import { approvalBridge } from './approval-bridge'
 import {
@@ -45,7 +49,13 @@ import { dispatchToolDetails } from './tool-sidecar'
 import { askBridge } from './ask-bridge'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
-import { sessionCatalog, sessionDisplayName, hydrateSessionMeta } from '@/components/panes/session-manage/session-catalog'
+import {
+  hydrateSessionMeta,
+  mergeSessionRows,
+  sessionCatalog,
+  sessionDisplayName,
+  type SessionsIndexResult,
+} from '@/components/panes/session-manage/session-catalog'
 import { cachedAppPrefs, loadAppPrefs, setRunActive, updateAppPrefs } from '@/lib/app-prefs'
 import {
   mergeWorkspaceSessionRows,
@@ -61,6 +71,7 @@ import {
   scheduleReviewRefresh,
 } from '@/components/panes/review-store'
 import { setSessionThreadSwitcher } from '@/components/panes/session-manage/session-tab-bridge'
+import { setSessionListRefresher } from '@/components/panes/session-manage/session-refresh-bridge'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -98,30 +109,14 @@ const isAutoTitleEnabled = async (): Promise<boolean> => {
   return (t.auto_title ?? t.autoTitle ?? t.auto) !== false
 }
 
-/** POST /ag-ui 图片契约白名单（png/jpeg/webp/gif） */
-const IMAGE_MIME_WHITELIST = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
-
-/** POST body images[] 条目（纯 base64，不带 data: 前缀） */
-export interface PiImagePayload {
-  data: string
-  mimeType: string
-}
-
-/** data URL → {data: 纯 base64, mimeType}；白名单外/形状不符返回 null，
- * 调用方 console.error 后跳过（渲染选择非吞错）——会话分栏运行时复用 */
-export const parseImageDataUrl = (url: string): PiImagePayload | null => {
-  const m = /^data:(image\/(?:png|jpeg|webp|gif));base64,(.+)$/.exec(url)
-  return m ? { mimeType: m[1]!, data: m[2]! } : null
-}
-
-/** 图片附件适配器：accept 收窄到 POST 契约白名单——白名单外的文件在
- * 选择器/拖放层就被拒，不会进入 composer（禁止兜底的前置闸门） */
-class PiImageAttachmentAdapter extends SimpleImageAttachmentAdapter {
-  override accept = 'image/png,image/jpeg,image/webp,image/gif'
-}
-
-/** 模块级单例：adapter 实例稳定，避免 runtime 每次渲染重建 */
-export const imageAttachmentAdapter: AttachmentAdapter = new PiImageAttachmentAdapter()
+/** POST /ag-ui 图片契约白名单（png/jpeg/webp/gif）——实现与解析在
+ * attachments.ts（附件通道单一来源：类型分类 / 提示词 / adapter） */
+export {
+  NATIVE_IMAGE_MIMES,
+  parseImageDataUrl,
+  piAttachmentAdapter,
+  type PiImagePayload,
+} from './attachments'
 
 /** pi SessionIndex 行（pi_list_sessions 返回，字段对齐上游 SessionMeta） */
 interface PiSessionMeta {
@@ -301,56 +296,102 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   }, [currentThreadId, derivedTitle])
 
   const refreshThreads = useCallback(async () => {
-    try {
-      const metas = await invoke<PiSessionMeta[]>('pi_list_sessions')
-      const rows: ThreadListRow[] = (metas ?? []).map((m) => ({
-        status: 'regular' as const,
-        id: m.id,
-        title: m.name ?? undefined,
-        // custom = SessionMeta 的前端投影面：path（打开/删除/导出）、
-        // messageCount（未读水位）、lastModifiedMs（行龄）、cwd（工作区
-        // 分组）、timestamp（created 排序）。
-        custom: {
-          path: m.path,
-          messageCount: m.messageCount,
-          lastModifiedMs: m.lastModifiedMs,
-          cwd: m.cwd,
-          timestamp: m.timestamp,
-        },
-      }))
-      // 选择文件夹建的会话在别的会话根里（pi_list_sessions 只扫启动
-      // 目录）——登记表补行；活动登记会话的 messageCount 以 pi 真值
-      // 回填（行尾"N 条消息"不长期停在 0）。
-      const activeId = currentThreadIdRef.current
-      if (activeId && workspaceSessionIndex.getState().entries[activeId]) {
-        try {
-          const st = await invoke<{ messageCount?: unknown }>('pi_get_state')
-          if (typeof st?.messageCount === 'number' && Number.isFinite(st.messageCount)) {
-            workspaceSessionIndex
-              .getState()
-              .updateStats(activeId, st.messageCount, Date.now())
-          }
-        } catch (e) {
-          // 行仍可见（登记表的旧统计），但错误必须可见——不冒充已刷新。
-          console.error('[pi] 工作区会话状态读取失败（行统计保持登记值）', e)
-        }
-      }
-      const merged = mergeWorkspaceSessionRows(
-        rows,
-        Object.values(workspaceSessionIndex.getState().entries),
+    // 项目注册表（侧栏 project 分组 / 行菜单归属标签的数据面）：只成功拉
+    // 一次；失败置 projectsError（设置页可见、可手动重试），不自动循环重试。
+    // includeDeleted=true：软删项目的名字仍要能解析（归属映射保留）。
+    const before = sessionCatalog.getState()
+    if (!before.projectsLoaded && before.projectsError === null) {
+      void before.loadProjects(true).catch((e) =>
+        console.error('[pi] 项目注册表读取失败（pi_projects_list）', e),
       )
-      // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
-      // 侧栏 threads（assistant-ui）title 用统一显示名。
-      sessionCatalog.getState().ingest(merged, currentThreadIdRef.current)
-      setThreads(
-        merged.map((r) => ({
-          ...r,
-          title: sessionDisplayName(sessionCatalog.getState().entries[r.id]),
-        })),
-      )
-    } catch (e) {
-      console.error('[pi] 会话列表读取失败', e)
     }
+    // 双源并行：pi_list_sessions（旧形状，启动 cwd 的会话根，侧栏既有基线）
+    // + pi_sessions_index（跨工作区/项目根，带 projectId 与诊断）。
+    // 失败策略：索引失败 → 基线 + workspaceSessionIndex 补行照常（跨工作区
+    // 会话暂不可见，错误 console 可见 + store.sessionsIndexError）；基线
+    // 失败 → 用索引；两者都失败 → 保持现有列表不动（不把失败画成空态）。
+    const [baseResult, indexResult] = await Promise.allSettled([
+      invoke<PiSessionMeta[]>('pi_list_sessions'),
+      invoke<SessionsIndexResult>('pi_sessions_index'),
+    ])
+    let index: SessionsIndexResult | null = null
+    let indexError: string | null = null
+    if (indexResult.status === 'fulfilled') {
+      index = indexResult.value
+    } else {
+      indexError = String(indexResult.reason)
+      console.error(
+        '[pi] 跨根会话索引读取失败（pi_sessions_index）——跨工作区会话暂不可见',
+        indexResult.reason,
+      )
+    }
+    sessionCatalog.getState().applySessionIndex(index, indexError)
+    if (baseResult.status === 'rejected') {
+      console.error('[pi] 会话列表读取失败（pi_list_sessions）', baseResult.reason)
+      if (index === null) return
+    }
+    const baseRows: ThreadListRow[] =
+      baseResult.status === 'fulfilled'
+        ? (baseResult.value ?? []).map((m) => ({
+            status: 'regular' as const,
+            id: m.id,
+            title: m.name ?? undefined,
+            // custom = SessionMeta 的前端投影面：path（打开/删除/导出）、
+            // messageCount（未读水位）、lastModifiedMs（行龄）、cwd（工作区
+            // 分组）、timestamp（created 排序）。
+            custom: {
+              path: m.path,
+              messageCount: m.messageCount,
+              lastModifiedMs: m.lastModifiedMs,
+              cwd: m.cwd,
+              timestamp: m.timestamp,
+            },
+          }))
+        : []
+    // 选择文件夹建的会话在别的会话根里（pi_list_sessions 只扫启动目录）——
+    // 登记表补行；活动登记会话的 messageCount 以 pi 真值回填（行尾"N 条
+    // 消息"不长期停在 0）。这是 pi_sessions_index 就绪前的兜底面，索引
+    // 成功时两边同一批会话由 mergeSessionRows 去重（索引覆盖同 id）。
+    const activeId = currentThreadIdRef.current
+    if (activeId && workspaceSessionIndex.getState().entries[activeId]) {
+      try {
+        const st = await invoke<{ messageCount?: unknown }>('pi_get_state')
+        if (typeof st?.messageCount === 'number' && Number.isFinite(st.messageCount)) {
+          workspaceSessionIndex
+            .getState()
+            .updateStats(activeId, st.messageCount, Date.now())
+        }
+      } catch (e) {
+        // 行仍可见（登记表的旧统计），但错误必须可见——不冒充已刷新。
+        console.error('[pi] 工作区会话状态读取失败（行统计保持登记值）', e)
+      }
+    }
+    const withWorkspace = mergeWorkspaceSessionRows(
+      baseRows,
+      Object.values(workspaceSessionIndex.getState().entries),
+    )
+    // 跨根合并：同 id 由索引覆盖（含 projectId/谱系），索引独有行追加。
+    // custom 断言回 aui 的行形状（SessionCatalogRow.custom 是结构化子集，
+    // 没有 string 索引签名；值本身仍是 JSON 对象，运行时同一份）。
+    const rows: ThreadListRow[] = mergeSessionRows(withWorkspace, index?.sessions ?? []).map(
+      (row) => ({
+        status: 'regular' as const,
+        id: row.id,
+        ...(row.title === undefined ? {} : { title: row.title }),
+        ...(row.custom === undefined
+          ? {}
+          : { custom: row.custom as Record<string, unknown> }),
+      }),
+    )
+    // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
+    // 侧栏 threads（assistant-ui）title 用统一显示名。
+    sessionCatalog.getState().ingest(rows, currentThreadIdRef.current)
+    setThreads(
+      rows.map((r) => ({
+        ...r,
+        title: sessionDisplayName(sessionCatalog.getState().entries[r.id]),
+      })),
+    )
   }, [])
 
 
@@ -585,13 +626,35 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }),
     })
       .then((res) => {
-        // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出
-        if (!res.ok) throw new Error(`POST /ag-ui 失败: ${res.status}`)
+        // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出。
+        // 413 是图片链路的典型失败（请求体超过 axum 上限），文案写明。
+        if (!res.ok) {
+          const msg =
+            res.status === 413
+              ? '消息发送失败：请求体过大（HTTP 413）——图片/附件总大小超过服务端上限'
+              : `消息发送失败：POST /ag-ui 返回 ${res.status}`
+          errorBridge.getState().setError(msg, false)
+          throw new Error(msg)
+        }
       })
       // POST 成功即触发自动命名（maybeAutoNameSession 内部全 try/catch，
-      // 不向外抛——外层 catch 仍只服务 POST 本身的失败）
-      .then(() => maybeAutoNameSession())
-      .catch((e) => console.error('[agui] POST 失败', e))
+      // 不向外抛——外层 catch 仍只服务 POST 本身的失败）。同时清掉上一次
+      // 发送失败的本地错误（新 run 已上路，旧错误条不该继续挂着）。
+      .then(() => {
+        errorBridge.getState().setError(null)
+        return maybeAutoNameSession()
+      })
+      .catch((e) => {
+        console.error('[agui] POST 失败', e)
+        // 网络层失败（fetch 直接 reject）也要可见——错误条是用户唯一的
+        // 反馈面（乐观消息已经进投影，不能让用户以为消息在跑）。
+        if (!errorBridge.getState().error) {
+          errorBridge.getState().setError(
+            `消息发送失败：${e instanceof Error ? e.message : String(e)}`,
+            false,
+          )
+        }
+      })
   }, [maybeAutoNameSession])
 
   /** 最后一条 user 消息（TurnMessage 形）——onReload 重发文本的来源 */
@@ -1027,6 +1090,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       ...(next.imageDataUrls && next.imageDataUrls.length > 0
         ? { images: next.imageDataUrls }
         : {}),
+      ...(next.files && next.files.length > 0 ? { files: next.files } : {}),
     })
     postRun(next.submission ?? next.text, next.images)
     void refreshThreads()
@@ -1219,6 +1283,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     return () => setSessionThreadSwitcher(null)
   }, [switchToThread])
 
+  // 会话列表刷新登记（2026-11-15 会话管理 P0）：项目归属 / 项目增删 /
+  // 归档恢复等写入 Rust 后，侧栏与跨根索引需要重拉（cwd 推断只有重扫才
+  // 知道）。未注册时调用方 console.error 可见（bridge 内）。
+  useEffect(() => {
+    setSessionListRefresher(() => {
+      void refreshThreads()
+    })
+    return () => setSessionListRefresher(null)
+  }, [refreshThreads])
+
   const threadListAdapter = {
     threadId: currentThreadId ?? undefined,
     threads,
@@ -1308,10 +1382,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     // getThreadListAdapter 只读 store.adapters?.threadList；顶层平铺无效）
     adapters: {
       threadList: threadListAdapter,
-      // 图片附件（POST 契约白名单见 PiImageAttachmentAdapter.accept）——
-      // send 产出 content [{type:'image', image: dataURL}]，onNew 据此
-      // 组 POST images 与乐观消息 image part
-      attachments: imageAttachmentAdapter,
+      // 附件（图片走引擎原生多模态，视频/音频/文档走 prompt 文件引用；
+      // 分类/白名单/提示词见 attachments.ts 单一来源）
+      attachments: piAttachmentAdapter,
       // 朗读（read-aloud 元素）：带 boundary 进度的 Web Speech 适配器——
       // 无语音引擎环境为 undefined（capabilities.speech=false，UI 钮隐藏）
       ...(speechAdapter ? { speech: speechAdapter } : {}),
@@ -1332,30 +1405,33 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         typeof m.runConfig?.custom?.voiceSubmission === 'string'
           ? m.runConfig.custom.voiceSubmission
           : null
-      const submission = voiceSubmission ?? text
-      // canSend 保证：走到这里要么有文本、要么带附件。纯附件无文本不满足
-      // POST 契约（message 必填）——抛 MessageNotSentError 让草稿回到
-      // composer（静默丢附件 = 兜底，禁止）
-      if (!text) throw new MessageNotSentError('[pi] 消息为空：附件必须伴随文本 prompt 发送')
-      // 图片附件 → POST images（data URL 严格解析成 {data: 纯base64,
-      // mimeType}）；白名单外/形状不符 console.error 可见并跳过该图——
-      // 文本照发（渲染选择非吞错）
-      const images: PiImagePayload[] = []
-      const imageDataUrls: string[] = []
-      for (const att of m.attachments ?? []) {
-        for (const part of att.content) {
-          if (part.type !== 'image') continue
-          const parsed = parseImageDataUrl(part.image)
-          if (!parsed) {
-            console.error(`[pi] 附件 ${att.name} 的图片不在白名单（png/jpeg/webp/gif）——未随消息发送`)
-            continue
-          }
-          images.push(parsed)
-          imageDataUrls.push(part.image)
-        }
+      // 附件归一（唯一来源 attachments.ts）：图片 → POST images[]（引擎原生
+      // 多模态）；视频/音频/文档 → 绝对路径引用块（引擎没有这些原生块，
+      // 不伪装）；不完整/不支持的类型直接报错，整条消息不发（禁止半发）。
+      // 必须包成 MessageNotSentError：assistant-ui 只对它回填草稿/附件，
+      // 普通 Error 会把用户刚打的字与附件留在"已清空"状态。
+      let plan: ReturnType<typeof collectAttachmentPlan>
+      try {
+        plan = collectAttachmentPlan(m.attachments ?? [])
+      } catch (e) {
+        throw new MessageNotSentError(e instanceof Error ? e.message : String(e))
       }
-      // 错误即错误：endpoint 未就绪直接抛错——消息不装作已发送
-      if (!endpointRef.current) throw new Error('[agui] endpoint 未就绪，消息未发送')
+      // 引擎契约：message 必填且非空。显示文本可以只有附件（乐观 user
+      // 消息只渲染图片/附件 chip），发给引擎的文本用附件说明补齐。
+      // 语音委托的隐藏 note 同样要带上附件引用（composePrompt 只 trim 边界）。
+      const submission = composePrompt(
+        voiceSubmission ?? text,
+        plan.imageNames,
+        plan.files,
+      )
+      if (!submission.trim()) {
+        throw new MessageNotSentError('[pi] 消息为空：没有可发送的文本或附件')
+      }
+      // 错误即错误：endpoint 未就绪直接报错——消息不装作已发送；用
+      // MessageNotSentError 保证草稿与附件回填（不丢用户输入）
+      if (!endpointRef.current) {
+        throw new MessageNotSentError('[agui] endpoint 未就绪，消息未发送')
+      }
       // run 进行中 → 入队（message-queue 语义，对应 pi steering/follow_up
       // 的 one-at-a-time 排队模式）：pi prompt 持锁跨整个 run，立即 POST
       // 只会撞锁。排队消息不进轮次投影（乐观 user 消息在出队发送时才
@@ -1366,7 +1442,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           id: `queued-${++queuedSeq}`,
           text,
           ...(submission !== text ? { submission } : {}),
-          ...(images.length > 0 ? { images, imageDataUrls } : {}),
+          ...(plan.images.length > 0
+            ? { images: plan.images, imageDataUrls: plan.imageDataUrls }
+            : {}),
+          ...(plan.files.length > 0 ? { files: plan.files } : {}),
         })
         return
       }
@@ -1374,9 +1453,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         type: 'USER_SUBMIT',
         text,
         messageId: `user-${Date.now()}`,
-        ...(imageDataUrls.length > 0 ? { images: imageDataUrls } : {}),
+        ...(plan.imageDataUrls.length > 0 ? { images: plan.imageDataUrls } : {}),
+        ...(plan.files.length > 0 ? { files: plan.files } : {}),
       })
-      postRun(submission, images)
+      postRun(submission, plan.images)
       // 首条消息触发会话创建 → 线程列表出现当前会话
       void refreshThreads()
     },

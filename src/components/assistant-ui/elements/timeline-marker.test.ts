@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { bucketMarkers, markerLabel } from './timeline-marker';
+import {
+  bucketMarkers,
+  compactionRowView,
+  compactionTokenSummary,
+  markerLabel,
+} from './timeline-marker';
 import type { TimelineMarker } from '../timeline-marker-store';
 
 describe('markerLabel', () => {
@@ -19,8 +24,54 @@ describe('markerLabel', () => {
   });
 });
 
-describe('bucketMarkers', () => {
-  const mc = (idx: number, provider: string, modelId: string): TimelineMarker => ({
+describe('compactionTokenSummary / compactionRowView（上下文压缩行）', () => {
+  it('tokensBefore → tokensAfter（en-US 千分位）；只有一个就只报一个', () => {
+    expect(compactionTokenSummary({ tokensBefore: 12345, tokensAfter: 3210 })).toBe(
+      '12,345 → 3,210 tokens',
+    );
+    expect(compactionTokenSummary({ tokensBefore: 12345 })).toBe('12,345 tokens');
+    expect(compactionTokenSummary({})).toBeUndefined();
+  });
+
+  it('start → 正在压缩上下文（running，无状态色）', () => {
+    expect(compactionRowView({ phase: 'start' })).toEqual({
+      label: '正在压缩上下文',
+      running: true,
+      tone: 'default',
+    });
+  });
+
+  it('end 成功 → 上下文已压缩 · tokens', () => {
+    expect(
+      compactionRowView({ phase: 'end', tokensBefore: 1000, tokensAfter: 200 }),
+    ).toEqual({
+      label: '上下文已压缩 · 1,000 → 200 tokens',
+      running: false,
+      tone: 'default',
+    });
+    expect(compactionRowView({ phase: 'end' }).label).toBe('上下文已压缩');
+  });
+
+  it('end 中断 → 琥珀色中断文案', () => {
+    expect(compactionRowView({ phase: 'end', aborted: true })).toMatchObject({
+      label: '上下文压缩已中断',
+      tone: 'warning',
+    });
+  });
+
+  it('end 失败 → 红色失败文案 + 错误原因独立行', () => {
+    expect(
+      compactionRowView({ phase: 'end', errorMessage: 'provider 超时' }),
+    ).toEqual({
+      label: '上下文压缩失败',
+      running: false,
+      tone: 'error',
+      detail: 'provider 超时',
+    });
+  });
+});
+
+describe('bucketMarkers', () => {  const mc = (idx: number, provider: string, modelId: string): TimelineMarker => ({
     kind: 'modelChange',
     beforeMessageIndex: idx,
     provider,

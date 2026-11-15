@@ -58,6 +58,7 @@ import {
   summaryFileLeafName,
 } from "@/components/assistant-ui/work-summary";
 import { parsePlanSteps, planReviewState } from "@/components/assistant-ui/plan-parse";
+import { openFileFromToolPath } from "@/components/assistant-ui/open-file";
 import {
   describeToolCall,
   toolLabelZh,
@@ -112,6 +113,8 @@ const KIND_LABELS: Record<string, { running: string; done: string }> = {
   ast_grep: { running: "正在搜索", done: "已搜索" },
   lsp: { running: "正在搜索", done: "已搜索" },
   web_search: { running: "正在搜索", done: "已搜索" },
+  // rpi 的网页搜索扩展工具名（无下划线；见 tool-specs.ts:202 实测注释）
+  websearch: { running: "正在搜索", done: "已搜索" },
   edit: { running: "正在编辑", done: "已编辑" },
   hashline_edit: { running: "正在编辑", done: "已编辑" },
   ast_edit: { running: "正在编辑", done: "已编辑" },
@@ -441,57 +444,79 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
       primaryText: `${count} 个问题`,
       canToggle: true,
       content: (
-        <div className="pt-2">
-          <div className="border-border ml-2 space-y-2 border-l pl-3.5">
-            {answers.length > 0 ? (
-              answers.map((entry, index) => (
-                <div key={index} className="space-y-1">
-                  {entry.question !== null ? (
-                    <p className="text-foreground text-[14px] leading-5 font-medium">
-                      {entry.question}
-                    </p>
-                  ) : null}
-                  {entry.answer !== null ? (
-                    <p className="text-muted-foreground text-[14px] leading-5">
-                      {entry.answer}
-                    </p>
-                  ) : null}
-                </div>
-              ))
-            ) : (
-              <div className="space-y-1">
-                <p className="text-foreground text-[14px] leading-5 font-medium">
-                  {questionFallback ?? "（问题参数缺失）"}
-                </p>
-                {row.failed ? (
+        <div className="border-border ml-2 space-y-2 border-l pl-3.5">
+          {answers.length > 0 ? (
+            answers.map((entry, index) => (
+              <div key={index} className="space-y-1">
+                {entry.question !== null ? (
+                  <p className="text-foreground text-[14px] leading-5 font-medium">
+                    {entry.question}
+                  </p>
+                ) : null}
+                {entry.answer !== null ? (
                   <p className="text-muted-foreground text-[14px] leading-5">
-                    {row.errorText ?? "执行失败"}
+                    {entry.answer}
                   </p>
                 ) : null}
               </div>
-            )}
-          </div>
+            ))
+          ) : (
+            <div className="space-y-1">
+              <p className="text-foreground text-[14px] leading-5 font-medium">
+                {questionFallback ?? "（问题参数缺失）"}
+              </p>
+              {row.failed ? (
+                <p className="text-muted-foreground text-[14px] leading-5">
+                  {row.errorText ?? "执行失败"}
+                </p>
+              ) : null}
+            </div>
+          )}
         </div>
       ),
     });
   }
 
   // 5b. read / ls / image → 只读行（ZCode read 不可展开：正文在侧栏文件预览）
-  // 摘要 = 文件图标 + 文件名（tooltip 全路径），类别词 `已读取`
+  // 摘要 = 文件图标 + 文件名（tooltip 全路径）；read/image 的文件名 chip
+  // 可点 → 代码查看器。ls 是目录，不挂预览入口（预览面板只读文件）。
   if (toolName === "read" || toolName === "ls" || toolName === "image") {
     const path = stringArg(args, "path", "file_path", "filePath");
+    const chip = path ? (
+      <>
+        {toolName === "ls" ? (
+          <FolderOpenIcon className="size-4 shrink-0" />
+        ) : (
+          <FileTextIcon className="size-4 shrink-0" />
+        )}
+        <span className="min-w-0 truncate">{shortenPath(path)}</span>
+      </>
+    ) : null;
     return summary({
       icon: toolName === "ls" ? <FolderOpenIcon /> : <FileTextIcon />,
-      primaryText: path ? (
-        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5" title={path}>
-          {toolName === "ls" ? (
-            <FolderOpenIcon className="size-4 shrink-0" />
-          ) : (
-            <FileTextIcon className="size-4 shrink-0" />
-          )}
-          <span className="min-w-0 truncate">{shortenPath(path)}</span>
-        </span>
-      ) : undefined,
+      primaryText:
+        path === undefined ? undefined : toolName === "ls" ? (
+          <span
+            className="inline-flex min-w-0 max-w-full items-center gap-1.5"
+            title={path}
+          >
+            {chip}
+          </span>
+        ) : (
+          <button
+            type="button"
+            data-slot="aui_file-chip"
+            title={path}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              openFileFromToolPath(path);
+            }}
+            className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 text-left transition-colors hover:text-foreground"
+          >
+            {chip}
+          </button>
+        ),
       canToggle: false,
     });
   }
@@ -520,14 +545,24 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     return summary({
       icon: toolName === "write" ? <FilePlusIcon /> : <FilePenIcon />,
       primaryText: path ? (
-        <span className="inline-flex min-w-0 max-w-full items-center gap-1.5" title={path}>
+        <button
+          type="button"
+          data-slot="aui_file-chip"
+          title={path}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openFileFromToolPath(path);
+          }}
+          className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 text-left transition-colors hover:text-foreground"
+        >
           {toolName === "write" ? (
             <FilePlusIcon className="size-4 shrink-0" />
           ) : (
             <FilePenIcon className="size-4 shrink-0" />
           )}
           <span className="min-w-0 truncate">{summaryFileLeafName(path)}</span>
-        </span>
+        </button>
       ) : undefined,
       diffCount:
         additions === 0 && removals === 0 ? undefined : (
@@ -556,8 +591,9 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     });
   }
 
-  // 5e. web_search → 搜索卡（结果解析失败落回参数/结果）
-  if (toolName === "web_search") {
+  // 5e. web_search / websearch（rpi 扩展名）→ 搜索卡；结果解析失败回退
+  // 参数/结果（不静默丢内容）
+  if (toolName === "web_search" || toolName === "websearch") {
     const query = stringArg(args, "query", "q", "search_query");
     const results = parseWebSearchResults(toolResultText(result));
     return summary({

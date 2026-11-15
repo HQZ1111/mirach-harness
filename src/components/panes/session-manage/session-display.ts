@@ -72,6 +72,9 @@ export interface SessionViewMode {
   /** status/tokens 排序键的辅助面（rankIdsByOrdering 的 aux——status 五桶
    *  判定 + session-usage 缓存；updated/created/manual 键不消费）。 */
   readonly aux?: OrderAux
+  /** 项目注册表（project 分组的标签与组序来源）。缺省 = 兼容旧行为：
+   *  按 cwd 分组（项目表还没拉到时不得把「没加载」显示成「没有项目」）。 */
+  readonly projects?: readonly ProjectGroupRef[]
 }
 
 // ── hermes lib/display-path.ts：路径显示格式化（组标签用 pathLeaf）────────
@@ -162,9 +165,123 @@ export function groupEntriesByWorkspace(
   return rows
 }
 
+/** 项目注册表在展示层的投影（只取分组/标签需要的字段——不把 Rust 类型
+ *  拉进纯函数模块，避免 catalog ↔ display 的循环依赖）。 */
+export interface ProjectGroupRef {
+  readonly id: string
+  readonly name: string
+  readonly pinned?: boolean
+  readonly order?: number
+  /** 软删条目仍可命中（显式归属保留）——标签追加「（已删除）」。 */
+  readonly deletedAt?: number
+}
+
+/** 项目分组标签：注册表名 ?? 未知 id 直示 ?? 主页（无归属）。
+ *  「未知项目」不静默归并到主页——否则软删/幽灵映射的行会被误读成
+ *  「本来就没项目」。 */
+export function projectGroupLabel(
+  projectId: string | undefined,
+  projects: readonly ProjectGroupRef[],
+): string {
+  if (projectId === undefined) return '主页'
+  const project = projects.find((p) => p.id === projectId)
+  if (project === undefined) return `未知项目 ${projectId.slice(0, 8)}`
+  return project.deletedAt === undefined ? project.name : `${project.name}（已删除）`
+}
+
+/** 注册表的展示序：置顶项目在前，其余按 order/createdAt/id（与
+ *  session-catalog.sortProjects 同序 + pinned 分面）。泛型保持调用方的
+ *  完整条目类型（侧栏用 ProjectGroupRef、弹层用 PiProject）。 */
+export function projectsForDisplay<T extends ProjectGroupRef>(projects: readonly T[]): T[] {
+  return [...projects].sort((a, b) => {
+    const pin = Number(b.pinned === true) - Number(a.pinned === true)
+    if (pin !== 0) return pin
+    return (
+      (a.order ?? 0) - (b.order ?? 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    )
+  })
+}
+
 /**
- * 按状态桶分组（hermes grouping='status' 的 pi 数据面：五桶各一组头——
- * 需要 input/运行中/未读/草稿/空闲，状态排序 rank 的同序决定组序 =
+ * 按项目分组（settings/会话管理 P0 定稿：**组 = projectId**，cwd 桶只
+ * 兼容旧数据/未归属行）。
+ *
+ * 组序：
+ * 1. 注册表里的项目（置顶优先、再按 order）——即使组内为空也不出组头；
+ * 2. 索引给了未知 projectId 的行（幽灵/软删前映射）：首现序，标签直示 id；
+ * 3. 没有 projectId 但有 cwd 的行：按 cwd 桶（旧数据兼容）；
+ * 4. 既无 projectId 也无 cwd：主页桶（恒殿后）。
+ *
+ * 组内保持传入序（排序键已由 buildSessionDisplay 应用）。分隔线 key =
+ * `pj:<id>` / `w:<cwd>`，折叠语义与日期桶一致（折叠表不复用旧键名，
+ * 因此不会与 cwd 分组的折叠态串台）。
+ */
+export function groupEntriesByProject(
+  entries: readonly { readonly id: string; readonly projectId?: string; readonly cwd?: string }[],
+  projects: readonly ProjectGroupRef[],
+): SessionListRow[] {
+  const registered = projectsForDisplay(projects)
+  const projectRank = new Map<string, number>()
+  registered.forEach((project, index) => projectRank.set(project.id, index))
+
+  interface Bucket {
+    key: string
+    label: string
+    rank: readonly [number, number]
+    ids: string[]
+  }
+  const buckets: Bucket[] = []
+  const index = new Map<string, Bucket>()
+  let unknownSeq = 0
+  let cwdSeq = 0
+
+  for (const entry of entries) {
+    let key: string
+    let label: string
+    let rank: readonly [number, number]
+    const registeredRank =
+      entry.projectId === undefined ? undefined : projectRank.get(entry.projectId)
+    if (registeredRank !== undefined) {
+      key = `pj:${entry.projectId}`
+      label = projectGroupLabel(entry.projectId, registered)
+      rank = [0, registeredRank]
+    } else if (entry.projectId !== undefined) {
+      key = `pj:${entry.projectId}`
+      label = projectGroupLabel(entry.projectId, registered)
+      rank = [1, unknownSeq]
+    } else if (entry.cwd !== undefined && entry.cwd !== '') {
+      key = `w:${entry.cwd}`
+      label = pathLeaf(entry.cwd)
+      rank = [2, cwdSeq]
+    } else {
+      key = 'w:'
+      label = '主页'
+      rank = [3, 0]
+    }
+    let bucket = index.get(key)
+    if (bucket === undefined) {
+      bucket = { key, label, rank, ids: [] }
+      index.set(key, bucket)
+      buckets.push(bucket)
+      if (rank[0] === 1) unknownSeq += 1
+      else if (rank[0] === 2) cwdSeq += 1
+    }
+    bucket.ids.push(entry.id)
+  }
+
+  buckets.sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1])
+
+  const rows: SessionListRow[] = []
+  for (const bucket of buckets) {
+    rows.push({ key: bucket.key, kind: 'divider', label: bucket.label, variant: 'project' })
+    for (const id of bucket.ids) rows.push({ id, kind: 'session' })
+  }
+  return rows
+}
+
+/**
+ * 按状态桶分组（hermes grouping='status' 的 pi 数据面：五桶各一组头—— * 需要 input/运行中/未读/草稿/空闲，状态排序 rank 的同序决定组序 =
  * needs-input 最前、idle 殿后；桶内保持排序键给定的相对序）。每组一条
  * 状态分隔线（variant:'status'，label = 中文名 + 色点名由渲染层定）。
  * 非空桶才出组头（无运行中会话不出「运行中」行）。
@@ -271,7 +388,9 @@ export function buildSessionDisplay(
     grouping === 'status'
       ? groupEntriesByStatus(statusEntries())
       : grouping === 'project'
-        ? groupEntriesByWorkspace(rankedEntries)
+        ? opts.view?.projects !== undefined
+          ? groupEntriesByProject(rankedEntries, opts.view.projects)
+          : groupEntriesByWorkspace(rankedEntries)
         : groupEntriesByRecency(
             unpinned.map((m) => ({ id: m.id, ms: m.lastActiveMs })),
             opts,

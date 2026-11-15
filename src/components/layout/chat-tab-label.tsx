@@ -35,7 +35,11 @@ export function ChatTabLabel(): React.ReactElement | null {
           margin-left:auto 贴右端；工作区名吃剩余宽度、超出省略——不再被
           按钮挤成 "Admin…"。 */}
       <div className="chat-tab-label__row" data-slot="chat-tab-label-row">
-        <span className="chat-tab-label__workspace" data-workspace={workspace}>
+        <span
+          className="chat-tab-label__workspace"
+          data-workspace={workspace}
+          title={workspace}
+        >
           {workspace}
         </span>
         <div className="chat-tab-label__actions" data-slot="chat-tab-label-actions">

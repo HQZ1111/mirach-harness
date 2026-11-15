@@ -15,14 +15,35 @@
 //! 编造退出码）。进程退出 = TerminalRegistry::drop 兜底全部 kill（Drop
 //! 无法传播——规矩 12 的既注例外）；窗格关闭由前端 unmount 钩子逐个 kill。
 //!
-//! 【cwd 裁定】pi_get_state 没有 cwd 能力（PiEngine::state 只回
-//! sessionId/provider/modelId/thinkingLevel/messageCount；SessionOptions
-//! 未设 cwd，pi 的会话 cwd 从未进状态面），fs.rs 亦无 cwd 来源——故取
-//! **系统 home**（Windows USERPROFILE / Unix HOME；取不到 = Err 传播）。
+//! 【首屏输出不能丢（2026-11-15，对齐 ZCode createBufferedTerminalOutputEmitter）】
+//! spawn 与前端 `listen()` 之间存在真实窗口：`terminal_spawn` 一返回就
+//! 起输出泵，而前端还要等 invoke 回包 + `listen` 两次 IPC 才拿得到事件。
+//! Tauri Event 在无监听者时**直接丢弃**——shell 的 banner/首个提示符正好
+//! 落在窗口里就是"终端开了但一片空白"。修法 = 宿主侧有界缓冲 + 显式
+//! attach：未 attach 的会话把输出存 backlog（上限 BACKLOG_MAX_BYTES，超了
+//! 丢最旧块——与 ZCode 的 1MB 策略同值，是内存上界策略不是错误兜底），
+//! 前端先订阅事件再 `terminal_attach`：返回 backlog 一次性回放，此后输出
+//! 走事件。**未 attach 就退出的会话**同理靠 attach 回放 exit——否则前端
+//! 错过退出事件，页签会永远停在"运行中"（死会话假活）。
+//!
+//! 【shell 裁定】同 ZCode resolveTerminalShell：Windows 依次
+//! pwsh.exe → powershell.exe → ComSpec → cmd.exe（每个都验可执行；
+//! PSReadLine 在 5.1 下更容易把输入行空白重绘成 ANSI black，故优先 pwsh）；
+//! Unix 依次 $SHELL → /bin/zsh → /bin/bash → /bin/sh。全部不可用 = Err。
+//!
+//! 【cwd 裁定】前端传**当前会话的工作区**（sessionCatalog 的 active 条目
+//! cwd，ZCode 同源语义：terminalService.create({cwd}) 用 workspace 路径）。
+//! 传了但不是目录 = Err 传播（规矩 12：不静默回退到 home——用户会看到
+//! "终端启动失败: 工作区目录不可用 …"，比开在别处假装成功好）。不传
+//! （无活动会话/会话没选工作区）才取系统 home（USERPROFILE/HOME）。
+//!
+//! 【env 裁定】对齐 ZCode resolveTerminalEnv：TERM=xterm-256color、
+//! COLORTERM 缺省 truecolor（父进程 inherit 其余变量——portable-pty 的
+//! CommandBuilder 以 get_base_env() 起底，PATH 不会被清空）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -37,8 +58,13 @@ const MAX_SESSIONS: usize = 8;
 /// 输出泵单次读块（PTY 输出是逐段到达的流，块大小只影响事件粒度）
 const READ_CHUNK: usize = 8192;
 
-/// 单个终端会话的进程侧句柄。三个字段各带自己的 Mutex：写/改尺寸/杀
-/// 是三条独立 IPC 路径，互不阻塞（registry 锁只护 HashMap 的取放）。
+/// 未 attach 期间的输出缓冲上限（字节）。与 ZCode
+/// TERMINAL_UNSUBSCRIBED_OUTPUT_MAX_CHARS 同值：超出丢**最旧**的整块
+/// （屏幕上最可能还可见的是尾部输出）。这是内存上界策略，不是错误兜底。
+const BACKLOG_MAX_BYTES: usize = 1_048_576;
+
+/// 单个终端会话的进程侧句柄。四个字段各带自己的 Mutex：写/改尺寸/杀/
+/// 输出缓冲是四条独立路径，互不阻塞（registry 锁只护 HashMap 的取放）。
 struct SessionHandle {
     /// shell stdin（terminal_write 走这里）
     writer: Mutex<Box<dyn Write + Send>>,
@@ -47,6 +73,51 @@ struct SessionHandle {
     /// 杀手（terminal_kill / Drop 清场走这里）——child 本体已交给 wait
     /// 线程阻塞 wait，杀进程只经 killer
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// 输出泵 ↔ 前端 attach 的交接面（backlog + 退出补发，见模块头）
+    output: Mutex<OutputState>,
+}
+
+/// 输出缓冲 / attach 状态（纯逻辑，单测覆盖）。
+#[derive(Default)]
+struct OutputState {
+    /// 前端已 attach：此后输出直接走事件，不再进 backlog
+    attached: bool,
+    backlog: VecDeque<Vec<u8>>,
+    backlog_bytes: usize,
+    /// 会话已退出时的退出信息。attach 晚于退出时靠它补发（事件已错过）
+    exited: Option<ExitInfo>,
+}
+
+impl OutputState {
+    /// 输出泵单块交接：未 attach = 入 backlog（返回 false，不要 emit）；
+    /// 已 attach = 返回 true（调用方 emit）。
+    fn offer(&mut self, chunk: Vec<u8>) -> bool {
+        if self.attached {
+            return true;
+        }
+        self.backlog_bytes += chunk.len();
+        self.backlog.push_back(chunk);
+        // 至少留一块：单块超过上限时也保留它（丢一块 8KB 的实时输出
+        // 比留超限更糟——上限约束的是累积量）
+        while self.backlog_bytes > BACKLOG_MAX_BYTES && self.backlog.len() > 1 {
+            match self.backlog.pop_front() {
+                Some(dropped) => self.backlog_bytes -= dropped.len(),
+                None => break,
+            }
+        }
+        false
+    }
+
+    /// attach：置位 + 取走 backlog（顺序拼接成一块，前端一次流式解码）。
+    fn attach(&mut self) -> Vec<u8> {
+        self.attached = true;
+        let mut out = Vec::with_capacity(self.backlog_bytes);
+        for chunk in self.backlog.drain(..) {
+            out.extend_from_slice(&chunk);
+        }
+        self.backlog_bytes = 0;
+        out
+    }
 }
 
 #[derive(Default)]
@@ -118,23 +189,90 @@ impl Drop for TerminalRegistry {
     }
 }
 
-// ── 默认值裁定 ───────────────────────────────────────────────────────────────
+// ── shell / cwd 裁定 ─────────────────────────────────────────────────────────
 
-/// 默认 shell：Windows = PowerShell（用户定稿；powershell.exe 系统自带，
-/// 不猜 pwsh 是否安装）；Unix = $SHELL，缺省 bash（环境变量缺失是配置
-/// 事实而非错误，注释裁定）。
-fn default_shell() -> String {
-    #[cfg(windows)]
-    {
-        "powershell.exe".to_string()
+/// shell 候选序列（ZCode resolveTerminalShell 同序，2026-11-15 对齐）。
+#[cfg(windows)]
+fn shell_candidates() -> Vec<String> {
+    let mut candidates = vec!["pwsh.exe".to_string(), "powershell.exe".to_string()];
+    if let Ok(comspec) = std::env::var("ComSpec") {
+        if !comspec.trim().is_empty() {
+            candidates.push(comspec);
+        }
     }
-    #[cfg(not(windows))]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-    }
+    candidates.push("cmd.exe".to_string());
+    candidates
 }
 
-/// 终端 cwd = 系统 home（裁定见模块头【cwd 裁定】）。取不到/非目录 = Err。
+#[cfg(not(windows))]
+fn shell_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(shell) = std::env::var("SHELL") {
+        if !shell.trim().is_empty() {
+            candidates.push(shell);
+        }
+    }
+    candidates.extend(["/bin/zsh", "/bin/bash", "/bin/sh"].map(str::to_string));
+    candidates
+}
+
+/// 候选 → 第一个可执行项（纯逻辑：存在性判定注入，单测覆盖顺序/空串/
+/// 坏 PATH 条目跳过）。
+fn pick_shell(candidates: &[String], mut exists: impl FnMut(&str) -> bool) -> Option<String> {
+    candidates
+        .iter()
+        .find(|candidate| !candidate.trim().is_empty() && exists(candidate))
+        .cloned()
+}
+
+/// 可执行判定：含路径分隔符 = 直接查文件；裸名 = 按 PATH 逐目录查同名
+/// 文件（候选全是带 .exe 的显式名，不需要 PATHEXT 推断）。
+fn is_executable(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Path::new(trimmed).is_file();
+    }
+    let Some(path_env) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_env).any(|dir| {
+        let candidate = dir.join(trimmed);
+        candidate.is_file()
+    })
+}
+
+/// 启动用的 shell；一个都不可用 = Err（不猜、不静默降级到某个不存在的
+/// 路径——spawn 那一步的报错会失去"为什么"）。
+fn resolve_shell() -> Result<String, String> {
+    let candidates = shell_candidates();
+    pick_shell(&candidates, is_executable).ok_or_else(|| {
+        format!(
+            "没有可用的 shell（已试: {}）",
+            candidates.join(" / ")
+        )
+    })
+}
+
+/// 终端 cwd：显式传入（当前会话工作区）必须是目录；未传才取系统 home。
+fn resolve_cwd(requested: Option<String>) -> Result<PathBuf, String> {
+    if let Some(raw) = requested {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("工作区目录参数为空字符串".to_string());
+        }
+        let path = PathBuf::from(trimmed);
+        if !path.is_dir() {
+            return Err(format!("工作区目录不可用（不是目录）: {}", path.display()));
+        }
+        return Ok(path);
+    }
+    default_cwd()
+}
+
+/// 终端 cwd 缺省 = 系统 home。取不到/非目录 = Err。
 fn default_cwd() -> Result<PathBuf, String> {
     #[cfg(windows)]
     let key = "USERPROFILE";
@@ -159,6 +297,14 @@ struct TerminalOutputEvent {
     data: String,
 }
 
+/// 退出信息（事件载荷与 attach 回放共用一份形状）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitInfo {
+    pub exit_code: Option<u32>,
+    pub error: Option<String>,
+}
+
 /// 退出事件载荷：exit_code 缺 = wait 本身失败（error 说明原因）。
 /// 唯一上报通道就是这条事件（线程深处无调用方可返 Err）——失败也走这里。
 #[derive(Clone, Serialize)]
@@ -169,7 +315,17 @@ struct TerminalExitEvent {
     error: Option<String>,
 }
 
-/// spawn 结果：shell 原串给前端做页签名（ZCode formatShellLabel 同源）。
+/// attach 结果：data = 未送达输出的 base64（空串 = 没有），exit = 会话
+/// 已退出时的退出信息（事件抢先发过或前端还没订阅，都会在这里补一次）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attached {
+    data: String,
+    exit: Option<ExitInfo>,
+}
+
+/// spawn 结果：shell 原串给前端做页签名（ZCode formatShellLabel 同源），
+/// cwd 给前端做页签标题（ZCode formatTerminalTabTitle 的 projectName）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Spawned {
@@ -186,7 +342,12 @@ pub fn terminal_spawn(
     state: State<Arc<TerminalRegistry>>,
     cols: Option<u16>,
     rows: Option<u16>,
+    cwd: Option<String>,
 ) -> Result<Spawned, String> {
+    // 先解析 shell/cwd（便宜且可能失败），再占 id——失败不消耗会话号
+    let cwd = resolve_cwd(cwd)?;
+    let shell = resolve_shell()?;
+
     // 容量检查前置：超限就不开 PTY（开了再拒会漏孤儿进程）
     let id = {
         let mut inner = state
@@ -195,9 +356,6 @@ pub fn terminal_spawn(
             .map_err(|_| "terminal registry mutex poisoned".to_string())?;
         inner.alloc_id()?
     };
-
-    let cwd = default_cwd()?;
-    let shell = default_shell();
 
     // 初始尺寸：前端先 fit 再 spawn（ZCode 同款时序，避免启动输出按错
     // 宽度重排）；缺省 80×24 只是 PTY 协议初值，前端随后必 resize。
@@ -214,6 +372,12 @@ pub fn terminal_spawn(
 
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(&cwd);
+    // 交互终端环境（ZCode resolveTerminalEnv 同源）：Windows 下 ConPTY 也
+    // 照样传——git/npm/彩色输出的能力探测读的就是这两个变量。
+    cmd.env("TERM", "xterm-256color");
+    if std::env::var_os("COLORTERM").is_none() {
+        cmd.env("COLORTERM", "truecolor");
+    }
 
     let mut child = pair
         .slave
@@ -232,27 +396,41 @@ pub fn terminal_spawn(
         .map_err(|e| format!("PTY reader 获取失败: {e}"))?;
     let killer = child.clone_killer();
 
-    state.insert(
-        id,
-        Arc::new(SessionHandle {
-            writer: Mutex::new(writer),
-            master: Mutex::new(pair.master),
-            killer: Mutex::new(killer),
-        }),
-    )?;
+    let handle = Arc::new(SessionHandle {
+        writer: Mutex::new(writer),
+        master: Mutex::new(pair.master),
+        killer: Mutex::new(killer),
+        output: Mutex::new(OutputState::default()),
+    });
+    state.insert(id, handle.clone())?;
 
-    // 输出泵：读 PTY → terminal-output:{id}。EOF（子进程退出/PTY 关闭）
-    // 或事件通道失效（应用退出中）即收线；wait 线程负责退出上报。
+    // 输出泵：读 PTY → terminal-output:{id}。未 attach 时先进 backlog
+    // （见模块头【首屏输出不能丢】）。EOF（子进程退出/PTY 关闭）或事件
+    // 通道失效（应用退出中）即收线；wait 线程负责退出上报。
     let app_pump = app.clone();
+    let pump_handle = handle.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; READ_CHUNK];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    let emit_now = match pump_handle.output.lock() {
+                        Ok(mut out) => out.offer(chunk.clone()),
+                        Err(_) => {
+                            // 缓冲锁中毒：输出无处安放（既不能缓存也不能
+                            // 保证顺序），收线并留日志（线程无处返 Err）
+                            eprintln!("[terminal:{id}] output mutex poisoned, pump stops");
+                            break;
+                        }
+                    };
+                    if !emit_now {
+                        continue;
+                    }
                     let event = TerminalOutputEvent {
                         id,
-                        data: base64::engine::general_purpose::STANDARD.encode(&buf[..n]),
+                        data: base64::engine::general_purpose::STANDARD.encode(&chunk),
                     };
                     if let Err(e) = app_pump.emit(&format!("terminal-output:{id}"), event) {
                         eprintln!("[terminal:{id}] output emit failed: {e}");
@@ -267,37 +445,81 @@ pub fn terminal_spawn(
         }
     });
 
-    // wait 线程：阻塞到子进程退出 → 摘除登记（释放 PTY）→ 上报退出码。
+    // wait 线程：阻塞到子进程退出 → 记录退出态（attach 晚到也能补发）→
+    // 摘除登记（释放 PTY）→ 上报退出码。
     let registry = state.inner().clone();
     let app_wait = app;
+    let wait_handle = handle;
     std::thread::spawn(move || {
         let status = child.wait();
-        if let Err(e) = registry.remove(id) {
-            eprintln!("[terminal:{id}] registry remove failed: {e}");
-        }
         let (exit_code, error) = match status {
             Ok(s) => (Some(s.exit_code()), None),
             Err(e) => (None, Some(format!("PTY wait 失败: {e}"))),
         };
-        let event = TerminalExitEvent {
-            id,
-            exit_code,
-            error,
+        let info = ExitInfo { exit_code, error };
+
+        let emit_now = match wait_handle.output.lock() {
+            Ok(mut out) => {
+                out.exited = Some(info.clone());
+                out.attached
+            }
+            Err(_) => false,
         };
+        // 先摘登记再上报：摘除后 attach 会明确 Err（前端按"会话已结束"处理），
+        // 不会把已死会话当成活会话接上
+        if let Err(e) = registry.remove(id) {
+            eprintln!("[terminal:{id}] registry remove failed: {e}");
+        }
+        if emit_now {
+            let event = TerminalExitEvent {
+                id,
+                exit_code: info.exit_code,
+                error: info.error.clone(),
+            };
+            // emit 失败 = 无接收方（应用退出中）——无处可报，留日志
+            if let Err(e) = app_wait.emit(&format!("terminal-exit:{id}"), event) {
+                eprintln!("[terminal:{id}] exit emit failed: {e}");
+            }
+        }
         eprintln!(
             "[terminal:{id}] exited (code {:?}, error {:?})",
-            event.exit_code, event.error
+            info.exit_code, info.error
         );
-        // emit 失败 = 无接收方（应用退出中）——无处可报，留日志
-        if let Err(e) = app_wait.emit(&format!("terminal-exit:{id}"), event) {
-            eprintln!("[terminal:{id}] exit emit failed: {e}");
-        }
     });
 
     Ok(Spawned {
         id,
         shell,
         cwd: cwd.to_string_lossy().into_owned(),
+    })
+}
+
+/// attach 会话输出：返回 backlog（一次性回放）+ 退出补发。前端必须在
+/// 订阅 terminal-output/terminal-exit 之后调用——此后事件与 backlog 的
+/// 先后由前端 TerminalOutputGate 保证（见 terminal-pane.tsx）。
+#[tauri::command(async)]
+pub fn terminal_attach(state: State<Arc<TerminalRegistry>>, id: u32) -> Result<Attached, String> {
+    let handle = {
+        let inner = state
+            .0
+            .lock()
+            .map_err(|_| "terminal registry mutex poisoned".to_string())?;
+        inner
+            .sessions
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| {
+                format!("终端会话 {id} 已结束（attach 时已不在注册表——shell 启动后立即退出）")
+            })?
+    };
+    let mut out = handle
+        .output
+        .lock()
+        .map_err(|_| format!("终端会话 {id} output mutex poisoned"))?;
+    let backlog = out.attach();
+    Ok(Attached {
+        data: base64::engine::general_purpose::STANDARD.encode(backlog),
+        exit: out.exited.clone(),
     })
 }
 
@@ -405,6 +627,7 @@ mod tests {
                 writer: Mutex::new(Box::new(std::io::sink())),
                 master: Mutex::new(unreachable_master()),
                 killer: Mutex::new(Box::new(NoKill)),
+                output: Mutex::new(OutputState::default()),
             }));
             ids.push(id);
         }
@@ -444,5 +667,120 @@ mod tests {
             })
             .expect("openpty in test")
             .master
+    }
+
+    // ── 输出缓冲 / attach 交接（首屏输出不丢的机制） ──────────────────────
+
+    /// 未 attach：全部入 backlog，保持顺序；attach 一次性取走并置位。
+    #[test]
+    fn output_backlog_keeps_order_and_attach_drains_it() {
+        let mut out = OutputState::default();
+        assert!(!out.offer(b"first".to_vec()));
+        assert!(!out.offer(b"second".to_vec()));
+        assert_eq!(out.attach(), b"firstsecond".to_vec());
+        assert!(out.attached);
+        // attach 之后再进输出 = 直接走事件（不进 backlog）
+        assert!(out.offer(b"live".to_vec()));
+        assert_eq!(out.attach(), Vec::<u8>::new());
+    }
+
+    /// 上限：超出 BACKLOG_MAX_BYTES 丢最旧整块，保留尾部（内存上界策略）。
+    #[test]
+    fn output_backlog_drops_oldest_beyond_cap() {
+        let mut out = OutputState::default();
+        let chunk = vec![b'x'; 64 * 1024];
+        let chunks = BACKLOG_MAX_BYTES / chunk.len() + 4;
+        for _ in 0..chunks {
+            out.offer(chunk.clone());
+        }
+        assert!(out.backlog_bytes <= BACKLOG_MAX_BYTES);
+        assert!(!out.backlog.is_empty());
+        // 只保留了最近的若干块
+        assert!(out.backlog.len() < chunks);
+    }
+
+    /// 单块超过上限时也要保留（不能把 8KB 的实时输出整块丢掉）。
+    #[test]
+    fn output_backlog_keeps_single_oversized_chunk() {
+        let mut out = OutputState::default();
+        let oversized = vec![b'y'; BACKLOG_MAX_BYTES + 16];
+        out.offer(oversized.clone());
+        assert_eq!(out.backlog.len(), 1);
+        assert_eq!(out.attach().len(), oversized.len());
+    }
+
+    /// attach 晚于退出：exit 信息必须还在（前端靠它补发退出态）。
+    #[test]
+    fn output_attach_replays_exit_info() {
+        let mut out = OutputState::default();
+        out.exited = Some(ExitInfo {
+            exit_code: Some(1),
+            error: None,
+        });
+        let _ = out.attach();
+        assert_eq!(out.exited.as_ref().and_then(|e| e.exit_code), Some(1));
+    }
+
+    // ── shell / cwd 裁定 ──────────────────────────────────────────────────
+
+    /// 候选顺序：第一个存在者胜出；空串与不存在项跳过。
+    #[test]
+    fn pick_shell_takes_first_existing_candidate() {
+        let candidates = vec![
+            String::new(),
+            "pwsh.exe".to_string(),
+            "powershell.exe".to_string(),
+            "cmd.exe".to_string(),
+        ];
+        // pwsh 不在：落到 powershell
+        assert_eq!(
+            pick_shell(&candidates, |c| c != "pwsh.exe"),
+            Some("powershell.exe".to_string())
+        );
+        // pwsh 在：pwsh 优先（PSReadLine 重绘问题在 5.1 更严重）
+        assert_eq!(
+            pick_shell(&candidates, |c| c.ends_with(".exe")),
+            Some("pwsh.exe".to_string())
+        );
+        // 一个都没有 = None（调用方 Err）
+        assert_eq!(pick_shell(&candidates, |_| false), None);
+    }
+
+    /// 平台候选序列的形状（ComSpec 仅在其非空时出现，cmd.exe 兜底在末尾）。
+    #[test]
+    fn shell_candidates_have_expected_shape() {
+        let candidates = shell_candidates();
+        assert!(candidates.iter().all(|c| !c.trim().is_empty()));
+        assert!(!candidates.is_empty());
+        #[cfg(windows)]
+        {
+            assert_eq!(candidates[0], "pwsh.exe");
+            assert_eq!(candidates[1], "powershell.exe");
+            assert_eq!(candidates.last().unwrap(), "cmd.exe");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(candidates.last().unwrap(), "/bin/sh");
+        }
+    }
+
+    /// cwd：显式目录（存在）= 用它；不存在 = Err（不静默回退 home）；
+    /// 未传 = 系统 home。
+    #[test]
+    fn resolve_cwd_validates_explicit_directory() {
+        let temp = std::env::temp_dir();
+        let resolved = resolve_cwd(Some(temp.to_string_lossy().into_owned()))
+            .expect("temp dir is usable");
+        assert_eq!(resolved, temp);
+
+        let missing = temp.join("mirach-terminal-missing-dir-xyz");
+        let err = resolve_cwd(Some(missing.to_string_lossy().into_owned()))
+            .expect_err("missing dir must be Err");
+        assert!(err.contains("工作区目录不可用"), "unexpected error: {err}");
+
+        assert!(resolve_cwd(Some("   ".to_string())).is_err());
+
+        let fallback = resolve_cwd(None).expect("home dir is usable in test env");
+        assert!(fallback.is_dir());
     }
 }

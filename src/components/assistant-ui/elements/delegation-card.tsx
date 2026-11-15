@@ -35,6 +35,7 @@ import {
   sessionCatalog,
 } from "@/components/panes/session-manage/session-catalog";
 import { switchSessionThreadBridge } from "@/components/panes/session-manage/session-tab-bridge";
+import { openSubagentDetail } from "@/components/panes/subagent-detail-opener";
 
 export interface DelegationResult {
   kind: string;
@@ -255,8 +256,31 @@ export const DelegationCard: FC<DelegationCardProps> = ({ result, running }) => 
         </Collapsible>
       ) : null}
 
-      {sessionKnown && sessionId !== null ? (
-        <div className="mt-1.5 flex justify-end">
+      <div className="mt-1.5 flex justify-end gap-2">
+        <button
+          type="button"
+          data-slot="aui_delegation-detail"
+          onClick={() =>
+            openSubagentDetail({
+              name: "子代理",
+              ...(result.role !== null ? { role: result.role } : {}),
+              ...(result.task !== null ? { task: result.task } : {}),
+              ...(result.status !== null ? { status: result.status } : {}),
+              running: isRunning,
+              ...(result.report !== null ? { report: result.report } : {}),
+              turns: result.turns,
+              maxTurns: result.maxTurns,
+              turnLimited: result.turnLimited,
+              timeoutSeconds: result.timeoutSeconds,
+              childId: result.childId,
+              sessionId: result.sessionId,
+            })
+          }
+          className="text-foreground/60 hover:bg-foreground/[0.06] hover:text-foreground/90 flex h-6 items-center rounded-full px-2 text-[11px] transition-colors"
+        >
+          子代理详情
+        </button>
+        {sessionKnown && sessionId !== null ? (
           <button
             type="button"
             data-slot="aui_delegation-open"
@@ -265,8 +289,8 @@ export const DelegationCard: FC<DelegationCardProps> = ({ result, running }) => 
           >
             查看子会话
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </article>
   );
 };

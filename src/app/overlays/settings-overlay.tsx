@@ -61,6 +61,7 @@ import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import {
+  Archive,
   Bell,
   BookOpen,
   Brain,
@@ -68,6 +69,7 @@ import {
   ChartColumn,
   CircleUser,
   Cpu,
+  Folder,
   Globe,
   Info,
   Keyboard,
@@ -86,6 +88,8 @@ import {
 } from 'lucide-react'
 
 import { activateBundledPlugins, usePluginContributions } from '@/contrib/plugins'
+import { ProjectsSettingsSection } from '@/app/settings/projects-settings'
+import { ArchivesSettingsSection } from '@/app/settings/archives-settings'
 import { Switch } from '@/components/ui/switch'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import {
@@ -748,7 +752,9 @@ function SetTextDraftField({
 // 左栏节列表 + 右栏条件渲染选中节。id 仅用于左导航寻址（data-section-id），
 // 不进任何持久化面。
 //
-// **分组结构（用户 2026-10-22 定稿，逐字对上，改之前先问）**：5 组 20 项。
+// **分组结构（用户 2026-10-22 定稿，逐字对上，改之前先问）**：原 5 组 20 项；
+// 2026-11-15 会话管理 P0 在「安全与数据」新增「项目」「归档会话」两节
+// （22 项）——这是用户当轮明确要求的改动，其余项仍按 20 项定稿执行。
 // 视觉骨架照搬 beui AnimatedSidebar 的「组标题 + 菜单项 + 子级竖线」三层
 // 结构（样式见 overlays.css 的 .set-nav 家族），但不引入 motion/react——
 // 这里只借视觉与信息层级，动效仍用本工程既有 CSS 令牌。
@@ -787,6 +793,8 @@ type SectionId =
   | 'security'
   | 'password-login'
   | 'sessions'
+  | 'projects'
+  | 'archives'
   | 'shortcuts'
   | 'knowledge'
   | 'usage-stats'
@@ -915,6 +923,19 @@ const NAV_GROUPS: readonly NavGroup[] = [
         id: 'sessions',
         label: '会话管理',
       },
+      // 项目注册表 / 归档会话（2026-11-15 会话管理 P0）：Rust 侧
+      // pi_projects_* + pi_sessions_index 的用户入口。会话管理只配「会话
+      // 存在哪」，这两项管「会话归到哪 / 收进回收站后怎么处置」。
+      {
+        icon: Folder,
+        id: 'projects',
+        label: '项目',
+      },
+      {
+        icon: Archive,
+        id: 'archives',
+        label: '归档会话',
+      },
       {
         icon: Keyboard,
         id: 'shortcuts',
@@ -1026,6 +1047,11 @@ const IMPLEMENTED_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
   // 本节只写引擎配置，两个入口不重复同一数据面。
   'sessions',
   'skills-tools',
+  // 项目注册表 + 归档会话（2026-11-15 会话管理 P0）：面板实现分别在
+  // app/settings/projects-settings.tsx / archives-settings.tsx（节标题由
+  // 上方 set-inset-head 承担，面板传 headerLabel={null}）。
+  'projects',
+  'archives',
   // GPT-Live 语音（2026-11-12）：引擎模式 / OpenAI key / 模型音色 + 就绪
   // 读数——voice-settings.tsx（moss live 桥接层的配置面）
   'voice',
@@ -2818,6 +2844,17 @@ export function SettingsOverlay({
             )}
           </section>
           )}
+
+          {/* ── 项目（安全与数据 / 项目）：Rust 项目注册表（pi_projects_*）
+              的列表/搜索/排序/置顶/重命名/根目录增删/移除与恢复。节标题由
+              右栏 set-inset-head 承担，面板不重复画。彻底删除缺 IPC（只有
+              软删/恢复），面板内如实标注。 ── */}
+          {activeSection === 'projects' && <ProjectsSettingsSection headerLabel={null} />}
+
+          {/* ── 归档会话（安全与数据 / 归档会话）：pi_sessions_index
+              ({ archived: true }) 按项目分组，恢复 / 批量删除。活动会话
+              跳过并明示（设置页不接管对话区）。 ── */}
+          {activeSection === 'archives' && <ArchivesSettingsSection headerLabel={null} />}
 
           {/* ── 技能与工具（Agent 控制 / 技能与工具）：rpi 的追加资源目录 +
               引擎默认工具列表（2026-11-14 补齐）。旧占位文案说"只读资源

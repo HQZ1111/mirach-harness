@@ -182,6 +182,12 @@
   --tab-separator: var(--scale-gray-a3);      /* hermes --ui-stroke-quaternary 系（原 0.07） */
   --tab-dot-size: 5px;                        /* 横向多页签之间的分隔圆点（用户 2026-09-27） */
   --tab-dot-color: #bfc3cc;                   /* 圆点色 */
+  /* 标签宽度上限 + 关闭钮显形时的文字渐隐带（ZCode side-pane tab 事实
+     行为：tab 最大 9.75rem=156px、最小 3.75rem=60px，标题超宽在标签内
+     省略/渐隐，不撑宽标签条、不产横向滚动条） */
+  --tab-max-w: 156px;
+  --tab-min-w: 60px;
+  --tab-fade-offset: 20px;                    /* ZCode 同款 1.25rem */
 
   /* ── 页签关闭/回家钮（用户 2026-09-27：统一图标+令牌，仅悬停显形）── */
   --tab-close-size: 12px;                     /* 图标线宽 */

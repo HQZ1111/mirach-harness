@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
 import { useAttachmentSrc } from "@/hooks/use-attachment-src";
+import { attachmentKindLabel, formatFileSize, type AttachmentKind } from "@/components/assistant-ui/attachments";
 import { cn } from "@/lib/utils";
 
 type AttachmentPreviewProps = {
@@ -113,18 +114,22 @@ const AttachmentUI: FC = () => {
   const isComposer = aui.attachment.source !== "message";
 
   const isImage = useAuiState((s) => s.attachment.type === "image");
-  const typeLabel = useAuiState((s) => {
-    const type = s.attachment.type;
-    switch (type) {
-      case "image":
-        return "Image";
-      case "document":
-        return "Document";
-      case "file":
-        return "File";
-      default:
-        return type;
-    }
+  const fileName = useAuiState((s) => s.attachment.name);
+  // 类型/大小：adapter 在附件对象上挂了 kind/size 扩展字段（composer 与
+  // 乐观 user 消息都带）。缺失时从 contentType/type 退化推导——chip 至少
+  // 显示"文档"，不显示空白。
+  const kindLabel = useAuiState((s) => {
+    const a = s.attachment as { kind?: AttachmentKind; type: string; contentType?: string };
+    if (a.kind) return attachmentKindLabel(a.kind);
+    if (a.type === "image") return "图片";
+    const mime = a.contentType ?? "";
+    if (mime.startsWith("video/")) return "视频";
+    if (mime.startsWith("audio/")) return "音频";
+    return "文档";
+  });
+  const size = useAuiState((s) => {
+    const n = (s.attachment as { size?: number }).size;
+    return typeof n === "number" && n > 0 ? n : 0;
   });
 
   // An attachment on a submission is still being prepared, whether or not the
@@ -149,6 +154,8 @@ const AttachmentUI: FC = () => {
       : undefined,
   );
 
+  const sizeLabel = size > 0 ? formatFileSize(size) : undefined;
+
   return (
     <TooltipProvider>
       <Tooltip>
@@ -160,54 +167,103 @@ const AttachmentUI: FC = () => {
             isImage &&
               !isComposer &&
               "aui-attachment-root-message only:*:first:size-24",
+            // 图片 composer 附件：tile 下补一行名字/大小（需求：chip 显示
+            // 类型/文件名/大小）。
+            isComposer && isImage && "flex flex-col items-center gap-1",
           )}
         >
-          <AttachmentPreviewDialog>
+          {isImage ? (
+            <AttachmentPreviewDialog>
+              <TooltipTrigger asChild>
+                <div
+                  className={cn(
+                    "aui-attachment-tile bg-muted hover:after:bg-foreground/10 focus-visible:ring-ring/50 relative size-14 cursor-pointer overflow-hidden rounded-[calc(var(--composer-radius,1rem)-var(--composer-padding,8px))] transition-transform outline-none after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:ring-1 after:ring-black/10 after:transition-colors after:ring-inset focus-visible:ring-1 active:scale-[0.96] motion-reduce:transition-none dark:after:ring-white/10",
+                    isError &&
+                      "after:ring-destructive/60 dark:after:ring-destructive/60",
+                  )}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.currentTarget.click();
+                    } else if (e.key === " ") {
+                      e.preventDefault();
+                    }
+                  }}
+                  onKeyUp={(e) => {
+                    if (e.key === " ") e.currentTarget.click();
+                  }}
+                  aria-label={`${kindLabel} attachment${
+                    isError ? ", upload failed" : isUploading ? ", uploading" : ""
+                  }`}
+                >
+                  <AttachmentThumb />
+                  {isUploading && (
+                    <div
+                      aria-hidden="true"
+                      className="aui-attachment-tile-uploading bg-background/60 animate-in fade-in-0 absolute inset-0 flex items-center justify-center backdrop-blur-[2px] motion-reduce:animate-none"
+                    >
+                      <Loader2Icon className="text-muted-foreground size-[var(--size-icon-lg)] animate-spin" />
+                    </div>
+                  )}
+                  {isError && (
+                    <div
+                      aria-hidden="true"
+                      className="aui-attachment-tile-error bg-background/70 animate-in fade-in-0 absolute inset-0 flex items-center justify-center backdrop-blur-[2px] motion-reduce:animate-none"
+                    >
+                      <AlertCircleIcon className="text-destructive size-[var(--size-icon-lg)]" />
+                    </div>
+                  )}
+                </div>
+              </TooltipTrigger>
+            </AttachmentPreviewDialog>
+          ) : (
+            // 视频 / 音频 / 文档：没有原生多模态块，渲染成信息 chip
+            // （名字 + 类型 + 大小）；模型实际拿到的是 prompt 里的绝对路径。
             <TooltipTrigger asChild>
               <div
                 className={cn(
-                  "aui-attachment-tile bg-muted hover:after:bg-foreground/10 focus-visible:ring-ring/50 relative size-14 cursor-pointer overflow-hidden rounded-[calc(var(--composer-radius,1rem)-var(--composer-padding,8px))] transition-transform outline-none after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:ring-1 after:ring-black/10 after:transition-colors after:ring-inset focus-visible:ring-1 active:scale-[0.96] motion-reduce:transition-none dark:after:ring-white/10",
-                  isError &&
-                    "after:ring-destructive/60 dark:after:ring-destructive/60",
+                  "aui-attachment-file-chip border-border bg-muted/60 flex min-w-0 max-w-[220px] items-center gap-2 rounded-[10px] border px-2 py-1.5 text-start",
+                  isComposer && "pe-7",
+                  isError && "border-destructive/60",
                 )}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    e.currentTarget.click();
-                  } else if (e.key === " ") {
-                    e.preventDefault();
-                  }
-                }}
-                onKeyUp={(e) => {
-                  if (e.key === " ") e.currentTarget.click();
-                }}
-                aria-label={`${typeLabel} attachment${
-                  isError ? ", upload failed" : isUploading ? ", uploading" : ""
-                }`}
+                role="group"
+                aria-label={`${kindLabel} ${fileName}`}
               >
-                <AttachmentThumb />
-                {isUploading && (
-                  <div
-                    aria-hidden="true"
-                    className="aui-attachment-tile-uploading bg-background/60 animate-in fade-in-0 absolute inset-0 flex items-center justify-center backdrop-blur-[2px] motion-reduce:animate-none"
+                <FileText className="text-muted-foreground size-[var(--size-icon-lg)] shrink-0 stroke-[1.5]" />
+                <span className="flex min-w-0 flex-col">
+                  <span className="text-foreground truncate text-[12px] leading-4">
+                    {fileName}
+                  </span>
+                  <span
+                    className={cn(
+                      "truncate text-[10px] leading-3",
+                      isError ? "text-destructive" : "text-muted-foreground",
+                    )}
                   >
-                    <Loader2Icon className="text-muted-foreground size-[var(--size-icon-lg)] animate-spin" />
-                  </div>
-                )}
-                {isError && (
-                  <div
-                    aria-hidden="true"
-                    className="aui-attachment-tile-error bg-background/70 animate-in fade-in-0 absolute inset-0 flex items-center justify-center backdrop-blur-[2px] motion-reduce:animate-none"
-                  >
-                    <AlertCircleIcon className="text-destructive size-[var(--size-icon-lg)]" />
-                  </div>
-                )}
+                    {isError
+                      ? (errorMessage ?? "不可发送")
+                      : [kindLabel, sizeLabel].filter(Boolean).join(" · ")}
+                  </span>
+                </span>
               </div>
             </TooltipTrigger>
-          </AttachmentPreviewDialog>
+          )}
           {isComposer && <AttachmentRemove />}
+          {isComposer && isImage && (
+            <>
+              <span
+                className="text-foreground max-w-14 truncate text-[10px] leading-3"
+                title={fileName}
+              >
+                {fileName}
+              </span>
+              <span className="text-muted-foreground max-w-14 truncate text-[9px] leading-3">
+                {[kindLabel, sizeLabel].filter(Boolean).join(" · ")}
+              </span>
+            </>
+          )}
         </AttachmentPrimitive.Root>
         <TooltipContent side="top">
           <AttachmentPrimitive.Name />

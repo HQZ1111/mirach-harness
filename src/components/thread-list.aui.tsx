@@ -320,6 +320,8 @@ const useSessionRowMetas = (): SessionRowMeta[] => {
         createdMs,
         messageCount:
           typeof countRaw === "number" && Number.isFinite(countRaw) ? countRaw : undefined,
+        // 项目归属（pi_sessions_index.projectId；null = 明确无归属）。
+        projectId: typeof custom?.projectId === "string" ? custom.projectId : undefined,
       };
     });
   }, [threadIds, threadItems]);
@@ -338,6 +340,9 @@ const useThreadDisplay = (searchQuery: string) => {
   const ordering = useSidebarView(effectiveOrdering);
   const showArchived = useSidebarView((s) => s.showArchived);
   const query = searchQuery.trim();
+  // 项目注册表（project 分组的组名/组序来源）。未加载 = undefined →
+  // buildSessionDisplay 退回 cwd 分组（旧行为，不把「没拉到」画成「没有项目」）。
+  const projects = useSessionManage((s) => (s.projectsLoaded ? s.projects : undefined));
 
   // 归档过滤（hermes $sidebarShowArchived 关 = 归档行整个不渲染；开 =
   // 归位显示，行 lead 换归档字形）。搜索同样只搜未归档面。
@@ -435,10 +440,10 @@ const useThreadDisplay = (searchQuery: string) => {
       threadIds,
       metas: filteredMetas,
       display: buildSessionDisplay(filteredMetas, pinned, order, collapsed, {
-        view: { grouping, ordering, aux },
+        view: { grouping, ordering, aux, projects },
       }),
     };
-  }, [query, threadIds, threadItems, filteredMetas, pinned, order, collapsed, grouping, ordering, aux]);
+  }, [query, threadIds, threadItems, filteredMetas, pinned, order, collapsed, grouping, ordering, aux, projects]);
 };
 
 // ── 侧栏选项钮（hermes SidebarFilterMenu 对齐：段头 + 右侧的常驻视图
@@ -553,7 +558,10 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
             <span>分组</span>
             <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
-              {grouping === "date" ? "更新时间" : grouping === "project" ? "工作区" : "状态"}
+              {/* grouping='project' 自 2026-11-15 起按**项目注册表**（projectId）
+                  分组，标签从「工作区」改为「项目」——cwd 桶只用于无归属的
+                  旧数据（Filters 里的「工作区」是 cwd 过滤，另一回事）。 */}
+              {grouping === "date" ? "更新时间" : grouping === "project" ? "项目" : "状态"}
               <ChevronRightIcon className="size-[var(--size-icon-sm)]" />
             </span>
           </ContextMenuSubTrigger>
@@ -568,7 +576,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 <ViewOptionRow icon={ClockIcon} label="更新时间" />
               </ContextMenuRadioItem>
               <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="project">
-                <ViewOptionRow icon={FolderIcon} label="工作区" />
+                <ViewOptionRow icon={FolderIcon} label="项目" />
               </ContextMenuRadioItem>
               <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="status">
                 <ViewOptionRow icon={ActivityIcon} label="状态" />
@@ -1568,6 +1576,9 @@ export const ThreadListItem: FC = () => {
   const path = meta?.path;
   const messageCount = meta?.messageCount ?? 0;
   const aui = useAui();
+
+  // 项目归属由工作区本身表达（用户口径：工作区 = 项目），侧栏不再提供
+  // “移到项目”动作；sessionProjects 仅保留给设置页/未来跨工作区项目。
 
   // 未读/归档态（客户端水位语义——hermes session-unread/archive 对偶）。
   const isArchived = useSessionArchive((s) => s.archived.includes(threadId));

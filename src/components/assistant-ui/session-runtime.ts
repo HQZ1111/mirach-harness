@@ -25,7 +25,13 @@ import { useActorRef, useSelector } from '@xstate/react'
 
 import { turnMachine, type TurnContext } from './turn-actor'
 import { convertTurnMessage, hydratePiMessages } from './pi-hydrate'
-import { imageAttachmentAdapter, parseImageDataUrl, speechAdapter, type PiImagePayload } from './runtime'
+import { speechAdapter } from './runtime'
+import {
+  collectAttachmentPlan,
+  composePrompt,
+  piAttachmentAdapter,
+  type PiImagePayload,
+} from './attachments'
 
 export interface ThreadChatRuntimeOptions {
   /** 会话 id（= buffer/stream 键 = catalog entries 键） */
@@ -158,20 +164,17 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
         .filter((c) => c.type === 'text')
         .map((c) => c.text)
         .join('')
-      if (!text) throw new MessageNotSentError('[session-chat] 消息为空：附件必须伴随文本 prompt 发送')
-      const images: PiImagePayload[] = []
-      for (const att of m.attachments ?? []) {
-        for (const part of att.content) {
-          if (part.type !== 'image') continue
-          const parsed = parseImageDataUrl(part.image)
-          if (!parsed) {
-            console.error(`[session-chat] 附件 ${att.name} 的图片不在白名单——未随消息发送`)
-            continue
-          }
-          images.push(parsed)
-        }
+      // 分栏柄在 rpi 下不可用（side_open/side_prompt 恒 Err），附件同样
+      // 按主 runtime 的规则归一：不完整/不支持 → 整条不发（可见报错）。
+      let plan: ReturnType<typeof collectAttachmentPlan>
+      try {
+        plan = collectAttachmentPlan(m.attachments ?? [])
+      } catch (e) {
+        throw new MessageNotSentError(e instanceof Error ? e.message : String(e))
       }
-      if (!endpointRef.current) throw new Error('[session-chat] endpoint 未就绪，消息未发送')
+      const submission = composePrompt(text, plan.imageNames, plan.files)
+      if (!submission.trim()) throw new MessageNotSentError('[session-chat] 消息为空：没有可发送的文本或附件')
+      if (!endpointRef.current) throw new MessageNotSentError('[session-chat] endpoint 未就绪，消息未发送')
       if (actorRef.getSnapshot().matches('streaming')) {
         throw new MessageNotSentError('[session-chat] 本会话上一条消息仍在运行——请稍候再发')
       }
@@ -179,8 +182,10 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
         type: 'USER_SUBMIT',
         text,
         messageId: `user-${Date.now()}`,
+        ...(plan.imageDataUrls.length > 0 ? { images: plan.imageDataUrls } : {}),
+        ...(plan.files.length > 0 ? { files: plan.files } : {}),
       })
-      postRun(text, images)
+      postRun(submission, plan.images)
     },
     [actorRef, postRun],
   )
@@ -203,7 +208,7 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
     // （pi-hydrate.convertTurnMessage——主/分栏防漂移）。state 投影：
     // 压缩横幅/中断态走本分栏自己的轮次机 context。
     adapters: {
-      attachments: imageAttachmentAdapter,
+      attachments: piAttachmentAdapter,
       ...(speechAdapter ? { speech: speechAdapter } : {}),
     },
     convertMessage: convertTurnMessage,

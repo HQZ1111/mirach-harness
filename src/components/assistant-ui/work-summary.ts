@@ -3,6 +3,12 @@
  * `packages/ui/src/v4/conversationAssistantWorkItems.ts` 的宿主投影
  * （2026-11-15，替换 2026-11-07 的「族组」扫描）。
  *
+ * **2026-11-15 复核**：工作过程是 ZCode 的两层结构——外层每 turn 一个
+ * `AssistantHistoryStatus`（只有状态/时长），内层按**连续摘要行**分段建
+ * `ConsecutiveSummaryGroup`（统计在组头）。本模块的 `buildWorkSummaryItems`
+ * 负责分段（正文/子代理/未归类工具切断组），统计/图标/活动项作用于**单个
+ * 组**。下面的规则与 ZCode 逐条对应。
+ *
  * ## 与旧「族组」的区别（为什么重写）
  *
  * 旧扫描按**族**分组（explore / execute / changes 三个父组），组头写
@@ -21,7 +27,8 @@
  * 2. **边界**（`groupConsecutiveAssistantSummaries`）：正文、子代理 /
  *    委托工具、未归类工具（submit_plan、MCP、工具目录查询…）、图片/文件
  *    部件——都中断当前组。
- * 3. **组内 ≥2 才成组**（渲染层判 `items.length < 2` 时摊平为单行）。
+ * 3. **组内 ≥2 才成组**（ZCode 渲染层判 `items.length < 2` 时摊平为单行；
+ *    宿主已不建分段组，这条仅保留为扫描语义）。
  * 4. **统计**（`formatAssistantSummaryStatistics`）：explore 计**调用数**；
  *    run + session 计**调用数**；change 按**唯一文件路径**计（词法归一化
  *    去重），无路径计 unresolved；完成态前缀「已」，运行态无前缀；分隔符
@@ -29,7 +36,8 @@
  * 5. **代表图标**（`getAssistantSummaryIconItem`）：CUA 0 / node-repl 1 /
  *    change 2 / run 3 / explore（含 session）4，取最小者。
  * 6. **活动项**（`getActiveAssistantSummaryItem`）：组内最后一个仍在流式的
- *    思考 / 运行中的工具——收起态的组头滚动显示它。
+ *    思考 / 运行中的工具；组头 `current = active ?? last`（渲染层
+ *    `SummaryRunView` 直接取 `active ?? indices.at(-1)`）。
  * 7. **折叠变更摘要**（`getAssistantSummaryChangeFiles`）：只有**纯 change
  *    组**（组内每条都是 change，或思考）才返回文件清单；混入别的族即
  *    undefined。
@@ -68,6 +76,9 @@ const EXPLORE_TOOLS: ReadonlySet<string> = new Set([
   'ast_grep',
   'lsp',
   'web_search',
+  // rpi 的网页搜索扩展工具名是 `websearch`（无下划线，与内核 web_search
+  // 不同；见 tool-presentation/tool-specs.ts:202 的实测注释）。
+  'websearch',
   'webfetch',
   'web_fetch',
   'fetch',
@@ -378,8 +389,23 @@ export function activeSummaryIndex(
   return undefined;
 }
 
-/** 纯 change 组才可折叠展示文件清单（ZCode `getAssistantSummaryChangeFiles`）。 */
-export function summaryChangeFiles(
+/**
+ * 该连续摘要组是否是「可滚动的 running 组」（ZCode
+ * `SummaryGroupBoundaryContext`: `taskRunning && tailRowId === lastRowId`）。
+ *
+ * 只有整轮尾组能滚动当前项；正文一旦成为整轮尾行，所有组都回到统计数据。
+ */
+export function isTailSummaryGroup(options: {
+  running: boolean;
+  /** 组内最后一行在消息 parts 里的下标。 */
+  groupLastIndex: number;
+  /** 整轮最后一个可见行的下标（正文也参与）。 */
+  turnTailIndex: number;
+}): boolean {
+  return options.running && options.groupLastIndex === options.turnTailIndex;
+}
+
+/** 纯 change 组才可折叠展示文件清单（ZCode `getAssistantSummaryChangeFiles`）。 */export function summaryChangeFiles(
   parts: readonly SummaryPartLike[],
   indices: readonly number[],
 ): { files: SummaryChangedFile[]; unresolved: number } | undefined {

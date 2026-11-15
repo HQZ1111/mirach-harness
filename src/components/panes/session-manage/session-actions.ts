@@ -56,14 +56,15 @@ export interface SessionActionFlags {
  *   重命名…（edit）· 置顶/取消置顶（pin）· 标记为已读/未读（mail）
  *   · 复制 ID（copy）
  *   ―― 分隔 ――
- *   分支（repo-forked）· 导出（cloud-download）
+ *   分支（repo-forked）· 导出（cloud-download）· 移到项目…（folder）
  *   ―― 分隔 ――
  *   归档/取消归档（archive）· 删除（trash，destructive）
  *
  * 不适用（数据面无）：在新标签页中打开 / 新窗口 / 在终端中打开（主会话区
- * 单线程投影，见重审计 #7）、外观色板与移到项目（pi 无会话色/无项目实体
- * ——按工作区分组以 cwd 为键，见重审计 #2）。删除仍走 destructive 末位 +
- * 确认弹层（hermes #61470 语义）。
+ * 单线程投影，见重审计 #7）、外观色板（pi 无会话色）。**移到项目**在
+ * 2026-11-15（项目注册表 P0）起接真数据面：`pi_sessions_index.projectId`
+ * 读归属、`sessionProjects` 显式映射写归属（见 project-dialogs.tsx）。
+ * 删除仍走 destructive 末位 + 确认弹层（hermes #61470 语义）。
  */
 export function projectSessionActions({
   pinned,

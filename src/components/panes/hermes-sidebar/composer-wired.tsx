@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
+  useAui,
   useAuiState,
   unstable_useComposerInput,
 } from '@assistant-ui/react'
@@ -45,6 +46,7 @@ import {
   toModelOptions,
 } from '@/components/assistant-ui/model-catalog-store'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
+import { pickAttachmentFiles } from '@/components/assistant-ui/attachments'
 
 const COMMANDS = [
   { name: 'image', description: '生成一张图片', icon: ImageIcon },
@@ -137,6 +139,7 @@ function useDictation(onFinal: (text: string) => void) {
 
 export function ComposerWired() {
   const input = unstable_useComposerInput()
+  const aui = useAui()
   const value = input.value
   const isRunning = useAuiState((s) => s.thread.isRunning)
   const threadId = useAuiState((s) => s.threadListItem.id)
@@ -259,6 +262,27 @@ export function ComposerWired() {
       .then((st) => setCurrentEffort(st.thinkingLevel ?? null))
       .catch((e) => console.error(`[pi] set_thinking_level ${level} 失败（保持原选择）`, e))
   }, [])
+  // ── 附件选择（2026-11-15）──────────────────────────────────────────────
+  // 不用 assistant-ui 的 HTML `<input type=file>`：那条路只能拿到 File 字节，
+  // 拿不到本地路径——视频/音频/文档要靠「绝对路径 + 模型用工具读」的通道
+  // （引擎没有这些原生多模态块）。原生对话框直给路径，图片再预读 data URL
+  // 走引擎原生图片通道。选择/读取失败在输入框下方红字可见（不静默）。
+  const [attachError, setAttachError] = useState<string | null>(null)
+  const [pickingAttachments, setPickingAttachments] = useState(false)
+  const onPickAttachments = useCallback(async () => {
+    if (pickingAttachments) return
+    setPickingAttachments(true)
+    setAttachError(null)
+    try {
+      const files = await pickAttachmentFiles()
+      for (const file of files) await aui.composer.addAttachment(file)
+    } catch (e) {
+      console.error('[composer] 选择附件失败', e)
+      setAttachError(`添加附件失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setPickingAttachments(false)
+    }
+  }, [aui, pickingAttachments])
   // 当前模型的上下文窗口（用量环分母）——目录缺失或 <=0 时不渲染
   // ContextDisplay.Bar：旧写法 ?? 0 会除零 → Infinity → clamp 100 =
   // 红环误报（审查 #7）。
@@ -435,10 +459,15 @@ export function ComposerWired() {
               {/* 左组（2026-11-01 用户："不在加号后面在中间了"）：ComposerToolbar
                   是 justify-between——附件钮与模式钮必须包成一个组才贴左，
                   否则第二个子元素被推到行中 */}
-              <div className="flex items-center gap-[4px]">
-                <ComposerPrimitive.AddAttachment asChild>
-                  <ComposerAttachButton aria-label="添加附件" />
-                </ComposerPrimitive.AddAttachment>
+              <div className="flex shrink-0 items-center gap-[4px]">
+                {/* 原生选择器（图片/视频/音频/文档）：HTML input 拿不到本地
+                    路径，视频/文档无法据此构造文件引用。 */}
+                <ComposerAttachButton
+                  aria-label="添加附件"
+                  disabled={pickingAttachments}
+                  title="添加图片 / 视频 / 音频 / 文档"
+                  onClick={() => void onPickAttachments()}
+                />
                 {/* ZCode 同位的模式芯片（计划/确认/自主/完全访问）。rpi 只有
                     plan-mode 插件态 + permission-gate 启动开关，没有运行时
                     切换面——芯片只读展示当前真实模式，菜单里其余态置灰并
@@ -470,7 +499,16 @@ export function ComposerWired() {
                   align="end"
                   // ZCode 实测（9444）：模型触发器 28 高、圆角 8、14px 字、px-2；
                   // 不是胶囊（旧值 rounded-full 会盖掉组件内的 rounded-md）。
-                  className="h-[28px] rounded-[8px] px-2 text-[14px]"
+                  //
+                  // 窄卡片折叠（2026-11-15，ZCode `@xl/composer` 断点）：
+                  // 触发器是**唯一可收缩项**（其余按钮 shrink-0）——宽态
+                  // 封顶 320px（默认字号下 deepseek-v4.1-flash-1017 这类长名
+                  // 仍完整显示），卡片 < 36rem 收到 160px + 隐藏思考档位，
+                  // < 24rem 只留 96px 短名。宽态不要用 200px：正常桌面宽度
+                  // 也会把模型名截成 "deepseek-v4.1-flash-1…"（用户实报）。
+                  // `[&>button]:min-w-0`：goo PopoverTrigger 里还有一层裸
+                  // button，默认 min-width:auto 会让内部长名拒绝收缩。
+                  className="h-[28px] max-w-[320px] min-w-0 shrink rounded-[8px] px-2 text-[14px] @max-xl/composer:max-w-[160px] @max-sm/composer:max-w-[96px] @max-sm/composer:[&>button>svg]:hidden [&>button]:min-w-0 [&>button]:max-w-full"
                   effort={currentEffort ?? ''}
                   models={models}
                   value={currentModel ?? undefined}
@@ -479,17 +517,6 @@ export function ComposerWired() {
                   size="sm"
                   variant="ghost"
                 />
-                {/* 模型切换失败必须可见（规矩 12：错误就是错误）——此前
-                    只进 console，用户看到的只是"选了没反应"。 */}
-                {modelError && (
-                  <span
-                    className="text-destructive max-w-48 truncate text-[11px]"
-                    role="alert"
-                    title={modelError}
-                  >
-                    {modelError}
-                  </span>
-                )}
                 {dictation.supported && (
                   <ComposerVoiceButton
                     active={dictation.recording}
@@ -511,6 +538,28 @@ export function ComposerWired() {
                 )}
               </ComposerActions>
             </ComposerToolbar>
+            {/* 模型切换失败必须可见（规矩 12：错误就是错误）——此前
+                只进 console，用户看到的只是"选了没反应"。2026-11-15 挪出
+                工具行：它是可变长文本，留在行内会在窄卡片里把发送钮挤出
+                输入框；独立一行（truncate）既不撑破卡片也不隐藏错误。 */}
+            {modelError && (
+              <p
+                className="text-destructive w-full min-w-0 truncate px-1 text-[11px] leading-4"
+                role="alert"
+                title={modelError}
+              >
+                {modelError}
+              </p>
+            )}
+            {attachError && (
+              <p
+                className="text-destructive w-full min-w-0 truncate px-1 text-[11px] leading-4"
+                role="alert"
+                title={attachError}
+              >
+                {attachError}
+              </p>
+            )}
           </ComposerBar>
         </ComposerPrimitive.AttachmentDropzone>
       </Composer>

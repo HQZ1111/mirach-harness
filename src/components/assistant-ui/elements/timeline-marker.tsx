@@ -26,15 +26,26 @@
  * `checkpointRestored` 宿主没有对应数据面（无 goal 引擎、fork 谱系走
  * SessionLineBar、重试不产 marker），**不渲染空壳**。
  *
+ * ## 实时压缩行（2026-11-15）
+ *
+ * 历史 compact marker 只有「已压缩」事实；运行中的压缩（CUSTOM
+ * name=compaction 的 start/end）走 `compactionRowView` + 同一个
+ * `MarkerDivider` 壳体，支持 running/失败/中断三态与
+ * `tokensBefore → tokensAfter`（ZCode 的 marker 协议带 token 但渲染层
+ * 没展示，宿主按用户要求补上）。
+ *
  * ## 颜色
  *
  * ZCode 用 `--color-foreground-subtle`；宿主令牌层对应 `--text-4`
  * （AGENTS.md「颜色必须接回 mirach 令牌」：照抄 shadcn 令牌会与正文同灰）。
  */
-import type { FC } from 'react';
+import type { FC, ReactNode } from 'react';
 import { ArrowRightLeftIcon, ArchiveIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TimelineMarker } from '../timeline-marker-store';
+
+/** 分隔线状态色（ZCode 的运行态 = 无图标 + 文案流光；失败/中断给状态色）。 */
+export type MarkerTone = 'default' | 'warning' | 'error';
 
 /** 模型显示名：`provider/modelId` 里 provider 段做轻量美化（ZCode
  * `resolveProviderLabel` 的降级形态——宿主没有 provider 目录快照，
@@ -86,22 +97,102 @@ export function bucketMarkers(
   return out;
 }
 
-const MarkerRow: FC<{ icon: React.ReactNode; label: string; marker: TimelineMarker }> = ({
-  icon,
-  label,
-  marker,
-}) => (
+/** CUSTOM name=compaction 的投影形状（turn-actor.ts::CompactionSnapshot）。 */
+export interface CompactionRowSnapshot {
+  phase: 'start' | 'end';
+  reason?: string;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  aborted?: boolean;
+  errorMessage?: string;
+}
+
+export interface CompactionRowView {
+  label: string;
+  running: boolean;
+  tone: MarkerTone;
+  /** 失败原因（红字独立行；ZCode 模板无该槽位，宿主补一行可见错误）。 */
+  detail?: string;
+}
+
+/** token 数走技术规格格式（en-US 千分位），与 context-display 同口径。 */
+const formatTokenCount = (value: number) => value.toLocaleString('en-US');
+
+/** `tokensBefore → tokensAfter`（缺 tokensAfter 时只报 before；都没有 → undefined）。 */
+export function compactionTokenSummary(
+  snapshot: Pick<CompactionRowSnapshot, 'tokensBefore' | 'tokensAfter'>,
+): string | undefined {
+  if (typeof snapshot.tokensBefore !== 'number') return undefined;
+  return typeof snapshot.tokensAfter === 'number'
+    ? `${formatTokenCount(snapshot.tokensBefore)} → ${formatTokenCount(snapshot.tokensAfter)} tokens`
+    : `${formatTokenCount(snapshot.tokensBefore)} tokens`;
+}
+
+/**
+ * 上下文压缩分隔线的视图（ZCode `ConversationTimelineMarkerDivider` 的
+ * `case "compact"`：标题按状态取 `chat.contextCompaction.*`；running 隐藏
+ * 图标、文案流光；失败/中断给状态色）。
+ *
+ * ZCode 的 marker 不展示 token（协议里有、渲染层没用）；宿主把
+ * `tokensBefore → tokensAfter` 追加在标题后——这是用户明确要的可见信息，
+ * 不改变状态文案本身。
+ */
+export function compactionRowView(snapshot: CompactionRowSnapshot): CompactionRowView {
+  const tokens = compactionTokenSummary(snapshot);
+  const withTokens = (label: string) => (tokens ? `${label} · ${tokens}` : label);
+  if (snapshot.phase === 'start') {
+    return { label: '正在压缩上下文', running: true, tone: 'default' };
+  }
+  const errorMessage = snapshot.errorMessage?.trim();
+  if (errorMessage) {
+    return { label: withTokens('上下文压缩失败'), running: false, tone: 'error', detail: errorMessage };
+  }
+  if (snapshot.aborted === true) {
+    return { label: withTokens('上下文压缩已中断'), running: false, tone: 'warning' };
+  }
+  return { label: withTokens('上下文已压缩'), running: false, tone: 'default' };
+}
+
+/**
+ * 系统标记分隔线的展示壳（ZCode `MarkerDividerRow`）：两侧细横线 + 居中
+ * 「图标 + 文案」pill；running 时隐藏图标、文案走 shimmer（同 ZCode）；
+ * 失败/中断用状态色（ZCode 用 foreground-subtle，状态色是宿主要求）。
+ */
+export const MarkerDivider: FC<{
+  kind: string;
+  label: ReactNode;
+  icon?: ReactNode;
+  running?: boolean;
+  tone?: MarkerTone;
+  detail?: string;
+}> = ({ kind, label, icon, running = false, tone = 'default', detail }) => (
   <div
     data-slot="aui_timeline-marker"
-    data-marker-kind={marker.kind}
-    className="text-muted-foreground/70 flex w-full items-center gap-3 px-2 py-2 text-xs"
+    data-marker-kind={kind}
+    data-marker-tone={tone}
+    data-marker-running={running ? '1' : undefined}
+    className="flex w-full flex-col gap-1"
   >
-    <div aria-hidden className="bg-foreground/10 h-px min-w-8 flex-1" />
-    <span className="inline-flex min-w-0 shrink items-center justify-center gap-1.5 text-center leading-5">
-      {icon}
-      <span className="min-w-0 break-words">{label}</span>
-    </span>
-    <div aria-hidden className="bg-foreground/10 h-px min-w-8 flex-1" />
+    <div className="text-muted-foreground/70 flex w-full items-center gap-3 px-2 py-2 text-xs">
+      <div aria-hidden className="bg-foreground/10 h-px min-w-8 flex-1" />
+      <span className="inline-flex min-w-0 shrink items-center justify-center gap-1.5 text-center leading-5">
+        {running ? null : icon}
+        <span
+          className={cn(
+            'min-w-0 break-words',
+            running && 'shimmer motion-reduce:animate-none font-medium',
+            tone === 'error' && 'text-red-500',
+            tone === 'warning' && 'text-amber-600 dark:text-amber-400',
+          )}
+        >
+          {label}
+        </span>
+      </span>
+      <div aria-hidden className="bg-foreground/10 h-px min-w-8 flex-1" />
+    </div>
+    {detail ? (
+      <p className="text-destructive px-2 text-xs whitespace-pre-wrap">{detail}</p>
+    ) : null}
   </div>
 );
 
@@ -120,8 +211,8 @@ export const TimelineMarkerRow: FC<{ marker: TimelineMarker; prevModel?: string 
 }) => {
   if (marker.kind === 'compact') {
     return (
-      <MarkerRow
-        marker={marker}
+      <MarkerDivider
+        kind="compact"
         icon={<ArchiveIcon aria-hidden className="size-[var(--size-icon-sm)] shrink-0" />}
         label={markerLabel(marker)}
       />
@@ -130,8 +221,8 @@ export const TimelineMarkerRow: FC<{ marker: TimelineMarker; prevModel?: string 
   const to = modelLabel(marker.provider, marker.modelId);
   const label = prevModel ? `模型已切换 ${prevModel} → ${to}` : `正在使用 ${to}`;
   return (
-    <MarkerRow
-      marker={marker}
+    <MarkerDivider
+      kind="modelChange"
       icon={<ArrowRightLeftIcon aria-hidden className="size-[var(--size-icon-sm)] shrink-0" />}
       label={label}
     />

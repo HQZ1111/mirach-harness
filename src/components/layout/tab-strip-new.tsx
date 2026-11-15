@@ -14,7 +14,7 @@
  * （MENU_CONTENT_CLASS 同款观感：圆角/阴影/无描边）。
  */
 import type { FC } from 'react'
-import { EyeIcon, FolderTreeIcon, PlusIcon, SquareTerminalIcon } from 'lucide-react'
+import { EyeIcon, FolderTreeIcon, PlusIcon, RadioIcon, SquareTerminalIcon } from 'lucide-react'
 import type { IDockviewHeaderActionsProps } from 'dockview-react'
 
 import { regionOfGroup } from './dockview-column-ops'
@@ -32,6 +32,8 @@ const NEW_TAB_OPTIONS: readonly { kind: OpenPageKind; label: string; icon: typeo
   { kind: 'files', label: '文件树', icon: FolderTreeIcon },
   { kind: 'terminal', label: '终端', icon: SquareTerminalIcon },
   { kind: 'preview', label: '预览', icon: EyeIcon },
+  // 电台（2026-11-15）：hermes radio 插件改落窗格（宿主无底栏）。
+  { kind: 'radio', label: '电台', icon: RadioIcon },
 ]
 
 // 菜单观感由 beui ContextMenu 的 goo 表面提供（2026-10-26 归拢），这里只留宽度。

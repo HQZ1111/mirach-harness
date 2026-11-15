@@ -138,6 +138,7 @@
   max-width: calc(100% - 64px);
   min-width: 0;
   overflow: hidden;
+  pointer-events: auto; /* 容器整体 none——放行悬停 title（全名） */
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -170,6 +171,7 @@
      （实测 margin-top:-3 无任何位移）；transform 不参与布局，必定生效。 */
   transform: translateY(var(--chat-session-nudge));
   max-width: 50%; /* 栏宽的 50%——会话名超宽省略，悬停看全名（title） */
+  min-width: 0; /* 长名只在列头内省略，不撑宽列头、不产横向溢出 */
   overflow: hidden;
   pointer-events: auto; /* 容器整体 none——放行悬停 title（用户 2026-10-05） */
   text-overflow: ellipsis;
@@ -286,7 +288,10 @@
   position: relative;
 }
 
-/* 页签条（窗格内页签）：字号/选中色/悬停引用页签系统令牌 */
+/* 页签条（窗格内页签）：字号/选中色/悬停引用页签系统令牌。
+   2026-11-15 与面板栏/对话签对齐（ZCode TabsList 语义）：条内不出现
+   可见滚动条（横滚仍可程序化/滚轮驱动），长标题在签内省略而不是把
+   标签撑宽。 */
 .term-strip {
   align-items: stretch;
   border-bottom: 1px solid var(--stroke-soft);
@@ -294,6 +299,10 @@
   flex: none;
   height: var(--term-strip-h);
   overflow-x: auto;
+  scrollbar-width: none;
+}
+.term-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .term-tab {
@@ -301,8 +310,15 @@
   border-bottom: 2px solid transparent;
   border-right: 1px solid var(--stroke-soft);
   display: flex;
-  flex: none;
+  /* ZCode side-pane tab 同款收缩语义：按内容宽排，空间不足时等比收缩
+     （下限 60px = 3.75rem），收缩到底仍不够才溢出——长标题先截断，
+     不会把标签条挤成滚动条。 */
+  flex: 0 1 auto;
+  /* 宽度上限与面板栏标签同值（--tab-max-w）：长标题省略，不撑宽标签条 */
+  max-width: var(--tab-max-w);
+  min-width: var(--tab-min-w);
   padding: 0 var(--tab-pad-x);
+  position: relative; /* ✕ 绝对定位锚点（见下） */
 }
 
 .term-tab.active {
@@ -310,17 +326,31 @@
 }
 
 .term-tab-label {
+  --term-close-reveal: 0px;
   background: none;
   border: none;
   color: var(--tab-text);
   cursor: pointer;
+  /* 关闭钮显形时标题右端渐隐（与 .dv-default-tab-content 同语义） */
+  mask-image: linear-gradient(
+    to right,
+    #000 calc(100% - var(--term-close-reveal)),
+    transparent 100%
+  );
+  flex: 0 1 auto;
   font-family: inherit;
   font-size: var(--tab-font-size);
   font-weight: var(--tab-font-weight);
+  min-width: 0;
   overflow: hidden;
   padding: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.term-tab:hover .term-tab-label,
+.term-tab:focus-within .term-tab-label {
+  --term-close-reveal: var(--tab-fade-offset);
 }
 
 .term-tab.active .term-tab-label {
@@ -331,6 +361,9 @@
   color: var(--tab-text-active);
 }
 
+/* 关闭钮：绝对定位在标签右内缘（不给长标题/窄签留静态占位），常态
+   不显示不接收指针；hover 或键盘聚焦该签才显形（与面板栏标签同一
+   交互语义）。 */
 .term-tab-close {
   align-items: center;
   background: none;
@@ -338,17 +371,27 @@
   color: var(--tab-close-color);
   cursor: pointer;
   display: flex;
-  flex: none;
   height: var(--tab-close-hit);
   justify-content: center;
-  margin-left: 4px;
+  opacity: 0;
   padding: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  transition:
+    opacity var(--dur-hover),
+    visibility 0s linear var(--dur-hover);
   visibility: hidden;
   width: var(--tab-close-hit);
 }
 
 .term-tab:hover .term-tab-close,
-.term-tab.active .term-tab-close {
+.term-tab:focus-within .term-tab-close {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0s;
   visibility: visible;
 }
 
@@ -1642,3 +1685,258 @@
   margin-top: 4px;
 }
 
+
+/* ── 电台窗格（panes/radio-pane.tsx，2026-11-15）─────────────────────────────
+ * hermes radio 插件的布局样式移植（上游 plugin.js 的 CSS 常量）。
+ * 版式（用户定稿）：**选台列表占满面板，播放器沉到底部单独一条元素区**
+ * ——不是左侧列表 + 右侧播放区的分栏。
+ * 颜色/间距一律用令牌（规矩：panes.css 不写字面值），类名前缀 radio- 与
+ * 上游同名便于对照。
+ */
+.radio-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── 选台区（占满剩余高度） ── */
+.radio-stations {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.radio-search {
+  align-items: center;
+  display: flex;
+  flex: none;
+  height: 36px;
+  padding: 0 10px;
+}
+
+.radio-search-field { flex: 1; min-width: 0; }
+
+.radio-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 6px;
+}
+
+.radio-credit {
+  color: var(--text-4);
+  flex: none;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.radio-row {
+  align-items: center;
+  border-radius: 4px;
+  display: flex;
+  gap: 2px;
+}
+
+.radio-row:hover,
+.radio-row[data-current='true'] {
+  background: var(--chrome-action-hover, var(--ui-bg-quaternary));
+}
+
+.radio-row[data-current='true'] .radio-row-name,
+.radio-row[data-current='true'] .radio-row-icon { color: var(--ui-accent); }
+
+.radio-row-main {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  text-align: left;
+}
+
+.radio-row-main:focus-visible {
+  outline: 1px solid var(--ui-accent);
+  outline-offset: -1px;
+}
+
+.radio-row-icon {
+  color: var(--text-3);
+  display: flex;
+  flex: none;
+  opacity: 0;
+  width: 14px;
+}
+
+.radio-row:hover .radio-row-icon,
+.radio-row:focus-within .radio-row-icon,
+.radio-row[data-current='true'] .radio-row-icon { opacity: 1; }
+
+.radio-row-copy { flex: 1; min-width: 0; }
+
+.radio-row-name {
+  color: var(--text);
+  display: block;
+  font-size: var(--font-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.radio-row-desc {
+  color: var(--text-4);
+  display: block;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 置顶钮：悬停/聚焦才显形（触屏恒显） */
+.radio-row-pin { opacity: 0; pointer-events: none; }
+
+.radio-row:hover .radio-row-pin,
+.radio-row:focus-within .radio-row-pin { opacity: 1; pointer-events: auto; }
+
+@media (hover: none) {
+  .radio-row-pin { opacity: 1; pointer-events: auto; }
+}
+
+.radio-row [aria-pressed='true'] { color: var(--ui-accent); }
+
+.radio-note {
+  color: var(--text-4);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px 6px;
+}
+
+/* ── 底部播放条（独立元素区：整宽波形 + 元信息行） ── */
+.radio-playerbar {
+  background: var(--ui-bg-quinary, color-mix(in srgb, var(--text-4) 6%, transparent));
+  border-top: 1px solid var(--ui-stroke-quaternary, var(--text-4));
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px 8px;
+}
+
+.radio-playerbar-row {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.radio-playerbar-meta {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.radio-playerbar .radio-bar-name {
+  color: var(--text);
+  font-size: var(--font-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.radio-playerbar-close { flex: none; }
+
+/* ── 波形：三层叠画（两层余辉 + 当前），文字画盲文点阵 ── */
+.radio-waveform {
+  color: var(--text-3);
+  display: block;
+  flex: none;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  height: 24px;
+  line-height: 12px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.radio-waveform[data-compact='true'] {
+  height: 12px;
+  margin-inline: 2px;
+  width: 40px;
+}
+
+.radio-waveform[data-active='true'] { color: var(--ui-accent); }
+
+.radio-waveform-layer {
+  display: grid;
+  grid-auto-rows: 12px;
+  grid-template-columns: repeat(var(--radio-columns), minmax(0, 1fr));
+  inset: 0;
+  position: absolute;
+}
+
+.radio-waveform-layer > span {
+  min-width: 0;
+  text-align: center;
+}
+
+.radio-waveform-layer:nth-child(1) { opacity: 0.12; }
+.radio-waveform-layer:nth-child(2) { opacity: 0.28; }
+
+/* ── 曲目行 ── */
+.radio-track {
+  align-items: center;
+  color: var(--text-2);
+  display: flex;
+  font-size: 11px;
+  gap: 5px;
+  min-height: 15px;
+  min-width: 0;
+}
+
+.radio-track[data-track='true'] { color: var(--text); }
+
+.radio-track-artist {
+  flex: 0 1 auto;
+  max-width: 55%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.radio-track-separator { color: var(--text-4); flex: none; }
+
+.radio-track-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 传输钮（底部播放条内联，不再单独占一行） ── */
+.radio-transport {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.radio-transport-space { flex: 1; min-width: 4px; }
+
+.radio-transport input[type='range'] {
+  accent-color: var(--ui-accent);
+  cursor: pointer;
+  height: 3px;
+  min-width: 0;
+  width: 72px;
+}

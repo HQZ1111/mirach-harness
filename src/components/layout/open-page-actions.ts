@@ -21,6 +21,8 @@ export const OPEN_KIND_PANEL: Record<OpenPageKind, { id: string; component: stri
   // 审查（2026-10-26）：hermes right-sidebar/review 的移植——变更列表 +
   // diff + 暂存/还原 + 提交/推送/PR。
   review: { id: 'review', component: 'review', title: '审查' },
+  // 电台（2026-11-15）：hermes radio 插件改落窗格（宿主无底栏）。
+  radio: { id: 'radio', component: 'radio', title: '电台' },
 }
 
 export const panelsDropPosition = (

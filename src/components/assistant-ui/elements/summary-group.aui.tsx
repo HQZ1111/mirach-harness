@@ -2,7 +2,15 @@
 
 /**
  * 连续摘要组（ZCode `ToolCallBlocks/ToolSummaryRow.tsx::ConsecutiveSummaryGroup`
- * 的宿主移植，2026-11-15）。
+ * 的宿主移植，2026-11-15；2026-11-15 复核：这是**内层**组头）。
+ *
+ * ## 两层结构里的位置
+ *
+ * - 外层（每 turn 一个）：`work-segment.aui.tsx` 的 `WorkSegmentGroup`，
+ *   只有状态/时长，运行中不建头；
+ * - 内层（每个连续摘要运行段一个）：本组件，统计只在这里。
+ *   `work-parts.aui.tsx::SummaryRunView` 按 `buildWorkSummaryItems` 的
+ *   `rows` 分段建组；<2 行直接平铺；正文/子代理/未归类工具是边界。
  *
  * ## 形态（用户提供的 ZCode 截图逐项对应）
  *
@@ -20,9 +28,10 @@
  *   `[&_[data-summary-leading-icon]]:hidden` 隐藏子行行首图标（组头已有代表
  *   图标）；`gap-2` 行间距。
  * - **三种组头内容**（ZCode 条件完全一致）：
- *   1. 展开 或 组已闭合 → 图标 + 统计（纯 change 组收起时显示文件折叠摘要）；
- *   2. 收起 + 运行中 → `QueuedSummaryContent` 滚动当前项摘要（300ms 过渡 /
- *      500ms 停留，宿主已有）；
+ *   1. 展开 或 组已闭合 → 图标 + 统计（纯 change 组收起时显示文件折叠摘要，
+ *      单文件 chip 可点 → 代码查看器）；
+ *   2. 收起 + 运行中（仅整轮尾组）→ `QueuedSummaryContent` 滚动当前项摘要
+ *      （300ms 过渡 / 500ms 停留，宿主已有）；
  *   3. 展开 + 运行中 + 无活动项（工具间隙）→ 统计文本扫光。
  *
  * 纯展示组件；统计/活动项/图标的选择全在 `work-summary.ts` 的纯函数里。
@@ -48,6 +57,8 @@ export interface ConsecutiveSummaryGroupProps {
   groupRunning: boolean;
   /** 当前活动项（收起态滚动的摘要节点）的内容 key——变化才翻滚。 */
   activeKey?: string;
+  /** 当前活动项的内容版本（同一 key 内流式更新/状态变化原位刷新）。 */
+  activeRefreshVersion?: unknown;
   /** 当前活动项的摘要节点（活动项缺省 = 组内最后一项，ZCode `current = active ?? last`）。 */
   activeSummary?: ReactNode;
   children: ReactNode;
@@ -59,14 +70,16 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
   collapsedStatistics,
   groupRunning,
   activeKey,
+  activeRefreshVersion,
   activeSummary,
   children,
 }) => {
   const [open, setOpen] = useState(false);
   const contentId = useId();
   const hasActiveItem = activeSummary !== undefined;
-  // 收起 + 运行中：组头换成当前项摘要的滚动队列
-  const rolling = !open && groupRunning && hasActiveItem;
+  // 收起 + 运行中（仅整轮尾组）：组头换成当前项摘要的滚动队列。ZCode
+  // `current = active ?? last`——没有活动项时滚动最后一项，而不是切回统计。
+  const rolling = !open && groupRunning && activeSummary !== undefined;
 
   return (
     <Collapsible
@@ -96,6 +109,7 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
             <div className="pointer-events-none flex min-w-0 items-center">
               <QueuedSummaryContent
                 contentKey={activeKey ?? ""}
+                contentRefreshVersion={activeRefreshVersion}
                 primaryText={activeSummary}
                 enabled={groupRunning}
               />
@@ -165,25 +179,50 @@ export const ConsecutiveSummaryGroup: FC<ConsecutiveSummaryGroupProps> = ({
 
 /** 纯 change 组的折叠摘要（ZCode `CollapsedChangeSummary` 的单文件形态）：
  * `已修改 <文件名> +N`。多文件/有未解析路径时返回 undefined，调用方回落到
- * 统计文本。 */
+ * 统计文本。
+ *
+ * `onOpen`（2026-11-15 补）：文件 chip 可点，打开代码查看器面板
+ * （`openFileFromToolPath` → preview 面板）；缺省保持纯文本。 */
 export const CollapsedChangeLabel: FC<{
   label: string;
   fileName: string;
   additions: number;
   removed: number;
-}> = ({ label, fileName, additions, removed }) => (
-  <span className="inline-flex min-w-0 items-center gap-1.5">
-    <span className="shrink-0">{label}</span>
-    <span className="min-w-0 truncate text-foreground">{fileName}</span>
-    {additions > 0 ? (
-      <span className="shrink-0 font-mono text-xs text-emerald-600 tabular-nums dark:text-emerald-400">
-        +{additions}
-      </span>
-    ) : null}
-    {removed > 0 ? (
-      <span className="shrink-0 font-mono text-xs text-red-600 tabular-nums dark:text-red-400">
-        −{removed}
-      </span>
-    ) : null}
-  </span>
-);
+  onOpen?: () => void;
+}> = ({ label, fileName, additions, removed, onOpen }) => {
+  const body = (
+    <>
+      <span className="shrink-0">{label}</span>
+      <span className="min-w-0 truncate text-foreground">{fileName}</span>
+      {additions > 0 ? (
+        <span className="shrink-0 font-mono text-xs text-emerald-600 tabular-nums dark:text-emerald-400">
+          +{additions}
+        </span>
+      ) : null}
+      {removed > 0 ? (
+        <span className="shrink-0 font-mono text-xs text-red-600 tabular-nums dark:text-red-400">
+          −{removed}
+        </span>
+      ) : null}
+    </>
+  );
+  if (!onOpen) {
+    return <span className="inline-flex min-w-0 items-center gap-1.5">{body}</span>;
+  }
+  return (
+    <button
+      type="button"
+      data-slot="aui_collapsed-change"
+      onClick={(event) => {
+        // 组头本身也是 trigger；点文件 chip 只开文件，不展开/收起组。
+        event.preventDefault();
+        event.stopPropagation();
+        onOpen();
+      }}
+      className="hover:text-foreground inline-flex min-w-0 cursor-pointer items-center gap-1.5 text-left transition-colors"
+      title={`打开 ${fileName}`}
+    >
+      {body}
+    </button>
+  );
+};

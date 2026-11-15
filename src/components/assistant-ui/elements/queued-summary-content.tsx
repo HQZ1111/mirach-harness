@@ -59,7 +59,8 @@ export function shouldAnimateQueuedSummaryContent({
 
 interface SummaryContentSnapshot {
   key: string;
-  refreshVersion?: string;
+  /** 同一 key 的内容版本；身份/值变化才原位刷新（ZCode：unknown）。 */
+  refreshVersion?: unknown;
   primaryText: ReactNode;
   secondaryText?: ReactNode;
   trailingText?: ReactNode;
@@ -120,7 +121,8 @@ export function QueuedSummaryContent({
   disableAnimation = false,
 }: {
   contentKey: string;
-  contentRefreshVersion?: string;
+  /** 同一 key 内的内容版本（对象身份/值任一变化都原位刷新）。 */
+  contentRefreshVersion?: unknown;
   primaryText: ReactNode;
   secondaryText?: ReactNode;
   trailingText?: ReactNode;

@@ -8,6 +8,7 @@ import {
   countPiDiff,
   formatSummaryStatistics,
   isSummaryRow,
+  isTailSummaryGroup,
   normalizeSummaryPath,
   summaryChangeFiles,
   summaryFileLeafName,
@@ -36,8 +37,8 @@ describe('classifySummaryCategory（ZCode getAssistantSummaryToolCategory）', (
     expect(isSummaryRow(reasoning())).toBe(true)
   })
 
-  it('explore：读文件 / 搜索 / 抓网页', () => {
-    for (const name of ['read', 'ls', 'image', 'grep', 'find', 'ast_grep', 'lsp', 'web_search', 'webfetch']) {
+  it('explore：读文件 / 搜索 / 抓网页（含 rpi 的 websearch 别名）', () => {
+    for (const name of ['read', 'ls', 'image', 'grep', 'find', 'ast_grep', 'lsp', 'web_search', 'websearch', 'webfetch']) {
       expect(classifySummaryCategory(tool(name))).toBe('explore')
     }
   })
@@ -283,6 +284,28 @@ describe('activeSummaryIndex（收起态组头滚动的当前项）', () => {
 
   it('全部完成 → undefined（组头切回统计文本）', () => {
     expect(activeSummaryIndex([tool('read'), tool('bash')], [0, 1])).toBeUndefined()
+  })
+})
+
+
+describe('isTailSummaryGroup（只有整轮尾组可滚动当前项）', () => {
+  it('running 且组尾 == 整轮尾行 → true', () => {
+    expect(
+      isTailSummaryGroup({ running: true, groupLastIndex: 7, turnTailIndex: 7 }),
+    ).toBe(true)
+  })
+
+  it('非 running / 非尾行 / 正文成为尾行 → false', () => {
+    expect(
+      isTailSummaryGroup({ running: false, groupLastIndex: 7, turnTailIndex: 7 }),
+    ).toBe(false)
+    expect(
+      isTailSummaryGroup({ running: true, groupLastIndex: 5, turnTailIndex: 7 }),
+    ).toBe(false)
+    // 最终正文（index 8）成为整轮尾行：组 0..7 都不再滚动
+    expect(
+      isTailSummaryGroup({ running: true, groupLastIndex: 7, turnTailIndex: 8 }),
+    ).toBe(false)
   })
 })
 
