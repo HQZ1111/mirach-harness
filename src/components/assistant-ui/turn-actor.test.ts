@@ -186,13 +186,26 @@ describe('reduceAguiEvent tool-call parts', () => {
 })
 
 describe('thinking parts (§2.2)', () => {
-  it('THINKING_START converts string content to parts and opens an empty thinking part', () => {
+  it('THINKING_START inserts the thinking part before already-streamed text', () => {
     let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
     c = send(c, 'TEXT_MESSAGE_CONTENT', { delta: '先想想' })
     c = send(c, 'THINKING_TEXT_MESSAGE_START', {})
+    // 对齐 pi 落盘形状 [thinking, text]：live 投影不能是 [text, thinking]
     expect(c.messages[0].content).toEqual([
-      { type: 'text', text: '先想想' },
       { type: 'thinking', text: '' },
+      { type: 'text', text: '先想想' },
+    ])
+  })
+
+  it('text → thinking → text stays ONE text part (no interleaving)', () => {
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'TEXT_MESSAGE_CONTENT', { delta: '我是一个' })
+    c = send(c, 'THINKING_TEXT_MESSAGE_START', {})
+    c = send(c, 'THINKING_TEXT_MESSAGE_CONTENT', { delta: '继续思考' })
+    c = send(c, 'TEXT_MESSAGE_CONTENT', { delta: '运行在终端里的编码助手' })
+    expect(c.messages[0].content).toEqual([
+      { type: 'thinking', text: '继续思考' },
+      { type: 'text', text: '我是一个运行在终端里的编码助手' },
     ])
   })
 

@@ -80,6 +80,75 @@ export type CompactionSnapshot = {
   errorMessage?: string
 }
 
+/** 当前答案段边界：最后一个 tool-call 之后是否已有 text。 */
+function segmentBounds(parts: TurnPart[]): { lastTool: number; lastText: number } {
+  let lastTool = -1
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i]!.type === 'tool-call') {
+      lastTool = i
+      break
+    }
+  }
+  let lastText = -1
+  for (let i = parts.length - 1; i > lastTool; i--) {
+    if (parts[i]!.type === 'text') {
+      lastText = i
+      break
+    }
+  }
+  return { lastTool, lastText }
+}
+
+/**
+ * 文本增量：**追加到当前答案段已有的 text part**，而不是"最后一个 part 是
+ * text 才合并"。
+ *
+ * 2026-11-15 用户截图："我是一个 / 思考 / 正文" 在同一轮里穿插。真实流式
+ * 顺序是 text → thinking → text，旧实现把第二段文本 push 成新 part，于是
+ * live 投影是 [text1, thinking, text2]；而 pi 最终落盘是 [thinking, text]，
+ * 导致回复过程中和完成后长得不一样。
+ * 新规则：同一 tool 边界内只保留一个 text part，thinking 一律插到该 text
+ * part 之前（对齐落盘形状）；工具之后的文本才是新答案段。
+ */
+function appendTextDelta(parts: TurnPart[], delta: string): void {
+  const { lastTool, lastText } = segmentBounds(parts)
+  if (lastText > lastTool) {
+    const part = parts[lastText] as Extract<TurnPart, { type: 'text' }>
+    parts[lastText] = { ...part, text: part.text + delta }
+    return
+  }
+  parts.push({ type: 'text', text: delta })
+}
+
+/** thinking 增量/开块：插到当前答案段 text part 之前（无 text 则尾部）。 */
+function appendThinkingDelta(parts: TurnPart[], delta: string, openBlock: boolean): boolean {
+  const { lastTool, lastText } = segmentBounds(parts)
+  const insertAt = lastText > lastTool ? lastText : parts.length
+  let thinkingAt = -1
+  for (let i = insertAt - 1; i > lastTool; i--) {
+    if (parts[i]!.type === 'thinking') {
+      thinkingAt = i
+      break
+    }
+  }
+  if (openBlock) {
+    // 重复 START：紧贴 text 之前已有空 thinking = 幂等（返回 false 让调用方
+    // 保持 messages/parts 引用不变，增量同步门依赖这个身份）
+    if (thinkingAt >= 0 && (parts[thinkingAt] as Extract<TurnPart, { type: 'thinking' }>).text === '') {
+      return false
+    }
+    parts.splice(insertAt, 0, { type: 'thinking', text: '' })
+    return true
+  }
+  if (thinkingAt >= 0) {
+    const part = parts[thinkingAt] as Extract<TurnPart, { type: 'thinking' }>
+    parts[thinkingAt] = { ...part, text: part.text + delta }
+    return true
+  }
+  parts.splice(insertAt, 0, { type: 'thinking', text: delta })
+  return true
+}
+
 /** 会话用量快照（ContextDisplay 数据面；RUN_FINISHED.usage 原样投影；
  * cacheWriteTokens / costUsd 为可选增补字段） */
 export interface TurnUsage {
@@ -192,65 +261,40 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
         const c = messages[i].content
         if (typeof c === 'string') {
           messages[i] = { ...messages[i], content: c + delta }
-        } else {
-          const parts = [...c]
-          const last = parts[parts.length - 1]
-          if (last?.type === 'text') parts[parts.length - 1] = { ...last, text: last.text + delta }
-          else parts.push({ type: 'text', text: delta })
-          messages[i] = { ...messages[i], content: parts }
+          break
         }
+        const parts: TurnPart[] = [...c]
+        appendTextDelta(parts, delta)
+        messages[i] = { ...messages[i], content: parts }
         break
       }
       return { ...next, messages }
     }
     case 'THINKING_TEXT_MESSAGE_START': {
-      // 思考块开始（§2.2）：保证存在思考段——后续 CONTENT 追加到最后的
-      // thinking part。文本在先时把 string content 摊成 parts；空 thinking
-      // part 在渲染层被丢弃（assistant-ui 空 text 滤除），无害。
+      // 思考块开始：插到当前答案段 text 之前（live 投影对齐 pi 落盘形状
+      // [thinking, text]，避免 text/thinking/text 穿插）。
       const messages = [...ctx.messages]
       for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i].role !== 'assistant') continue
         const c = messages[i].content
-        if (typeof c === 'string') {
-          messages[i] = {
-            ...messages[i],
-            content: c
-              ? [{ type: 'text', text: c }, { type: 'thinking', text: '' }]
-              : [{ type: 'thinking', text: '' }],
-          }
-        } else {
-          const last = c[c.length - 1]
-          // 最后已是空 thinking part（重复 START）：幂等不新开
-          if (!(last?.type === 'thinking' && last.text === '')) {
-            messages[i] = { ...messages[i], content: [...c, { type: 'thinking', text: '' }] }
-          }
-        }
+        const parts: TurnPart[] = typeof c === 'string' ? (c ? [{ type: 'text', text: c }] : []) : [...c]
+        const changed = appendThinkingDelta(parts, '', true)
+        if (changed) messages[i] = { ...messages[i], content: parts }
         break
       }
       return { ...next, messages }
     }
     case 'THINKING_TEXT_MESSAGE_CONTENT': {
-      // 追加到最后的 thinking part；无思考段则新开（START 缺失时 CONTENT
-      // 自立——Rust 侧 ThinkingStart 映射补齐前仍可用）。
+      // 追加到当前答案段之前的 thinking；无则插到 text 前（START 缺失时
+      // CONTENT 自立——Rust 侧 ThinkingStart 映射补齐前仍可用）。
       const messages = [...ctx.messages]
       const delta = String(ev.delta ?? '')
       for (let i = messages.length - 1; i >= 0; i--) {
         if (messages[i].role !== 'assistant') continue
         const c = messages[i].content
-        if (typeof c === 'string') {
-          messages[i] = {
-            ...messages[i],
-            content: c
-              ? [{ type: 'text', text: c }, { type: 'thinking', text: delta }]
-              : [{ type: 'thinking', text: delta }],
-          }
-        } else {
-          const parts = [...c]
-          const last = parts[parts.length - 1]
-          if (last?.type === 'thinking') parts[parts.length - 1] = { ...last, text: last.text + delta }
-          else parts.push({ type: 'thinking', text: delta })
-          messages[i] = { ...messages[i], content: parts }
-        }
+        const parts: TurnPart[] = typeof c === 'string' ? (c ? [{ type: 'text', text: c }] : []) : [...c]
+        appendThinkingDelta(parts, delta, false)
+        messages[i] = { ...messages[i], content: parts }
         break
       }
       return { ...next, messages }
