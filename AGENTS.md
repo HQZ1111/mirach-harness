@@ -1803,6 +1803,23 @@ G:\pi-rust-main，不用 pi agent rust 了"，策略选 1 竖链优先）
 - **门禁**：cargo check 0/0 · cargo test **164** · 真机：bot 会话、
   delegate_task、ask_user、checkpoint 四个插件面全部闭环。
 
+## Duplicate key 崩溃的**两条**成因（2026-11-15，第二条晚到一轮）
+
+用户两次报 `聊天渲染出错：Duplicate key toolCallId-… in useResources`：
+1. **SSE 重连重放**：归约器只记录 lastEventId 从不比较 → 同一 seq 事件二次
+   应用。修法 = 归约入口 `id <= 已应用游标` 整事件丢弃（console.warn）。
+2. **水合/流竞态**（序号去重挡不住）：切会话/挂载时先 `pi_get_messages`
+   水合（历史里已有该 toolCall 部件），而 SSE 是 **150ms 轮询**——水合前
+   已产生、水合后才投递的 `tool_execution start` 再挂一份 → 同一
+   toolCallId 两个部件。修法 = **投影幂等**：toolCallId 是自然键，部件已
+   存在则整事件跳过（console.warn），不合并、不改写既有部件（result 由
+   后续 end 事件填）。**这不是兜底**：事件流 at-least-once（重放 + 水合
+   双源），幂等应用是协议契约；上一版"合并 + 静默"才是掩盖，已按用户
+   要求删除。
+   - 排查启示：`useResources` 只看**部件键**，任何"同一 id 出现两次"都炸；
+     新增任何"从第二个源补状态"的路径（水合、插件投影、重放）都必须
+     按自然键幂等。
+
 ## 构建工具换 huacnlee/cargo fork + egui 组件库调研（2026-11-14）
 
 - **huacnlee/cargo fork 已装**（v0.102.0-9，基线 cargo 1.101.0）：替换
