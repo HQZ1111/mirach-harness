@@ -26,9 +26,12 @@
   **464 passed**；CDP 实测 `groups_plan('plan-test')` → `status=task, member_id=m-ada`。
 - **门禁**：改动文件 tsc 0；镜像树历史类型错仍在（全仓 tsc 1341 条为镜像类型漂移，
   vite 构建不受影响，待后续收）；cargo test 464 绿。
-- **未推送**：GitHub 连接被 reset（本机无代理），本地 main 领先 origin/main
-  **4 个提交**（群聊后端 + 插件移植 + groups 修复 + 本快照）；网络恢复后
-  `git push origin main`。
+- **已推送**：`c6cd077..93e1ad1`（群聊后端 + 插件移植 + groups 修复 + 交接快照
+  + 对话对齐缺口文档），origin/main 已同步。
+- **下一步（已定稿，待统一批次执行）**：对话对齐 ZCode 的宿主侧改造——
+  缺口清单见 `docs/zcode-parity-gaps.md`（协议层 A1-A4：块生命周期/错误事件/
+  消息身份/TurnEnd 未映射；投影层 B1-B5：最终正文判据/错误面/行级计时/段模型）；
+  按该文档 §3 顺序一次做完后提 PR。
 
 **✅ 2026-11-13（续）：MOSS 工具面全协议落地 + mock vendor 全链 E2E 通**。
 `lib/moss-tools.ts`（host 原生只读集 6 个 sync 工具 + `run_cron_job_now`
