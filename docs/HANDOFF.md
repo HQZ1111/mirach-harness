@@ -32,6 +32,9 @@
   缺口清单见 `docs/zcode-parity-gaps.md`（协议层 A1-A4：块生命周期/错误事件/
   消息身份/TurnEnd 未映射；投影层 B1-B5：最终正文判据/错误面/行级计时/段模型）；
   按该文档 §3 顺序一次做完后提 PR。
+- **bots 插件移植完成度审计**：`docs/bots-port-gaps.md`（插件源码 121 文件原样；
+  宿主适配 P0 缺 `prompt.submit`（群聊轮次不执行）/P1 事件面 9 通道无生产者/
+  MCP/技能市场/relay/composer 贡献面未接；**不是 100% 功能复刻**）。
 
 **✅ 2026-11-13（续）：MOSS 工具面全协议落地 + mock vendor 全链 E2E 通**。
 `lib/moss-tools.ts`（host 原生只读集 6 个 sync 工具 + `run_cron_job_now`
