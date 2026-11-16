@@ -35,6 +35,8 @@
   task 身份/终局回执，rpi 侧未定协议）。详见 `docs/bots-port-gaps.md`。
 - **门禁**：tsc 0（非镜像树）/ vitest 1003（82 文件）/ cargo test 660 /
   cargo check 0 错误。
+- **PR**：https://github.com/HQZ1111/mirach-harness/pull/2（分支
+  `bots-plugin-complete`，24 文件 +2542/−312）。
 
 **✅ 2026-11-16：hermes-bots 插件移植落地（c85756a）+ groups_plan 修复（ff41b18）**。
 
