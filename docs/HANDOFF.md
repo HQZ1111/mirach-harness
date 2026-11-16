@@ -6,6 +6,30 @@
 
 ## 当前状态
 
+**✅ 2026-11-16：hermes-bots 插件移植落地（c85756a）+ groups_plan 修复（ff41b18）**。
+
+- **内置插件跑通**：`src/sdk`（`@hermes/plugin-sdk` 宿主对偶：host.request 分发
+  profiles/session/cron/cli/groups；host.state 八字段接真 atom）→ `src/plugins/bundled.ts`
+  + `PluginPane` + dockview `bots` 槽位（贡献优先、BotsPane 回落）；CDP 实测
+  花名册渲染 / 点击建·复用 canonical Bot Chat（双锚，侧栏过滤）/ composer 发送
+  （人格·模型生效）/ 编辑机器人对话框 / 例程面板（列表·新建·暂停·删除全链）。
+- **例程面板**：`hermes-bots:routines` 贡献自动挂到主区右侧「定时任务」面板
+  （registry 订阅：贡献在→建面板，消失→摘）。修四个真缺陷：`pi_cron_jobs` 回包是
+  `{jobs,tickerRunning}` 非数组（曾 TypeError）、行内删除动作是 `remove`（非 delete）、
+  `nextRunOverdueMs` 签名必须收 job 对象（手写近似版让每行恒「逾期自」）、
+  `display.status` 给 `supported:false` 定型（屏幕门户不再假 spinner）。
+- **焦点 owner 口径**：`focusedSessionOwner` 只认 bot 双锚（`chatSessionId`），
+  普通会话报 null；connectionId 留空（本机行身份=裸名字）。此前伪造 `local`
+  owner 让例程窗格死锁在「这个机器人需要先出现在名册中」。
+- **groups 后端**：`groups_plan` 的 `local_profiles` 从成员 `target.kind=local`
+  提取（原返回空 Vec → 恒报 "not local to this gateway"）；`cargo test hosted_rooms`
+  **464 passed**；CDP 实测 `groups_plan('plan-test')` → `status=task, member_id=m-ada`。
+- **门禁**：改动文件 tsc 0；镜像树历史类型错仍在（全仓 tsc 1341 条为镜像类型漂移，
+  vite 构建不受影响，待后续收）；cargo test 464 绿。
+- **未推送**：GitHub 连接被 reset（本机无代理），本地 main 领先 origin/main
+  **4 个提交**（群聊后端 + 插件移植 + groups 修复 + 本快照）；网络恢复后
+  `git push origin main`。
+
 **✅ 2026-11-13（续）：MOSS 工具面全协议落地 + mock vendor 全链 E2E 通**。
 `lib/moss-tools.ts`（host 原生只读集 6 个 sync 工具 + `run_cron_job_now`
 async_effect，用户定稿口径）+ `lib/moss-tool-flow.ts`（纯协议态机：call_id
