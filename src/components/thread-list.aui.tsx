@@ -70,6 +70,7 @@ import {
   type SessionRowGroup,
 } from "@/components/panes/session-manage/session-catalog";
 import { botChatPaths, useBotsStore } from "@/components/panes/hub/bots-store";
+import { useHiddenSessions } from "@/components/panes/hub/hidden-sessions";
 import {
   projectSessionActions,
   type SessionActionId,
@@ -352,12 +353,21 @@ const useThreadDisplay = (searchQuery: string) => {
   // 参与，防误藏同名用户会话）。
   const bots = useBotsStore((s) => s.bots);
   const botPathSet = useMemo(() => botChatPaths(bots), [bots]);
+  // 通用隐藏面（hermes setPersistedSessionHidden 的宿主对偶）：插件点名隐藏
+  // 的会话（群聊成员 plumbing 会话 / Bot Chat 标题清扫）进 hidden-sessions
+  // 路径集，与双锚集合并过滤。
+  const hiddenPaths = useHiddenSessions((s) => s.paths);
+  const hiddenPathSet = useMemo(() => new Set(hiddenPaths), [hiddenPaths]);
   const metas = useMemo(
     () =>
       (showArchived ? allMetas : allMetas.filter((m) => !archived.includes(m.id))).filter(
-        (m) => !(m.path !== undefined && botPathSet.has(m.path)),
+        (m) =>
+          !(
+            m.path !== undefined &&
+            (botPathSet.has(m.path) || hiddenPathSet.has(m.path))
+          ),
       ),
-    [allMetas, archived, showArchived, botPathSet],
+    [allMetas, archived, showArchived, botPathSet, hiddenPathSet],
   );
 
   // 状态桶判定（session-status.ts：needs-input > working > unread > draft >

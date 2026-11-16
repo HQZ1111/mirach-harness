@@ -306,11 +306,18 @@ export type PluginLocaleBundles = Record<string, Record<string, string>>
 
 /**
  * 上游 `gatewayActivationEpoch`：网关每次重连自增，用于让订阅者知道"要重取"。
+ * **上游是函数不是常量**（`store/gateway.ts:434`：`export function
+ * gatewayActivationEpoch(): number`；插件在 `groupCreationSource` 等处直接
+ * 调用 `gatewayActivationEpoch()`）。写成 `const = 0` 会让调用点抛
+ * "gatewayActivationEpoch is not a function"——群聊创建对话框因此永远停在
+ * "检查中"（settle 在 then 里抛错，capability 永不落地）。
  *
- * 宿主没有 gateway socket（进程内引擎），**恒 0**。上游代码用它做 cache 失效，
- * 恒 0 等价于"从不失效"——宿主侧数据本来就由 query 的 staleTime 管理。
+ * 宿主没有 gateway socket（进程内引擎），**恒 0**。上游代码用它做 cache
+ * 失效，恒 0 等价于"从不失效"——宿主侧数据本来就由 query 的 staleTime 管理。
  */
-export const gatewayActivationEpoch = 0
+export function gatewayActivationEpoch(): number {
+  return 0
+}
 
 /** 上游 `useGatewayActivationEpoch`：同上，hook 形态。 */
 export function useGatewayActivationEpoch(): number {

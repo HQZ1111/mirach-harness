@@ -27,16 +27,21 @@
  */
 
 import { atom, type Atom } from 'nanostores'
+import type { ReactNode } from 'react'
 
 import { queryClient } from '@/hermes-shim/lib/query-client'
 import { $pluginDecisions } from '@/hermes-shim/contrib/plugins-store'
+import { openPluginWorkspace } from '@/components/layout/plugin-workspaces'
 import type { RpcEvent } from './types'
 
-/** 上游 `host.agents()` 的 UnionRoster 形状（单机 = 一个 local source）。 */
+/** 上游 `host.agents()` 的 UnionRoster 形状（单机 = 一个 local source）。
+ *  source 字段名与上游一致：`connectionId`（插件按它建源索引）。 */
 interface HostRosterSource {
-  id?: string
+  connectionId: string
   kind: 'local' | 'remote'
   label?: string
+  reachable?: boolean
+  [key: string]: unknown
 }
 
 interface HostRosterAgent {
@@ -152,15 +157,39 @@ export const host = {
   /**
    * Agent（机器人）名册。
    *
-   * 宿主对应：`pi_hub_roster`。返回空数组时上游会自然走"无名册"分支。
+   * 上游 = 所有连接上的 (connectionId, profile) 并集；宿主单连接，agent
+   * 就是本地 bots-store 的行（profiles.list 的**同一份真相**）。返回真实
+   * 行而不是空表：上游 roster 构建（data.ts buildUnionRoster）用这张表给
+   * profiles.list 的行**标注 route/sourceScoped**——requestForBot 之后才会
+   * 走 `host.requestProfile(route, …)`，宿主才能从 route 里拿到成员
+   * profile（群聊 prompt.submit 的成员身份就靠它）。空表会让所有行停留
+   * not_scoped，成员身份在 RPC 参数里彻底丢失。
    */
   agents: async (): Promise<HostRoster> => {
-    // 单机引擎：一个 local source。subagent 的 `pi_hub_roster` 不是 profile
-    // 名册（见上游 UnionRoster 语义），不能混用；robots 的行来自
-    // `profiles.list`，这里只需给出"唯一本地 source"的拓扑。
-    return {
-      sources: [{ id: 'local', kind: 'local', label: '本机' }],
-      agents: [],
+    try {
+      const { botsStore } = await import('@/components/panes/hub/bots-store')
+      if (!botsStore.getState().bots.length) botsStore.getState().load()
+      const agents = botsStore.getState().bots.map((bot) => ({
+        connectionId: 'local',
+        connectionKind: 'local' as const,
+        connectionLabel: '本机',
+        profile: bot.name,
+        targetProfile: bot.name,
+        handle: bot.name,
+        title: bot.title,
+      }))
+      // sources 形状照上游（`{ connectionId, kind, label, reachable }`）——
+      // 插件用 `sourceByConnection(sources)` 按 **connectionId** 建索引做
+      // 源健康标注（`annotateBotSource`）；写成 `{id}` 会让索引恒空，
+      // 所有 sourceScoped 行被标成"网关已移除"（实测：机器人群聊里
+      // 2 个中 0 个可用 + 行尾红字）。
+      return {
+        sources: [{ connectionId: 'local', kind: 'local' as const, label: '本机', reachable: true }],
+        agents,
+      }
+    } catch (e) {
+      console.error('[host] agents() 读取 bot 名册失败', e)
+      throw e
     }
   },
 
@@ -220,15 +249,32 @@ export const host = {
     // Tauri 的 listen 只接受 [A-Za-z0-9_:/‑] 事件名；上游网关事件名带点
     // （`tool.start` / `session.reclaimed`）。映射成 `mirach:plugin:tool:start`，
     // 宿主侧没有生产者时订阅是空操作（不报错），有生产者时按同名通道发。
+    //
+    // 信封字段：上游把 `session_id` / `connectionId` / `profile` 打在
+    // **envelope** 上（不在 payload 里），订阅方按 `event.session_id` 筛
+    // 自己的会话（group-turns 的 waitForTurnSignal / screen-autoraise 的
+    // 归属判定）。宿主的生产者（pi_bot 泳道）把这三个键放在 payload 里，
+    // 这里原样提升到信封（副键保留在 payload 中，两处都能读到）。
     const channel = `mirach:plugin:${name.replace(/[^A-Za-z0-9_:\/-]/g, ':')}`
     let unlisten: (() => void) | null = null
     let cancelled = false
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event')
-        const off = await listen(channel, (event) =>
-          handler({ type: name, payload: event.payload } as RpcEvent)
-        )
+        const off = await listen(channel, (event) => {
+          const raw = event.payload
+          const payload =
+            raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+              ? (raw as Record<string, unknown>)
+              : undefined
+          handler({
+            type: name,
+            payload: raw,
+            ...(typeof payload?.session_id === 'string' ? { session_id: payload.session_id } : {}),
+            ...(typeof payload?.connectionId === 'string' ? { connectionId: payload.connectionId } : {}),
+            ...(typeof payload?.profile === 'string' ? { profile: payload.profile } : {}),
+          } as RpcEvent)
+        })
         if (cancelled) off()
         else unlisten = off
       } catch (e) {
@@ -257,12 +303,23 @@ export const host = {
   /**
    * 定向到某 profile 的 RPC。
    *
-   * 宿主单身份（全部 bot 都是本机 profile），等价于 `request`；route 的
-   * profile 语义已由调用方塞进 params（routing.ts 的 scopedBotParams）。
+   * 宿主单身份（全部 bot 都是本机 profile），落同一个分发表；但 **route 的
+   * profile 必须并进 params**——上游 requestForBot 对 sourceScoped 行只传
+   * route，不带 `profile` 参数（scopedBotParams 仅在 params 已有该键时改写）。
+   * 群聊成员轮次的 prompt.submit / 附件 / 审批都要靠这个 profile 找到 bot
+   * 预设（人格/模型/工具集）。route 缺 profile 时原样透传（不猜）。
    */
-  requestProfile: async <T>(_route: unknown, method: string, params: Record<string, unknown> = {}): Promise<T> => {
+  requestProfile: async <T>(route: unknown, method: string, params: Record<string, unknown> = {}): Promise<T> => {
     const { dispatchHostRequest } = await import('./host-rpc')
-    return dispatchHostRequest<T>(method, params)
+    const r = route as null | { profile?: unknown; targetProfile?: unknown }
+    const profile =
+      typeof r?.targetProfile === 'string' && r.targetProfile
+        ? r.targetProfile
+        : typeof r?.profile === 'string'
+          ? r.profile
+          : ''
+    const merged = profile && params.profile === undefined ? { ...params, profile } : params
+    return dispatchHostRequest<T>(method, merged)
   },
 
   /** 当前活跃的 gateway 实例（宿主无 gateway 对象，返回 null）。 */
@@ -300,9 +357,21 @@ export const host = {
     })()
   },
 
-  /** 打开工作区。 */
-  openWorkspace: (id: string, options?: Record<string, unknown>): void => {
-    window.dispatchEvent(new CustomEvent('mirach:open-workspace', { detail: { id, ...options } }))
+  /**
+   * 打开工作区（上游 `host.openWorkspace`：主区标签页 + **返回关闭函数**）。
+   *
+   * 上游返回契约是 close：`const close = host.openWorkspace(id, {...})`，
+   * 插件把它存进 main-tab 记录用于程序化关闭（hermes-bots 的群聊房间即此
+   * 门——`group-chat-view.tsx::openGroupChat`）。宿主实现 = 主区 dockview
+   * 面板（`plugin-workspaces.ts`），不用再派发无人监听的自定义事件。
+   */
+  openWorkspace: (id: string, options?: Record<string, unknown>): (() => void) => {
+    return openPluginWorkspace(id, {
+      title: typeof options?.title === 'string' ? options.title : undefined,
+      render: typeof options?.render === 'function' ? (options.render as () => ReactNode) : undefined,
+      onClose: typeof options?.onClose === 'function' ? (options.onClose as () => void) : undefined,
+      minWidth: typeof options?.minWidth === 'string' ? options.minWidth : undefined,
+    })
   },
 
   /** 打开面板（宿主 dockview）。 */
@@ -328,7 +397,9 @@ export const host = {
   listPersistedSessions: async (_route?: unknown, options?: { limit?: number }): Promise<{ sessions: unknown[] }> => {
     try {
       const { invoke } = await import('@tauri-apps/api/core')
-      const list = await invoke<{ id: string; name: null | string; path: string }[]>('pi_list_sessions')
+      const list = await invoke<
+        { id: string; name: null | string; path: string; lastModifiedMs?: number }[]
+      >('pi_list_sessions')
       const limit = options?.limit && options.limit > 0 ? options.limit : undefined
       const rows = (Array.isArray(list) ? list : []).slice(0, limit)
       return {
@@ -338,6 +409,13 @@ export const host = {
           title: row.name ?? '',
           name: row.name ?? '',
           path: row.path,
+          // 秒级启动时间（上游 session.list 的 started_at 口径）——Bot Mode
+          // 的标题清扫（session-sweep.ts 的 isBotModeSweepCandidate）用它做
+          // 5 分钟宽限判定；缺字段会被 fail-closed 跳过（等于永不清扫）。
+          started_at:
+            typeof row.lastModifiedMs === 'number' && row.lastModifiedMs > 0
+              ? Math.floor(row.lastModifiedMs / 1000)
+              : undefined,
         })),
       }
     } catch (e) {
@@ -348,14 +426,38 @@ export const host = {
     }
   },
 
-  /** 把会话标记为持久隐藏。宿主没有 hidden 会话面：canonical Bot Chat 由
-   *  `session.create` 记双锚进 bots-store，侧栏按路径集过滤；这里接住上游
-   *  的扫描调用，未识别的 id 不做假动作（不写任何"已隐藏"的谎）。 */
+  /** 把会话标记为持久隐藏（写入宿主 hidden-sessions 路径集，侧栏过滤）。
+   *  会话 id → 路径经 pi_list_sessions 解析；解析不到（id 在别的工作区）时
+   *  用 pi_sessions_index 兜一道，仍找不到 = console.error（不静默假装已藏）。 */
   setPersistedSessionHidden: (_route: unknown, args?: { hidden?: boolean; sessionId?: string }): void => {
-    if (args?.hidden === false) return
-    // 双锚已在 create 时记录；这里只处理"同一 bot 的另一条会话"——
-    // 宿主侧没有通用隐藏面，故不冒充已隐藏。
-    console.debug('[host] setPersistedSessionHidden 忽略（宿主无双锚外隐藏面）', args?.sessionId)
+    const sessionId = typeof args?.sessionId === 'string' ? args.sessionId.trim() : ''
+    if (!sessionId) return
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        const merged = new Map<string, { id: string; path: string }>()
+        const index = await invoke<{ sessions?: { id: string; path: string }[] }>('pi_sessions_index')
+        for (const row of index?.sessions ?? []) {
+          if (row?.id && row?.path) merged.set(row.id, row)
+        }
+        if (!merged.has(sessionId)) {
+          const list = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
+          for (const row of list ?? []) {
+            if (row?.id && row?.path && !merged.has(row.id)) merged.set(row.id, row)
+          }
+        }
+        const row = merged.get(sessionId)
+        if (!row) {
+          console.error(`[host] setPersistedSessionHidden: 会话 ${sessionId} 不在任何会话根——未隐藏`)
+          return
+        }
+        const { hiddenSessionsStore } = await import('@/components/panes/hub/hidden-sessions')
+        if (args?.hidden === false) hiddenSessionsStore.getState().show(row.path)
+        else hiddenSessionsStore.getState().hide(row.path)
+      } catch (e) {
+        console.error('[host] setPersistedSessionHidden 失败', e)
+      }
+    })()
   },
 
   /** 聚焦一个已打开的工作区会话。 */

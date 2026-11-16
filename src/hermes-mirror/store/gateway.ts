@@ -75,8 +75,8 @@ export const $hydrationSyncProfile = atom<unknown>(null)
 /** 上游 `activeGatewayConnectionId` 的宿主对偶（未接线时为空实现，见文件头注释）。 */
 export const activeGatewayConnectionId = (): null | string => null
 
-/** 上游 `gatewayActivationEpoch` 的宿主对偶（未接线时为空实现，见文件头注释）。 */
-export const gatewayActivationEpoch: number = 0
+/** 上游 `gatewayActivationEpoch` 的宿主对偶（函数形态，见 `store/gateway.ts:434`）。 */
+export const gatewayActivationEpoch = (): number => 0
 
 /** 上游 `useGatewayActivationEpoch` 的宿主对偶（未接线时为空实现，见文件头注释）。 */
 export const useGatewayActivationEpoch = (): number => 0

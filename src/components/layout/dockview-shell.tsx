@@ -37,6 +37,8 @@ import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { LeftRailPane } from '@/components/panes/left-rail-pane'
 import { BotsPane } from '@/components/panes/bots-pane'
 import { PluginPane } from '@/components/panes/plugin-pane'
+import { PluginWorkspacePane } from '@/components/panes/plugin-workspace-pane'
+import { pruneOrphanWorkspacePanels, workspacePanelClosed } from '@/components/layout/plugin-workspaces'
 import { registry } from '@/hermes-shim/contrib/registry'
 import { BOTS_PANEL_ID, botsPanelStore } from '@/components/panes/hub/bots-panel-actions'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
@@ -423,6 +425,10 @@ export function DockviewShell() {
     subagent: (props: IDockviewPanelProps) => (
       <SubagentDetailPane payload={props.params.payload ?? {}} />
     ),
+    // 插件工作区（`host.openWorkspace` 的门；hermes-bots 群聊房间走这条）。
+    'plugin-workspace': (props: IDockviewPanelProps<{ workspaceId?: string }>) => (
+      <PluginWorkspacePane {...props} />
+    ),
   }
 
   const onReady = useCallback(
@@ -562,6 +568,8 @@ export function DockviewShell() {
       })
       a.onDidRemovePanel((p) => {
         if (p.id === BOTS_PANEL_ID) botsPanelStore.getState().setOpen(false)
+        // 插件工作区关标签 → 回调插件 onClose + 清记录（plugin-workspaces）。
+        workspacePanelClosed(p.id)
       })
       let persistTimer: ReturnType<typeof setTimeout> | null = null
       a.onDidLayoutChange(() => {
@@ -603,6 +611,10 @@ export function DockviewShell() {
       try {
         const saved = loadLayout()
         a.fromJSON(saved ?? factoryLayout(a.width, a.height))
+        // 插件工作区面板是窗口内记录（render 是插件闭包）——存档恢复出来的
+        // 孤儿面板在这里剪掉；必须在 hydrate 窗口内、React 挂载前关（组件
+        // 自己 close 会撞上 fromJSON 恢复过程抛 "invalid operation"）。
+        pruneOrphanWorkspacePanels(a)
         // **打开页标签名以代码为准，不认存档**（2026-10-31）。
         //
         // 用户："打开页的标题把打开换个说明文字"。改 `addPanel` 的 title 只

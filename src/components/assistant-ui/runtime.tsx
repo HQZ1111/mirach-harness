@@ -54,6 +54,7 @@ import { sessionQueue } from './session-queue-store'
 import { timelineMarkerBridge } from './timeline-marker-store'
 import { dispatchToolDetails } from './tool-sidecar'
 import { askBridge } from './ask-bridge'
+import { runComposerMiddleware } from '@/hermes-shim/contrib/composer-middleware'
 
 import { sessionWorkspaceStore } from '@/components/panes/session-manage/session-workspace'
 import {
@@ -1542,13 +1543,25 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     isRunning,
     onNew: async (m) => {
       const raw = m.content
-      const text = (typeof raw === 'string' ? raw : raw.map((c) => (c.type === 'text' ? c.text : '')).join('')).trim()
+      let text = (typeof raw === 'string' ? raw : raw.map((c) => (c.type === 'text' ? c.text : '')).join('')).trim()
       // 语音委托：UI 文本只有用户说的话；隐藏 note/上下文经 runConfig 传入，
       // 只用于发给引擎（0.12 起 runConfig.custom 是宿主自定义字段的通道）。
       const voiceSubmission =
         typeof m.runConfig?.custom?.voiceSubmission === 'string'
           ? m.runConfig.custom.voiceSubmission
           : null
+      // composer.middleware 贡献面（hermes-bots 的 @身份注记 / /new→/compact
+      // 守卫）：只在**用户直接提交**时跑（语音委托的隐藏 note 与队列重放
+      // 不再过 middleware——上游同款：middleware 在 onSubmit 前跑一次）。
+      // 返回 null = 取消发送（上游语义）。
+      if (!voiceSubmission) {
+        const rewritten = await runComposerMiddleware({
+          text,
+          attachments: m.attachments ?? [],
+        })
+        if (rewritten === null) return
+        text = rewritten.text
+      }
       // 附件归一（唯一来源 attachments.ts）：图片 → POST images[]（引擎原生
       // 多模态）；视频/音频/文档 → 绝对路径引用块（引擎没有这些原生块，
       // 不伪装）；不完整/不支持的类型直接报错，整条消息不发（禁止半发）。

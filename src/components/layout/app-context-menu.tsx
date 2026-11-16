@@ -36,7 +36,7 @@
  * - 布局段图标 = @vscode/codicons src/icons/*.svg path 逐字（raw 下载，
  *   layout-sidebar-left/right、arrow-both、layout-panel）。
  */
-import { useEffect, useState, type FC } from 'react'
+import { useEffect, useMemo, useState, type FC } from 'react'
 import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { supportsMultipleWindows } from '@tauri-apps/api/app'
@@ -56,6 +56,7 @@ import { isMobilePlatform } from '@/lib/platform'
 import { settingsShellFor, settingsShellFromProbe } from '@/lib/settings-shell'
 import { SettingsOverlay } from '@/app/overlays/settings-overlay'
 import { CommandPalette, type PaletteCommand } from '@/components/assistant-ui/elements/command-palette'
+import { useContributions } from '@/hermes-shim/contrib/react/use-contributions'
 
 import {
   columnFlagsOf,
@@ -336,22 +337,52 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: 'shell-settings', label: '设置', group: '命令', keys: [] },
 ]
 
+/**
+ * 插件命令面（hermes `PALETTE_AREA` = `'command.palette'`，见 hermes
+ * `app/command-palette/contrib.ts`；hermes-bots 的 `new-agent` 注册在这里）。
+ * 数据形状照抄上游：`{id, label, keywords?, run}`——`run` 由插件自己实现
+ * （bot 项的 run 是人读提示，上游同款），宿主只负责把它列进面板并执行。
+ */
+const PALETTE_AREA = 'command.palette'
+
+/** 面板行：静态命令无 `run`（走 runShellAction），插件行有。 */
+interface PaletteRow extends PaletteCommand {
+  run?: () => void
+}
+
+function pluginPaletteRows(contributions: readonly { data?: unknown }[]): PaletteRow[] {
+  const rows: PaletteRow[] = []
+  for (const c of contributions) {
+    const d = c.data as { id?: unknown; label?: unknown; run?: unknown } | undefined
+    if (typeof d?.id !== 'string' || typeof d?.label !== 'string' || typeof d?.run !== 'function') continue
+    rows.push({ id: d.id, label: d.label, group: '机器人', keys: [], run: d.run as () => void })
+  }
+  return rows
+}
+
 const CommandPaletteHost: FC = () => {
   const open = useStore(appPaletteStore, (s) => s.open)
   const [query, setQuery] = useState('')
   const [activeId, setActiveId] = useState(PALETTE_COMMANDS[0].id)
+
+  // 插件命令（registry 快照引用稳定，贡献变化才重算）。
+  const paletteContribs = useContributions(PALETTE_AREA)
+  const commands = useMemo<readonly PaletteRow[]>(
+    () => [...PALETTE_COMMANDS, ...pluginPaletteRows(paletteContribs)],
+    [paletteContribs],
+  )
 
   // 打开即复位查询/高亮，并聚焦输入框（模板 input 无 ref/autofocus——
   // 面板挂载完成后的下一帧聚焦，Scoped 到本 portal 实例）。
   useEffect(() => {
     if (!open) return
     setQuery('')
-    setActiveId(PALETTE_COMMANDS[0].id)
+    setActiveId(commands[0]?.id ?? '')
     const raf = requestAnimationFrame(() => {
       document.querySelector<HTMLInputElement>('[data-slot="command-palette"] input')?.focus()
     })
     return () => cancelAnimationFrame(raf)
-  }, [open])
+  }, [open, commands])
 
   if (!open) return null
 
@@ -360,14 +391,26 @@ const CommandPaletteHost: FC = () => {
   const handleQueryChange = (q: string) => {
     setQuery(q)
     const needle = q.toLowerCase()
-    const matches = PALETTE_COMMANDS.filter((c) => c.label.toLowerCase().includes(needle))
+    const matches = commands.filter((c) => c.label.toLowerCase().includes(needle))
     if (!matches.some((c) => c.id === activeId)) {
-      setActiveId(matches[0]?.id ?? PALETTE_COMMANDS[0].id)
+      setActiveId(matches[0]?.id ?? commands[0]?.id ?? '')
     }
   }
 
   const handleRun = (id: string) => {
     appPaletteStore.getState().closePalette()
+    const pluginRun = commands.find((c) => c.id === id)?.run
+    if (pluginRun) {
+      // 插件命令的失败不吞（规矩 12）：console 可见，面板已关。
+      try {
+        void Promise.resolve(pluginRun()).catch((e) => {
+          console.error(`[app-context-menu] 命令面板贡献 ${id} 执行失败`, e)
+        })
+      } catch (e) {
+        console.error(`[app-context-menu] 命令面板贡献 ${id} 执行失败`, e)
+      }
+      return
+    }
     runShellAction(id)
   }
 
@@ -383,7 +426,7 @@ const CommandPaletteHost: FC = () => {
     >
       <CommandPalette
         activeId={activeId}
-        commands={PALETTE_COMMANDS}
+        commands={commands}
         onActiveChange={setActiveId}
         onQueryChange={handleQueryChange}
         onRun={handleRun}

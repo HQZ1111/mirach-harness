@@ -91,7 +91,23 @@ pub fn groups_dispatch(method: String, params: Option<Value>) -> Result<Value, S
 /// `groups.*` 的业务分派。
 fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Result<Value, String> {
     match method {
-        "groups.capabilities" => Ok(controls::capabilities_payload(store::MAX_LOG_LIMIT as i64)),
+        "groups.capabilities" => {
+            // 宿主没有 canonical 群驱动（hosted_rooms 只到状态机/规划层，
+            // 没有执行模型轮次的 driver 进程）。插件（canonical-group-
+            // capabilities.ts::groupExecutionMode）据此分支：
+            //   driver===false + persistent_process===false + 不宣称房间
+            //   归属 → 'legacy'（上游一等支持模式：Desktop 驱动群聊，
+            //   成员轮次经 prompt.submit 跑在 pi_bot 后台泳道）。
+            // `methods` 必须为空：里面有 groups.create 会被判成 ownsRooms
+            // → 'unavailable'（插件不提供 gateway 群聊入口）。宿主确实
+            // 不提供"网关自己跑"的房间控制，清空是如实声明。
+            let mut payload = controls::capabilities_payload(store::MAX_LOG_LIMIT as i64);
+            payload["driver"] = json!(false);
+            payload["persistent_process"] = json!(false);
+            payload["methods"] = json!([]);
+            payload["features"] = json!([]);
+            Ok(payload)
+        }
 
         "groups.list" => {
             let conn = open_store()?;

@@ -6,6 +6,36 @@
 
 ## 当前状态
 
+**✅ 2026-11-17：bots 插件补齐轮（用户："先补齐bots……百分百对齐hermes的bots"）**。
+
+- **P0 群聊成员轮次全链接通**：新 `src-tauri/src/pi_bot.rs` = 后台 bot 会话
+  泳道（独立 harness，不抢前台会话；create/open/prompt/interrupt/compact/
+  attach/ask/approval），`host-rpc` 接 `prompt.submit`/`approval.respond`/
+  `clarify.lock`/`file.attach`/`image.attach_bytes` + `session.resume` 富投影
+  （running/inflight/turn_started_at/open_requests/pending_approval +
+  `failed_turn` 边界行）。实机：发消息 → 成员会话真跑 → deepseek 403（key
+  配额用尽）→ 房间活动行如实显示真错误 → 自动轮到下一成员。
+- **贡献面 2/7 → 6/7**：`composer.atCompletions`（@ 补全出机器人行）、
+  `composer.middleware`（发送前管线）、`chat.empty`、`command.palette`
+  （New bot… 行），加既有 panes×2；`profile group header` 无消费面（屏幕
+  不支持）。
+- **`host.openWorkspace` 从空开关变真门**：`plugin-workspaces.ts` +
+  `plugin-workspace-pane.tsx`（主区标签页 + 重启孤儿剪枝）——群聊房间此前
+  点开毫无反应（事件无监听者 + close 返回值被吞）。
+- **修 5 个真 bug**（用户可见）：ctx.storage 值级 KV 被当字符串（bot-meta v2
+  等持久化全坏）；`gatewayActivationEpoch` 写成常量而上游是函数（群聊创建
+  对话框永远"检查中"）；`host.agents().sources` 用错键名（所有行"网关已
+  移除"、群成员 0 可用）；`pi_get_session_messages` 叶子取文件尾行（rpi
+  记录条目无父链 → 投影恒空 → 群聊读不到回复）；`sdk/message-text.tsx`
+  借 assistant-ui part 原语（群聊房间白屏）。
+- **剩余结构性缺口 = canonical（网关驱动）群聊**：新群聊按上游语义要求
+  网关 driver（宿主 legacy 声明 → 对话框如实"版本过旧"）；Rust 已移植
+  hosted_rooms 状态机/规划/控制面，缺 driver runner（上游源
+  `tui_gateway/hosted_room_driver.py` + `hosted_room_service.py`；依赖会话层
+  task 身份/终局回执，rpi 侧未定协议）。详见 `docs/bots-port-gaps.md`。
+- **门禁**：tsc 0（非镜像树）/ vitest 1003（82 文件）/ cargo test 660 /
+  cargo check 0 错误。
+
 **✅ 2026-11-16：hermes-bots 插件移植落地（c85756a）+ groups_plan 修复（ff41b18）**。
 
 - **内置插件跑通**：`src/sdk`（`@hermes/plugin-sdk` 宿主对偶：host.request 分发

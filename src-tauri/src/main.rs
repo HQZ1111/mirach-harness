@@ -11,6 +11,7 @@ mod fs;
 
 // pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
 mod pi_session;
+mod pi_bot;
 // rpi 插件状态只读投影（rpi-todo / rpi-plan-mode 的 AppendEntry 条目 → 旧
 // wire）：pi_session.rs 的 todo_state / mode_state 消费
 mod pi_plugin_state;
@@ -825,8 +826,15 @@ fn pi_get_session_messages(path: String) -> Result<serde_json::Value, String> {
             entries.push(v);
         }
     }
+    // 叶子 = 最后一条 **message** 条目，不是文件最后一行：rpi 会话在消息
+    // 之后追加 record 条目（assistant_frame / operation_started /
+    // operation_finished，都不带 message.parentId 链）。以前取"最后一行"
+    // 当叶子 → 链只走到那条 record → 投影出空数组（实测：群聊成员轮次
+    // 跑完后 session.resume 读不到任何消息，房间读成"超时静默"）。
     let leaf_id = entries
-        .last()
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("message"))
         .and_then(|e| e.get("id"))
         .and_then(|v| v.as_str())
         .map(String::from);
@@ -1707,6 +1715,16 @@ fn main() {
             pi_discard_session,
             pi_new_session,
             pi_create_bot_session,
+            pi_bot::pi_bot_create_session,
+            pi_bot::pi_bot_open,
+            pi_bot::pi_bot_prompt,
+            pi_bot::pi_bot_state,
+            pi_bot::pi_bot_interrupt,
+            pi_bot::pi_bot_compact,
+            pi_bot::pi_bot_attach_image,
+            pi_bot::pi_bot_attach_file,
+            pi_bot::pi_bot_clarify_lock,
+            pi_bot::pi_bot_approval_respond,
             pi_sessions_usage,
             pi_export_session_html,
             pi_stream_cursor,
