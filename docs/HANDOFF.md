@@ -28,10 +28,10 @@
   vite 构建不受影响，待后续收）；cargo test 464 绿。
 - **已推送**：`c6cd077..93e1ad1`（群聊后端 + 插件移植 + groups 修复 + 交接快照
   + 对话对齐缺口文档），origin/main 已同步。
-- **下一步（已定稿，待统一批次执行）**：对话对齐 ZCode 的宿主侧改造——
-  缺口清单见 `docs/zcode-parity-gaps.md`（协议层 A1-A4：块生命周期/错误事件/
-  消息身份/TurnEnd 未映射；投影层 B1-B5：最终正文判据/错误面/行级计时/段模型）；
-  按该文档 §3 顺序一次做完后提 PR。
+- **下一步（已定稿，待统一批次执行）**：对话对齐 ZCode 的**宿主（pi rust 引擎）侧**改造——
+  缺口清单见 `docs/zcode-parity-gaps.md`（P1 会话行投影 / P2 productTurn+workSegments /
+  P3 块级状态计时 / P4 最终正文标记 / P5 错误事件 / P6 subagent·hook·marker 行 /
+  P7 行序列读取 API）；tauri 侧 agui 映射与前端启发式收在该文档 §5 附录（下游）。
 - **bots 插件移植完成度审计**：`docs/bots-port-gaps.md`（插件源码 121 文件原样；
   宿主适配 P0 缺 `prompt.submit`（群聊轮次不执行）/P1 事件面 9 通道无生产者/
   MCP/技能市场/relay/composer 贡献面未接；**不是 100% 功能复刻**）。
