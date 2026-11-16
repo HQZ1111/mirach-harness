@@ -1,6 +1,7 @@
 import type * as React from 'react'
+import { useState } from 'react'
 
-import { Codicon } from '@/hermes-mirror/components/ui/codicon'
+import { Codicon } from './codicon'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -11,7 +12,7 @@ import {
   ContextMenuSubContent,
   ContextMenuSubTrigger,
   ContextMenuTrigger
-} from '@/hermes-mirror/components/ui/context-menu'
+} from './context-menu'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -22,7 +23,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger
-} from '@/hermes-mirror/components/ui/dropdown-menu'
+} from './dropdown-menu'
 
 // One place to define a set of actions and get BOTH a kebab dropdown and a
 // matching right-click context menu — so a row's ⋯ menu and its right-click menu
@@ -160,6 +161,9 @@ interface ActionsContextMenuProps {
   contentClassName?: string
   /** Skip the wrapper (render children bare) — e.g. nothing is actionable yet. */
   disabled?: boolean
+  /** Vetoes an open request, e.g. a touch hold the browser owns. Radix opens
+   *  on a touch hold from pointer timers, with no contextmenu event to stop. */
+  allowOpen?: () => boolean
   onCloseAutoFocus?: (event: Event) => void
 }
 
@@ -168,6 +172,7 @@ interface ActionsContextMenuProps {
  * kebab's `items` render function so both surfaces mirror each other.
  */
 export function ActionsContextMenu({
+  allowOpen,
   ariaLabel,
   children,
   contentClassName,
@@ -175,12 +180,14 @@ export function ActionsContextMenu({
   items,
   onCloseAutoFocus
 }: ActionsContextMenuProps) {
+  const [open, setOpen] = useState(false)
+
   if (disabled) {
     return <>{children}</>
   }
 
   return (
-    <ContextMenu>
+    <ContextMenu onOpenChange={next => setOpen(next && (allowOpen?.() ?? true))} open={open}>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent aria-label={ariaLabel} className={contentClassName} onCloseAutoFocus={onCloseAutoFocus}>
         <ActionItems items={items} kit={CONTEXT_KIT} />

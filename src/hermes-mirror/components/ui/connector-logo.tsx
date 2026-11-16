@@ -1,5 +1,5 @@
-import { brandFor } from '@/hermes-mirror/lib/mcp-brands'
-import { cn } from '@/hermes-shim/lib/utils'
+import { brandFor } from '@/lib/mcp-brands'
+import { cn } from '@/lib/utils'
 
 import { AvatarChip, monogramFor } from './avatar-chip'
 import { Favicon } from './favicon'

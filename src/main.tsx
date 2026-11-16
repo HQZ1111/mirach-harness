@@ -79,16 +79,51 @@ if (!inTauri) document.body.classList.add('in-browser')
 
 const rootEl = document.getElementById('root')!
 
+/**
+ * 启动期模块加载失败的自愈（2026-11-16 用户实报"又白屏了"）。
+ *
+ * vite 重启/配置变更（tsconfig/vite.config 被插件移植改动）时，浏览器可能
+ * 在 server ready 之前请求 `/src/app/index.tsx` → "Failed to fetch dynamically
+ * imported module" → dynamic import reject → 根节点永远空白（页面不会自己再试）。
+ * 这里只自动重载 **一次**（sessionStorage 护栏防死循环）；第二次仍失败就停在
+ * 控制台可见的错误上，等用户手动刷新，绝不无限刷新。
+ */
+function retryBootOnce(err: unknown): void {
+  console.error('[boot] 模块加载失败', err)
+  try {
+    if (sessionStorage.getItem('mirach.boot-retried') === '1') {
+      console.error('[boot] 已自动重试过一次，停止刷新——请手动刷新窗口')
+      return
+    }
+    sessionStorage.setItem('mirach.boot-retried', '1')
+  } catch {
+    return
+  }
+  window.setTimeout(() => window.location.reload(), 800)
+}
+
+/** 渲染成功后清掉重试标记，下一次启动仍可自愈。 */
+function clearBootRetry(): void {
+  try {
+    sessionStorage.removeItem('mirach.boot-retried')
+  } catch {
+    /* nonfatal */
+  }
+}
+
 // 设置独立窗口：整窗只有设置页，不需要主窗的右键菜单体系（那个菜单的
 // 每一项——新建会话/布局/隐藏栏——在设置窗里全是无意义的）。
 if (isSettingsWindow) {
-  void import('./app/overlays/settings-window').then(({ SettingsWindowRoot }) => {
-    createRoot(rootEl).render(
-      <StrictMode>
-        <SettingsWindowRoot />
-      </StrictMode>,
-    )
-  })
+  void import('./app/overlays/settings-window')
+    .then(({ SettingsWindowRoot }) => {
+      createRoot(rootEl).render(
+        <StrictMode>
+          <SettingsWindowRoot />
+        </StrictMode>,
+      )
+      clearBootRetry()
+    })
+    .catch(retryBootOnce)
 } else {
   void Promise.all([
     import('./app'),
@@ -129,5 +164,25 @@ if (isSettingsWindow) {
         <AppContextMenu />
       </StrictMode>,
     )
-  })
+    clearBootRetry()
+
+    // 内置插件（hermes bots 等）——与运行时磁盘门并列的第二条插件源：
+    // vite 打包的整棵工程 + createContext 注册。失败只进设置页插件记录，
+    // 不打白壳。
+    void import('./plugins/bundled')
+      .then(({ startBundledPlugins }) => startBundledPlugins())
+      .catch((e) => console.error('[plugins] 内置插件启动失败', e))
+
+    // 运行时插件热拔插：装 SDK 命名空间 → 扫描 <app_data>/desktop-plugins →
+    // 每 1.5s 比对 mtime（保存即重载）。整条链动态 import + catch：插件侧
+    // 任何失败都只影响插件清单，不把宿主壳打白。
+    void import('./sdk/runtime')
+      .then(({ installPluginSdk }) => installPluginSdk())
+      .then(() => import('./hermes-shim/contrib/runtime-loader'))
+      .then(({ discoverRuntimePlugins, startRuntimePluginWatch }) => {
+        void discoverRuntimePlugins()
+        startRuntimePluginWatch()
+      })
+      .catch((e) => console.error('[plugins] 运行时插件启动失败', e))
+  }).catch(retryBootOnce)
 }

@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useState } from 'react'
 
-import { Loader2 } from '@/hermes-shim/lib/icons'
-import { cn } from '@/hermes-shim/lib/utils'
+import { Loader2 } from '@/lib/icons'
+import { cn } from '@/lib/utils'
 
 /**
  * A site's icon, resolved the thorough way.

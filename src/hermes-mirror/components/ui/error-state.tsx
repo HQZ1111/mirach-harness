@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react'
 
-import { Codicon } from '@/hermes-mirror/components/ui/codicon'
-import { AlertTriangle } from '@/hermes-shim/lib/icons'
-import { cn } from '@/hermes-shim/lib/utils'
+import { Codicon } from './codicon'
+import { AlertTriangle } from '@/lib/icons'
+import { cn } from '@/lib/utils'
 
 // The single canonical error glyph (codicon's filled error mark). Use this
 // everywhere an error is surfaced (boundaries, dialogs, banners) so failures

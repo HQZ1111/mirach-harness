@@ -16,8 +16,13 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@hermes/plugin-sdk": ["./src/sdk/index.ts"],
+      "@hermes/shared": ["./src/shared/index.ts"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  // 上游 bots 的测试辅助（只被 .test 文件引用，生产不用）——与上游
+  // 自己的 tsconfig 一致：测试支撑不进主编译。
+  "exclude": ["src/hermes-mirror/plugins/hermes-bots/__test_utils__"]
 }

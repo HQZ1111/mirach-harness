@@ -1,11 +1,11 @@
 import { Dialog as DialogPrimitive } from 'radix-ui'
 import * as React from 'react'
 
-import { Button } from '@/hermes-mirror/components/ui/button'
-import { DialogPortalContainerContext } from '@/hermes-mirror/components/ui/dialog-portal-context'
-import { useI18n } from '@/hermes-mirror/i18n'
-import { X } from '@/hermes-shim/lib/icons'
-import { cn } from '@/hermes-shim/lib/utils'
+import { Button } from './button'
+import { DialogPortalContainerContext } from './dialog-portal-context'
+import { useI18n } from '@/i18n'
+import { X } from '@/lib/icons'
+import { cn } from '@/lib/utils'
 
 function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />

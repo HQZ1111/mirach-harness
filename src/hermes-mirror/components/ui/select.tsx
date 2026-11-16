@@ -1,17 +1,17 @@
 import { Select as SelectPrimitive } from 'radix-ui'
 import * as React from 'react'
 
-import { Codicon } from '@/hermes-mirror/components/ui/codicon'
-import { type ControlVariantProps, controlVariants } from '@/hermes-mirror/components/ui/control'
-import { usePopoverPortalContainer } from '@/hermes-mirror/components/ui/dialog-portal-context'
+import { Codicon } from './codicon'
+import { type ControlVariantProps, controlVariants } from './control'
+import { usePopoverPortalContainer } from './dialog-portal-context'
 import {
   menuItemClass,
   menuItemFocusClass,
   menuLabelClass,
   menuMotionClass,
   menuSurfaceClass
-} from '@/hermes-mirror/components/ui/menu'
-import { cn } from '@/hermes-shim/lib/utils'
+} from './menu'
+import { cn } from '@/lib/utils'
 
 function Select({ ...props }: React.ComponentProps<typeof SelectPrimitive.Root>) {
   return <SelectPrimitive.Root data-slot="select" {...props} />

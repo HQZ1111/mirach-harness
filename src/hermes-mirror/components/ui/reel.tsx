@@ -1,6 +1,6 @@
 import type { ComponentProps } from 'react'
 
-import { cn } from '@/hermes-shim/lib/utils'
+import { cn } from '@/lib/utils'
 
 /** One row that scrolls sideways, snapping each child to the start edge.
  *  Children keep their own width; set it from the caller (`*:w-68`). */

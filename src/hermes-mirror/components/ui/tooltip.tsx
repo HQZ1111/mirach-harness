@@ -3,10 +3,10 @@ import './tooltip.css'
 import { Tooltip as TooltipPrimitive } from 'radix-ui'
 import * as React from 'react'
 
-import { useI18n } from '@/hermes-mirror/i18n'
-import { type InputModality, lastInputModality } from '@/hermes-mirror/lib/input-modality'
-import { useKeybindHint } from '@/hermes-mirror/lib/keybinds/use-keybind-hint'
-import { cn } from '@/hermes-shim/lib/utils'
+import { useI18n } from '@/i18n'
+import { type InputModality, lastInputModality } from '@/lib/input-modality'
+import { useKeybindHint } from '@/lib/keybinds/use-keybind-hint'
+import { cn } from '@/lib/utils'
 
 import { TOOLTIP_PLACEMENTS, type TooltipPlacement } from './tooltip-placement'
 

@@ -1,5 +1,5 @@
-import type { IconComponent } from '@/hermes-shim/lib/icons'
-import { cn } from '@/hermes-shim/lib/utils'
+import type { IconComponent } from '@/lib/icons'
+import { cn } from '@/lib/utils'
 
 export interface SegmentedControlOption<T extends string> {
   id: T

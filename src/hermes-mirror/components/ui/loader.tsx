@@ -1,6 +1,6 @@
 import { type ComponentProps, useEffect, useRef } from 'react'
 
-import { cn } from '@/hermes-shim/lib/utils'
+import { cn } from '@/lib/utils'
 
 export const LOADER_TYPES = [
   'original-thinking',

@@ -36,6 +36,8 @@ import { inTauri, appWindow } from '@/lib/tauri-window'
 import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { LeftRailPane } from '@/components/panes/left-rail-pane'
 import { BotsPane } from '@/components/panes/bots-pane'
+import { PluginPane } from '@/components/panes/plugin-pane'
+import { registry } from '@/hermes-shim/contrib/registry'
 import { BOTS_PANEL_ID, botsPanelStore } from '@/components/panes/hub/bots-panel-actions'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
@@ -137,6 +139,16 @@ const OpenTabHeader = (props: IDockviewPanelHeaderProps) => (
     <span className="dv-open-tab-title">{props.api.title ?? OPEN_PANEL_TITLE}</span>
   </div>
 )
+
+/**
+ * 插件贡献 → dockview 面板的同步器（例程面板）。
+ *
+ * bots 插件在 Bot Mode 会话在屏时注册 `hermes-bots:routines` 贡献、离开时
+ * 注销（上游 pane 引擎按贡献自动增删窗格）。宿主没有通用引擎，这里做窄
+ * 对偶：贡献在 → 在主区右侧建面板；贡献消失 → 摘面板。api 未就绪时先空转，
+ * onReady 会再调一次。
+ */
+let routinesPaneSync: (() => void) | null = null
 
 export function DockviewShell() {
   const apiRef = useRef<DockviewApi | null>(null)
@@ -350,11 +362,50 @@ export function DockviewShell() {
     openPagePanel(a, kind)
   }, [])
 
+  // ── 插件贡献 → 例程面板（见模块级 routinesPaneSync 注释）────────────────
+  useEffect(() => {
+    const sync = () => {
+      const a = apiRef.current
+      if (!a) return
+      const wanted = registry.getArea('panes').some((c) => c.id === 'hermes-bots:routines')
+      const panel = a.getPanel('routines')
+      if (wanted && !panel) {
+        try {
+          a.addPanel({
+            id: 'routines',
+            component: 'routines',
+            title: '定时任务',
+            position: { referencePanel: 'workspace', direction: 'right' },
+            initialWidth: 320,
+          })
+        } catch (e) {
+          console.error('[plugins] 例程面板创建失败', e)
+        }
+      } else if (!wanted && panel) {
+        try {
+          a.removePanel(panel)
+        } catch (e) {
+          console.error('[plugins] 例程面板移除失败', e)
+        }
+      }
+    }
+    routinesPaneSync = sync
+    const unsub = registry.subscribeArea('panes', sync)
+    sync()
+    return () => {
+      unsub()
+      routinesPaneSync = null
+    }
+  }, [])
+
   const components = {
     leftrail: () => <LeftRailPane />,
-    // 机器人弹出栏（2026-11-07 完整移植 hermes 机器人页）：Mirach 点击开合，
-    // dock 在左栏右侧（bots-panel-actions 的 region 'bots'——面板栏语义外）
-    bots: () => <BotsPane />,
+    // 机器人弹出栏：hermes bots 插件（bundled）的窗格贡献若已注册就用它
+    // （完整 Bot Mode：花名册/群聊/例程）；插件未加载/被禁用时回落到宿主
+    // 原生移植版 BotsPane（2026-11-07 完整移植）。两条面都是真 UI。
+    bots: () => <PluginPane contributionId="hermes-bots:pane" fallback={<BotsPane />} />,
+    // 例程（bots 插件的 routines 贡献，Bot Mode 会话在屏时注册）。
+    routines: () => <PluginPane contributionId="hermes-bots:routines" />,
     // 主区工作台（2026-10-26）：聊天 / 技能与工具 视图开关（hermes 的
     // `/skills` 顶级路由语义——SkillsPage 替换对话区，`App.tsx:166`）。
     workspace: () => <MainWorkspacePane />,
@@ -378,6 +429,8 @@ export function DockviewShell() {
     (event: DockviewReadyEvent) => {
       const a = event.api
       apiRef.current = a
+      // 例程面板：插件贡献可能早于 api 就绪注册（boot 顺序），这里补一次。
+      routinesPaneSync?.()
       // 调试句柄（__flModel 同惯例）：E2E/CDP 从 api 驱动，不猜 DOM
       ;(globalThis as { __dvApi?: DockviewApi }).__dvApi = a
       // 语义归属准入（v8.1 拖拽平移轮，2026-10-14）：M1 的 onWillDragPanel/

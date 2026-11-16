@@ -1,7 +1,7 @@
 import type { ComponentPropsWithoutRef, ComponentType, ReactNode, SVGProps } from 'react'
 import { forwardRef } from 'react'
 
-import { cn } from '@/hermes-shim/lib/utils'
+import { cn } from '@/lib/utils'
 
 /**
  * The square identity chip: a brand glyph on a 16% tint of its own color, or

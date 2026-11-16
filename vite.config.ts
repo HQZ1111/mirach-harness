@@ -11,7 +11,13 @@ export default defineConfig({
   clearScreen: false,
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      // hermes 插件 SDK 的宿主对偶（见 src/sdk/index.ts 头注释）。
+      // 2026-11-16：sdk-upstream 是上游 SDK 逐字副本，但它 import 的
+      // `@/store/*` / `@/hermes` 在本仓不存在——alias 指过去会让整棵插件图
+      // 在 vite 里解析失败。宿主用 curated shim（sdk/index.ts）作为唯一 SDK 面。
+      '@hermes/plugin-sdk': fileURLToPath(new URL('./src/sdk/index.ts', import.meta.url)),
+      '@hermes/shared': fileURLToPath(new URL('./src/shared/index.ts', import.meta.url))
     }
   },
   server: {

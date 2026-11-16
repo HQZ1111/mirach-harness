@@ -22,6 +22,13 @@ import { useStore } from 'zustand'
 
 import { turnMachine, type TurnContext, type TurnMessage, type TurnUsage } from './turn-actor'
 import {
+  $hostActiveSessionId,
+  $hostFocusedSessionOwner,
+  $hostFocusedSessionProfile,
+  $hostFocusedStoredSessionId,
+  $hostBusy,
+} from '@/sdk/host'
+import {
   collectAttachmentPlan,
   composePrompt,
   piAttachmentAdapter,
@@ -70,8 +77,12 @@ import {
   reviewStore,
   scheduleReviewRefresh,
 } from '@/components/panes/review-store'
-import { setSessionThreadSwitcher } from '@/components/panes/session-manage/session-tab-bridge'
+import {
+  setSessionThreadSwitcher,
+  setStoredSessionOpener,
+} from '@/components/panes/session-manage/session-tab-bridge'
 import { setSessionListRefresher } from '@/components/panes/session-manage/session-refresh-bridge'
+import { botsStore } from '@/components/panes/hub/bots-store'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -79,6 +90,34 @@ import {
 } from './speech-adapter'
 
 const THREAD = 'main'
+
+/**
+ * 焦点会话的 bot owner（插件 `host.state.focusedSessionOwner` 的对偶）。
+ *
+ * 机器人会话由 host-rpc 的 `session.create` 记双锚（`chatSessionId`）——只有
+ * 命中锚的会话才报 owner（`{connectionId, profile: botName}`，与
+ * `profiles.list` 的 RosterRow key 同源）。普通会话必须报 **null**：上游 SDK
+ * 契约是无唯一 owner 时 fail closed，例程窗格（RoutinesPane）会退回花名册
+ * 点选的 scope；伪造 `'local'` owner 会被当成 authoritative，匹配不到任何
+ * 行 → 死锁在「这个机器人需要先出现在名单中」。
+ */
+let hostFocusBotsLoaded = false
+function botOwnerForSession(sessionId: null | string): null | { connectionId: string; profile: string } {
+  if (!sessionId) return null
+  if (!hostFocusBotsLoaded) {
+    hostFocusBotsLoaded = true
+    botsStore.getState().load()
+  }
+  const bot = botsStore.getState().bots.find((b) => b.chatSessionId === sessionId)
+  if (!bot) return null
+  // connectionId 留空 = 本机（未 source-scoped）行。上游对 local 行的身份是
+  // **裸名字**（botSelectionKey 只对 sourceScoped/remoteSource 行加
+  // `connectionId::` 前缀）；带上 'local' 会让 bindProfileSync 把 $selectedBot
+  // 写成 'local::name'——与 roster 行的选择键不匹配，例程窗格在"无焦点 bot"
+  // 时也会退回空态。BotPreset.connectionId 是旧版远端占位标记，不能当
+  // roster 身份用。
+  return { connectionId: '', profile: bot.name }
+}
 
 /** 自动命名已尝试过的会话（每会话只做一次——含失败，失败 console 可见、
  * 不静默重试；跨重启由 pi 持久的 name 字段 + 默认态判定兜住重名） */
@@ -256,7 +295,24 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // 活动会话切换 → catalog（消费方经 activeId 取显示名/项目名）。
   useEffect(() => {
     sessionCatalog.getState().setActive(currentThreadId)
+    // 插件 host.state：活动会话（草稿态 null）——花名册高亮/屏幕门户读它。
+    $hostActiveSessionId.set(currentThreadId)
+    $hostFocusedStoredSessionId.set(currentThreadId)
+    // 焦点 owner：只有机器人会话（双锚命中）报真名，普通会话报 null
+    // （见 botOwnerForSession 注释——伪造 owner 会让例程窗格死锁）。
+    const owner = botOwnerForSession(currentThreadId)
+    $hostFocusedSessionOwner.set(owner)
+    $hostFocusedSessionProfile.set(owner?.profile ?? 'local')
   }, [currentThreadId])
+
+  // 插件 host.state.busy：轮次机 streaming 态就是"在跑"（turn 机只有
+  // idle/streaming 两态，工具执行发生在 streaming 内，不是独立状态）。
+  useEffect(() => {
+    const sub = actorRef.subscribe((snap) => {
+      $hostBusy.set(snap.matches('streaming'))
+    })
+    return () => sub.unsubscribe()
+  }, [actorRef])
 
   // 「运行期间」保持唤醒（设置 → 常规）：run 开始/结束把活动信号发给 Rust
   // 的 keep-awake 线程。其它模式（关闭/始终）下该信号无效果。
@@ -1265,14 +1321,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     [interruptIfRunning, lastUserMessage, postRun, refreshThreads],
   )
 
-  const switchToThread = useCallback(
-    async (id: string) => {
-      const row = threadsRef.current.find((t) => t.id === id)
-      const path = row?.custom?.path
-      if (typeof path !== 'string') {
-        console.error(`[pi] 会话 ${id} 缺少 path，无法打开`)
-        return
-      }
+  const switchToThreadPath = useCallback(
+    async (id: string, path: string) => {
       // 流式中切换（§4.5）：prompt 持锁跨整个 run（RUN_FINISHED/ERROR 才
       // 释放），不先中断 open_session 会撞锁失败——先 pi_interrupt 再切；
       // 中断失败保持当前会话（不更新本地态，禁止假装切换成功）。
@@ -1293,6 +1343,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
         setCurrentThreadId(id)
+        // 宿主状态面（插件 host.state）：活动/聚焦会话 = 当前线程；机器人
+        // 花名册的"这行是否正在看"与"是否在跑"读这两个 atom。owner/profile
+        // 由 [currentThreadId] 的效果统一算（bot 双锚命中才是 owner）。
+        $hostActiveSessionId.set(id)
+        $hostFocusedStoredSessionId.set(id)
         await refreshThreads()
         resetSessionScopedBridges(id)
         // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
@@ -1313,6 +1368,50 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     [actorRef, hydratePiMessages, refreshThreads, resetSessionScopedBridges],
   )
 
+  const switchToThread = useCallback(
+    async (id: string) => {
+      const row = threadsRef.current.find((t) => t.id === id)
+      const path = row?.custom?.path
+      if (typeof path !== 'string') {
+        console.error(`[pi] 会话 ${id} 缺少 path，无法打开`)
+        return
+      }
+      await switchToThreadPath(id, path)
+    },
+    [switchToThreadPath],
+  )
+
+  /**
+   * 按存储会话 id 打开（插件 `host.openSession` 的对偶）。
+   *
+   * 与 `switchToThread` 的差异：**不要求该行已在侧栏目录里**——插件刚
+   * `session.create` 出来的 bot 会话还没被 `refreshThreads` 收进来。此时
+   * 按 pi_list_sessions 的 id → path 兜路；仍找不到就 console.error（可见），
+   * 不假装打开成功。
+   */
+  const openStoredSession = useCallback(
+    async (storedId: string) => {
+      const row = threadsRef.current.find((t) => t.id === storedId)
+      const knownPath = row?.custom?.path
+      if (typeof knownPath === 'string') {
+        await switchToThreadPath(storedId, knownPath)
+        return
+      }
+      try {
+        const sessions = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
+        const path = (sessions ?? []).find((s) => s.id === storedId)?.path
+        if (!path) {
+          console.error(`[pi] 存储会话 ${storedId} 不在 pi_list_sessions——无法打开`)
+          return
+        }
+        await switchToThreadPath(storedId, path)
+      } catch (e) {
+        console.error(`[pi] 存储会话 ${storedId} 打开失败（路径解析）`, e)
+      }
+    },
+    [switchToThreadPath],
+  )
+
   // 会话页签激活 → 切线程（docs/layout-design.md v6.0 §8）：flex-layout 的
   // SELECT_TAB 拦截经 bridge 调这里；switchToThread 换新（依赖变化）时
   // 重登记，卸载清空（未注册 = bridge 侧错误可见）。
@@ -1320,6 +1419,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     setSessionThreadSwitcher((id) => void switchToThread(id))
     return () => setSessionThreadSwitcher(null)
   }, [switchToThread])
+
+  // 插件侧 host.openSession（存储会话 id，可能尚未进目录）→ 本组件的
+  // 打开实现；卸载清空（未注册 = bridge 侧错误可见）。
+  useEffect(() => {
+    setStoredSessionOpener((id) => void openStoredSession(id))
+    return () => setStoredSessionOpener(null)
+  }, [openStoredSession])
 
   // 会话列表刷新登记（2026-11-15 会话管理 P0）：项目归属 / 项目增删 /
   // 归档恢复等写入 Rust 后，侧栏与跨根索引需要重拉（cwd 推断只有重扫才

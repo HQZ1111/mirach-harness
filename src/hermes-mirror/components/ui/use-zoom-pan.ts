@@ -8,7 +8,7 @@ import {
   useState
 } from 'react'
 
-import { isSmartZoomWheel } from '@/hermes-mirror/lib/trackpad-gestures'
+import { isSmartZoomWheel } from '@/lib/trackpad-gestures'
 
 interface Transform {
   scale: number

@@ -3,8 +3,8 @@ import './glyph-spinner.css'
 import type { CSSProperties } from 'react'
 import spinners, { type BrailleSpinnerName as SpinnerName } from 'unicode-animations'
 
-import { usePaneVisible } from '@/hermes-mirror/components/pane-shell/pane-visibility'
-import { cn } from '@/hermes-shim/lib/utils'
+import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
+import { cn } from '@/lib/utils'
 
 export type { SpinnerName }
 

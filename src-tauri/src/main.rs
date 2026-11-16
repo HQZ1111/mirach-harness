@@ -109,6 +109,10 @@ mod hosted_rooms;
 // 群聊 IPC 命令面（groups.* 20 个方法 + 讨论规划）。
 mod pi_groups;
 
+// 桌面插件运行时（热拔插）：扫描 / 读取 / 写入 / 卸载
+// `<app_data_dir>/desktop-plugins/<id>/plugin.js`。渲染层负责 import + 注册。
+mod plugin_runtime;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -1679,6 +1683,11 @@ fn main() {
             pi_set_thinking_level,
             pi_interrupt,
             pi_lane_busy,
+            plugin_runtime::plugin_runtime_root,
+            plugin_runtime::plugin_runtime_scan,
+            plugin_runtime::plugin_runtime_read,
+            plugin_runtime::plugin_runtime_write,
+            plugin_runtime::plugin_runtime_uninstall,
             pi_list_models,
             pi_refresh_model_registry,
             pi_pending_approvals,

@@ -35,6 +35,7 @@
     "@icons-pack/react-simple-icons": "^13.11.1",
     "@lezer/highlight": "^1.2.5",
     "@nanostores/react": "^2.0.1",
+    "@novnc/novnc": "^1.7.0",
     "@tabler/icons-react": "^3.47.0",
     "@tanstack/react-query": "^5.103.1",
     "@tanstack/react-virtual": "3.13.12",

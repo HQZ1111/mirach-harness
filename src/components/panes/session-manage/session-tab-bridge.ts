@@ -24,9 +24,12 @@ export interface SessionTabDropPosition {
 
 export type OpenSessionTabFn = (threadId: string, position?: SessionTabDropPosition) => void
 export type SwitchSessionThreadFn = (threadId: string) => void
+/** 按存储会话 id 打开（不要求该行已在侧栏目录里——新建 bot 会话即此情形）。 */
+export type OpenStoredSessionFn = (storedSessionId: string) => void
 
 let openTab: OpenSessionTabFn | null = null
 let switcher: SwitchSessionThreadFn | null = null
+let storedOpener: OpenStoredSessionFn | null = null
 
 export function setSessionTabOpener(fn: OpenSessionTabFn | null) {
   openTab = fn
@@ -50,4 +53,18 @@ export function switchSessionThreadBridge(threadId: string) {
     return
   }
   switcher(threadId)
+}
+
+export function setStoredSessionOpener(fn: OpenStoredSessionFn | null) {
+  storedOpener = fn
+}
+
+/** 打开一个存储会话（插件 `host.openSession`）。id 来自 pi 索引，可能还没
+ *  进侧栏目录（刚创建的 bot 会话）——runtime 侧按 pi_list_sessions 补路径。 */
+export function openStoredSessionBridge(storedSessionId: string) {
+  if (!storedOpener) {
+    console.error('[session-tab-bridge] openStoredSession 未注册（runtime 未挂载）')
+    return
+  }
+  storedOpener(storedSessionId)
 }

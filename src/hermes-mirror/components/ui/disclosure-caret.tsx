@@ -1,5 +1,5 @@
-import { Codicon, type CodiconProps } from '@/hermes-mirror/components/ui/codicon'
-import { cn } from '@/hermes-shim/lib/utils'
+import { Codicon, type CodiconProps } from './codicon'
+import { cn } from '@/lib/utils'
 
 interface DisclosureCaretProps extends Omit<CodiconProps, 'name'> {
   open: boolean

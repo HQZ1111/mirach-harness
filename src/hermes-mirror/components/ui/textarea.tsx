@@ -1,6 +1,6 @@
 import * as React from 'react'
 
-import { cn } from '@/hermes-shim/lib/utils'
+import { cn } from '@/lib/utils'
 
 import { type ControlVariantProps, controlVariants } from './control'
 

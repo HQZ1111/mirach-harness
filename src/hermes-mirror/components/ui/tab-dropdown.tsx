@@ -1,18 +1,18 @@
-import { compactNumber } from '@/hermes-mirror/shared'
+import { compactNumber } from '@hermes/shared'
 import { Fragment } from 'react'
 
-import { Codicon } from '@/hermes-mirror/components/ui/codicon'
+import { Codicon } from './codicon'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger
-} from '@/hermes-mirror/components/ui/dropdown-menu'
-import { CountSkeleton } from '@/hermes-mirror/components/ui/skeleton'
-import { TextTab, TextTabMeta } from '@/hermes-mirror/components/ui/text-tab'
-import type { IconComponent } from '@/hermes-shim/lib/icons'
-import { cn } from '@/hermes-shim/lib/utils'
+} from './dropdown-menu'
+import { CountSkeleton } from './skeleton'
+import { TextTab, TextTabMeta } from './text-tab'
+import type { IconComponent } from '@/lib/icons'
+import { cn } from '@/lib/utils'
 
 // A count badge beside a tab label. `null` = still loading (pulsing chip, not a
 // fake 0); numbers render compact; strings pass through; `undefined` = no badge.

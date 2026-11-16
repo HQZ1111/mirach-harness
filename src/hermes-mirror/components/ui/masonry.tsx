@@ -2,7 +2,7 @@ import './masonry.css'
 
 import { Children, type ComponentProps, useLayoutEffect, useRef } from 'react'
 
-import { cn } from '@/hermes-shim/lib/utils'
+import { cn } from '@/lib/utils'
 
 /** Native grid lanes when available; measured lanes for older Electron releases.
  * Children stay in source order and never move between React parents. */

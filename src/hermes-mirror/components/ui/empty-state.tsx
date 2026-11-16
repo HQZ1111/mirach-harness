@@ -1,4 +1,4 @@
-import { cn } from '@/hermes-shim/lib/utils'
+import { cn } from '@/lib/utils'
 
 // Canonical centered empty state (title + description). The default for "no
 // results / nothing here yet" page bodies. For richer master-detail lists that

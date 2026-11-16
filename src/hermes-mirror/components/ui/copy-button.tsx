@@ -1,38 +1,19 @@
 import * as React from 'react'
 
-import { Button } from '@/hermes-mirror/components/ui/button'
-import { ContextMenuItem } from '@/hermes-mirror/components/ui/context-menu'
-import { DropdownMenuItem } from '@/hermes-mirror/components/ui/dropdown-menu'
-import { Tip } from '@/hermes-mirror/components/ui/tooltip'
-import { useI18n } from '@/hermes-mirror/i18n'
-import { triggerHaptic } from '@/hermes-shim/lib/haptics'
-import { Check, Copy, X } from '@/hermes-shim/lib/icons'
-import { cn } from '@/hermes-shim/lib/utils'
+import { Button } from './button'
+import { ContextMenuItem } from './context-menu'
+import { DropdownMenuItem } from './dropdown-menu'
+import { Tip } from './tooltip'
+import { useI18n } from '@/i18n'
+import { writeClipboardText } from '@/lib/clipboard'
+import { triggerHaptic } from '@/lib/haptics'
+import { Check, Copy, X } from '@/lib/icons'
+import { cn } from '@/lib/utils'
 
 type CopyPayload = string | (() => Promise<string> | string)
 type CopyButtonAppearance = 'button' | 'icon' | 'inline' | 'menu-item' | 'context-menu-item' | 'tool-row'
 type CopyStatus = 'copied' | 'error' | 'idle'
 const COPIED_RESET_MS = 1_500
-
-export async function writeClipboardText(text: string) {
-  if (!text) {
-    return
-  }
-
-  if (window.hermesDesktop?.writeClipboard) {
-    await window.hermesDesktop.writeClipboard(text)
-
-    return
-  }
-
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-
-    return
-  }
-
-  throw new Error('Clipboard API is unavailable')
-}
 
 export interface CopyButtonProps {
   appearance?: CopyButtonAppearance

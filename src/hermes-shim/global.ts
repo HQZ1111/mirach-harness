@@ -103,7 +103,19 @@ export interface HermesApiRequest {
  *  every copied call site guards with `?.`. */
 export interface HermesDesktopBridge {
   api: <T>(request: HermesApiRequest) => Promise<T>
-  connections?: { list: () => Promise<{ connections: { connectionId: string; label: string }[] }> }
+  /**
+   * 连接注册表（宿主对应 `pi_connections_*`）。
+   *
+   * `id` 是 bots 用来判断「成员所属连接是否已被删除」的键（见 `plugin.tsx:330`
+   * 的 `annotateOrphanedGroupChatMembers`）。`onChanged` 是注册表生命周期推送
+   * （`reason: 'removed'` 时 bots 会清扫孤儿成员）。
+   *
+   * 宿主 `onChanged` 实现见 `bridge.ts`（订阅 `mirach:connections-changed` 事件）。
+   */
+  connections?: {
+    list: () => Promise<{ connections: { connectionId: string; id?: string; label: string }[] }>
+    onChanged?: (handler: (payload: { connectionId?: string; reason?: string }) => void) => () => void
+  }
   desktopPluginsRoot?: () => Promise<string>
   getAgentRoster?: () => Promise<{ agents: DesktopRosterAgent[] }>
   getConnection?: (profile?: null | string) => Promise<HermesConnection>
