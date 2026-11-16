@@ -101,6 +101,14 @@ mod window_state;
 // 要同步读），文件 = app_data_dir/app-prefs.json
 mod app_prefs;
 
+// 托管群聊后端（hermes gateway/hosted_room_*.py 的 Rust 移植，2026-11-15）。
+// P1 = common（叶子工具）+ store（9 张表 + append-only 事件日志）。
+// 分期与边界见 hosted_rooms/mod.rs 头注释；计划见 docs/bots-rust-port-plan.md。
+mod hosted_rooms;
+
+// 群聊 IPC 命令面（groups.* 20 个方法 + 讨论规划）。
+mod pi_groups;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -1678,6 +1686,10 @@ fn main() {
             pi_mode_state,
             pi_goal_state,
             pi_run_command,
+
+            pi_groups::groups_dispatch,
+
+            pi_groups::groups_plan,
             pi_set_approval_mode,
             pi_set_plan_mode,
             pi_decide_plan,

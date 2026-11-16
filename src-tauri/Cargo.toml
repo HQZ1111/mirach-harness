@@ -17,6 +17,12 @@ tauri = { version = "3.0.0-alpha.4", features = ["unstable", "tray-icon"] }
 tauri-runtime-wry = "3.0.0-alpha.4"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
+# 宿主侧托管群聊（hosted_rooms）：事件日志 + 9 张表。版本与 rpi 同源
+# （pi-rust-main/Cargo.toml 的 workspace 依赖 0.31 + bundled），复用同一份
+# cargo 缓存与 SQLite 编译产物；不引入 sqlx（rpi 全仓零使用）。
+rusqlite = { version = "0.31", features = ["bundled"] }
+# 执行策略签名 / grant HMAC / 各类 digest
+sha2 = "0.10"
 
 # pi SDK 集成（2026-11-14 单引擎定稿）：pi_agent_rust vendored 依赖与
 # vendor/ 目录已整体删除（历史存档 = git df701a4 前后各提交；上游真源
