@@ -517,7 +517,7 @@ pub fn groups_plan(room_id: String) -> Result<Value, String> {
             "disbanded_at": room_row.disbanded_at,
             "members": members,
         }),
-        &local_profiles(),
+        &local_profiles(&members),
     )
     .map_err(|e| e.message)?;
 
@@ -568,9 +568,36 @@ pub fn groups_plan(room_id: String) -> Result<Value, String> {
 }
 
 /// 本地 profile 列表（宿主单身份）。
-fn local_profiles() -> Vec<String> {
-    // 从成员里出现过的 profile 都算（宿主没有 profile 系统，宽松接受）
-    Vec::new()
+/// 本网关上的 profile 列表（上游 `local_profiles` 的宿主对偶）。
+///
+/// 宿主没有 hermes 那套 profile 系统，所以**从房间成员里取**：凡是 target.kind
+/// 为 `local`（或无 target，默认 local）的成员，其 profile 就是本网关上的 profile。
+///
+/// 这与上游语义一致：上游校验的也是「该成员的 profile 是否属于本网关」。
+/// 宿主单用户单身份，本网关能服务的 profile 就是成员里声明为 local 的那些。
+fn local_profiles(members: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(items) = members.as_array() else {
+        return out;
+    };
+    for item in items {
+        let Some(object) = item.as_object() else { continue };
+        // target 缺失 = 默认 local（上游 `_validate_member_target` 的 None 分支）
+        let is_local = match object.get("target") {
+            None | Some(Value::Null) => true,
+            Some(target) => target.get("kind").and_then(Value::as_str) == Some("local"),
+        };
+        if !is_local {
+            continue;
+        }
+        if let Some(profile) = object.get("profile").and_then(Value::as_str) {
+            let trimmed = profile.trim();
+            if !trimmed.is_empty() && !out.iter().any(|p| p == trimmed) {
+                out.push(trimmed.to_owned());
+            }
+        }
+    }
+    out
 }
 
 /// 供 `lib.rs`/`main.rs` 注册的命令表。
