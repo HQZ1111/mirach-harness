@@ -33,6 +33,11 @@ export function PluginWorkspacePane(props: IDockviewPanelProps<{ workspaceId?: s
   if (!record) return null
   return (
     <div data-panel-id={workspaceId} style={{ display: 'contents' }}>
+      {/* 上游 workspace 的可见性探针按 `plugin-workspace:<id>` 查（插件
+          GroupChatMainView：`host.paneVisibility(\`plugin-workspace:${ID}:group:…\`)`）。
+          宿主 dockview 面板 id 是 `<id>`，这里补一个同层标记，否则插件面永远
+          认为自己在屏外、不读数据（实测：群聊房间卡在"正在加载群组…"）。 */}
+      <span data-panel-id={`plugin-workspace:${workspaceId}`} style={{ display: 'contents' }} />
       <QueryClientProvider client={queryClient}>
         <I18nProvider configClient={null} initialLocale={hostLocale()}>
           {record.render ? (

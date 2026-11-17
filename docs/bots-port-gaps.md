@@ -122,27 +122,33 @@
 **唯一未闭环的验证点 = 成功回复**：本机 deepseek key 配额耗尽（403），
 回复正文链路要真 key 才能看到；协议/泳道/投影全链已由失败轮证明。
 
-## 3. 剩余结构性缺口：canonical（网关驱动）群聊
+## 3. canonical（网关驱动）群聊：已落地最小驱动（2026-11-17 续）
 
-**hermes 语义**：新群聊必须由网关驱动（`groupCreationEngine`：legacy 网关
-→ `unavailable/owner_update_required`；这也是实机里"本设备版本太旧"提示的
-来源）。宿主选择 legacy 能力声明的原因与现状：
+**状态**：新群聊可创建、可驱动。实机（CDP）：新建群聊 → 两名成员依次跑轮次
+（真实 403 配额错误）→ turn.failed 如实回写 → room.activity settled，界面
+显示「回合失败」卡与 Round 状态。
 
-- 已移植：`src-tauri/src/hosted_rooms/`（26 模块：事件日志 9 表 / discussion
-  计划 / driver 租约状态机 / controls 30 方法，464 tests 绿）+
-  `pi_groups.rs` 的 `groups_dispatch` 25 方法（capabilities/list/state/log/
-  create/rename/disband/send/context/stop/continue/retry/discard/附件）、
-  `groups_plan`（"谁下一个说话"）。
-- 未移植：**driver runner** —— 把 plan 产出的任务变成成员会话的一次真 run、
-  把结果写回房间事件日志（turn.started / message.member / turn.settled）。
-  上游实现 = `D:\hermes-agent-main\tui_gateway\hosted_room_driver.py`
-  （1320 行）+ `hosted_room_service.py`（1306 行）。它依赖会话层的
-  **任务身份/终局回执**（`submit(task=…, on_terminal=…)`、history 里的
-  terminal receipt、`expected_task_id` 中断）——rpi 会话层目前没有这组
-  语义；接线前要先定这层协议（可复用 pi_bot 泳道的执行面，但它现在只有
-  "一轮 run"粒度，没有 task_id/generation）。
-- `groups.approve` / `groups.peer.*` / `promote/demote/replica`：明确报错
-  （跨网关 peer 通道未接通，不伪造成功）。
+实现三层：
+
+- `src/components/panes/hub/canonical-group-driver.ts`：前端驱动循环
+  （groups_plan → 成员会话 `Group: <room_id>` → prompt.submit → 轮询
+  session.resume → 写回 message.member / turn.settled / turn.failed /
+  turn.cancelled / room.activity）；driver_status 供 workspace 的 typing 行 /
+  Round N / Stop 按钮。
+- `groups_plan` 暴露 task 的完整 prompt 与坐标；新增 `groups.driver_append`
+  （Rust 侧 actor-kinds + 事件形状校验后落 hosted_room_events）；
+  `groups.list` 补 `next_offset`、`room_json` 补 `members/latest_seq`、
+  `groups.send` 返回 `accepted/client_event_id` 受理回执。
+- `groups.capabilities` = driver:true + 16 个方法；`host-rpc` 的
+  groups.state 注入 driver_status，send/continue/stop 接驱动生命周期。
+
+**与 hermes 的差距（如实标注）**：无 driver 租约/fencing/indeterminate 恢复
+（应用重启 = 在途轮次丢失，启动扫描会重驱动仍有待办的讨论）；router(auto) /
+lead 路由不调模型（route 计划按 bounded/router_unsupported 收尾）；
+retry/discard（Rust 要求 driver 租约）暂不可用；approvals 不桥接。
+
+**宿主扩展（非上游协议）**：`groups.driver_append`；成员身份字段改用
+Unicode 标识符（宿主机器人名是中文，上游 profile 是 ASCII slug）。
 
 ## 4. 统计口径（2026-11-17）
 
@@ -178,3 +184,5 @@
   明确报错；`display.*` 方法明确报"无 display 子系统"。
 - 引擎侧缺口统一收在 **`docs/pi-host-gaps.md`**（OAuth MCP、display、
   canonical driver 的会话任务身份、session.reclaimed、多连接 peer）。
+- **canonical 群聊最小驱动落地**（同日）：见 §3——新建群聊可创建、驱动
+  跑轮次、失败如实回写、settled 收尾，实机全通。

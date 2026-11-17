@@ -65,6 +65,8 @@ pub const GROUP_METHODS: &[(&str, &str)] = &[
     ("groups.retry", "session:control"),
     ("groups.discard", "session:control"),
     ("groups.approve", "session:approve"),
+    // 宿主扩展（非上游）：canonical 驱动把成员轮次结果写回房间日志。
+    ("groups.driver_append", "session:operator"),
     ("groups.peer.register", "session:control"),
     ("groups.peer.invite", "session:operator"),
     ("groups.peer.revoke", "session:operator"),
@@ -92,6 +94,8 @@ pub const METHOD_FIELDS: &[(&str, &[&str])] = &[
     ("groups.attachment.download", &["room_id", "event_id", "attachment_id"]),
     ("groups.stop", &["room_id", "cancel_id"]),
     ("groups.continue", &["room_id", "discussion_event_id"]),
+    // 宿主扩展：驱动的写回口（事件形状由 store/decision_engine 再校验）。
+    ("groups.driver_append", &["room_id", "event_id", "kind", "actor", "payload"]),
     ("groups.retry", &["room_id", "member_id", "task_id", "execution_generation"]),
     ("groups.discard", &["room_id", "member_id", "task_id", "execution_generation"]),
     (
@@ -312,9 +316,15 @@ mod tests {
 
     #[test]
     fn method_count_matches_upstream() {
-        // 上游 GROUP_METHODS 19 项 + profiles.list = 20
-        assert_eq!(GROUP_METHODS.len(), 19);
-        assert_eq!(METHOD_FIELDS.len(), 20);
+        // 上游 GROUP_METHODS 19 项 + profiles.list = 20；宿主扩展
+        // （groups.driver_append，非上游协议）额外 +1。
+        let upstream = GROUP_METHODS
+            .iter()
+            .filter(|(m, _)| *m != "groups.driver_append")
+            .count();
+        assert_eq!(upstream, 19);
+        assert_eq!(GROUP_METHODS.len(), 20);
+        assert_eq!(METHOD_FIELDS.len(), 21);
     }
 
     #[test]

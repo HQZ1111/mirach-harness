@@ -48,9 +48,16 @@
     技能/插件/连接器/工具集四页签（实机）。
   - **图像/屏幕面**：`image.generate` probe available:false；`display.*`
     明确报错（无 display 子系统）。
+  - **canonical 群聊最小驱动落地**（同日）：`canonical-group-driver.ts`
+    （前端驱动）+ `groups_plan` 暴露 task.prompt + `groups.driver_append`
+    写回口 + `groups.capabilities` driver:true。实机：新建群聊 → 发消息 →
+    两名成员依次跑轮次（真实 403）→ turn.failed 如实回写 → room.activity
+    settled；界面出「回合失败」卡 / Round 状态 / Stop。差距：无租约/
+    fencing/indeterminate 恢复、router(auto) 不支持、retry/discard/
+    approvals 未桥接（`docs/bots-port-gaps.md` §3）。
   - **引擎侧缺口文档**：`docs/pi-host-gaps.md`（OAuth MCP / display /
-    canonical driver 任务身份 / session.reclaimed / 多连接 peer）。结论：
-    本轮所有补齐均在宿主侧完成，未改 `G:\pi-rust-main`（该树无 .git，
+    canonical 全语义所需 task 身份 / session.reclaimed / 多连接 peer）。
+    结论：本轮所有补齐均在宿主侧完成，未改 `G:\pi-rust-main`（该树无 .git，
     需要时按文档拆 patch）。
 - **PR**：https://github.com/HQZ1111/mirach-harness/pull/2（分支
   `bots-plugin-complete`；本轮续的改动追加在同一分支）。

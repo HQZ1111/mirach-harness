@@ -92,19 +92,36 @@ pub fn groups_dispatch(method: String, params: Option<Value>) -> Result<Value, S
 fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Result<Value, String> {
     match method {
         "groups.capabilities" => {
-            // 宿主没有 canonical 群驱动（hosted_rooms 只到状态机/规划层，
-            // 没有执行模型轮次的 driver 进程）。插件（canonical-group-
-            // capabilities.ts::groupExecutionMode）据此分支：
-            //   driver===false + persistent_process===false + 不宣称房间
-            //   归属 → 'legacy'（上游一等支持模式：Desktop 驱动群聊，
-            //   成员轮次经 prompt.submit 跑在 pi_bot 后台泳道）。
-            // `methods` 必须为空：里面有 groups.create 会被判成 ownsRooms
-            // → 'unavailable'（插件不提供 gateway 群聊入口）。宿主确实
-            // 不提供"网关自己跑"的房间控制，清空是如实声明。
+            // 宿主的 canonical 驱动 = **前端 canonical-group-driver**（见
+            // src/components/panes/hub/canonical-group-driver.ts）：它在
+            // `groups.send` 后按 groups_plan 的任务表逐成员跑 rpi 会话，
+            // 结果经 `groups.driver_append` 写回房间日志。
+            //   driver: true            → 插件判 canonical（可建房、canonical
+            //                             workspace + driver_status 尽在其上）
+            //   persistent_process:false → 驱动活在应用进程里，关应用即停
+            //   methods                 → 如实列出宿主实现的方法（workspace
+            //                             按它显隐控制项）
             let mut payload = controls::capabilities_payload(store::MAX_LOG_LIMIT as i64);
-            payload["driver"] = json!(false);
+            payload["driver"] = json!(true);
             payload["persistent_process"] = json!(false);
-            payload["methods"] = json!([]);
+            payload["methods"] = json!([
+                "groups.capabilities",
+                "groups.list",
+                "groups.state",
+                "groups.log",
+                "groups.create",
+                "groups.rename",
+                "groups.disband",
+                "groups.send",
+                "groups.context",
+                "groups.stop",
+                "groups.continue",
+                "groups.retry",
+                "groups.discard",
+                "groups.attachment.upload",
+                "groups.attachment.download",
+                "groups.driver_append",
+            ]);
             payload["features"] = json!([]);
             Ok(payload)
         }
@@ -118,10 +135,19 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let rooms = store::list_rooms(&conn, include_disbanded, limit, offset).map_err(|e| e.to_string())?;
+            // 上游 `groups.list` 的分页游标：`next_offset: null` = 没有下一页。
+            // 插件 `listCanonicalRooms` 以 `next_offset === null` 终止（undefined
+            // 会抛 "Could not load the next group chats"——房间发现整块失败）。
+            let next_offset = if rooms.len() as i64 >= limit {
+                Some(offset + rooms.len() as i64)
+            } else {
+                None
+            };
             Ok(json!({
                 "rooms": rooms.iter().map(room_json).collect::<Vec<_>>(),
                 "limit": limit,
                 "offset": offset,
+                "next_offset": next_offset,
             }))
         }
 
@@ -143,7 +169,9 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             Ok(json!({
                 "room": room_json(&room),
                 "context": context.to_json(),
-                "change_events": true,
+                // 宿主没有 groups.changed 推送通道：false = 前端按 2s 轮询收敛
+                // （workspace 的 push 分支只服务有广播的网关）。
+                "change_events": false,
             }))
         }
 
@@ -152,9 +180,16 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             let room_id = params.get("room_id").cloned().unwrap_or(Value::Null);
             let since_seq = params.get("since_seq").and_then(common::json_i64).unwrap_or(0);
             let limit = params.get("limit").and_then(common::json_i64).unwrap_or(100);
-            let events = store::read_events(&conn, &room_id, since_seq, limit).map_err(|e| e.to_string())?;
+            // 多读一条判 has_more（workspace 的分页收敛需要）。
+            let mut events = store::read_events(&conn, &room_id, since_seq, limit.saturating_add(1))
+                .map_err(|e| e.to_string())?;
+            let has_more = events.len() as i64 > limit;
+            if has_more {
+                events.truncate(limit as usize);
+            }
             Ok(json!({
                 "events": events.iter().map(event_json).collect::<Vec<_>>(),
+                "has_more": has_more,
             }))
         }
 
@@ -193,6 +228,35 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             Ok(json!({"ok": true}))
         }
 
+        "groups.driver_append" => {
+            // canonical 驱动的写回口：宿主前端 driver 把成员轮次的结果
+            // （message.member / turn.settled / turn.failed / turn.cancelled /
+            // room.activity）按事件词汇表写进房间日志。actor 与 payload 由
+            // store::append_event 做 actor-kind 校验、规划层再校验一次形状。
+            let mut conn = open_store()?;
+            let room_id = params.get("room_id").cloned().unwrap_or(Value::Null);
+            let event_id = params.get("event_id").cloned().unwrap_or(Value::Null);
+            let kind = params.get("kind").cloned().unwrap_or(Value::Null);
+            let actor = params.get("actor").cloned().unwrap_or(Value::Null);
+            let payload = params.get("payload").cloned().unwrap_or(Value::Null);
+            let room = store::room_state(&conn, &room_id, false).map_err(|e| e.to_string())?;
+            let event = store::append_event(
+                &mut conn,
+                &room_id,
+                &event_id,
+                &kind,
+                &actor,
+                &payload,
+                &Value::String(room.authority_gateway_id.clone()),
+                Some(room.authority_epoch),
+                None,
+                None,
+                false,
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(json!({ "event": event_json(&event) }))
+        }
+
         "groups.send" => {
             // 用户发消息：append message.user 事件
             let mut conn = open_store()?;
@@ -216,7 +280,15 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
                 false,
             )
             .map_err(|e| e.to_string())?;
-            Ok(json!({"event": event_json(&event), "admitted": true}))
+            // 上游 `groups.send` 的受理回执：`client_event_id` 与请求的
+            // event_id 一致、`accepted:true`——canonical workspace 的
+            // confirmSend 用这两个字段证明"这次发送已被受理"。
+            Ok(json!({
+                "accepted": true,
+                "client_event_id": event_id,
+                "event": event_json(&event),
+                "admitted": true,
+            }))
         }
 
         "groups.context" => {
@@ -435,12 +507,18 @@ fn now() -> f64 {
 }
 
 fn room_json(room: &store::Room) -> Value {
+    // members 直接回原始 roster 数组（上游 CanonicalRoom.members 的字段：
+    // member_id/profile/handle/display_name/target）——canonical 群聊 UI 靠它
+    // 渲染成员与路由。latest_seq = next_seq - 1（log 游标收敛用）。
+    let members: Value = serde_json::from_str(&room.members_json).unwrap_or(Value::Null);
     json!({
         "room_id": room.room_id,
         "name": room.name,
+        "members": members,
         "authority_gateway_id": room.authority_gateway_id,
         "authority_epoch": room.authority_epoch,
         "next_seq": room.next_seq,
+        "latest_seq": room.next_seq.saturating_sub(1),
         "revision": room.revision,
         "created_at": room.created_at,
         "updated_at": room.updated_at,
@@ -575,10 +653,15 @@ pub fn groups_plan(room_id: String) -> Result<Value, String> {
         "task": decision.task.map(|t| json!({
             "task_id": t.task_id,
             "turn_id": t.turn_id,
+            "thread_id": t.thread_id,
             "member_id": t.member_id,
             "member_index": t.member_index,
             "round_index": t.round_index,
             "seen_through_seq": t.seen_through_seq,
+            "source_event_seq": t.source_event_seq,
+            // 成员轮次的完整 prompt（plan.rs 的 build_turn_prompt 产物）——
+            // canonical 驱动把它原样交给该成员的 rpi 会话。
+            "prompt": t.prompt,
         })),
     }))
 }

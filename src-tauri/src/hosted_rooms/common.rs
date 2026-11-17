@@ -45,6 +45,36 @@ pub fn is_identifier(value: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
 }
 
+/// 宿主扩展的 **Unicode 标识符**（2026-11-17）：上游 profile/handle 是 ASCII
+/// slug，宿主的机器人名/群成员名是任意 Unicode（中文/全角）。
+///
+/// 语义（比 `is_identifier` 只在字符类上放宽）：首字符 Unicode 字母或数字，
+/// 其后 Unicode 字母数字或 `. _ -`。用于**成员身份字段**（member_id /
+/// profile / handle / local profile）——房间 id、event id、gateway id 等
+/// 结构性标识仍走 ASCII 的 `is_identifier`。
+pub fn is_identifier_unicode(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// `identifier()` 的 Unicode 形态（成员身份字段用）。
+pub fn identifier_unicode(value: &str, label: &str, max_chars: usize) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > max_chars
+        || !is_identifier_unicode(trimmed)
+    {
+        return err(format!("invalid {label}"));
+    }
+    Ok(trimmed.to_owned())
+}
+
 /// 标识符校验的错误（上游由调用方传入自己的错误类，此处宿主统一一种）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldError(pub String);

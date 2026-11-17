@@ -52,6 +52,11 @@ import {
   type BotPreset,
 } from '@/components/panes/hub/bots-store'
 import { hiddenSessionsStore } from '@/components/panes/hub/hidden-sessions'
+import {
+  canonicalDriverStatus,
+  kickCanonicalRoom,
+  stopCanonicalRoom,
+} from '@/components/panes/hub/canonical-group-driver'
 
 // ── 本地 ui_meta 余字段表 ───────────────────────────────────────────────────
 
@@ -1179,6 +1184,36 @@ export async function dispatchHostRequest<T>(
         running: false,
         profile_key: typeof params.profile === 'string' ? params.profile : null,
       } as T
+    }
+
+    case 'groups.state': {
+      // 宿主 canonical 驱动（canonical-group-driver.ts）的活跃轮次 → 上游
+      // workspace 读的 driver_status（typing 行 / Round N / 停止按钮 /
+      // stopConfirmed 判定）。
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      return { ...res, driver_status: canonicalDriverStatus(roomId) } as T
+    }
+
+    case 'groups.send': {
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      if (roomId) kickCanonicalRoom(roomId)
+      return res as T
+    }
+
+    case 'groups.continue': {
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      if (roomId) kickCanonicalRoom(roomId)
+      return res as T
+    }
+
+    case 'groups.stop': {
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      if (roomId) await stopCanonicalRoom(roomId)
+      return res as T
     }
 
     case 'cron.manage':

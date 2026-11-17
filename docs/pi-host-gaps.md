@@ -43,17 +43,22 @@ history 里的 terminal receipt、`expected_task_id` 的精确中断、失败
 `indeterminate` 的恢复判定。rpi 的 harness 目前只有 run 粒度
 （prompt → 事件流 → 结束），没有 task_id / execution_generation / 回执。
 
-**宿主现状**：legacy（Desktop 驱动）群聊全链已通；canonical（网关驱动）
-群聊**创建被上游语义挡住**（legacy 能力声明 → "版本过旧"提示），
-`groups.capabilities` 如实声明 `driver:false`。
+**宿主现状（2026-11-17 更新）**：**路线 B 已落地最小版**——宿主前端驱动
+（`src/components/panes/hub/canonical-group-driver.ts`）在 `pi_bot.rs` 泳道
+上自己维护 task 坐标与终局：`groups_plan`（Rust 规划，含成员 prompt）→
+成员会话 `Group: <room_id>` → `prompt.submit` → 轮询 → `groups.driver_append`
+写回 message.member / turn.* / room.activity。实机：建房 → 两名成员依次跑
+轮次 → 403 失败如实回写 → room.activity settled。`groups.capabilities` 已
+`driver:true`（新建群聊可用）。
 
-**两条路**：
-- A（引擎补）：给 harness 的 submit/history 加 task 身份与终局回执，宿主
-  按 hermes driver 逐段移植 `hosted_room_driver.py` + `hosted_room_service.py`。
-- B（纯宿主）：宿主自己在 `pi_bot.rs` 泳道上维护 task 账本（task_id、
-  generation、终局结果），只把 `groups.*` 的对外语义补齐；可以不做
-  indeterminate 恢复的极端分支。若选 B，不需要动引擎，但 canonical 的
-  跨重启恢复语义会比 hermes 弱一档（需要在文档里如实标注）。
+**仍缺（引擎补才到 hermes 全语义）**：
+- harness 的 submit/history 加 **task 身份与终局回执**（task_id /
+  execution_generation / terminal receipt / `expected_task_id` 中断）——
+  这才能实现 hermes 的**租约/fencing/indeterminate 恢复**（当前重启 = 在途
+  轮次丢失，启动扫描重驱动）。
+- router(auto) / lead 路由需要一次廉价模型调用（宿主当前把 route 计划按
+  bounded 收尾）。
+- approvals 的 pending_actions 投影与 groups.approve 桥接（当前不桥接）。
 
 ## 4. 会话回收事件 `session.reclaimed`
 
