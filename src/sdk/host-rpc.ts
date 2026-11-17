@@ -53,8 +53,11 @@ import {
 } from '@/components/panes/hub/bots-store'
 import { hiddenSessionsStore } from '@/components/panes/hub/hidden-sessions'
 import {
+  approveCanonicalAction,
   canonicalDriverStatus,
+  discardCanonicalTask,
   kickCanonicalRoom,
+  retryCanonicalTask,
   stopCanonicalRoom,
 } from '@/components/panes/hub/canonical-group-driver'
 
@@ -1135,19 +1138,33 @@ export async function dispatchHostRequest<T>(
     }
 
     case 'skills.manage': {
-      // 上游 = hermes 技能市场（Hub）。宿主没有市场：搜索返回空表（且
-      // console 可见），安装明确报错——不假装装上了。
+      // 宿主技能目录 = hermes `optional-skills/` 的本地复制（22 分类 139 技能，
+      // 见 src-tauri/src/pi_skills_catalog.rs）。搜索真实命中；安装 = 整目录
+      // 复制到 ~/.rpi/agent/skills/<name>（rpi 的技能发现目录）。
       const action = String(params.action ?? '')
       if (action === 'search') {
-        console.warn(
-          '[host-rpc] skills.manage search：宿主没有技能市场（hermes Hub）；本地技能清单见 pi_capabilities',
-        )
-        return { results: [] } as T
+        const query = typeof params.query === 'string' ? params.query : ''
+        const res = await invoke<{
+          entries?: { name: string; description?: string; category?: string; installed?: boolean }[]
+        }>('pi_skills_search', { query })
+        return {
+          results: (res?.entries ?? []).map((entry) => ({
+            name: entry.name,
+            description: entry.description ?? '',
+          })),
+        } as T
       }
       if (action === 'install') {
-        throw new Error(
-          'skills.manage install: 宿主没有技能市场（hermes Hub）；本地技能目录 ~/.rpi/agent/skills（设置 → 能力）',
-        )
+        // 插件把技能标识放在 `query`（skills-hub.tsx install()），兼容 name/identifier。
+        const name = String(params.query ?? params.name ?? params.identifier ?? '').trim()
+        if (!name) throw new Error('skills.manage install 缺少技能名')
+        const res = await invoke<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', { name })
+        return { ok: true, result: res } as T
+      }
+      if (action === 'remove' || action === 'uninstall') {
+        const name = String(params.query ?? params.name ?? '').trim()
+        if (!name) throw new Error('skills.manage remove 缺少技能名')
+        return (await invoke('pi_skill_remove', { name })) as T
       }
       throw new Error(`skills.manage 未知 action：${action}`)
     }
@@ -1214,6 +1231,40 @@ export async function dispatchHostRequest<T>(
       const roomId = String(params.room_id ?? '')
       if (roomId) await stopCanonicalRoom(roomId)
       return res as T
+    }
+
+    case 'groups.approve': {
+      // canonical 审批：lane forwarding —— once/deny 直接回给成员会话。
+      const roomId = String(params.room_id ?? '')
+      const requestId = String(params.request_id ?? '')
+      const choice = String(params.choice ?? '')
+      if (!roomId || !requestId || !choice) {
+        throw new Error('groups.approve 缺少 room_id / request_id / choice')
+      }
+      await approveCanonicalAction(roomId, requestId, choice)
+      return { ok: true } as T
+    }
+
+    case 'groups.retry': {
+      const roomId = String(params.room_id ?? '')
+      const memberId = String(params.member_id ?? '')
+      const taskId = String(params.task_id ?? '')
+      if (!roomId || !memberId || !taskId) {
+        throw new Error('groups.retry 缺少 room_id / member_id / task_id')
+      }
+      retryCanonicalTask(roomId, memberId, taskId)
+      return { ok: true } as T
+    }
+
+    case 'groups.discard': {
+      const roomId = String(params.room_id ?? '')
+      const memberId = String(params.member_id ?? '')
+      const taskId = String(params.task_id ?? '')
+      if (!roomId || !memberId || !taskId) {
+        throw new Error('groups.discard 缺少 room_id / member_id / task_id')
+      }
+      await discardCanonicalTask(roomId, memberId, taskId)
+      return { ok: true } as T
     }
 
     case 'cron.manage':

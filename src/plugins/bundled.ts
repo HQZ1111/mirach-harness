@@ -132,6 +132,15 @@ export async function startBundledPlugins(): Promise<void> {
     void import('@/components/panes/hub/canonical-group-driver')
       .then((driver) => driver.startCanonicalGroupDriver())
       .catch((e) => console.error('[canonical-driver] 启动失败', e))
+    // MCP OAuth token 启动刷新（10 分钟内到期的全部换新；失败清单 console 可见）。
+    void import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<{ failed?: { name?: string; error?: string }[] }>('pi_mcp_oauth_refresh_all'))
+      .then((res) => {
+        for (const failure of res?.failed ?? []) {
+          console.error(`[mcp-oauth] ${failure.name} 刷新失败`, failure.error)
+        }
+      })
+      .catch((e) => console.error('[mcp-oauth] 启动刷新失败', e))
     if (import.meta.env.DEV) {
       // E2E 调试句柄（`__dvApi` 同惯例）：Bot Mode 的选择/焦点/名册原子。
       // 只在 DEV 暴露；CDP 探针用它核对 UI 背后的真实 store 值，不猜 DOM。

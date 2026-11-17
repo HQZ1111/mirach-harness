@@ -494,8 +494,23 @@ export const host = {
   /** 清理遗留 profile 偏好（宿主无跨设备遗留态）。 */
   dropLeftoverProfilePrefs: (_args: unknown): void => {},
   /** 完成 MCP OAuth（宿主走设置页）。 */
-  completeMcpOAuth: async (_args: unknown): Promise<void> => {
-    throw new Error('host.completeMcpOAuth: 宿主 MCP OAuth 在设置页完成')
+  /**
+   * MCP OAuth（`McpSetupButton` 的 OAuth 分支）。
+   *
+   * 宿主实现 = Rust `pi_mcp_oauth_complete`：RFC 9728/8414 discovery + DCR +
+   * PKCE S256 + 本机回调 + token 交换 + 把 `Authorization` 写进 mcp.json 的
+   * headers（rpi-mcp-adapter 原样发送）。只覆盖支持 DCR 的厂商；不支持时
+   * 明确报错（无异味降级）。
+   */
+  completeMcpOAuth: async (args: unknown): Promise<void> => {
+    const input = (args ?? {}) as { serverName?: unknown; catalogPreset?: unknown }
+    const serverName = typeof input.serverName === 'string' ? input.serverName.trim() : ''
+    if (!serverName) throw new Error('host.completeMcpOAuth: 缺少 serverName')
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('pi_mcp_oauth_complete', {
+      serverName,
+      preset: typeof input.catalogPreset === 'string' ? input.catalogPreset : undefined,
+    })
   },
   /** 插件开关决策。上游是 atom（`host.pluginDecisions.get()` / 订阅）；
    *  这里直接接宿主 plugins-store 的同一 atom（设置页开关即生效）。 */

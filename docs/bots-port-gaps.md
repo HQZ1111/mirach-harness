@@ -69,21 +69,32 @@
 
 ### P2 MCP / 技能市场 / relay（诚实接线，不造假）
 
-- **MCP 目录已补（2026-11-17 续）**：`mcp.catalog` = `src-tauri/src/pi_mcp_catalog.rs`
-  + `assets/mcp-catalog.json`（hermes `optional-mcps/` 的宿主可执行子集：
-  **10 条 no-auth HTTP**，如 deepwiki/context7/wolfram/microsoft-learn）。
-  `mcp.servers.add {preset}` 一键装（写 `~/.rpi/agent/mcp.json` 的
-  `{url}`）；`mcp.servers.test` 对 HTTP 条目做**真实探测**（initialize →
-  initialized → tools/list，实机 deepwiki 返回 3 个工具 + serverInfo）。
+- **MCP 目录已补（2026-11-17 续，同日再扩）**：`mcp.catalog` =
+  `src-tauri/src/pi_mcp_catalog.rs` + `assets/mcp-catalog.json`（hermes
+  `optional-mcps/` 的宿主可执行子集：**64 条 = 10 条 no-auth HTTP + 54 条
+  OAuth HTTP**，如 deepwiki/context7/wolfram/notion/linear/sentry）。
+  `mcp.servers.add {preset}` 一键装（写 `~/.rpi/agent/mcp.json` 的 `{url}`）；
+  `mcp.servers.test` 对 HTTP 条目做**真实探测**（initialize → initialized →
+  tools/list，实机 deepwiki 返回 3 个工具 + serverInfo）；
   `mcp.servers.set_api_key` 写 `mcpServers.<name>.env`；`mcp.servers.remove` 真删。
-  **56 条 OAuth 条目不入目录**：rpi-mcp-adapter 没有 OAuth token 管理（见
-  `docs/pi-host-gaps.md` §1），列出来就是假入口。显式 config 的任意
-  HTTP/stdio 服务器仍可加。
+- **MCP OAuth（宿主标准 DCR 流程）**：`pi_mcp_oauth.rs` 实现 RFC 9728/8414
+  discovery → Dynamic Client Registration → PKCE S256 → 本机回调 → token
+  交换 → 把 `Authorization: Bearer …` 写回 mcp.json headers；启动时批量刷新
+  10 分钟内到期的 token。实机（notion dry-run）：discovery + DCR 成功
+  （client_id 已注册）。**不支持 DCR 的厂商**（需预注册 client）如实报错，
+  不进目录（asana / n8n 两条）。
 - `mcp.catalog` 的 `installed` 标记从 pi_mcp 真快照回读；`profiles.describe`
   的 `mcp_servers` 同源。
-- `skills.manage` 搜索 = 空表 + console.warn（宿主没有技能市场），install
-  明确报错（本地技能清单见 pi_capabilities → 设置页能力）。
+- **技能市场 = 本地技能目录**（2026-11-17 续）：宿主没有 hermes Hub，但把
+  上游 `optional-skills/`（**22 分类 / 139 技能 / 819 文件**）复制进
+  `src-tauri/skills-catalog` 并随包（bundle.resources）。`skills.manage`
+  search 真检索（名称/描述/分类），install = 整目录复制到
+  `~/.rpi/agent/skills/<name>`（rpi 技能发现目录），remove 真删。
+  实机：搜索 "git" 4 条；安装 `watchers` 后 `~/.rpi/agent/skills/watchers/`
+  出现 SKILL.md + scripts/。
 - `bot_relay.*` = 单身份：roster.sync 0 / drain 空 / reply·deliver 明确报错。
+  **agent 互发（message_agent 工具）**需要 rpi 扩展提供工具注入口，见
+  `docs/pi-host-gaps.md` §6。
 
 ### P3 细节
 
@@ -143,9 +154,13 @@
   groups.state 注入 driver_status，send/continue/stop 接驱动生命周期。
 
 **与 hermes 的差距（如实标注）**：无 driver 租约/fencing/indeterminate 恢复
-（应用重启 = 在途轮次丢失，启动扫描会重驱动仍有待办的讨论）；router(auto) /
-lead 路由不调模型（route 计划按 bounded/router_unsupported 收尾）；
-retry/discard（Rust 要求 driver 租约）暂不可用；approvals 不桥接。
+（应用重启 = 在途轮次丢失，启动扫描会重驱动仍有待办的讨论）。
+**同日续**：approvals 已桥接（lane pending_approval → driver_status.
+pending_actions → `groups.approve` 回灌 once/deny；触发前提是引擎侧权限闸
+扩展生效，见 pi-host-gaps §6）；retry/discard 已实现（retry 重跑本次应用内
+失败任务、discard 写 turn.cancelled；重启后仅剩日志会明确报错）；
+**router(auto) 已实现**（route 计划 → 一次模型调用选应答者 → `room.routed`，
+实机：输出 everyone → 成员真回复）。legacy 房间不受影响。
 
 **宿主扩展（非上游协议）**：`groups.driver_append`；成员身份字段改用
 Unicode 标识符（宿主机器人名是中文，上游 profile 是 ASCII slug）。
@@ -186,3 +201,23 @@ Unicode 标识符（宿主机器人名是中文，上游 profile 是 ASCII slug�
   canonical driver 的会话任务身份、session.reclaimed、多连接 peer）。
 - **canonical 群聊最小驱动落地**（同日）：见 §3——新建群聊可创建、驱动
   跑轮次、失败如实回写、settled 收尾，实机全通。
+
+## 7. 2026-11-17 收尾：真模型成功链验证（用户提供测试 key）
+
+用户提供 `https://bbtoken.boywe.cn/v1` 测试 key（models.json 加 `BBT`
+provider，defaultProvider=BBT/deepseek-v4.1-flash）。**「真模型端到端」硬阻塞
+解除**，逐链验证（全部实机）：
+
+| 链 | 结果 |
+|---|---|
+| 主对话 | 「1+1 等于几」→「1+1 等于 2。」（usage 21338/10，stopReason stop） |
+| canonical 群聊 | 两成员各回真实自我介绍；handoff 行「风格和 请 二万人 接手」；`已结束 — 没有人还有话要说`（message.member ×2 + turn.settled ×2 + room.activity settled） |
+| legacy 群聊 | 两成员真回复（「大家好，我是微软…」「大家好，我是风格和…」） |
+| router(auto) | `room.routed {everyone:true}` → 成员真回复 |
+| MCP（模型内调用）| `mcp_list` 发现 deepwiki（serverInfo/tools）→ `mcp_call ask_wiki_question(facebook/react)` 返回真实答案并中文总结；远端错误（仓库未索引）也如实回显 |
+| 技能目录 | search "git" → 4 条；install `watchers` → 落盘 SKILL.md + scripts/ |
+| MCP OAuth | notion dry-run：discovery + DCR 成功（client_id 注册） |
+
+同日新增宿主面：MCP OAuth（标准 DCR+PKCE+刷新）、本地技能目录（139 技能）、
+canonical approvals/retry/discard/router。**仍未做**：lead 路由、权限闸运行时
+切换（引擎侧，见 pi-host-gaps §6）、message_agent/relay（引擎扩展）、display。

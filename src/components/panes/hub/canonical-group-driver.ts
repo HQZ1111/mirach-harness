@@ -86,6 +86,13 @@ interface RoomRun {
   task?: PlannedTask
   discussionEventId?: string | null
   threadId?: string | null
+  /** 在途审批（lane 的 pending_approval）→ canonical pending_actions。 */
+  pending?: {
+    request_id: string
+    description?: string
+    command?: string
+    choices: string[]
+  }
 }
 
 export interface CanonicalDriverStatus {
@@ -108,6 +115,11 @@ const runs = new Map<string, RoomRun>()
 const listeners = new Set<() => void>()
 let booted = false
 
+/** 本次应用内失败的任务（canonical Retry 用）：task_id → 任务坐标 + prompt。 */
+const failedTasks = new Map<string, { task: PlannedTask; member: RoomMember; discussionId: string }>()
+/** Retry 请求：房间 → 待强制重跑的任务（驱动循环优先消费）。 */
+const retryQueue = new Map<string, { task: PlannedTask; member: RoomMember; discussionId: string }>()
+
 function notify(): void {
   for (const listener of listeners) listener()
 }
@@ -128,11 +140,27 @@ export function canonicalDriverStatus(roomId: string): CanonicalDriverStatus {
         ...(typeof run.task?.round_index === 'number' ? { round_index: run.task.round_index } : {}),
       }]
     : []
+  const pendingActions = run?.pending && run.memberId && run.task
+    ? [{
+        kind: 'approval',
+        member_id: run.memberId,
+        task_id: run.task.task_id,
+        execution_generation: 1,
+        request_id: run.pending.request_id,
+        approval: {
+          request_id: run.pending.request_id,
+          command: run.pending.command,
+          description: run.pending.description,
+          // canonical UI 只发 once/deny；lane 的 session/always 选项不外露。
+          choices: run.pending.choices.filter((c) => c === 'once' || c === 'deny'),
+        },
+      }]
+    : []
   return {
     working: Boolean(run),
     // 全 0/空 = workspace 的 stopConfirmed 判定成立（无 stopping/deferred 残留）。
     counts: {},
-    pending_actions: [],
+    pending_actions: pendingActions,
     member_activity: activity,
     max_rounds: null,
   }
@@ -187,19 +215,17 @@ function coordinates(task: PlannedTask, discussionEventId: string): Record<strin
 }
 
 // ── 成员会话 ────────────────────────────────────────────────────────────────
+//
+// 每个成员一棵会话：上游是「每 profile 一个 `Group: <room_id>`」（profile 目录
+// 天然隔离）；宿主单 profile，标题必须带成员名，否则两个成员共用一个会话
+// （实测：第二个成员的 prompt 进第一个成员的上下文，回复互相污染）。
 
-const roomSessionTitles = new Map<string, string>()
-
-function sessionTitle(roomId: string): string {
-  const known = roomSessionTitles.get(roomId)
-  if (known) return known
-  const title = `Group: ${roomId}`
-  roomSessionTitles.set(roomId, title)
-  return title
+function sessionTitle(roomId: string, profile: string): string {
+  return `Group: ${roomId} · ${profile}`
 }
 
-async function ensureMemberSession(roomId: string, profile: string): Promise<string> {
-  const title = sessionTitle(roomId)
+/** 按标题复用/新建一个 room_plumbing 会话（成员会话与 router 会话共用）。 */
+async function ensureSessionByTitle(title: string, profile: string): Promise<string> {
   try {
     const resumed = await request<{ session_id?: string }>('session.resume', {
       session_id: title,
@@ -221,9 +247,14 @@ async function ensureMemberSession(roomId: string, profile: string): Promise<str
   return created.session_id
 }
 
+async function ensureMemberSession(roomId: string, profile: string): Promise<string> {
+  return ensureSessionByTitle(sessionTitle(roomId, profile), profile)
+}
+
 async function resumeSnapshot(sessionId: string, profile: string): Promise<{
   running?: boolean
   messages?: ResumeMessage[]
+  pending_approval?: unknown
 }> {
   return request('session.resume', { session_id: sessionId, profile })
 }
@@ -263,11 +294,30 @@ async function runMemberTurn(
   for (;;) {
     if (run.cancelled) return { kind: 'failed', error: 'been cancelled' }
     await new Promise((resolve) => setTimeout(resolve, 1500))
-    let snapshot: { running?: boolean; messages?: ResumeMessage[] }
+    let snapshot: { running?: boolean; messages?: ResumeMessage[]; pending_approval?: unknown }
     try {
       snapshot = await resumeSnapshot(sessionId, member.profile)
     } catch (e) {
       return { kind: 'failed', error: e instanceof Error ? e.message : String(e) }
+    }
+    // 审批阻塞：把 lane 的 pending_approval 投影成 canonical pending action，
+    // 轮次继续等（用户 once/deny 后 lane 继续跑）。
+    const approval = snapshot.pending_approval
+    if (approval && typeof approval === 'object' && !Array.isArray(approval)) {
+      const row = approval as Record<string, unknown>
+      const requestId = typeof row.request_id === 'string' ? row.request_id : ''
+      if (requestId) {
+        run.pending = {
+          request_id: requestId,
+          description: typeof row.description === 'string' ? row.description : undefined,
+          command: typeof row.command === 'string' ? row.command : undefined,
+          choices: Array.isArray(row.choices) ? row.choices.filter((c): c is string => typeof c === 'string') : ['once', 'deny'],
+        }
+        notify()
+      }
+    } else if (run.pending) {
+      delete run.pending
+      notify()
     }
     if (snapshot.running) continue
 
@@ -288,6 +338,166 @@ async function runMemberTurn(
 
 // ── 驱动循环 ────────────────────────────────────────────────────────────────
 
+/**
+ * routing=auto：一次廉价模型调用选出下一轮应答者（hermes `hosted_room_router`
+ * 的宿主对偶）。答案按 `router::routed_payload` 的形状写 `room.routed`
+ * （event_id = `droute:<discussion>`，member_ids/everyone/fallback 同上游）。
+ * 调用/解析失败返回 false（调用方按 bounded 收尾），错误 console 可见。
+ */
+async function routeCanonicalRoom(
+  run: RoomRun,
+  room: NonNullable<RoomState['room']>,
+  discussionId: string,
+  threadId: string,
+): Promise<boolean> {
+  const members = room.members ?? []
+  if (!members.length) return false
+  try {
+    const log = await invoke<{ events?: { kind?: string; payload?: Record<string, unknown> }[] }>(
+      'groups_dispatch',
+      { method: 'groups.log', params: { room_id: run.roomId, since_seq: 0, limit: 200 } },
+    )
+    const membersById = new Set(members.map((m) => m.member_id))
+    const lines: string[] = []
+    for (const event of log?.events ?? []) {
+      const payload = event.payload ?? {}
+      if (event.kind === 'message.user') lines.push(`User: ${String(payload.text ?? '')}`)
+      if (event.kind === 'message.member') lines.push(`${String(payload.member_id ?? '')}: ${String(payload.text ?? '')}`)
+    }
+    const roster = members.map((m) => `${m.member_id} (${m.handle ?? m.member_id})`).join(', ')
+    const prompt = [
+      'You are the router for a group chat. Pick which participants should reply next.',
+      `Participants: ${roster}`,
+      'Recent messages:',
+      ...lines.slice(-20),
+      '',
+      'Reply with ONE JSON object only: {"member_ids":["<member_id>", ...]} or {"everyone":true}.',
+      'Choose the member(s) most relevant to the latest messages; pick one unless several are explicitly addressed.',
+    ].join('\n')
+
+    const profile = members[0].profile
+    const sessionId = await ensureSessionByTitle(`Router: ${run.roomId}`, profile)
+    const before = await resumeSnapshot(sessionId, profile)
+    const baseline = Array.isArray(before.messages) ? before.messages.length : 0
+    await request('prompt.submit', { session_id: sessionId, text: prompt, profile })
+
+    let reply = ''
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const snapshot = await resumeSnapshot(sessionId, profile)
+      if (snapshot.running) continue
+      const fresh = (snapshot.messages ?? []).slice(baseline)
+      const texts = fresh
+        .filter((row) => row.role === 'assistant')
+        .map((row) => String(row.text ?? row.content ?? '').trim())
+        .filter(Boolean)
+      reply = texts[texts.length - 1] ?? ''
+      break
+    }
+    const match = reply.match(/\{[\s\S]*\}/)
+    if (!match) throw new Error(`router 输出不是 JSON: ${reply.slice(0, 120)}`)
+    const parsed = JSON.parse(match[0]) as { member_ids?: unknown; everyone?: unknown }
+    const names = Array.isArray(parsed.member_ids)
+      ? parsed.member_ids.filter((id): id is string => typeof id === 'string' && membersById.has(id))
+      : []
+    const everyone = parsed.everyone === true || names.length === 0
+    await invoke('groups_dispatch', {
+      method: 'groups.driver_append',
+      params: {
+        room_id: run.roomId,
+        event_id: `droute:${discussionId}`,
+        kind: 'room.routed',
+        actor: { kind: 'gateway', id: room.authority_gateway_id ?? '' },
+        payload: {
+          discussion_event_id: discussionId,
+          thread_id: threadId,
+          member_ids: everyone ? [] : names,
+          everyone,
+          fallback: everyone,
+        },
+      },
+    })
+    return true
+  } catch (e) {
+    console.error('[canonical-driver] router 调用失败——按 bounded 收尾', e)
+    return false
+  }
+}
+
+async function executeMemberTask(
+  run: RoomRun,
+  room: NonNullable<RoomState['room']>,
+  task: PlannedTask,
+  discussionId: string,
+  member: RoomMember,
+): Promise<'done' | 'cancelled'> {
+  const gatewayActor: Record<string, unknown> = { kind: 'gateway', id: room.authority_gateway_id ?? '' }
+  const memberActor: Record<string, unknown> = {
+    kind: 'member',
+    id: member.member_id,
+    profile: member.profile,
+  }
+
+  run.task = task
+  run.discussionEventId = discussionId
+  run.threadId = task.thread_id ?? null
+  run.memberId = task.member_id
+  run.startedAt = Date.now()
+  notify()
+
+  const outcome = await runMemberTurn(run, task, member)
+  run.memberId = undefined
+  run.startedAt = undefined
+  delete run.pending
+  notify()
+
+  if (run.cancelled) {
+    await appendEvent(run.roomId, 'turn.cancelled', gatewayActor, {
+      ...coordinates(task, discussionId),
+      seen_through_seq: task.seen_through_seq,
+      reason: 'stopped',
+    })
+    return 'cancelled'
+  }
+
+  if (outcome.kind === 'replied') {
+    const messageEventId = eventId()
+    await invoke('groups_dispatch', {
+      method: 'groups.driver_append',
+      params: {
+        room_id: run.roomId,
+        event_id: messageEventId,
+        kind: 'message.member',
+        actor: memberActor,
+        payload: { ...coordinates(task, discussionId), text: outcome.text },
+      },
+    })
+    await appendEvent(run.roomId, 'turn.settled', gatewayActor, {
+      ...coordinates(task, discussionId),
+      seen_through_seq: task.seen_through_seq,
+      message_event_id: messageEventId,
+      passed: false,
+    })
+  } else if (outcome.kind === 'passed') {
+    await appendEvent(run.roomId, 'turn.settled', gatewayActor, {
+      ...coordinates(task, discussionId),
+      seen_through_seq: task.seen_through_seq,
+      message_event_id: null,
+      passed: true,
+    })
+  } else {
+    // 保留失败任务的 prompt/成员，供 canonical 的 Retry 重跑。
+    failedTasks.set(task.task_id, { task, member, discussionId })
+    await appendEvent(run.roomId, 'turn.failed', gatewayActor, {
+      ...coordinates(task, discussionId),
+      seen_through_seq: task.seen_through_seq,
+      error: outcome.error,
+      reason_code: 'turn_failed',
+    })
+  }
+  return 'done'
+}
+
 async function driveRoom(roomId: string): Promise<void> {
   if (runs.has(roomId)) return
   const run: RoomRun = { roomId, cancelled: false }
@@ -301,13 +511,35 @@ async function driveRoom(roomId: string): Promise<void> {
       const state = await readRoomState(roomId)
       const room = state.room
       if (!room || room.room_id !== roomId) throw new Error(`driver: 房间 ${roomId} 读不到`)
-      const gatewayActor: Record<string, unknown> = { kind: 'gateway', id: room.authority_gateway_id ?? '' }
+
+      // Retry：用户按「重试」后优先重跑该成员的任务（坐标不变）。
+      const forced = retryQueue.get(roomId)
+      if (forced) {
+        retryQueue.delete(roomId)
+        const result = await executeMemberTask(run, room, forced.task, forced.discussionId, forced.member)
+        if (result === 'cancelled') break
+        continue
+      }
 
       const plan = await planRoom(roomId)
 
       if (plan.status !== 'task' || !plan.task) {
         const threadId = plan.thread_id ?? ''
         const discussionId = plan.discussion_event_id ?? ''
+        const gatewayActor: Record<string, unknown> = { kind: 'gateway', id: room.authority_gateway_id ?? '' }
+        if (plan.status === 'route') {
+          // routing=auto：用一次廉价模型调用决定谁来接（hermes
+          // hosted_room_router 的宿主对偶）。失败/无法解析 → 按 bounded 收尾。
+          const routed = await routeCanonicalRoom(run, room, discussionId, threadId)
+          if (routed) continue
+          await appendEvent(roomId, 'room.activity', gatewayActor, {
+            status: 'bounded',
+            reason_code: 'router_unsupported',
+            thread_id: threadId,
+            discussion_event_id: discussionId,
+          })
+          break
+        }
         if (plan.status === 'settled') {
           await appendEvent(roomId, 'room.activity', gatewayActor, {
             status: 'settled',
@@ -322,14 +554,6 @@ async function driveRoom(roomId: string): Promise<void> {
             thread_id: threadId,
             discussion_event_id: discussionId,
           })
-        } else if (plan.status === 'route') {
-          // routing=auto 需要一次路由模型调用；宿主不做，如实收尾。
-          await appendEvent(roomId, 'room.activity', gatewayActor, {
-            status: 'bounded',
-            reason_code: 'router_unsupported',
-            thread_id: threadId,
-            discussion_event_id: discussionId,
-          })
         }
         break
       }
@@ -340,13 +564,13 @@ async function driveRoom(roomId: string): Promise<void> {
         console.error('[canonical-driver] plan 给了 task 但缺 discussion_event_id——无法写回坐标')
         break
       }
-      run.task = task
-      run.discussionEventId = discussionId
-      run.threadId = task.thread_id ?? plan.thread_id ?? null
 
       const member = (room.members ?? []).find((m) => m.member_id === task.member_id)
       if (!member?.profile) {
-        await appendEvent(roomId, 'turn.failed', gatewayActor, {
+        await appendEvent(roomId, 'turn.failed', {
+          kind: 'gateway',
+          id: room.authority_gateway_id ?? '',
+        }, {
           ...coordinates(task, discussionId),
           seen_through_seq: task.seen_through_seq,
           error: `房间名册里找不到成员 ${task.member_id}`,
@@ -355,58 +579,8 @@ async function driveRoom(roomId: string): Promise<void> {
         break
       }
 
-      const memberActor: Record<string, unknown> = {
-        kind: 'member',
-        id: member.member_id,
-        profile: member.profile,
-      }
-      const outcome = await runMemberTurn(run, task, member)
-      run.memberId = undefined
-      run.startedAt = undefined
-      notify()
-
-      if (run.cancelled) {
-        await appendEvent(roomId, 'turn.cancelled', gatewayActor, {
-          ...coordinates(task, discussionId),
-          seen_through_seq: task.seen_through_seq,
-          reason: 'stopped',
-        })
-        break
-      }
-
-      if (outcome.kind === 'replied') {
-        const messageEventId = eventId()
-        await invoke('groups_dispatch', {
-          method: 'groups.driver_append',
-          params: {
-            room_id: roomId,
-            event_id: messageEventId,
-            kind: 'message.member',
-            actor: memberActor,
-            payload: { ...coordinates(task, discussionId), text: outcome.text },
-          },
-        })
-        await appendEvent(roomId, 'turn.settled', gatewayActor, {
-          ...coordinates(task, discussionId),
-          seen_through_seq: task.seen_through_seq,
-          message_event_id: messageEventId,
-          passed: false,
-        })
-      } else if (outcome.kind === 'passed') {
-        await appendEvent(roomId, 'turn.settled', gatewayActor, {
-          ...coordinates(task, discussionId),
-          seen_through_seq: task.seen_through_seq,
-          message_event_id: null,
-          passed: true,
-        })
-      } else {
-        await appendEvent(roomId, 'turn.failed', gatewayActor, {
-          ...coordinates(task, discussionId),
-          seen_through_seq: task.seen_through_seq,
-          error: outcome.error,
-          reason_code: 'turn_failed',
-        })
-      }
+      const result = await executeMemberTask(run, room, task, discussionId, member)
+      if (result === 'cancelled') break
     }
   } catch (e) {
     console.error('[canonical-driver] 驱动失败（房间保持现状，下次发送/启动会重试）', roomId, e)
@@ -438,11 +612,62 @@ export async function stopCanonicalRoom(roomId: string): Promise<void> {
   }
 }
 
+/** 审批答复（canonical `groups.approve` → lane `approval.respond`）。 */
+export async function approveCanonicalAction(
+  roomId: string,
+  requestId: string,
+  choice: string,
+): Promise<void> {
+  const run = runs.get(roomId)
+  if (!run?.sessionId) throw new Error('没有在途成员轮次可审批')
+  await request('approval.respond', {
+    session_id: run.sessionId,
+    request_id: requestId,
+    choice,
+  })
+  if (run.pending?.request_id === requestId) {
+    delete run.pending
+    notify()
+  }
+}
+
+/**
+ * Retry：重跑本次应用内失败的任务（坐标不变，重跑结果写回同一 (round, member)）。
+ * 应用重启后失败任务的 prompt 已不在内存——明确报错，不假装能重试。
+ */
+export function retryCanonicalTask(roomId: string, memberId: string, taskId: string): void {
+  const entry = failedTasks.get(taskId)
+  if (!entry || entry.member.member_id !== memberId) {
+    throw new Error('这张失败卡已不可重试（应用重启后仅保留日志；再发一条消息让房间继续）')
+  }
+  retryQueue.set(roomId, entry)
+  kickCanonicalRoom(roomId)
+}
+
+/** Discard：把失败任务标成 cancelled，从当前轮次里收起。 */
+export async function discardCanonicalTask(
+  roomId: string,
+  memberId: string,
+  taskId: string,
+): Promise<void> {
+  const entry = failedTasks.get(taskId)
+  if (!entry || entry.member.member_id !== memberId) {
+    throw new Error('这张失败卡已不可丢弃（应用重启后仅保留日志）')
+  }
+  const state = await readRoomState(roomId)
+  const gateway = state.room?.authority_gateway_id ?? ''
+  await appendEvent(roomId, 'turn.cancelled', { kind: 'gateway', id: gateway }, {
+    ...coordinates(entry.task, entry.discussionId),
+    seen_through_seq: entry.task.seen_through_seq,
+    reason: 'discarded',
+  })
+  failedTasks.delete(taskId)
+}
+
 /**
  * 应用启动时的恢复扫描：仍在跑的讨论（plan 给 task）重新驱动。
  * 由 `startBundledPlugins` 在插件注册完成后调用一次。
- */
-export async function startCanonicalGroupDriver(): Promise<void> {
+ */export async function startCanonicalGroupDriver(): Promise<void> {
   if (booted) return
   booted = true
   try {

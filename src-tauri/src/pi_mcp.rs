@@ -488,6 +488,43 @@ pub(crate) fn installed_names() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// 单个已配置服务器的原始 spec + 所在文件（OAuth 写回 headers 要用）。
+pub(crate) fn server_entry_full(name: &str) -> Result<Option<(Value, PathBuf)>, String> {
+    let global = global_config_path()?;
+    let (merged, _) = merged_entries(&global, None)?;
+    Ok(merged.get(name).map(|entry| (entry.value.clone(), entry.source_file.clone())))
+}
+
+/// 改写某个服务器条目的一个 header（RMW，其它键保留）。
+pub(crate) fn write_server_header(
+    path: &Path,
+    name: &str,
+    header: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut doc = read_json_document(path)?
+        .ok_or_else(|| format!("MCP 配置不存在: {}", path.display()))?;
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 配置顶层必须是 JSON object: {}", path.display()))?;
+    let servers = root
+        .get_mut(SERVERS_KEY)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("MCP 配置的 `{SERVERS_KEY}` 必须是 object: {}", path.display()))?;
+    let server = servers
+        .get_mut(name)
+        .ok_or_else(|| format!("MCP 服务器不存在: {name}"))?
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 服务器条目必须是 object: {name}"))?;
+    let headers = server
+        .entry("headers".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 服务器 {name} 的 headers 必须是 object"))?;
+    headers.insert(header.to_string(), Value::String(value.to_string()));
+    write_json_document_public(path, &doc, validate_mcp_document)
+}
+
 /// 写入一个 MCP 服务器到**全局**配置（`~/.rpi/agent/mcp.json`）。
 ///
 /// `cwd` 保留以兼容前端/注册签名；写路径固定全局（见文件头：项目级只读）。
@@ -743,8 +780,19 @@ pub fn pi_mcp_test_server(
 
     if kind == "http" {
         if let Some(url) = entry.value.get("url").and_then(Value::as_str) {
-            let headers: Vec<(String, String)> = entry
-                .value
+            // OAuth 服务器：token 快过期先刷新（刷新失败原样传播——测试结果
+            // 必须反映真实可用性）。
+            let oauth_managed = entry.value.get("headers").is_some();
+            if oauth_managed {
+                crate::pi_mcp_oauth::ensure_fresh(name)?;
+            }
+            // 刷新可能改写 headers（token 轮换），重新读一次条目。
+            let (refreshed, _) = merged_entries(&global_path, project_path.as_deref())?
+                .0
+                .get(name)
+                .map(|entry| (entry.value.clone(), ()))
+                .unwrap_or((entry.value.clone(), ()));
+            let headers: Vec<(String, String)> = refreshed
                 .get("headers")
                 .and_then(Value::as_object)
                 .map(|map| {

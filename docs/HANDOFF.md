@@ -55,6 +55,21 @@
     settled；界面出「回合失败」卡 / Round 状态 / Stop。差距：无租约/
     fencing/indeterminate 恢复、router(auto) 不支持、retry/discard/
     approvals 未桥接（`docs/bots-port-gaps.md` §3）。
+  - **2026-11-17 收尾（用户提供测试 key：`bbtoken.boywe.cn/v1`）**：
+    models.json 加 `BBT` provider 并设为默认 → **「真模型端到端」硬阻塞解除**。
+    成功链实机验证：主对话 1+1=2；canonical 群聊两成员真实自我介绍 +
+    handoff + settled；legacy 群聊真回复；router(auto) `room.routed` →
+    成员真回复；**MCP 模型内调用**（`mcp_list` 发现 deepwiki → `mcp_call
+    ask_wiki_question(facebook/react)` 返回真实答案并中文总结）；远端错误
+    如实回显。
+  - **新增宿主面**：`pi_mcp_oauth.rs`（MCP OAuth 标准 DCR+PKCE+刷新，目录扩到
+    64 条）；`pi_skills_catalog.rs`（hermes optional-skills 139 技能，
+    skills.manage 搜索/安装/删除，实机装 watchers）；canonical driver 补
+    **approvals 桥 / retry / discard / router(auto)**；`groups.capabilities`
+    方法表 16 项。
+  - **仍未做（引擎侧，见 `docs/pi-host-gaps.md` §6/§7）**：权限闸运行时切换
+    （rpi 迁移后 set_approval_mode/plan 系为只读，approval 卡触发需扩展通道）、
+    message_agent/relay（需会话层工具注册面）、display、canonical 租约级恢复。
   - **引擎侧缺口文档**：`docs/pi-host-gaps.md`（OAuth MCP / display /
     canonical 全语义所需 task 身份 / session.reclaimed / 多连接 peer）。
     结论：本轮所有补齐均在宿主侧完成，未改 `G:\pi-rust-main`（该树无 .git，

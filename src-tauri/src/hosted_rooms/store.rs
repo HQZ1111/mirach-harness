@@ -336,7 +336,16 @@ fn validate_actor_id(value: &Value, label: &str) -> RoomResult<String> {
     let Some(s) = value.as_str() else {
         return fail(format!("{label} must be a string"));
     };
-    Ok(common::identifier(s, label, MAX_ACTOR_ID_CHARS, true, None)?)
+    let trimmed = s.trim();
+    // 宿主扩展：成员 actor id 可能是中文机器人名 → Unicode 标识符也放行；
+    // gateway id（install:<id>）继续走 ASCII 标识符（含 `:`）。
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_ACTOR_ID_CHARS
+        || !(common::is_identifier(trimmed) || common::is_identifier_unicode(trimmed))
+    {
+        return fail(format!("invalid {label}"));
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn validate_room_name(value: &Value) -> RoomResult<String> {

@@ -5,22 +5,16 @@
 > 落地，不进本文。`G:\pi-rust-main` 当前是**无 .git 的源码镜像**，无法直接开
 > PR；需要时把本文条目拆成 patch 交给 pi 仓库。
 
-## 1. rpi-mcp-adapter 的 OAuth 支持（MCP 目录 56/66 条不可用）
+## 1. ~~rpi-mcp-adapter 的 OAuth 支持~~（宿主侧已补，2026-11-17 收尾）
 
-**事实**：hermes 的 `optional-mcps/` 目录 66 条里 **56 条是 OAuth**（Notion /
-Figma / Sentry / Linear / Supabase …）。rpi 的 MCP 适配扩展
-（`rpi_mcp_adapter.dll`，源码路径 `packages/rpi-mcp-adapter/src/jsonrpc.rs`）
-提供 `mcp_list / mcp_call / mcp_resource / mcp_request`，支持 stdio +
-Streamable HTTP + **配置好的 headers**，但没有 OAuth 2.1 / DCR / PKCE /
-token refresh（字符串表里无 oauth 相关实现）。
+**更新**：宿主自己实现了 OAuth 客户端（`src-tauri/src/pi_mcp_oauth.rs`）：
+RFC 9728/8414 discovery → DCR → PKCE S256 → 本机回调 → token 交换 → 把
+`Authorization: Bearer …` 写进 mcp.json 的 headers（适配器原样发送）；启动
+批量刷新 + 测试时按需刷新。目录扩到 **64 条（10 no-auth + 54 OAuth）**。
+实机 notion dry-run：discovery + DCR 成功。
 
-**宿主现状**：`mcp.catalog` 只暴露 **10 条 no-auth HTTP** 条目（可安装、可
-真实探测，见 `src-tauri/src/pi_mcp_catalog.rs`）；56 条 OAuth 条目不入目录
-（避免假入口）。显式 config 的 HTTP/stdio 服务器仍可用。
-
-**要引擎补的**：适配器内的 OAuth 流程（对齐 hermes `mcp_oauth_manager`：
-discovery / DCR / PKCE / token 存储与刷新），并让 `mcp_list` 首次连接时自动
-走浏览器授权。
+**剩余引擎侧可选项**：把 OAuth 放进扩展内（`mcp_list` 首次连接自动授权、
+token 存 OS keyring），可省掉宿主写 headers 这一层；非阻塞。
 
 ## 2. Display / Bot Desktop（屏幕门户、屏幕面板、display.lease/observe）
 
@@ -77,12 +71,47 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
 **结论**：不是"缺实现"，是宿主架构没有该概念；除非 pi 支持多引擎/多网关
 （或宿主自建网关网格），否则不做。
 
+## 6. 权限闸运行时切换 / 审批卡触发（rpi 迁移后的欠账）
+
+**事实**：rpi 把「审批模式」拆给扩展承担——`RPI_PERMISSION_GATE=1` 或
+`rpi-permissions` / `rpi-permission-gate` 扩展在**会话构建时**读规则与 env；
+宿主没有运行时切换面。实测宿主：
+`pi_session.rs::set_approval_mode` / `set_plan_mode` / `decide_plan` 在 rpi
+迁移后都是**显式 Err**（早前 pi_agent_rust 的三态开关已不存在），
+`mode_state` 是只读投影。宿主前端的「计划/文件内修改/完全访问」切换与
+PlanReviewCard 目前是**只显示、切换报错**的降级态（代码里有注释，
+UI 未再承诺可用）。
+
+**影响**：canonical 群聊的 approvals 桥（lane `pending_approval` →
+driver_status.pending_actions → `groups.approve` → `approval.respond`）已实现，
+但**只有当成员会话里权限闸真的向宿主弹审批时才会出现卡片**；当前默认规则下
+bash/write 直接放行，卡片不触发。
+
+**要引擎/扩展补的**：①approval 三态（AlwaysAsk / Write / Yolo）的运行时
+切换接口（或让宿主设置 env + 重建会话的正式通道）；②权限闸把「工具要审批」
+经扩展 UI 邮箱（宿主已 attach）弹到宿主卡片的稳定通道。两者都属 pi 侧。
+
+## 7. agent 互发（message_agent 工具 / relay）
+
+**事实**：hermes 里 agent 互发 = 每个会话注入 `message_agent` 工具，工具经
+网关 relay 投递到目标 bot 的 canonical 会话。宿主没有工具注入口
+（`SessionOptions` 等价面不存在），relay RPC 也只是跨网关 mailbox
+（单身份 → 空）。宿主侧已如实返回空/报错，不伪造。
+
+**要引擎补的**：①会话层暴露「宿主自定义工具」注册面（或官方 message_agent
+扩展）——工具实现可回调宿主（本地 HTTP / CLI 均可），宿主把消息写进目标 bot
+的 bot-lane 会话；②或提供 relay outbox 的本地实现（单机 = 直投）。
+
 ---
 
 ## 附：宿主侧已用插件/适配层补齐、无需引擎改动的项（备查）
 
-- MCP 管理面（`pi_mcp.rs`）+ 预设目录（`pi_mcp_catalog.rs`）+ 真 HTTP 探测。
-- 群聊 legacy 驱动（prompt.submit → `pi_bot.rs` 泳道）。
+- MCP 管理面（`pi_mcp.rs`）+ 预设目录（`pi_mcp_catalog.rs`，64 条）+
+  真 HTTP 探测 + **OAuth（标准 DCR，`pi_mcp_oauth.rs`）**。
+- 技能目录（`pi_skills_catalog.rs`，139 技能；`skills.manage` 搜索/安装/删除）。
+- 群聊 legacy 驱动（prompt.submit → `pi_bot.rs` 泳道）与 canonical 最小驱动
+  （`canonical-group-driver.ts`：含 approvals 桥、retry/discard、
+  router(auto)；实机成功回复已验证）。
 - bot 花名册/单聊/例程的 `profiles.* / cron.* / cli.exec`。
 - 事件 `message.complete / error`（bot 泳道生产）。
 - composer / chat-empty / command.palette / 能力面板导出等全部宿主贡献面。

@@ -57,6 +57,10 @@ mod pi_mcp;
 // MCP 预设目录（hermes `optional-mcps/` 的宿主可执行子集；见 pi_mcp_catalog.rs
 // 头注：rpi-mcp-adapter 不支持 OAuth，只收 no-auth HTTP 条目）。
 mod pi_mcp_catalog;
+// MCP OAuth（标准 DCR + PKCE；宿主对偶 hermes mcp_oauth_manager）。
+mod pi_mcp_oauth;
+// 本地技能目录（hermes optional-skills 的宿主复制；skills.manage 的搜索/安装面）。
+mod pi_skills_catalog;
 // pi 扩展的加载面（2026-11-02）：照 pi CLI 的做法用 ResourceLoader 解析
 // 扩展路径并交给会话。此前宿主恒传空 extension_paths，pi::extensions 的
 // 整套能力（工具注册/斜杠命令/事件钩子）在宿主里等于不存在。
@@ -1794,6 +1798,12 @@ fn main() {
             pi_mcp::pi_mcp_set_api_key,
             pi_mcp_catalog::pi_mcp_catalog,
             pi_mcp_catalog::pi_mcp_install_preset,
+            pi_mcp_oauth::pi_mcp_oauth_complete,
+            pi_mcp_oauth::pi_mcp_oauth_refresh,
+            pi_mcp_oauth::pi_mcp_oauth_refresh_all,
+            pi_skills_catalog::pi_skills_search,
+            pi_skills_catalog::pi_skill_install,
+            pi_skills_catalog::pi_skill_remove,
             pi_extensions::pi_extensions,
             pi_cron::pi_cron_jobs,
             pi_cron::pi_cron_job,

@@ -35,8 +35,18 @@ struct CatalogEntry {
     #[serde(default)]
     source: String,
     url: String,
+    /// `none` | `oauth`（OAuth = 宿主标准 DCR 流程；只有需要手工 client 的
+    /// 厂商被生成器排除）。
+    #[serde(default = "default_auth")]
+    auth: String,
+    #[serde(default)]
+    requires: Vec<String>,
     #[serde(default)]
     suggest_keywords: Vec<String>,
+}
+
+fn default_auth() -> String {
+    "none".to_owned()
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,9 +80,8 @@ pub fn pi_mcp_catalog() -> Result<Value, String> {
                 "source": e.source,
                 "url": e.url,
                 "suggestKeywords": e.suggest_keywords,
-                "auth": "none",
-                // 宿主可执行条目都不需要凭据；保留字段让插件 UI 形状一致。
-                "requires": [],
+                "auth": e.auth,
+                "requires": e.requires,
                 "installed": installed.contains(&e.name),
                 "fromCatalog": true,
             })
