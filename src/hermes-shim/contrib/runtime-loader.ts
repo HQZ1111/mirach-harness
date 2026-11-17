@@ -91,9 +91,9 @@ interface RuntimePluginContext {
   runAction: (id: string) => { ok: boolean; error?: string }
   listActions: () => unknown[]
   storage: {
-    get: (key: string, fallback: string) => string
-    set: (key: string, value: string) => void
-    delete: (key: string) => void
+    get: <T>(key: string, fallback?: T) => T
+    set: (key: string, value: unknown) => void
+    remove: (key: string) => void
   }
   i18n: {
     t: (key: string, ...args: unknown[]) => string
@@ -271,25 +271,39 @@ export function createContext(pluginId: string, disposers: (() => void)[]): Runt
     runAction: (id) => ({ ok: false, error: `host 未接线 runAction(${id})` }),
     listActions: () => [],
     storage: {
-      get: (key, fallback) => {
+      // 上游 `PluginContext.storage` 是**值级** KV（`get<T>(key, fallback): T`，
+      // `set(key, value: unknown)`，`remove(key)`）——value 可以是对象/布尔，
+      // 不是字符串。宿主落 localStorage，必须 JSON 序列化；早期版本直接
+      // `setItem(key, value)` 会把对象写成 "[object Object]"、get 又回裸字符串，
+      // 插件（hermes-bots 的 bot meta / 分区 / 群聊记录）读到的类型全错。
+      get: <T,>(key: string, fallback?: T): T => {
         try {
-          return window.localStorage.getItem(storagePrefix + key) ?? fallback
-        } catch {
-          return fallback
+          const raw = window.localStorage.getItem(storagePrefix + key)
+          if (raw === null) return fallback as T
+          try {
+            return JSON.parse(raw) as T
+          } catch {
+            // 历史版本写入的裸字符串（未 JSON 序列化）——按原值读回；
+            // 下一次 set 会升级成 JSON 形态。
+            return raw as unknown as T
+          }
+        } catch (e) {
+          console.error(`[plugins] ${pluginId} storage.get 失败`, e)
+          return fallback as T
         }
       },
-      set: (key, value) => {
+      set: (key: string, value: unknown) => {
         try {
-          window.localStorage.setItem(storagePrefix + key, value)
+          window.localStorage.setItem(storagePrefix + key, JSON.stringify(value))
         } catch (e) {
           console.error(`[plugins] ${pluginId} storage.set 失败`, e)
         }
       },
-      delete: (key) => {
+      remove: (key: string) => {
         try {
           window.localStorage.removeItem(storagePrefix + key)
-        } catch {
-          /* nonfatal */
+        } catch (e) {
+          console.error(`[plugins] ${pluginId} storage.remove 失败`, e)
         }
       },
     },

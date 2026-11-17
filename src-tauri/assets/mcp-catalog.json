@@ -1,0 +1,755 @@
+{
+  "entries": [
+    {
+      "name": "airtable",
+      "description": "Bases, tables, and records from your Airtable workspace.",
+      "source": "https://support.airtable.com/articles/9897799762-using-the-airtable-mcp-server",
+      "url": "https://mcp.airtable.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "airtable"
+      ]
+    },
+    {
+      "name": "algolia",
+      "description": "Algolia search: indices, analytics, and settings (read-only).",
+      "source": "https://www.algolia.com/doc/guides/model-context-protocol/productivity-mcp",
+      "url": "https://mcp.algolia.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "algolia"
+      ]
+    },
+    {
+      "name": "alltrails",
+      "description": "AllTrails: find hikes and trails with reviews and ratings.",
+      "source": "https://www.alltrails.com/mcp",
+      "url": "https://www.alltrails.com/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "hiking",
+        "trail",
+        "alltrails"
+      ]
+    },
+    {
+      "name": "amplitude",
+      "description": "Amplitude analytics: charts, dashboards, experiments, flags.",
+      "source": "https://amplitude.com/docs/amplitude-ai/amplitude-mcp",
+      "url": "https://mcp.amplitude.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "amplitude"
+      ]
+    },
+    {
+      "name": "atlassian",
+      "description": "Jira issues and Confluence pages via Atlassian's hosted remote MCP.",
+      "source": "https://support.atlassian.com/rovo/docs/getting-started-with-the-atlassian-remote-mcp-server/",
+      "url": "https://mcp.atlassian.com/v1/mcp/authv2",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "jira",
+        "confluence",
+        "atlassian",
+        "bitbucket"
+      ]
+    },
+    {
+      "name": "attio",
+      "description": "CRM records, lists, and notes in Attio.",
+      "source": "https://attio.com/help/apps/other-apps/using-the-attio-mcp-server",
+      "url": "https://mcp.attio.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "attio",
+        "crm"
+      ]
+    },
+    {
+      "name": "aws-knowledge",
+      "description": "Authoritative AWS docs, API references, and best practices.",
+      "source": "https://awslabs.github.io/mcp/servers/aws-knowledge-mcp-server/",
+      "url": "https://knowledge-mcp.global.api.aws",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "aws docs",
+        "aws knowledge"
+      ]
+    },
+    {
+      "name": "betterstack",
+      "description": "Better Stack: logs, uptime monitors, incidents, and status pages.",
+      "source": "https://betterstack.com/docs/getting-started/integrations/mcp/",
+      "url": "https://mcp.betterstack.com",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "better stack",
+        "betterstack",
+        "uptime monitor"
+      ]
+    },
+    {
+      "name": "buildkite",
+      "description": "CI/CD pipelines, builds, and test results from Buildkite.",
+      "source": "https://buildkite.com/docs/apis/mcp-server",
+      "url": "https://mcp.buildkite.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "buildkite",
+        "ci"
+      ]
+    },
+    {
+      "name": "calendly",
+      "description": "Scheduling links, events, and invitees from Calendly.",
+      "source": "https://developer.calendly.com/calendly-mcp-server",
+      "url": "https://mcp.calendly.com",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "calendly",
+        "scheduling"
+      ]
+    },
+    {
+      "name": "canva",
+      "description": "Create, search, and manage Canva designs.",
+      "source": "https://www.canva.dev/docs/mcp/",
+      "url": "https://mcp.canva.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "canva",
+        "design"
+      ]
+    },
+    {
+      "name": "circleci",
+      "description": "CircleCI: diagnose build failures, read logs, rerun workflows.",
+      "source": "https://circleci.com/docs/guides/toolkit/circleci-mcp-overview/",
+      "url": "https://mcp.circleci.com/v1/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "circleci"
+      ]
+    },
+    {
+      "name": "clickup",
+      "description": "Tasks, docs, and workspaces in ClickUp.",
+      "source": "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server",
+      "url": "https://mcp.clickup.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "clickup",
+        "task"
+      ]
+    },
+    {
+      "name": "close",
+      "description": "Sales CRM: leads, opportunities, calls, and emails.",
+      "source": "https://help.close.com/docs/mcp-server",
+      "url": "https://mcp.close.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "close crm"
+      ]
+    },
+    {
+      "name": "cloudflare",
+      "description": "Full Cloudflare API access via the official remote MCP.",
+      "source": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/",
+      "url": "https://mcp.cloudflare.com/mcp?codemode=false",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": []
+    },
+    {
+      "name": "cloudinary",
+      "description": "Upload, search, and transform media assets in Cloudinary.",
+      "source": "https://cloudinary.com/documentation/cloudinary_llm_mcp",
+      "url": "https://asset-management.mcp.cloudinary.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "cloudinary",
+        "media assets"
+      ]
+    },
+    {
+      "name": "comfy-cloud",
+      "description": "Generate images, video, audio, and 3D on Comfy Cloud.",
+      "source": "https://docs.comfy.org/agent-tools/cloud",
+      "url": "https://cloud.comfy.org/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": []
+    },
+    {
+      "name": "context7",
+      "description": "Up-to-date, version-specific library docs and code examples.",
+      "source": "https://context7.com/docs/resources/all-clients",
+      "url": "https://mcp.context7.com/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "context7",
+        "library docs"
+      ]
+    },
+    {
+      "name": "craft",
+      "description": "Craft: structured docs, tasks, and personal knowledge base.",
+      "source": "https://support.craft.do/hc/en-us/articles/29455875123101",
+      "url": "https://mcp.craft.do/my/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "craft docs"
+      ]
+    },
+    {
+      "name": "datadog",
+      "description": "Logs, monitors, dashboards, and incidents from Datadog.",
+      "source": "https://docs.datadoghq.com/bits_ai/mcp_server/",
+      "url": "https://mcp.datadoghq.com/api/unstable/mcp-server/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "datadog",
+        "apm"
+      ]
+    },
+    {
+      "name": "deepwiki",
+      "description": "Ask questions about any public GitHub repo (Devin's DeepWiki).",
+      "source": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "deepwiki",
+        "repo wiki"
+      ]
+    },
+    {
+      "name": "dropbox",
+      "description": "Search, read, and manage files in Dropbox.",
+      "source": "https://help.dropbox.com/integrations/connect-dropbox-mcp-server",
+      "url": "https://mcp.dropbox.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "dropbox"
+      ]
+    },
+    {
+      "name": "figma",
+      "description": "Official Figma remote MCP — design context, Code Connect, and write-to-canvas via https://mcp.figma.com/mcp (OAuth).",
+      "source": "https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/",
+      "url": "https://mcp.figma.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "figma",
+        "mockup",
+        "wireframe"
+      ]
+    },
+    {
+      "name": "fireflies",
+      "description": "Meeting transcripts, summaries, and action items.",
+      "source": "https://docs.fireflies.ai/getting-started/mcp-configuration",
+      "url": "https://api.fireflies.ai/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "fireflies",
+        "meeting notes",
+        "transcript"
+      ]
+    },
+    {
+      "name": "gamma",
+      "description": "Gamma: generate and edit AI presentations, docs, and sites.",
+      "source": "https://developers.gamma.app/docs/gamma-mcp-server",
+      "url": "https://mcp.gamma.app/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "gamma",
+        "presentation"
+      ]
+    },
+    {
+      "name": "gitlab",
+      "description": "GitLab: issues, merge requests, pipelines, and repo context.",
+      "source": "https://docs.gitlab.com/user/model_context_protocol/mcp_server/",
+      "url": "https://gitlab.com/api/v4/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "gitlab",
+        "merge request"
+      ]
+    },
+    {
+      "name": "globalping",
+      "description": "Ping, traceroute, DNS, and HTTP tests from global probes.",
+      "source": "https://github.com/jsdelivr/globalping-mcp-server",
+      "url": "https://mcp.globalping.dev/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "globalping",
+        "traceroute",
+        "ping"
+      ]
+    },
+    {
+      "name": "grafana",
+      "description": "Query metrics, logs, dashboards, alerts, and incidents from Grafana Cloud.",
+      "source": "https://grafana.com/docs/grafana-cloud/ai-tools/mcp-servers/cloud-mcp/",
+      "url": "https://mcp.grafana.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "grafana",
+        "promql",
+        "logql",
+        "observability",
+        "dashboard"
+      ]
+    },
+    {
+      "name": "hugging_face",
+      "description": "Models, datasets, Spaces, and papers from the Hugging Face Hub.",
+      "source": "https://huggingface.co/docs/hub/agents-mcp",
+      "url": "https://huggingface.co/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "hugging face",
+        "huggingface"
+      ]
+    },
+    {
+      "name": "indeed",
+      "description": "Search jobs and listings on Indeed.",
+      "source": "https://docs.indeed.com/indeed-mcp",
+      "url": "https://mcp.indeed.com/claude/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "indeed",
+        "job search"
+      ]
+    },
+    {
+      "name": "intercom",
+      "description": "Conversations, tickets, and customer data from Intercom.",
+      "source": "https://developers.intercom.com/docs/guides/mcp",
+      "url": "https://mcp.intercom.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "intercom"
+      ]
+    },
+    {
+      "name": "kiwi",
+      "description": "Kiwi.com flight search: itineraries with direct booking links.",
+      "source": "https://www.kiwi.com/stories/kiwi-mcp-connector/",
+      "url": "https://mcp.kiwi.com",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "flight search",
+        "kiwi.com"
+      ]
+    },
+    {
+      "name": "klaviyo",
+      "description": "Klaviyo marketing: campaigns, flows, segments, and reporting.",
+      "source": "https://developers.klaviyo.com/en/docs/klaviyo_mcp_server",
+      "url": "https://mcp.klaviyo.com/mcp?core-tools-only=true&disable-tools-with-user-generated-content=true",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "klaviyo"
+      ]
+    },
+    {
+      "name": "linear",
+      "description": "Find, create, and update Linear issues, projects, and comments.",
+      "source": "https://linear.app/docs/mcp",
+      "url": "https://mcp.linear.app/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "linear"
+      ]
+    },
+    {
+      "name": "microsoft-learn",
+      "description": "Official Microsoft, Azure, and .NET docs and code samples.",
+      "source": "https://learn.microsoft.com/en-us/training/support/mcp-get-started",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "microsoft docs",
+        "azure docs",
+        "msdn"
+      ]
+    },
+    {
+      "name": "miro",
+      "description": "Read and edit Miro boards, diagrams, and frames.",
+      "source": "https://developers.miro.com/docs/connecting-to-miro-mcp",
+      "url": "https://mcp.miro.com/",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "miro",
+        "whiteboard"
+      ]
+    },
+    {
+      "name": "mixpanel",
+      "description": "Mixpanel analytics: events, funnels, retention, dashboards.",
+      "source": "https://docs.mixpanel.com/docs/mcp",
+      "url": "https://mcp.mixpanel.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "mixpanel"
+      ]
+    },
+    {
+      "name": "monday",
+      "description": "Boards, items, docs, and workflows in monday.com.",
+      "source": "https://developer.monday.com/apps/docs/mondaycom-mcp-integration",
+      "url": "https://mcp.monday.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "monday.com",
+        "monday board"
+      ]
+    },
+    {
+      "name": "motherduck",
+      "description": "MotherDuck: query DuckDB cloud warehouses with SQL.",
+      "source": "https://motherduck.com/docs/key-tasks/ai-and-motherduck/mcp-setup/",
+      "url": "https://api.motherduck.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "motherduck",
+        "duckdb"
+      ]
+    },
+    {
+      "name": "neon",
+      "description": "Neon serverless Postgres: projects, branches, and SQL.",
+      "source": "https://neon.com/docs/ai/neon-mcp-server",
+      "url": "https://mcp.neon.tech/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "neon",
+        "postgres"
+      ]
+    },
+    {
+      "name": "netlify",
+      "description": "Sites, deploys, and env vars via Netlify's hosted MCP.",
+      "source": "https://docs.netlify.com/build/build-with-ai/agent-setup-guides/agent-setup-overview/",
+      "url": "https://netlify-mcp.netlify.app/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "netlify"
+      ]
+    },
+    {
+      "name": "notion",
+      "description": "Pages and databases from your Notion workspace.",
+      "source": "https://developers.notion.com/docs/mcp",
+      "url": "https://mcp.notion.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "notion"
+      ]
+    },
+    {
+      "name": "paypal",
+      "description": "Payments, invoices, and subscriptions via PayPal's hosted MCP.",
+      "source": "https://developer.paypal.com/tools/mcp-server/",
+      "url": "https://mcp.paypal.com/sse",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "paypal"
+      ]
+    },
+    {
+      "name": "plaid",
+      "description": "Plaid dashboard: integrations, Items, and usage debugging.",
+      "source": "https://plaid.com/docs/resources/mcp/",
+      "url": "https://api.dashboard.plaid.com/mcp/",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "plaid"
+      ]
+    },
+    {
+      "name": "postman",
+      "description": "Postman workspaces, collections, environments, and APIs.",
+      "source": "https://learning.postman.com/docs/reference/postman-api/postman-mcp-server/postman-mcp-remote-server/",
+      "url": "https://mcp.postman.com/minimal",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "postman",
+        "api collection"
+      ]
+    },
+    {
+      "name": "prisma-postgres",
+      "description": "Create and manage Prisma Postgres databases.",
+      "source": "https://www.prisma.io/docs/postgres/integrations/mcp-server",
+      "url": "https://mcp.prisma.io/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "prisma"
+      ]
+    },
+    {
+      "name": "railway",
+      "description": "Railway: projects, services, deployments, and environments.",
+      "source": "https://docs.railway.com/guides/mcp-server",
+      "url": "https://mcp.railway.com",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "railway",
+        "railway deploy"
+      ]
+    },
+    {
+      "name": "rentahuman",
+      "description": "Find people and manage real-world work through RentAHuman.",
+      "source": "https://rentahuman.ai/docs#mcp",
+      "url": "https://rentahuman.ai/api/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "rentahuman",
+        "hire a human",
+        "real-world task"
+      ]
+    },
+    {
+      "name": "robinhood",
+      "description": "Robinhood agentic trading: portfolio, balances, and orders.",
+      "source": "https://robinhood.com/us/en/support/articles/agentic-trading-overview/",
+      "url": "https://agent.robinhood.com/mcp/trading",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "robinhood",
+        "stock trade"
+      ]
+    },
+    {
+      "name": "semgrep",
+      "description": "Scan code for security vulnerabilities with Semgrep.",
+      "source": "https://semgrep.dev/docs/mcp",
+      "url": "https://mcp.semgrep.ai/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "semgrep",
+        "static analysis"
+      ]
+    },
+    {
+      "name": "sentry",
+      "description": "Issues, stack traces, and error context from Sentry.",
+      "source": "https://docs.sentry.io/product/sentry-mcp/",
+      "url": "https://mcp.sentry.dev/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "sentry",
+        "stack trace",
+        "crash report"
+      ]
+    },
+    {
+      "name": "square",
+      "description": "Catalog, orders, and payments via Square's hosted MCP.",
+      "source": "https://developer.squareup.com/docs/mcp",
+      "url": "https://mcp.squareup.com/sse",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "squareup"
+      ]
+    },
+    {
+      "name": "strava",
+      "description": "Strava: activities, fitness trends, training load (read-only).",
+      "source": "https://support.strava.com/en-us/articles/15401531-strava-mcp-connector",
+      "url": "https://mcp.strava.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "strava",
+        "running",
+        "cycling"
+      ]
+    },
+    {
+      "name": "stripe",
+      "description": "Payments, customers, and invoices via Stripe's hosted MCP.",
+      "source": "https://docs.stripe.com/mcp",
+      "url": "https://mcp.stripe.com",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "stripe"
+      ]
+    },
+    {
+      "name": "supabase",
+      "description": "Database, auth, and storage from your Supabase projects.",
+      "source": "https://supabase.com/docs/guides/ai-tools/mcp",
+      "url": "https://mcp.supabase.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "supabase"
+      ]
+    },
+    {
+      "name": "todoist",
+      "description": "Manage Todoist tasks and projects.",
+      "source": "https://www.todoist.com/help/articles/todoist-mcp-server",
+      "url": "https://ai.todoist.net/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "todoist",
+        "todo"
+      ]
+    },
+    {
+      "name": "trivago",
+      "description": "trivago hotel search: compare prices by city and dates.",
+      "source": "https://mcp.trivago.com/mcp",
+      "url": "https://mcp.trivago.com/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "hotel search",
+        "trivago"
+      ]
+    },
+    {
+      "name": "twelve-data",
+      "description": "Stocks, forex, and crypto market data from Twelve Data.",
+      "source": "https://twelvedata.com/docs",
+      "url": "https://mcp.twelvedata.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "twelve data",
+        "stock price"
+      ]
+    },
+    {
+      "name": "twilio-docs",
+      "description": "Twilio developer docs search (public beta, read-only).",
+      "source": "https://www.twilio.com/docs/ai/mcp",
+      "url": "https://mcp.twilio.com/docs",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "twilio docs"
+      ]
+    },
+    {
+      "name": "unreal-engine",
+      "description": "Drive the Unreal Engine 5.8 editor over its local MCP server.",
+      "source": "https://dev.epicgames.com/documentation/unreal-engine/unreal-mcp-in-unreal-editor",
+      "url": "http://127.0.0.1:8000/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": []
+    },
+    {
+      "name": "vercel",
+      "description": "Deployments, logs, and projects via Vercel's hosted MCP.",
+      "source": "https://vercel.com/docs/mcp",
+      "url": "https://mcp.vercel.com",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "vercel"
+      ]
+    },
+    {
+      "name": "webflow",
+      "description": "Sites, CMS collections, and pages via Webflow's hosted MCP.",
+      "source": "https://developers.webflow.com/mcp/reference/getting-started",
+      "url": "https://mcp.webflow.com/mcp",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "webflow"
+      ]
+    },
+    {
+      "name": "wolfram",
+      "description": "Wolfram|Alpha computation, math, and curated knowledge.",
+      "source": "https://www.wolfram.com/agent-tools/",
+      "url": "https://agenttools.wolfram.com/mcp",
+      "auth": "none",
+      "requires": [],
+      "suggestKeywords": [
+        "wolfram",
+        "wolfram alpha",
+        "computation"
+      ]
+    },
+    {
+      "name": "wordpress-com",
+      "description": "WordPress.com: posts, pages, drafts, stats, and comments.",
+      "source": "https://developer.wordpress.com/docs/mcp/",
+      "url": "https://public-api.wordpress.com/wpcom/v2/mcp/v1",
+      "auth": "oauth",
+      "requires": [],
+      "suggestKeywords": [
+        "wordpress"
+      ]
+    }
+  ]
+}

@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::pi_paths;
 use crate::pi_settings::{read_json_document, write_json_document_public};
@@ -479,6 +479,52 @@ pub fn pi_mcp_servers(cwd: Option<String>, project_trusted: bool) -> Result<McpS
     })
 }
 
+/// 已配置服务器名（合并视图；供 MCP 目录做 installed 标记）。
+pub(crate) fn installed_names() -> Result<Vec<String>, String> {
+    Ok(pi_mcp_servers(None, false)?
+        .servers
+        .into_iter()
+        .map(|row| row.name)
+        .collect())
+}
+
+/// 单个已配置服务器的原始 spec + 所在文件（OAuth 写回 headers 要用）。
+pub(crate) fn server_entry_full(name: &str) -> Result<Option<(Value, PathBuf)>, String> {
+    let global = global_config_path()?;
+    let (merged, _) = merged_entries(&global, None)?;
+    Ok(merged.get(name).map(|entry| (entry.value.clone(), entry.source_file.clone())))
+}
+
+/// 改写某个服务器条目的一个 header（RMW，其它键保留）。
+pub(crate) fn write_server_header(
+    path: &Path,
+    name: &str,
+    header: &str,
+    value: &str,
+) -> Result<(), String> {
+    let mut doc = read_json_document(path)?
+        .ok_or_else(|| format!("MCP 配置不存在: {}", path.display()))?;
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 配置顶层必须是 JSON object: {}", path.display()))?;
+    let servers = root
+        .get_mut(SERVERS_KEY)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("MCP 配置的 `{SERVERS_KEY}` 必须是 object: {}", path.display()))?;
+    let server = servers
+        .get_mut(name)
+        .ok_or_else(|| format!("MCP 服务器不存在: {name}"))?
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 服务器条目必须是 object: {name}"))?;
+    let headers = server
+        .entry("headers".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 服务器 {name} 的 headers 必须是 object"))?;
+    headers.insert(header.to_string(), Value::String(value.to_string()));
+    write_json_document_public(path, &doc, validate_mcp_document)
+}
+
 /// 写入一个 MCP 服务器到**全局**配置（`~/.rpi/agent/mcp.json`）。
 ///
 /// `cwd` 保留以兼容前端/注册签名；写路径固定全局（见文件头：项目级只读）。
@@ -501,6 +547,63 @@ pub fn pi_mcp_remove_server(cwd: String, name: String) -> Result<bool, String> {
         return Err("服务器名为空".into());
     }
     remove_server_at(&global_config_path()?, name)
+}
+
+/// 给已安装的 MCP 服务器写一个 env 变量（插件 `mcp.servers.set_api_key`
+/// 的宿主对偶；hermes 写 `.env`，宿主写 `mcpServers.<name>.env`——rpi
+/// adapter 在启动 stdio 子进程时读这个表）。
+///
+/// - 服务器必须已在全局配置里（不存在 → Err，不偷偷新建半截条目）；
+/// - 变量名按 `[A-Za-z_][A-Za-z0-9_]*` 校验；
+/// - 空值 = 删除该键（显式清除）。
+#[tauri::command(rename_all = "camelCase", async)]
+pub fn pi_mcp_set_api_key(
+    cwd: String,
+    name: String,
+    env_var: String,
+    value: String,
+) -> Result<(), String> {
+    let _ = cwd;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("服务器名为空".into());
+    }
+    let env_var = env_var.trim();
+    let valid = !env_var.is_empty()
+        && env_var
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()));
+    if !valid {
+        return Err(format!("非法 env 变量名: {env_var}"));
+    }
+
+    let path = global_config_path()?;
+    let mut doc = read_json_document(&path)?
+        .ok_or_else(|| format!("MCP 配置不存在: {}", path.display()))?;
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 配置顶层必须是 JSON object: {}", path.display()))?;
+    let servers = root
+        .get_mut(SERVERS_KEY)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("MCP 配置的 `{SERVERS_KEY}` 必须是 object: {}", path.display()))?;
+    let server = servers
+        .get_mut(name)
+        .ok_or_else(|| format!("MCP 服务器不存在: {name}"))?
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 服务器条目必须是 object: {name}"))?;
+    let env = server
+        .entry("env".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| format!("MCP 服务器 {name} 的 env 必须是 object"))?;
+    if value.is_empty() {
+        env.remove(env_var);
+    } else {
+        env.insert(env_var.to_string(), Value::String(value));
+    }
+    write_json_document_public(&path, &doc, validate_mcp_document)
 }
 
 // ── 测试 ───────────────────────────────────────────────────────────────────
@@ -639,13 +742,13 @@ fn validate_probe_target(entry: &MergedEntry) -> (String, Result<String, String>
 
 /// 测试一个 MCP 服务器。
 ///
-/// **取舍（重要）**：旧 pi 时代这里走 `McpManager::test` 真起进程并列出工具；
-/// 现在 MCP 能力在**引擎侧插件**（rpi-mcp-adapter）里，宿主进程既没有它的
-/// 句柄也没有 MCP 协议客户端——真连接测试只能在会话内由 `mcp_list` /
-/// `mcp_call` 完成。因此这里只做**配置合法性校验**：stdio 解析启动命令是否
-/// 存在于 PATH/文件系统，HTTP 解析 URL 语法。结果如实返回
-/// `ok: false`（没有连上）+ `error`（说明校验结论与"未做真实连接"），
-/// 绝不返回 `ok: true` 假装探测成功。
+/// **HTTP 条目做真实探测**（2026-11-17）：Streamable HTTP 的
+/// `initialize` → `notifications/initialized` → `tools/list` 三步，
+/// 返回真实工具表与 serverInfo（no-auth / 配置了 headers 的条目都可测）。
+///
+/// **stdio 条目只做配置校验**：MCP 能力在引擎侧插件（rpi-mcp-adapter）里，
+/// 宿主进程没有它的句柄；真实连接只能在会话内用 `mcp_list` / `mcp_call`。
+/// 结果如实返回 `ok:false` + 说明，绝不假装探测成功。
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_mcp_test_server(
     cwd: String,
@@ -674,6 +777,57 @@ pub fn pi_mcp_test_server(
     })?;
 
     let (kind, validation) = validate_probe_target(entry);
+
+    if kind == "http" {
+        if let Some(url) = entry.value.get("url").and_then(Value::as_str) {
+            // OAuth 服务器：token 快过期先刷新（刷新失败原样传播——测试结果
+            // 必须反映真实可用性）。
+            let oauth_managed = entry.value.get("headers").is_some();
+            if oauth_managed {
+                crate::pi_mcp_oauth::ensure_fresh(name)?;
+            }
+            // 刷新可能改写 headers（token 轮换），重新读一次条目。
+            let (refreshed, _) = merged_entries(&global_path, project_path.as_deref())?
+                .0
+                .get(name)
+                .map(|entry| (entry.value.clone(), ()))
+                .unwrap_or((entry.value.clone(), ()));
+            let headers: Vec<(String, String)> = refreshed
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let url_owned = url.to_owned();
+            let source_file = entry.source_file.display().to_string();
+            let provenance = entry.provenance;
+            let probe = std::thread::spawn(move || probe_http_mcp(&url_owned, &headers))
+                .join()
+                .map_err(|_| "MCP 探测线程崩溃".to_string())?;
+            return Ok(match probe {
+                Ok((info, tools)) => json!({
+                    "ok": true,
+                    "serverInfo": info,
+                    "tools": tools,
+                    "kind": "http",
+                    "configPath": source_file,
+                    "provenance": provenance,
+                }),
+                Err(error) => json!({
+                    "ok": false,
+                    "error": format!("真实连接失败：{error}"),
+                    "tools": [],
+                    "kind": "http",
+                    "configPath": source_file,
+                    "provenance": provenance,
+                }),
+            });
+        }
+    }
+
     let error = match validation {
         Ok(detail) => format!(
             "未连接：宿主进程无法驱动引擎侧 rpi-mcp-adapter，不能做真实连接/工具枚举。\
@@ -693,6 +847,141 @@ pub fn pi_mcp_test_server(
         "configPath": entry.source_file.display().to_string(),
         "provenance": entry.provenance,
     }))
+}
+
+// ── Streamable HTTP MCP 真实探测（initialize → initialized → tools/list）──
+
+fn json_rpc_body(id: Option<u64>, method: &str, params: Value) -> Value {
+    let mut body = Map::new();
+    body.insert("jsonrpc".to_owned(), Value::String("2.0".to_owned()));
+    if let Some(id) = id {
+        body.insert("id".to_owned(), json!(id));
+    }
+    body.insert("method".to_owned(), Value::String(method.to_owned()));
+    if !params.is_null() {
+        body.insert("params".to_owned(), params);
+    }
+    Value::Object(body)
+}
+
+/// 解析 MCP 的响应体：普通 JSON，或 `text/event-stream` 里最后一条 data JSON。
+fn parse_rpc_response(text: &str, content_type: &str) -> Result<Value, String> {
+    if content_type.contains("text/event-stream") {
+        let mut found: Option<Value> = None;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("data:") {
+                if let Ok(value) = serde_json::from_str::<Value>(rest.trim()) {
+                    found = Some(value);
+                }
+            }
+        }
+        return found.ok_or_else(|| "SSE 响应里没有 data JSON".to_owned());
+    }
+    serde_json::from_str::<Value>(text).map_err(|e| {
+        format!(
+            "响应不是 JSON（{e}）；body 前 200 字符：{}",
+            text.chars().take(200).collect::<String>()
+        )
+    })
+}
+
+fn probe_http_mcp(
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<(Value, Vec<Value>), String> {
+    use std::time::Duration;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("HTTP client 构造失败: {e}"))?;
+
+    let post = |body: &Value, session: Option<&str>| -> Result<(reqwest::StatusCode, String, Option<String>, String), String> {
+        let mut request = client
+            .post(url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream");
+        for (key, value) in headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+        if let Some(session) = session {
+            request = request.header("mcp-session-id", session);
+        }
+        let response = request
+            .json(body)
+            .send()
+            .map_err(|e| format!("请求失败: {e}"))?;
+        let status = response.status();
+        let session = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/json")
+            .to_owned();
+        let text = response
+            .text()
+            .map_err(|e| format!("读取响应失败: {e}"))?;
+        Ok((status, text, session, content_type))
+    };
+
+    let initialize = json_rpc_body(
+        Some(1),
+        "initialize",
+        json!({
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "mirach-harness", "version": "0" },
+        }),
+    );
+    let (status, text, session, content_type) = post(&initialize, None)?;
+    if !status.is_success() {
+        return Err(format!(
+            "initialize HTTP {status}：{}",
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    let init = parse_rpc_response(&text, &content_type)?;
+    if let Some(error) = init.get("error") {
+        return Err(format!("initialize 返回错误：{error}"));
+    }
+    let server_info = init
+        .pointer("/result/serverInfo")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let initialized = json_rpc_body(None, "notifications/initialized", Value::Null);
+    let (status, text, _, _) = post(&initialized, session.as_deref())?;
+    if !status.is_success() {
+        return Err(format!(
+            "notifications/initialized HTTP {status}：{}",
+            text.chars().take(200).collect::<String>()
+        ));
+    }
+
+    let list = json_rpc_body(Some(2), "tools/list", json!({}));
+    let (status, text, _, content_type) = post(&list, session.as_deref())?;
+    if !status.is_success() {
+        return Err(format!(
+            "tools/list HTTP {status}：{}",
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    let list_response = parse_rpc_response(&text, &content_type)?;
+    if let Some(error) = list_response.get("error") {
+        return Err(format!("tools/list 返回错误：{error}"));
+    }
+    let tools = list_response
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok((server_info, tools))
 }
 
 #[cfg(test)]

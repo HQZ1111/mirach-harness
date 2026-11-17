@@ -33,9 +33,11 @@ import {
   ComposerToolbar,
   ComposerVoice,
   ComposerVoiceButton,
-  useMentionMatches,
   useSlashMatches,
+  type ComposerPerson,
 } from '@/components/assistant-ui/elements/composer'
+import { useContributions } from '@/hermes-shim/contrib/react/use-contributions'
+import { COMPOSER_AT_COMPLETIONS_AREA } from '@/hermes-shim/contrib/composer-middleware'
 import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assistant-ui/elements/attachment.aui'
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
@@ -58,6 +60,13 @@ const PEOPLE = [
   { name: 'mirach', role: 'agent' },
   { name: 'reviewer', role: 'human' },
 ] as const
+
+/** 把末尾 @token 替换为选中的 handle。支持 `-` / `.` / `@connection` 的
+ *  贡献行形式（宿主原 `applyMention` 的 `[\w]*` 不认连字符，会把
+ *  `@my-bot` 的插入弄坏）。 */
+function applyMentionRow(value: string, name: string): string {
+  return value.replace(/@[\w@.-]*$/, `@${name} `)
+}
 
 /**
  * 官方 Dictation 三态（/elements/composer-voice）：active=从点下麦克风
@@ -148,7 +157,48 @@ export function ComposerWired() {
   const threadId = useAuiState((s) => s.threadListItem.id)
   const setText = input.setText
   const slash = useSlashMatches(value, COMMANDS)
-  const mentions = useMentionMatches(value, PEOPLE)
+  // @ 补全：静态行（宿主自带占位人员）+ `composer.atCompletions` 贡献行
+  // （hermes-bots 的机器人 handle）。上游语义：贡献行排在宿主行**之前**，
+  // 贡献声明的 handles 压掉同名宿主行（防重复）；单个源抛错只丢该源的行。
+  const atCompletions = useContributions(COMPOSER_AT_COMPLETIONS_AREA)
+  const mentions = useMemo<ComposerPerson[]>(() => {
+    const match = /@([\w@.-]*)$/.exec(value)
+    if (!match) return []
+    const query = (match[1] ?? '').toLowerCase()
+    const rows: ComposerPerson[] = []
+    const seen = new Set<string>()
+    const claimed = new Set<string>()
+    for (const contribution of atCompletions) {
+      const provide = (contribution.data as { provide?: unknown } | undefined)?.provide
+      if (typeof provide !== 'function') continue
+      try {
+        const items = (provide as (q: string) => unknown)(query)
+        if (!Array.isArray(items)) continue
+        for (const raw of items) {
+          const item = raw as { handles?: unknown; insert?: unknown }
+          const insert = typeof item?.insert === 'string' ? item.insert.trim() : ''
+          if (!insert) continue
+          const name = insert.replace(/^@/, '')
+          if (!name || seen.has(name)) continue
+          seen.add(name)
+          rows.push({ name, role: 'agent' })
+          if (Array.isArray(item.handles)) {
+            for (const handle of item.handles) claimed.add(String(handle).toLowerCase())
+          }
+        }
+      } catch (e) {
+        console.error(`[composer] @ 补全源 ${contribution.id} 抛错——丢弃该源的行`, e)
+      }
+    }
+    for (const person of PEOPLE) {
+      if (!person.name.toLowerCase().startsWith(query)) continue
+      if (claimed.has(`@${person.name.toLowerCase()}`)) continue
+      if (seen.has(person.name)) continue
+      seen.add(person.name)
+      rows.push({ name: person.name, role: person.role })
+    }
+    return rows
+  }, [atCompletions, value])
   const dictation = useDictation((text) => {
     const cur = value
     setText(cur ? cur + ' ' + text : text)
@@ -393,7 +443,7 @@ export function ComposerWired() {
       if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault()
         const p = mentions[Math.min(mentionIdx, n - 1)]
-        if (p) setText(value.replace(/@[\w]*$/, '@' + p.name + ' '))
+        if (p) setText(applyMentionRow(value, p.name))
         return
       }
       if (e.key === 'Escape') {
@@ -440,7 +490,7 @@ export function ComposerWired() {
                     key={p.name}
                     person={p}
                     active={i === Math.min(mentionIdx, mentions.length - 1)}
-                    onClick={() => setText(value.replace(/@[\w]*$/, '@' + p.name + ' '))}
+                    onClick={() => setText(applyMentionRow(value, p.name))}
                   />
                 ))}
               </ComposerMenu>

@@ -51,6 +51,15 @@ import {
   type BotPatch,
   type BotPreset,
 } from '@/components/panes/hub/bots-store'
+import { hiddenSessionsStore } from '@/components/panes/hub/hidden-sessions'
+import {
+  approveCanonicalAction,
+  canonicalDriverStatus,
+  discardCanonicalTask,
+  kickCanonicalRoom,
+  retryCanonicalTask,
+  stopCanonicalRoom,
+} from '@/components/panes/hub/canonical-group-driver'
 
 // ── 本地 ui_meta 余字段表 ───────────────────────────────────────────────────
 
@@ -266,8 +275,11 @@ async function findSessionPath(sessionId: string): Promise<null | string> {
 
 function missingSession(sessionId: string): Error {
   const error = new Error(`session not found: ${sessionId}`)
-  // canonical-chat 的 isMissingSessionError 只看 data.reason / message
-  ;(error as Error & { data?: unknown }).data = { reason: 'not_found' }
+  // canonical-chat 的 isMissingSessionError 只看 data.reason / message；
+  // group-turns 的 isSessionAbsentError 还认 code 4007 / 4001——两个字段都给，
+  // 让"会话确实不存在 → 允许新建"的判定在两套 wire 上都成立。
+  ;(error as Error & { code?: number; data?: unknown }).data = { reason: 'not_found' }
+  ;(error as Error & { code?: number }).code = 4007
   return error
 }
 
@@ -276,6 +288,79 @@ async function requireSession(sessionId: string): Promise<PiSessionRow> {
   const row = rows.find((r) => r.id === sessionId)
   if (!row) throw missingSession(sessionId)
   return row
+}
+
+/** 按 id **或标题**找会话（上游 session.resume 的二者皆可语义：stored id
+ *  优先，没命中时按 title 找——群聊成员会话在 room 里存的是 stored id，
+ *  rehydrate 后丢了指针的旧房间按 `Group: <room> · <thread>` 标题找回）。 */
+async function findSessionByAnyIdOrTitle(target: string): Promise<null | PiSessionRow> {
+  const rows = await readSessions()
+  const byId = rows.find((r) => r.id === target)
+  if (byId) return byId
+  const trimmed = target.trim()
+  if (!trimmed) return null
+  return rows.find((r) => (r.name ?? '') === trimmed) ?? null
+}
+
+// ── session.resume 的消息投影（上游 transcript 形状）───────────────────────
+
+interface ResumeMessage {
+  role: string
+  text?: string
+  content?: string
+  display_kind?: string
+}
+
+/** pi 消息的文本面（string / 块数组的 text 块；toolResult/thinking 不进
+ *  transcript——上游 resume 同样只投影角色 + 文本）。 */
+function messageText(message: Record<string, unknown>): string {
+  const content = message.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return (content as { text?: unknown; type?: string }[])
+      .filter((p) => typeof p?.text === 'string' && (!p.type || p.type === 'text'))
+      .map((p) => p.text as string)
+      .join('')
+  }
+  return typeof message.text === 'string' ? message.text : ''
+}
+
+/**
+ * pi 会话消息 → 上游 `session.resume` 的 transcript 行。
+ *
+ * 三条语义（都是群聊读取端实读的字段）：
+ * - `[System:` 开头的 user 行是网关合成行，resume 直接丢弃（上游同款）；
+ * - 无文本的行（纯工具/思考）不产出——上游 transcript 不含工具行；
+ * - **失败轮**：`stopReason: error/aborted` 或带 `errorMessage` 的 assistant
+ *   消息产出 `display_kind: 'failed_turn'` 边界行（正文 = 错误信息；此前
+ *   的部分正文先按普通行产出）。这是房间引擎区分"成员回答"与"回合失败"
+ *   的唯一标记（group-external-writes.ts:82）。
+ */
+function projectResumeMessages(raw: Record<string, unknown>[]): ResumeMessage[] {
+  const out: ResumeMessage[] = []
+  for (const message of raw ?? []) {
+    const role = typeof message.role === 'string' ? message.role : null
+    if (!role) continue
+    const text = messageText(message).trim()
+    const stopReason = typeof message.stopReason === 'string' ? message.stopReason : ''
+    const errorMessage = typeof message.errorMessage === 'string' ? message.errorMessage : ''
+    const failed = role === 'assistant' && (stopReason === 'error' || (stopReason === 'aborted' && !text) || errorMessage !== '')
+    if (text) {
+      if (!(role === 'user' && text.startsWith('[System:'))) {
+        out.push({ role, text, content: text })
+      }
+    }
+    if (failed) {
+      if (stopReason === 'aborted' && !errorMessage) continue // 用户中断：无失败正文可报
+      out.push({
+        role,
+        text: errorMessage || '本轮在模型给出回答前结束（无错误详情）',
+        content: errorMessage || '本轮在模型给出回答前结束（无错误详情）',
+        display_kind: 'failed_turn',
+      })
+    }
+  }
+  return out
 }
 
 // ── 启动参数（与 bot-launch.ts 同源语义）───────────────────────────────────
@@ -331,6 +416,38 @@ async function createSessionForBot(
     throw new Error('pi_create_bot_session 未返回 sessionId')
   }
   return { session_id: sid, stored_session_id: sid }
+}
+
+// ── bot 泳道（后台成员会话）────────────────────────────────────────────────
+
+/** bot 预设 → pi_bot_* 命令的重建参数（`follow_profile_config` 语义：会话
+ *  每次重开都按成员预设的**当前**人格/模型/工具集装配）。 */
+async function botLaneConfig(profile: string): Promise<Record<string, unknown>> {
+  const bot = profile ? findBot(profile) : null
+  if (!bot) return {}
+  const systemPrompt = composeSystemPrompt(bot)
+  const { provider, modelId } = splitModel(bot.model)
+  const enabledTools = await enabledToolsFor(bot)
+  return {
+    ...(systemPrompt ? { systemPrompt } : {}),
+    ...(provider && modelId ? { provider, modelId } : {}),
+    ...(enabledTools ? { enabledTools } : {}),
+    profile: bot.name,
+  }
+}
+
+/** 按会话 id/标题定位并懒重开泳道会话（附件面的入口；prompt.submit 自带
+ *  懒重开，不走这里）。 */
+async function openBotLaneSession(sessionId: string, profile: string): Promise<PiSessionRow> {
+  const row = await findSessionByAnyIdOrTitle(sessionId)
+  if (!row) throw missingSession(sessionId)
+  const config = await botLaneConfig(profile)
+  await invoke('pi_bot_open', {
+    sessionId: row.id,
+    path: row.path,
+    ...config,
+  })
+  return row
 }
 
 // ── cron ────────────────────────────────────────────────────────────────────
@@ -513,6 +630,19 @@ export async function dispatchHostRequest<T>(
 
     case 'profiles.configure': {
       const name = String(params.name ?? '').trim()
+      if (!name) throw new Error('profiles.configure: name 不能为空')
+      // 上游群聊的共享投影同步（group-chat.ts:1152-1247）把房间快照写进
+      // profile `default` 的 ui_meta。宿主没有 gateway profile 表：这里
+      // 接受并落 meta 余字段表（键 'default'），返回 applied 让同步循环
+      // 不进入 8 次重试；读回面（profiles.list 的 default 行）不存在，
+      // 快照按本地 localStorage 为真相（单实例等价）。
+      if (name === 'default' && !findBot(name)) {
+        const uiMeta = params.ui_meta
+        if (uiMeta && typeof uiMeta === 'object' && !Array.isArray(uiMeta)) {
+          patchMetaExtras(name, uiMeta as UnknownMeta)
+        }
+        return { applied: { ui_meta: true } } as T
+      }
       const bot = findBot(name)
       if (!bot) throw new Error(`profiles.configure: profile 不存在：${name}`)
 
@@ -547,6 +677,11 @@ export async function dispatchHostRequest<T>(
         changed = true
       }
       if (Array.isArray(params.enabled_mcp_servers)) {
+        // 如实标注：宿主没有 per-session MCP 面（pi 按 mcp.json 全局加载），
+        // 这份名单是展示元数据 + describe 回显；勾选不改变引擎加载。
+        console.warn(
+          '[host-rpc] profiles.configure enabled_mcp_servers：宿主只保存展示名单（pi 的 MCP 由 mcp.json 全局加载，没有 per-bot 开关）',
+        )
         patchMetaExtras(name, { 'host-enabled-mcp-servers': params.enabled_mcp_servers })
       }
       if (changed) botsStore.getState().upsert(next)
@@ -584,6 +719,20 @@ export async function dispatchHostRequest<T>(
         skills?: { description?: string; enabled?: boolean; name: string }[]
         toolsets?: { key: string; description?: string; enabled?: boolean; label?: string }[]
       }>('pi_capabilities')
+      // MCP 服务器清单：宿主真相 = pi_mcp（全局 + 项目 mcp.json）。
+      // `enabled` 回显用户上次在编辑机器人里勾选的名单（meta 余字段）；
+      // 名单缺省 = 全部启用。注意 pi 按 mcp.json 全局加载——勾选名单是
+      // 展示元数据，不改变引擎加载（宿主没有 per-session MCP 面）。
+      const mcpSnapshot = await invoke<{
+        servers?: { command: null | string; envKeys?: string[]; name: string; url: null | string }[]
+      }>('pi_mcp_servers', {
+        cwd: bot.cwd || undefined,
+        projectTrusted: false,
+      })
+      const rawEnabled = readMetaExtras()[name]?.['host-enabled-mcp-servers']
+      const enabledSet = Array.isArray(rawEnabled)
+        ? new Set(rawEnabled.map(String))
+        : null
       return {
         soul: bot.systemPrompt,
         model: (() => {
@@ -600,7 +749,12 @@ export async function dispatchHostRequest<T>(
           description: t.description ?? t.label ?? '',
           enabled: t.enabled !== false,
         })),
-        mcp_servers: [],
+        mcp_servers: (mcpSnapshot?.servers ?? []).map((row) => ({
+          name: row.name,
+          enabled: enabledSet === null ? true : enabledSet.has(row.name),
+          description: row.command ?? row.url ?? '',
+          requires: row.envKeys ?? [],
+        })),
       } as T
     }
 
@@ -632,6 +786,26 @@ export async function dispatchHostRequest<T>(
         typeof params.title === 'string' && params.title.trim()
           ? params.title.trim()
           : (bot?.name ?? '新会话')
+      // 群聊成员会话（`room_plumbing: true`）：跑在**后台 bot 泳道**，不抢
+      // 前台活动会话；建好即登记进隐藏路径集（room 成员会话永不进侧栏）。
+      if (params.room_plumbing === true) {
+        const systemPrompt = bot ? composeSystemPrompt(bot) : ''
+        const { provider, modelId } = splitModel(bot?.model ?? '')
+        const enabledTools = bot ? await enabledToolsFor(bot) : null
+        const created = await invoke<{ sessionId: string; path: string }>('pi_bot_create_session', {
+          name: title,
+          ...(systemPrompt ? { systemPrompt } : {}),
+          ...(provider && modelId ? { provider, modelId } : {}),
+          ...(bot?.cwd ? { cwd: bot.cwd } : {}),
+          ...(enabledTools ? { enabledTools } : {}),
+          ...(bot ? { profile: bot.name } : {}),
+        })
+        hiddenSessionsStore.getState().hide(created.path)
+        return {
+          session_id: created.sessionId,
+          stored_session_id: created.sessionId,
+        } as T
+      }
       const created = await createSessionForBot(bot, title)
       // hermes 的 bot 会话天生 hidden（Bot Mode 拥有）；宿主没有 hidden 面，
       // 显示层按 bots-store 的双锚路径集过滤。canonical Bot Chat 一创建就
@@ -676,61 +850,482 @@ export async function dispatchHostRequest<T>(
     }
 
     case 'session.interrupt': {
+      // 群聊 Stop 带 stored id（成员会话）→ 路由到后台泳道；无 id / 目标 =
+      // 活动会话 → 前台 main lane。
+      const target = typeof params.session_id === 'string' ? params.session_id : ''
+      if (target) {
+        const st = await invoke<{ sessionId?: null | string }>('pi_get_state')
+        if (st?.sessionId !== target) {
+          return (await invoke('pi_bot_interrupt', { sessionId: target })) as T
+        }
+      }
       await invoke('pi_interrupt')
       return {} as T
     }
 
     case 'session.compress': {
+      // group-compress 对成员会话调 session.compress {session_id}——压缩目标
+      // 是后台泳道会话，不是前台活动会话。
+      const target = typeof params.session_id === 'string' ? params.session_id : ''
+      if (target) {
+        const st = await invoke<{ sessionId?: null | string }>('pi_get_state')
+        if (st?.sessionId !== target) {
+          return (await invoke('pi_bot_compact', { sessionId: target })) as T
+        }
+      }
       await invoke('pi_compact')
       return { compressed: true, status: 'done' } as T
     }
 
     case 'session.resume': {
-      const sessionId = String(params.session_id ?? '')
-      const row = await requireSession(sessionId)
-      // pi_get_session_messages 按**文件 path** 读（非活动会话的静态面）；
-      // 上游 session.resume 的 messages 形状是 [{role,text}] —— 这里只投影
-      // 文本面（群聊的 tool/审批游行另议，缺失字段上游自然跳过）。
-      const raw = await invoke<Record<string, unknown>[]>('pi_get_session_messages', {
-        path: row.path,
-      })
-      const messages = (raw ?? [])
-        .map((m) => {
-          const role = typeof m.role === 'string' ? m.role : null
-          if (!role) return null
-          const text =
-            typeof m.text === 'string'
-              ? m.text
-              : typeof m.content === 'string'
-                ? m.content
-                : Array.isArray(m.content)
-                  ? (m.content as { text?: unknown; type?: string }[])
-                      .filter((p) => p?.type === 'text' && typeof p.text === 'string')
-                      .map((p) => p.text as string)
-                      .join('')
-                  : ''
-          return text ? { role, text } : null
+      const target = String(params.session_id ?? '')
+      if (!target) throw new Error('session.resume 缺少 session_id')
+      // stored id 优先、标题兜底（上游语义；群聊 rehydrate 后按标题找回）。
+      const row = await findSessionByAnyIdOrTitle(target)
+      if (!row) throw missingSession(target)
+      const omitMessages = params.omit_messages === true
+      let messages: ResumeMessage[] = []
+      if (!omitMessages) {
+        const raw = await invoke<Record<string, unknown>[]>('pi_get_session_messages', {
+          path: row.path,
         })
-        .filter((m): m is { role: string; text: string } => m !== null)
+        messages = projectResumeMessages(raw)
+      }
+      // 后台泳道运行态（running / inflight / open_requests / pending_approval）
+      // ——未注册的会话（应用重启后第一次 resume）返回诚实空态。
+      const laneState = await invoke<Record<string, unknown>>('pi_bot_state', {
+        sessionId: row.id,
+      })
+      // 启动时 recover 出的 indeterminate 任务（引擎 task_lease）：取一次即清。
+      const recovered = await invoke<{ tasks?: unknown[] }>('pi_bot_take_recovered', {
+        sessionId: row.id,
+      }).catch((e) => {
+        console.error('[host-rpc] pi_bot_take_recovered 失败', e)
+        return { tasks: [] as unknown[] }
+      })
       return {
         session_id: row.id,
-        running: false,
-        message_count: messages.length,
-        messages,
+        session_key: row.id,
+        running: laneState?.running === true,
+        inflight:
+          laneState && laneState.inflight !== null && laneState.inflight !== undefined
+            ? laneState.inflight
+            : undefined,
+        turn_started_at:
+          typeof laneState?.turn_started_at === 'number' ? laneState.turn_started_at : null,
+        message_count: omitMessages
+          ? (typeof row.messageCount === 'number' ? row.messageCount : undefined)
+          : messages.length,
+        // omit_messages 时**不返回 messages 键**（上游同语义；群聊的
+        // `Array.isArray(pre.messages) ? pre.messages.length : pre.message_count`
+        // 基线判定依赖"缺键"走 message_count，空数组会被读成 0）。
+        ...(omitMessages ? { messages_omitted: true } : { messages }),
+        open_requests: Array.isArray(laneState?.open_requests) ? laneState.open_requests : [],
+        pending_approval:
+          laneState && laneState.pending_approval !== null && laneState.pending_approval !== undefined
+            ? laneState.pending_approval
+            : undefined,
+        // 引擎任务租约面（canonical driver 的 fencing / 重试用）。
+        task: laneState?.task ?? null,
+        tasks: Array.isArray(laneState?.tasks) ? laneState.tasks : [],
+        recovered_tasks: Array.isArray(recovered?.tasks) ? recovered.tasks : [],
       } as T
     }
 
+    case 'prompt.submit': {
+      // 群聊成员轮次（group-turns.ts）与 canvas 群聊的提交面：跑在后台
+      // bot 泳道（不抢前台活动会话）。admission 语义——立即返回，
+      // 完成靠轮询 session.resume / message.complete 事件。
+      const target = String(params.session_id ?? '')
+      const text = String(params.text ?? '')
+      if (!target) throw new Error('prompt.submit 缺少 session_id')
+      if (!text.trim()) throw new Error('prompt.submit 缺少 text')
+      const row = await findSessionByAnyIdOrTitle(target)
+      if (!row) throw missingSession(target)
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const config = await botLaneConfig(profile)
+      const result = await invoke<Record<string, unknown>>('pi_bot_prompt', {
+        sessionId: row.id,
+        text,
+        // 引擎任务租约的元数据（canonical driver 存房间坐标，恢复时用）。
+        taskMeta:
+          params.task_meta !== null && typeof params.task_meta === 'object'
+            ? params.task_meta
+            : undefined,
+        path: row.path,
+        ...config,
+      })
+      return { ...result, session_id: row.id } as T
+    }
+
+    case 'task.interrupt': {
+      // 引擎任务租约的带 fencing 中断（canonical driver 的 Stop/retry 用）。
+      const sessionId = String(params.session_id ?? '')
+      const taskId = String(params.task_id ?? '')
+      const generation = Number(params.execution_generation ?? 0)
+      if (!sessionId || !taskId || !Number.isSafeInteger(generation) || generation < 1) {
+        throw new Error('task.interrupt 缺少 session_id / task_id / execution_generation')
+      }
+      return (await invoke('pi_bot_interrupt_task', {
+        sessionId,
+        taskId,
+        executionGeneration: generation,
+      })) as T
+    }
+
+    case 'approval.respond': {
+      // 群聊审批回灌（answerGroupClarify 的 approval 分支）：session_id 是
+      // resume 快照里那条 runtime id；宿主按会话定位后台泳道的审批对话框。
+      const sessionId = typeof params.session_id === 'string' ? params.session_id : ''
+      const requestId = String(params.request_id ?? '')
+      const choice = typeof params.choice === 'string' && params.choice ? params.choice : 'deny'
+      if (!requestId) throw new Error('approval.respond 缺少 request_id')
+      if (!sessionId) {
+        throw new Error('approval.respond 需要 session_id（宿主按会话定位挂起的审批）')
+      }
+      await invoke('pi_bot_approval_respond', { sessionId, requestId, choice })
+      return { resolved: 1 } as T
+    }
+
+    case 'clarify.lock': {
+      // 群聊 clarify 逐题应答（调用点不带 session_id）——按 request_id 在
+      // 泳道注册表里找到持有它的会话。
+      const requestId = String(params.request_id ?? '')
+      const questionId = String(params.question_id ?? '')
+      if (!requestId || !questionId) throw new Error('clarify.lock 缺少 request_id / question_id')
+      return (await invoke('pi_bot_clarify_lock', {
+        sessionId: typeof params.session_id === 'string' ? params.session_id : undefined,
+        requestId,
+        questionId,
+        answer: typeof params.answer === 'string' ? params.answer : null,
+      })) as T
+    }
+
+    case 'file.attach': {
+      const target = String(params.session_id ?? '')
+      const dataUrl = String(params.data_url ?? '')
+      const name = typeof params.name === 'string' && params.name ? params.name : 'attachment'
+      if (!target) throw new Error('file.attach 缺少 session_id')
+      if (!dataUrl) throw new Error('file.attach 缺少 data_url')
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const row = await openBotLaneSession(target, profile)
+      return (await invoke('pi_bot_attach_file', {
+        sessionId: row.id,
+        dataUrl,
+        name,
+      })) as T
+    }
+
+    case 'image.attach_bytes': {
+      const target = String(params.session_id ?? '')
+      const content =
+        typeof params.content_base64 === 'string'
+          ? params.content_base64
+          : typeof params.data === 'string'
+            ? params.data
+            : ''
+      if (!target) throw new Error('image.attach_bytes 缺少 session_id')
+      if (!content) throw new Error('image.attach_bytes 缺少 content_base64')
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const row = await openBotLaneSession(target, profile)
+      return (await invoke('pi_bot_attach_image', {
+        sessionId: row.id,
+        contentBase64: content,
+        filename: typeof params.filename === 'string' ? params.filename : undefined,
+      })) as T
+    }
+
+    case 'model.options': {
+      // 编辑机器人 / 新建机器人的模型下拉（model-picker.tsx）：宿主模型
+      // 目录（models.json + models.dev 回填）按 provider 分组。
+      const res = await invoke<{
+        models?: { id: string; name?: string; provider: string; contextWindow?: number }[]
+      }>('pi_list_models')
+      const byProvider = new Map<
+        string,
+        { slug: string; name: string; models: { id: string; name: string }[]; total_models: number }
+      >()
+      for (const model of res?.models ?? []) {
+        if (!model?.provider || !model?.id) continue
+        const entry = byProvider.get(model.provider) ?? {
+          slug: model.provider,
+          name: model.provider,
+          models: [],
+          total_models: 0,
+        }
+        entry.models.push({ id: model.id, name: model.name ?? model.id })
+        entry.total_models = entry.models.length
+        byProvider.set(model.provider, entry)
+      }
+      return { providers: [...byProvider.values()] } as T
+    }
+
+    case 'image.generate': {
+      // hermes 的图像生成后端（avatars / 群聊图片）。宿主没有图片模型接入；
+      // probe 返回 available:false（UI 隐藏生成入口），真生成明确报错。
+      if (params.probe === true) {
+        return { available: false, error: '宿主没有图片生成后端' } as T
+      }
+      throw new Error('image.generate: 宿主没有图片生成后端（机器人头像请用上传图片或图形头像）')
+    }
+
+    case 'display.install': {
+      // 宿主不安装远程桌面服务；display.install.* 事件也不会有生产者。
+      throw new Error('display.install: 宿主没有安装流程（本机屏幕镜像无需安装）')
+    }
+
+    case 'display.observe': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_observe', {
+        profile: profile || undefined,
+        viewerId: typeof params.viewer_id === 'string' ? params.viewer_id : undefined,
+      })) as T
+    }
+
+    case 'display.thumbnail': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_thumbnail', { profile: profile || undefined })) as T
+    }
+
+    case 'display.start': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_start', { profile: profile || undefined })) as T
+    }
+
+    case 'display.lease.acquire': {
+      // 租约 = 本机屏幕的"谁在控制"记账（只有持 hash 的 viewer 可释放）。
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_lease_acquire', {
+        profile: profile || undefined,
+        viewerId: String(params.viewer_id ?? ''),
+      })) as T
+    }
+
+    case 'display.lease.release': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_lease_release', {
+        profile: profile || undefined,
+        viewerId: typeof params.viewer_id === 'string' ? params.viewer_id : undefined,
+        force: params.force === true,
+      })) as T
+    }
+
+    case 'mcp.catalog': {
+      // hermes `mcp.catalog` 的宿主对偶：内置目录 = `optional-mcps/` 里
+      // rpi-mcp-adapter 可执行的子集（no-auth HTTP，2026-11-17 移植 10 条；
+      // OAuth 条目引擎没有 token 管理，不入目录——见 pi_mcp_catalog.rs 头注）。
+      // 已装服务器从 pi_mcp 真快照回读，installed 标记如实。
+      const res = await invoke<{ entries?: unknown[] }>('pi_mcp_catalog')
+      return { servers: res?.entries ?? [] } as T
+    }
+
+    case 'mcp.servers.list': {
+      // mcp-setup 的 support 探针：返回宿主真实 MCP 快照（pi_mcp，
+      // 全局 + 项目 mcp.json）。列表体不被 UI 读取，只为 ok:true。
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const bot = profile ? findBot(profile) : null
+      const snapshot = await invoke<{ servers?: unknown[] }>('pi_mcp_servers', {
+        cwd: bot?.cwd || undefined,
+        projectTrusted: false,
+      })
+      return { ok: true, result: { servers: snapshot?.servers ?? [] } } as T
+    }
+
+    case 'mcp.servers.add': {
+      // 两种形态：
+      // 1) `preset: '<catalog name>'`（hermes 目录一键装）——解析内置目录，
+      //    往 `~/.rpi/agent/mcp.json` 写 `{url}`（pi_mcp_install_preset）；
+      // 2) 显式 `config`（url/command/args/env）——直装（pi_mcp_upsert_server）。
+      const name = String(params.name ?? '').trim()
+      if (!name) throw new Error('mcp.servers.add 缺少 name')
+      const preset = typeof params.preset === 'string' ? params.preset.trim() : ''
+      const config = params.config
+      if (!config || typeof config !== 'object' || Array.isArray(config)) {
+        if (!preset) {
+          throw new Error(
+            `mcp.servers.add: 缺少 config（url/command/args/env），且没有可解析的目录预设「${name}」`,
+          )
+        }
+        const installed = await invoke<{ installed?: boolean; url?: string }>('pi_mcp_install_preset', {
+          name: preset === name ? name : preset,
+        })
+        return { ok: true, result: { added: true, name, url: installed?.url } } as T
+      }
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const bot = profile ? findBot(profile) : null
+      await invoke('pi_mcp_upsert_server', {
+        // Rust 侧 cwd 是必填 String（写路径固定全局，空串 = 无项目上下文）。
+        cwd: bot?.cwd || '',
+        name,
+        spec: config,
+      })
+      return { ok: true, result: { added: true, name } } as T
+    }
+
+    case 'mcp.servers.remove': {
+      // 从全局 mcp.json 删服务器（hermes 连接器/编辑器的移除路径）。
+      const name = String(params.name ?? '').trim()
+      if (!name) throw new Error('mcp.servers.remove 缺少 name')
+      const removed = await invoke<boolean>('pi_mcp_remove_server', { cwd: '', name })
+      return { ok: true, result: { removed, name } } as T
+    }
+
+    case 'mcp.servers.set_api_key': {      // 插件对目录条目写 env 密钥（hermes 写 .env；宿主写 mcp.json 的
+      // `mcpServers.<name>.env`——rpi-mcp-adapter 启动 stdio 子进程时读取）。
+      // 服务器必须已安装（不偷偷新建半截条目）；空值 = 清除该键。
+      const name = String(params.name ?? '').trim()
+      const envVar = String(params.env_var ?? params.envVar ?? '').trim()
+      const value = typeof params.value === 'string' ? params.value : ''
+      if (!name) throw new Error('mcp.servers.set_api_key 缺少 name')
+      if (!envVar) throw new Error('mcp.servers.set_api_key 缺少 env_var')
+      await invoke('pi_mcp_set_api_key', { cwd: '', name, envVar, value })
+      return { ok: true, result: { name, env_var: envVar } } as T
+    }
+
+    case 'mcp.servers.test': {
+      // HTTP 条目 = 真实 Streamable HTTP 探测（initialize → initialized →
+      // tools/list，返回真工具表/serverInfo）；stdio 条目 = 配置校验 +
+      // 如实 ok:false（宿主进程驱动不了引擎侧 adapter）。包成上游双层信封，
+      // 让 mcp-setup 的错误行显示真实原因。
+      const name = String(params.name ?? '')
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const bot = profile ? findBot(profile) : null
+      const result = await invoke<Record<string, unknown>>('pi_mcp_test_server', {
+        cwd: bot?.cwd || '',
+        name,
+        projectTrusted: false,
+      })
+      return { ok: true, result } as T
+    }
+
+    case 'skills.manage': {
+      // 宿主技能目录 = hermes `optional-skills/` 的本地复制（22 分类 139 技能，
+      // 见 src-tauri/src/pi_skills_catalog.rs）。搜索真实命中；安装 = 整目录
+      // 复制到 ~/.rpi/agent/skills/<name>（rpi 的技能发现目录）。
+      const action = String(params.action ?? '')
+      if (action === 'search') {
+        const query = typeof params.query === 'string' ? params.query : ''
+        const res = await invoke<{
+          entries?: { name: string; description?: string; category?: string; installed?: boolean }[]
+        }>('pi_skills_search', { query })
+        return {
+          results: (res?.entries ?? []).map((entry) => ({
+            name: entry.name,
+            description: entry.description ?? '',
+          })),
+        } as T
+      }
+      if (action === 'install') {
+        // 插件把技能标识放在 `query`（skills-hub.tsx install()），兼容 name/identifier。
+        const name = String(params.query ?? params.name ?? params.identifier ?? '').trim()
+        if (!name) throw new Error('skills.manage install 缺少技能名')
+        const res = await invoke<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', { name })
+        return { ok: true, result: res } as T
+      }
+      if (action === 'remove' || action === 'uninstall') {
+        const name = String(params.query ?? params.name ?? '').trim()
+        if (!name) throw new Error('skills.manage remove 缺少技能名')
+        return (await invoke('pi_skill_remove', { name })) as T
+      }
+      throw new Error(`skills.manage 未知 action：${action}`)
+    }
+
+    case 'bot_relay.roster.sync': {
+      // 宿主单身份：没有"其它连接上的 agent 行"可同步。接受并返回 0
+      // （上游语义 = 本连接看到的远端 roster 为空），不伪造 agent 行。
+      return { count: 0 } as T
+    }
+
+    case 'bot_relay.outbox.drain': {
+      // 宿主没有跨网关 relay mailbox（bot 互发的 outbox 由发送侧网关落盘；
+      // 单连接没有发送侧）。空认领是真实状态；插件 30s 轮询会稳定空转，
+      // outbox.pending 事件不会有生产者（见 docs/bots-port-gaps.md）。
+      return { envelopes: [] } as T
+    }
+
+    case 'bot_relay.reply': {
+      throw new Error('bot_relay.reply: 宿主没有跨网关 relay mailbox，没有可回复的信封')
+    }
+
+    case 'bot_relay.deliver': {
+      throw new Error('bot_relay.deliver: 宿主没有跨网关 relay 通道（单身份），不伪造投递')
+    }
+
     case 'display.status': {
-      // 宿主没有 Bot Desktop / display 后端（pi 引擎无 display.* 概念）。
-      // 按上游契约给**已定型的不支持**答复：supported:false → 屏幕门户/
-      // 例程头图走 unsupported 分支把自己藏起来；抛"未接线"只会让 portalTone
-      // 停在 'unknown'——UI 永远显示"正在检查屏幕…"的假 spinner。
+      // 本机屏幕镜像（pi_display.rs）：supported 取决于平台截屏能力，
+      // 几何/就绪状态全部真读。profile 从参数透传（status 里带该 profile
+      // 的租约与 profile_key）。
+      const status = await invoke<Record<string, unknown>>('pi_display_status', {
+        profile: typeof params.profile === 'string' ? params.profile : undefined,
+      })
       return {
-        supported: false,
-        installed: false,
-        running: false,
+        ...status,
         profile_key: typeof params.profile === 'string' ? params.profile : null,
       } as T
+    }
+
+    case 'groups.state': {
+      // 宿主 canonical 驱动（canonical-group-driver.ts）的活跃轮次 → 上游
+      // workspace 读的 driver_status（typing 行 / Round N / 停止按钮 /
+      // stopConfirmed 判定）。
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      return { ...res, driver_status: canonicalDriverStatus(roomId) } as T
+    }
+
+    case 'groups.send': {
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      if (roomId) kickCanonicalRoom(roomId)
+      return res as T
+    }
+
+    case 'groups.continue': {
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      if (roomId) kickCanonicalRoom(roomId)
+      return res as T
+    }
+
+    case 'groups.stop': {
+      const res = await invoke<Record<string, unknown>>('groups_dispatch', { method, params })
+      const roomId = String(params.room_id ?? '')
+      if (roomId) await stopCanonicalRoom(roomId)
+      return res as T
+    }
+
+    case 'groups.approve': {
+      // canonical 审批：lane forwarding —— once/deny 直接回给成员会话。
+      const roomId = String(params.room_id ?? '')
+      const requestId = String(params.request_id ?? '')
+      const choice = String(params.choice ?? '')
+      if (!roomId || !requestId || !choice) {
+        throw new Error('groups.approve 缺少 room_id / request_id / choice')
+      }
+      await approveCanonicalAction(roomId, requestId, choice)
+      return { ok: true } as T
+    }
+
+    case 'groups.retry': {
+      const roomId = String(params.room_id ?? '')
+      const memberId = String(params.member_id ?? '')
+      const taskId = String(params.task_id ?? '')
+      if (!roomId || !memberId || !taskId) {
+        throw new Error('groups.retry 缺少 room_id / member_id / task_id')
+      }
+      retryCanonicalTask(roomId, memberId, taskId)
+      return { ok: true } as T
+    }
+
+    case 'groups.discard': {
+      const roomId = String(params.room_id ?? '')
+      const memberId = String(params.member_id ?? '')
+      const taskId = String(params.task_id ?? '')
+      if (!roomId || !memberId || !taskId) {
+        throw new Error('groups.discard 缺少 room_id / member_id / task_id')
+      }
+      await discardCanonicalTask(roomId, memberId, taskId)
+      return { ok: true } as T
     }
 
     case 'cron.manage':

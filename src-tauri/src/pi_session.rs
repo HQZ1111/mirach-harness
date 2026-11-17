@@ -204,8 +204,144 @@ pub struct PiEngine {
     asks: Arc<AskRegistry>,
 }
 
+// ── harness 装配（PiEngine 与后台 bot 泳道共用）───────────────────────────
+//
+// 2026-11-17（bots 群聊接线）：把 build_harness_with / session_root /
+// session_metadata_in 的正文抽成自由函数，`pi_bot.rs` 的后台泳道用同一套
+// 装配语义（provider 解析、models.dev 窗口回填、ui_dialog attach、路径反查），
+// 避免两份实现漂移。PiEngine 的行为零变化（方法只做转发）。
+
+/// `rpi_cli::session::build` 的宿主装配结果（两处消费：前台 PiEngine、后台 bot 泳道）。
+pub(crate) struct BuiltHarness {
+    pub harness: Arc<AgentHarness>,
+    pub events: tokio::sync::broadcast::Receiver<AgentEvent>,
+    pub reload: ReloadContext,
+    pub provider: String,
+    pub model_id: String,
+    pub id: String,
+    pub path: PathBuf,
+    pub sessions_root: PathBuf,
+}
+
+/// 会话根解析（与 `PiEngine::session_root` 同体，抽自由函数供 bot 泳道复用）。
+pub(crate) fn resolve_session_root(cwd: &Path) -> PathBuf {
+    // 与引擎同语义：`configured_session_dir` 对 settings 读取失败用
+    // `.ok()` 吞掉并退回默认根。这里跟随（否则宿主与引擎的会话根会分
+    // 叉，新建会话反查必失败），但保持可见——失败不静默。
+    let settings = match rpi_cli::settings::load_settings() {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("[pi] 读 rpi 设置失败，会话根退回默认: {e}");
+            rpi_cli::settings::Settings::default()
+        }
+    };
+    let dir = settings
+        .session_dir
+        .unwrap_or_else(|| rpi_cli::session::default_session_dir(cwd));
+    if dir.is_relative() && !dir.has_root() {
+        cwd.join(dir)
+    } else {
+        dir
+    }
+}
+
+/// 会话根的 JSONL repo（列表/反查/fork 共用）。
+pub(crate) fn jsonl_repo_for(root: &Path) -> JsonlSessionRepo {
+    let fs: Arc<dyn rpi_tools::FileSystem> =
+        Arc::new(rpi_tools::OsExecutionEnv::with_cwd(root.to_path_buf()));
+    JsonlSessionRepo::with_env_cwd(JsonlSessionRepoOptions {
+        fs,
+        sessions_root: root.to_string_lossy().into_owned(),
+        clock: Arc::new(SystemClock),
+        ids: Arc::new(DefaultIdGenerator::new()),
+    })
+}
+
+/// 按会话 id 在会话根里反查磁盘元数据。
+pub(crate) fn session_meta_in(
+    rt: &PiRuntime,
+    root: &Path,
+    id: &str,
+) -> Result<JsonlSessionMetadata, String> {
+    let repo = jsonl_repo_for(root);
+    let metas = rt
+        .block_on(repo.list_typed(&JsonlSessionListOptions { cwd: None }))
+        .map_err(|e| format!("会话目录扫描失败 {}: {e}", root.display()))?;
+    metas.into_iter().find(|m| m.id == id).ok_or_else(|| {
+        format!(
+            "会话 {id} 不在会话目录 {} 中（文件未落盘或不在会话目录）",
+            root.display()
+        )
+    })
+}
+
+/// 装配一个 harness（含 provider 解析、contextWindow 回填、ui_dialog attach、
+/// 新建会话的路径反查）。`session_path = Some` 走恢复路径。
+pub(crate) fn build_harness_impl(
+    rt: &PiRuntime,
+    cwd: &Path,
+    session_path: Option<&str>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<BuiltHarness, String> {
+    let (harness, events, reload, resolved_provider, model_id, id) = rt.block_on(async {
+        let mut resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
+            .map_err(|e| format!("模型解析失败: {e}"))?;
+        // 宿主侧模型目录：models.json 缺 contextWindow（0）时用
+        // models.dev 的值补进**本次会话的 model**——引擎的压缩阈值
+        // （should_compact 只看 >0）也吃到真实窗口；不写用户配置。
+        if resolved.model.context_window == 0 {
+            if let Some(context_window) = crate::model_registry::lookup(&resolved.model.id) {
+                resolved.model.context_window = context_window;
+            }
+        }
+        let mut args = rpi_cli::args::Args::default();
+        if let Some(p) = session_path {
+            args.session = Some(p.to_string());
+        }
+        let (harness, events, reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
+            .await
+            .map_err(|e| format!("Harness 构建失败: {e}"))?;
+        // 宿主就是那个"交互 UI"：上游语义是没有客户端 attach 时插件拒绝
+        // 弹 UI（rpi-extensions actions.rs `handle` 的 open 分支原文
+        // "ask_user requires an interactive UI"）。`build` 的
+        // ReloadContext 里就是初始 ActionBridge / before_tool_call 钩子
+        // 共用的会话级邮箱，拿到立即 attach；每次重建 harness 都重新
+        // attach（generation 自增，旧桥失效）。attach 失败（锁中毒 /
+        // generation 耗尽）必须传播——静默不 attach 会让插件 UI 全部
+        // fail-closed 而无人知晓（规矩 12；上游 TUI 同样拒绝启动）。
+        if reload.ui_dialog.try_attach_with_generation().is_none() {
+            return Err("扩展 UI 邮箱 attach 失败（mailbox 状态锁中毒或 generation 耗尽）".into());
+        }
+        let provider = resolved.model.provider.clone();
+        let model_id = resolved.model.id.clone();
+        let id = harness
+            .session()
+            .get_metadata()
+            .await
+            .map(|m| m.id)
+            .map_err(|e| format!("会话元数据读取失败: {e}"))?;
+        Ok::<_, String>((harness, events, reload, provider, model_id, id))
+    })?;
+    let sessions_root = resolve_session_root(cwd);
+    let path = match session_path {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(session_meta_in(rt, &sessions_root, &id)?.path),
+    };
+    Ok(BuiltHarness {
+        harness: Arc::new(harness),
+        events,
+        reload,
+        provider: resolved_provider,
+        model_id,
+        id,
+        path,
+        sessions_root,
+    })
+}
+
 /// 工作区根（Phase 1 默认 = 用户主目录；工作区选择面后续接列头）。
-fn default_workspace() -> PathBuf {
+pub(crate) fn default_workspace() -> PathBuf {
     std::env::var("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -218,7 +354,7 @@ fn default_workspace() -> PathBuf {
 /// 原先始终用**活动会话的 cwd** 去查——跨工作区切换必然 "No session
 /// found"。形状不符（自定义 sessionDir、旧布局、直接放在根下）→ None，
 /// 调用方沿用活动 cwd（不猜）。
-fn workspace_from_session_path(path: &Path) -> Option<PathBuf> {
+pub(crate) fn workspace_from_session_path(path: &Path) -> Option<PathBuf> {
     let sessions = path.parent()?.parent()?; // .../<cwd>/.rpi/sessions
     if sessions.file_name()? != "sessions" {
         return None;
@@ -317,58 +453,15 @@ impl PiEngine {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> Result<HarnessLive, String> {
-        let (harness, events, reload, resolved_provider, model_id, id) = self.shared.rt.block_on(async {
-            let mut resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
-                .map_err(|e| format!("模型解析失败: {e}"))?;
-            // 宿主侧模型目录：models.json 缺 contextWindow（0）时用
-            // models.dev 的值补进**本次会话的 model**——引擎的压缩阈值
-            // （should_compact 只看 >0）也吃到真实窗口；不写用户配置。
-            if resolved.model.context_window == 0 {
-                if let Some(context_window) = crate::model_registry::lookup(&resolved.model.id) {
-                    resolved.model.context_window = context_window;
-                }
-            }
-            let mut args = rpi_cli::args::Args::default();
-            if let Some(p) = session_path {
-                args.session = Some(p.to_string());
-            }
-            let (harness, events, reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
-                .await
-                .map_err(|e| format!("Harness 构建失败: {e}"))?;
-            // 宿主就是那个"交互 UI"：上游语义是没有客户端 attach 时插件拒绝
-            // 弹 UI（rpi-extensions actions.rs `handle` 的 open 分支原文
-            // "ask_user requires an interactive UI"）。`build` 的
-            // ReloadContext 里就是初始 ActionBridge / before_tool_call 钩子
-            // 共用的会话级邮箱，拿到立即 attach；每次重建 harness 都重新
-            // attach（generation 自增，旧桥失效）。attach 失败（锁中毒 /
-            // generation 耗尽）必须传播——静默不 attach 会让插件 UI 全部
-            // fail-closed 而无人知晓（规矩 12；上游 TUI 同样拒绝启动）。
-            if reload.ui_dialog.try_attach_with_generation().is_none() {
-                return Err("扩展 UI 邮箱 attach 失败（mailbox 状态锁中毒或 generation 耗尽）".into());
-            }
-            let provider = resolved.model.provider.clone();
-            let model_id = resolved.model.id.clone();
-            let id = harness
-                .session()
-                .get_metadata()
-                .await
-                .map(|m| m.id)
-                .map_err(|e| format!("会话元数据读取失败: {e}"))?;
-            Ok::<_, String>((harness, events, reload, provider, model_id, id))
-        })?;
-        let sessions_root = self.session_root(cwd);
-        let session_path = match session_path {
-            Some(p) => PathBuf::from(p),
-            None => PathBuf::from(self.session_metadata_in(&sessions_root, &id)?.path),
-        };
+        let built = build_harness_impl(&self.shared.rt, cwd, session_path, provider, model)?;
         Ok(HarnessLive {
-            harness: Arc::new(harness),
-            events,
-            reload,
-            session_path: Some(session_path),
-            sessions_root,
-            provider: resolved_provider,
-            model_id,
+            harness: built.harness,
+            events: built.events,
+            reload: built.reload,
+            session_path: Some(built.path),
+            sessions_root: built.sessions_root,
+            provider: built.provider,
+            model_id: built.model_id,
         })
     }
 
@@ -379,53 +472,18 @@ impl PiEngine {
     /// **必须与 build 的 `cwd` 同源**：根不一致会让新建会话的路径反查直接
     /// 失败（`new_session_with_cwd` 以用户选定工作区建会话）。
     fn session_root(&self, cwd: &Path) -> PathBuf {
-        // 与引擎同语义：`configured_session_dir` 对 settings 读取失败用
-        // `.ok()` 吞掉并退回默认根。这里跟随（否则宿主与引擎的会话根会分
-        // 叉，新建会话反查必失败），但保持可见——失败不静默。
-        let settings = match rpi_cli::settings::load_settings() {
-            Ok(settings) => settings,
-            Err(e) => {
-                eprintln!("[pi] 读 rpi 设置失败，会话根退回默认: {e}");
-                rpi_cli::settings::Settings::default()
-            }
-        };
-        let dir = settings
-            .session_dir
-            .unwrap_or_else(|| rpi_cli::session::default_session_dir(cwd));
-        if dir.is_relative() && !dir.has_root() {
-            cwd.join(dir)
-        } else {
-            dir
-        }
+        resolve_session_root(cwd)
     }
 
     /// 会话根的 JSONL repo（列表/反查/fork 共用）。
     fn jsonl_repo(&self, root: &Path) -> JsonlSessionRepo {
-        let fs: Arc<dyn rpi_tools::FileSystem> =
-            Arc::new(rpi_tools::OsExecutionEnv::with_cwd(root.to_path_buf()));
-        JsonlSessionRepo::with_env_cwd(JsonlSessionRepoOptions {
-            fs,
-            sessions_root: root.to_string_lossy().into_owned(),
-            clock: Arc::new(SystemClock),
-            ids: Arc::new(DefaultIdGenerator::new()),
-        })
+        jsonl_repo_for(root)
     }
 
     /// 按会话 id 在会话根里反查磁盘元数据（rpi 不向宿主回报新建会话的
     /// 文件路径，只能用 repo 的公开 list 面反查；找不到 = Err）。
     fn session_metadata_in(&self, root: &Path, id: &str) -> Result<JsonlSessionMetadata, String> {
-        let repo = self.jsonl_repo(root);
-        let metas = self
-            .shared
-            .rt
-            .block_on(repo.list_typed(&JsonlSessionListOptions { cwd: None }))
-            .map_err(|e| format!("会话目录扫描失败 {}: {e}", root.display()))?;
-        metas.into_iter().find(|m| m.id == id).ok_or_else(|| {
-            format!(
-                "会话 {id} 不在会话目录 {} 中（文件未落盘或不在会话目录）",
-                root.display()
-            )
-        })
+        session_meta_in(&self.shared.rt, root, id)
     }
 
     fn live(&self) -> Result<Arc<HarnessLive>, String> {
@@ -1359,13 +1417,21 @@ impl PiEngine {
         // composer-wired 按字符串回填档位。
         let thinking_level = serde_json::to_value(thinking)
             .map_err(|e| format!("思考档位序列化失败: {e}"))?;
+        // 扩展装载真值（此前硬编码 false：rpi 插件实际已加载，扩展 slash
+        // 命令可用——假值会误导前端做能力判断）。
+        let has_extensions = live
+            .reload
+            .extension_session
+            .lock()
+            .map(|session| !session.is_empty())
+            .map_err(|_| "扩展会话锁中毒".to_string())?;
         Ok(serde_json::json!({
             "sessionId": session_id,
             "provider": model.provider,
             "modelId": model.id,
             "thinkingLevel": thinking_level,
             "messageCount": message_count,
-            "hasExtensions": false,
+            "hasExtensions": has_extensions,
         }))
     }
 
@@ -1544,6 +1610,8 @@ impl PiEngine {
             }
         }
         wire["permissionGate"] = serde_json::json!(gate);
+        // 运行时审批模式（rpi-cli approval_gate；宿主桥安装后由前端切换）。
+        wire["approvalMode"] = serde_json::json!(rpi_cli::approval_gate::mode().as_wire());
         Ok(wire)
     }
 
@@ -1559,8 +1627,85 @@ impl PiEngine {
             .unwrap_or(serde_json::Value::Null))
     }
 
-    pub fn set_approval_mode(&self, _mode: &str) -> Result<(), String> {
-        Err("审批模式切换不可用：rpi 无 always-ask/write/yolo 三态概念（权限由 rpi-permissions / rpi-permission-gate 的规则文件与 ask 对话框承担），插件未暴露切换面".into())
+    /// 会话计划目录（活动面板「会话计划」分区）：rpi-plan-mode 每次
+    /// `plan_mode_complete` 都 AppendEntry 一条 `plan-mode` 条目
+    /// （customType `plan-mode`，data `{active, plan}`，plan = 完整 markdown，
+    /// 见 pi_plugin_state.rs 模块头证据）。沿当前分支枚举**有 plan 文本**的
+    /// 条目（= 已完成计划；active 条目 plan 为 null 不算），按 seq 降序 —
+    /// 上游 sessionPlans 目录同序（最新在前）。
+    ///
+    /// 返回 `[{entryId, seq, timestamp, plan}]`；无条目 = 空数组（诚实空态）。
+    /// 条目缺 data / plan 非字符串 = Err（条目损坏，不静默丢行）。
+    pub fn plan_entries(&self) -> Result<serde_json::Value, String> {
+        let Some(live) = self.live_opt()? else {
+            return Ok(serde_json::Value::Array(Vec::new()));
+        };
+        let entries = self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .find_entries_on_branch(
+                    &EntryQuery {
+                        entry_type: Some("custom"),
+                        custom_type: Some(crate::pi_plugin_state::PLAN_ENTRY.to_string()),
+                        ..Default::default()
+                    },
+                    &BranchBounds::default(),
+                )
+                .await
+                .map_err(|e| format!("会话条目读取失败（plan-mode）: {e}"))
+        })?;
+        let mut rows: Vec<(u64, serde_json::Value)> = Vec::new();
+        for entry in entries {
+            let Entry::Custom(custom) = entry else {
+                continue;
+            };
+            if custom.custom_type != crate::pi_plugin_state::PLAN_ENTRY {
+                continue;
+            }
+            let data = custom.data.as_ref().ok_or_else(|| {
+                format!(
+                    "plan-mode 条目缺少 data（条目损坏：{}）",
+                    custom.base.id
+                )
+            })?;
+            match data.get("plan") {
+                // 进入/未完成态：plan 尚未产出（attached 为 null）。
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(text)) => {
+                    if !text.trim().is_empty() {
+                        rows.push((
+                            custom.base.seq,
+                            serde_json::json!({
+                                "entryId": custom.base.id,
+                                "seq": custom.base.seq,
+                                "timestamp": custom.base.timestamp,
+                                "plan": text,
+                            }),
+                        ));
+                    }
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "plan-mode 条目 data.plan 不是字符串（条目损坏：{}）",
+                        custom.base.id
+                    ))
+                }
+            }
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(serde_json::Value::Array(
+            rows.into_iter().map(|(_, row)| row).collect(),
+        ))
+    }
+
+    pub fn set_approval_mode(&self, mode: &str) -> Result<(), String> {
+        let parsed = rpi_cli::approval_gate::ApprovalMode::parse(mode).ok_or_else(|| {
+            format!(
+                "未知审批模式 `{mode}`（可用：always-ask / write / yolo）"
+            )
+        })?;
+        rpi_cli::approval_gate::set_mode(parsed);
+        Ok(())
     }
 
     /// 执行已注册的扩展 slash command（与 rpi-cli RPC `execute_command` 同一
@@ -1612,8 +1757,11 @@ impl PiEngine {
         .unwrap_or_else(|_| Err(format!("扩展命令 panic：{name}")))
     }
 
-    pub fn set_plan_mode(&self, _enabled: bool) -> Result<(), String> {
-        Err("plan 模式切换不可用：rpi-plan-mode 只注册 `/plan` 命令与 plan_mode_start / plan_mode_complete 工具，进入退出由插件自身完成；宿主只有读取面（pi_mode_state）".into())
+    pub fn set_plan_mode(&self, enabled: bool) -> Result<(), String> {
+        // rpi-plan-mode 的进入/退出是扩展命令 `/plan start|exit`；宿主通过
+        // 既有 run_command 通道转发（没有活动会话时如实 Err，不假装切了）。
+        self.run_command("/plan", if enabled { "start" } else { "exit" })
+            .map(|_| ())
     }
 
     pub fn decide_plan(&self, _approve: bool) -> Result<(), String> {
@@ -2243,7 +2391,7 @@ pub struct AskAnswerWire {
 
 /// JSON 字符串字段：首个非空（trim 后）值。与 rpi TUI 的 `ask_user_str`
 /// 同语义（rpi-cli/src/interactive_tui/extensions.rs:699-708）。
-fn json_str(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn json_str(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         value
             .get(*key)
@@ -2312,7 +2460,7 @@ fn is_permission_ui(ui: &serde_json::Value) -> bool {
 /// 形状（只影响映射，不影响应答——应答仍是整条请求一组 values）。
 /// 非 ask 形状（permission）或没有题目文本 = None：谓词不放行，
 /// 请求留在邮箱里给审批命令。
-fn ask_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value> {
+pub(crate) fn ask_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value> {
     if is_permission_ui(ui) {
         return None;
     }
@@ -2357,7 +2505,7 @@ fn ask_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value
 
 /// 审批对话框 → 前端 `PendingUiRequest`
 /// （`{id, method, payload, extensionId}`）。
-fn approval_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value> {
+pub(crate) fn approval_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::Value> {
     if !is_permission_ui(ui) {
         return None;
     }
@@ -2384,7 +2532,7 @@ fn approval_row(ui: &serde_json::Value, request_id: &str) -> Option<serde_json::
 /// = `{"values":[…],"kind":"selector"}`，输入应答 =
 /// `{"values":[text],"value":text,"text":text,"kind":"input"}`
 /// （rpi-cli/src/interactive_tui/extensions.rs:914-921 / 999-1008）。
-fn ask_answer_value(
+pub(crate) fn ask_answer_value(
     row: &serde_json::Value,
     answers: &[AskAnswerWire],
 ) -> Result<serde_json::Value, String> {
@@ -2434,7 +2582,7 @@ fn ask_answer_value(
 /// "yes"（大小写不敏感），所以宿主必须回标题（"Yes"/"No"），不能回布尔。
 /// 无 options 的 confirm 按上游 TUI 的默认 Yes/No 语义
 /// （rpi-cli/src/interactive_tui/extensions.rs:777-779）。
-fn approval_answer_value(
+pub(crate) fn approval_answer_value(
     ui: &serde_json::Value,
     value: Option<&serde_json::Value>,
 ) -> Result<serde_json::Value, String> {

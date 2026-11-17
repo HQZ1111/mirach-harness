@@ -302,15 +302,29 @@ export { translateNow } from '@/hermes-mirror/i18n'
 export type PluginTranslate = (key: string, vars?: Record<string, unknown>) => string
 export type PluginLocaleBundles = Record<string, Record<string, string>>
 
+// ── 能力面板（bots 编辑机器人对话框的门）──────────────────────────────────
+
+/** 上游 `CapabilitiesView` / `ConnectorsTab` / `ToolsetConfigPanel` 的宿主
+ *  对偶（hermes-mirror 的原件 + 宿主桥/Provider 包装）。hermes-bots 的
+ *  `profile-config.tsx` 用它们渲染"能力总览 / 连接器 / 工具集"三块。 */
+export { CapabilitiesView, ConnectorsTab, ToolsetConfigPanel } from './capabilities-views'
+
 // ── 会话未读 / 激活代际 ─────────────────────────────────────────────────────
 
 /**
  * 上游 `gatewayActivationEpoch`：网关每次重连自增，用于让订阅者知道"要重取"。
+ * **上游是函数不是常量**（`store/gateway.ts:434`：`export function
+ * gatewayActivationEpoch(): number`；插件在 `groupCreationSource` 等处直接
+ * 调用 `gatewayActivationEpoch()`）。写成 `const = 0` 会让调用点抛
+ * "gatewayActivationEpoch is not a function"——群聊创建对话框因此永远停在
+ * "检查中"（settle 在 then 里抛错，capability 永不落地）。
  *
- * 宿主没有 gateway socket（进程内引擎），**恒 0**。上游代码用它做 cache 失效，
- * 恒 0 等价于"从不失效"——宿主侧数据本来就由 query 的 staleTime 管理。
+ * 宿主没有 gateway socket（进程内引擎），**恒 0**。上游代码用它做 cache
+ * 失效，恒 0 等价于"从不失效"——宿主侧数据本来就由 query 的 staleTime 管理。
  */
-export const gatewayActivationEpoch = 0
+export function gatewayActivationEpoch(): number {
+  return 0
+}
 
 /** 上游 `useGatewayActivationEpoch`：同上，hook 形态。 */
 export function useGatewayActivationEpoch(): number {
@@ -329,9 +343,44 @@ export function markSessionUnreadFinished(_sessionId: string): void {}
 /** 上游 `forgetSessionUnread`：忘掉某会话的未读状态。 */
 export function forgetSessionUnread(_sessionId: string): void {}
 
-/** 上游 `resolveSiblingWsUrl`：解析 sibling 窗口的 WebSocket URL。 */
-export function resolveSiblingWsUrl(_args?: unknown): null {
-  // 宿主没有 sibling 窗口概念（单主窗 + 设置窗），返回 null
+/**
+ * 上游 `resolveSiblingWsUrl`：解析 sibling 窗口的 WebSocket URL。
+ *
+ * 宿主没有 sibling 窗口概念（单主窗 + 设置窗），但**本机屏幕的 RFB 流**是
+ * 一个真实的本地 WS 服务：`display.observe` 拿到的 ticket 配这个 URL 给
+ * noVNC 用（`/api/display/ws`）。其它 path 仍返回 null（无 sibling socket）。
+ */
+let displayWsPortCache: number | null = null
+let displayWsPortPending: Promise<number | null> | null = null
+
+async function displayWsPort(): Promise<number | null> {
+  if (displayWsPortCache !== null) return displayWsPortCache
+  if (!displayWsPortPending) {
+    displayWsPortPending = import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<{ port?: number | null }>('pi_display_ws_port'))
+      .then((res) => {
+        displayWsPortCache = typeof res?.port === 'number' ? res.port : null
+        return displayWsPortCache
+      })
+      .catch((e) => {
+        console.error('[display] 读取本机屏幕端口失败', e)
+        return null
+      })
+      .finally(() => {
+        displayWsPortPending = null
+      })
+  }
+  return displayWsPortPending
+}
+
+export async function resolveSiblingWsUrl(
+  _args?: unknown,
+  path?: string,
+): Promise<null | string> {
+  if (path === '/api/display/ws') {
+    const port = await displayWsPort()
+    if (port) return `ws://127.0.0.1:${port}/api/display/ws`
+  }
   return null
 }
 

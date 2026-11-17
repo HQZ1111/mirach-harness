@@ -11,6 +11,7 @@ mod fs;
 
 // pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
 mod pi_session;
+mod pi_bot;
 // rpi 插件状态只读投影（rpi-todo / rpi-plan-mode 的 AppendEntry 条目 → 旧
 // wire）：pi_session.rs 的 todo_state / mode_state 消费
 mod pi_plugin_state;
@@ -52,7 +53,18 @@ mod pi_capabilities;
 // pi **有**这两套系统（`pi::mcp` + `pi::extensions`），宿主会话侧也已经在用
 // （`sync_extension_mcp_registrations` / `extension_ui_handler`）；此前缺的
 // 只是管理 UI，不是能力。
+// 引擎侧宿主桥（message_agent 投递 / 审批询问 → 前端 UI 回执）。
+mod pi_engine_bridges;
+// 本机屏幕（display.* 的宿主对偶：GDI 截屏 + 最小 RFB WS 服务）。
+mod pi_display;
 mod pi_mcp;
+// MCP 预设目录（hermes `optional-mcps/` 的宿主可执行子集；见 pi_mcp_catalog.rs
+// 头注：rpi-mcp-adapter 不支持 OAuth，只收 no-auth HTTP 条目）。
+mod pi_mcp_catalog;
+// MCP OAuth（标准 DCR + PKCE；宿主对偶 hermes mcp_oauth_manager）。
+mod pi_mcp_oauth;
+// 本地技能目录（hermes optional-skills 的宿主复制；skills.manage 的搜索/安装面）。
+mod pi_skills_catalog;
 // pi 扩展的加载面（2026-11-02）：照 pi CLI 的做法用 ResourceLoader 解析
 // 扩展路径并交给会话。此前宿主恒传空 extension_paths，pi::extensions 的
 // 整套能力（工具注册/斜杠命令/事件钩子）在宿主里等于不存在。
@@ -825,8 +837,15 @@ fn pi_get_session_messages(path: String) -> Result<serde_json::Value, String> {
             entries.push(v);
         }
     }
+    // 叶子 = 最后一条 **message** 条目，不是文件最后一行：rpi 会话在消息
+    // 之后追加 record 条目（assistant_frame / operation_started /
+    // operation_finished，都不带 message.parentId 链）。以前取"最后一行"
+    // 当叶子 → 链只走到那条 record → 投影出空数组（实测：群聊成员轮次
+    // 跑完后 session.resume 读不到任何消息，房间读成"超时静默"）。
     let leaf_id = entries
-        .last()
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("message"))
         .and_then(|e| e.get("id"))
         .and_then(|v| v.as_str())
         .map(String::from);
@@ -995,6 +1014,16 @@ fn pi_goal_state(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
     state.engine.goal_state()
+}
+
+/// 会话计划目录（活动面板「会话计划」分区）：当前分支上有 plan 文本的
+/// `plan-mode` 条目（rpi-plan-mode 每次 plan_mode_complete 追加一条，
+/// plan = 完整 markdown）。按 seq 降序返回 `[{entryId, seq, timestamp, plan}]`。
+#[tauri::command(async)]
+fn pi_plan_entries(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.plan_entries()
 }
 
 /// 执行扩展 slash command（`/plan start|exit` 等）——与 rpi-cli RPC 的
@@ -1486,6 +1515,10 @@ fn main() {
             // 关窗回调（wire_window）要同步读 closeToTray；保持唤醒的专用
             // 线程也在这里起步。文件损坏 → setup 失败（不静默重置）。
             app.manage(app_prefs::init(app.handle())?);
+            // 引擎侧宿主桥：message_agent 投递门 + 审批闸门（先装门，再建会话）。
+            pi_engine_bridges::install(app.handle());
+            // 本机屏幕 RFB 服务（随机端口；前端经 pi_display_ws_port 读）。
+            pi_display::start_server();
             // 宿主侧模型目录：先同步载入磁盘缓存（不阻塞 UI），再后台拉取
             // models.dev（TTL 24h；失败只记日志，沿用缓存/空目录）。
             model_registry::init(app.handle());
@@ -1694,6 +1727,7 @@ fn main() {
             pi_extension_ui_response,
             pi_mode_state,
             pi_goal_state,
+            pi_plan_entries,
             pi_run_command,
 
             pi_groups::groups_dispatch,
@@ -1707,6 +1741,18 @@ fn main() {
             pi_discard_session,
             pi_new_session,
             pi_create_bot_session,
+            pi_bot::pi_bot_create_session,
+            pi_bot::pi_bot_open,
+            pi_bot::pi_bot_prompt,
+            pi_bot::pi_bot_state,
+            pi_bot::pi_bot_interrupt,
+            pi_bot::pi_bot_interrupt_task,
+            pi_bot::pi_bot_take_recovered,
+            pi_bot::pi_bot_compact,
+            pi_bot::pi_bot_attach_image,
+            pi_bot::pi_bot_attach_file,
+            pi_bot::pi_bot_clarify_lock,
+            pi_bot::pi_bot_approval_respond,
             pi_sessions_usage,
             pi_export_session_html,
             pi_stream_cursor,
@@ -1770,6 +1816,24 @@ fn main() {
             pi_mcp::pi_mcp_upsert_server,
             pi_mcp::pi_mcp_remove_server,
             pi_mcp::pi_mcp_test_server,
+            pi_mcp::pi_mcp_set_api_key,
+            pi_mcp_catalog::pi_mcp_catalog,
+            pi_mcp_catalog::pi_mcp_install_preset,
+            pi_mcp_oauth::pi_mcp_oauth_complete,
+            pi_mcp_oauth::pi_mcp_oauth_refresh,
+            pi_mcp_oauth::pi_mcp_oauth_refresh_all,
+            pi_engine_bridges::pi_agent_message_ack,
+            pi_engine_bridges::pi_approval_decision,
+            pi_display::pi_display_status,
+            pi_display::pi_display_ws_port,
+            pi_display::pi_display_thumbnail,
+            pi_display::pi_display_observe,
+            pi_display::pi_display_start,
+            pi_display::pi_display_lease_acquire,
+            pi_display::pi_display_lease_release,
+            pi_skills_catalog::pi_skills_search,
+            pi_skills_catalog::pi_skill_install,
+            pi_skills_catalog::pi_skill_remove,
             pi_extensions::pi_extensions,
             pi_cron::pi_cron_jobs,
             pi_cron::pi_cron_job,

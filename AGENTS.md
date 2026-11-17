@@ -2492,6 +2492,130 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
   实测 A→B→A→B→A 五次切换全通。注意：retired 表无上限，进程内打开的会话
   数 = 常驻 harness 数（每个很小，重启即清）。
 
+## 终端窗格 = ZCode 侧栏终端（2026-11-18 用户："右侧面板栏里的终端打开怎么和zcode不一样？"）
+
+规格 = 上游 `docs/ui/side-pane-terminal-tabs.md` + `SidePaneTerminalPane.tsx`
+（一个终端 = 一个侧栏标签，**内部不嵌第二层 tabs、无二级新建钮**）。
+
+- **一个面板 = 一个终端会话**（`terminal-pane.tsx`）：无内层页签条；内容 =
+  `bg-background p-3`（panes.css `.term-pane` 的 `padding: 0.75rem`——按
+  Tailwind p-3 语义随宿主 15px 根字号缩放）。退出条（重新打开）保留 =
+  宿主失败可见通道，上游没有、不影响同形。
+- **打开 = 新建面板**（`open-page-actions.ts::openTerminalPanel`，`openPagePanel`
+  对 terminal 走这条，不在复用单例）：标题 = cwd 末段（取不到 = 终端）+
+  " 2/3"（`terminal-tabs.ts::nextTerminalPanelTitle`，上游
+  `createTerminalSidePaneTitle` 同源）；id = 最小空位 `terminal` /
+  `terminal-2`…（`nextTerminalPanelId`）；**cwd 进 params**，存档恢复按同
+  目录重开。面板域判定统一走 `isTerminalPanelId`（dockview-shell 关标签的
+  栏生命周期 + boot 归一）。
+- **保活 = `renderer: 'always'`**（dockview overlay 挂载）：切标签/收栏不卸载、
+  PTY 不中断（上游 keepalive）；关闭面板才卸载 = kill。旧存档的终端面板在
+  boot 时补写 `setRenderer('always')`。
+- **必须知道的坑**：`always` 面板**隐藏时容器报整坞尺寸**（overlay 未定位
+  前 `.dv-render-overlay` 默认 100%×100%）——旧的"有尺寸就 spawn"会按
+  1726×1129 起 PTY。所以 spawn/fit 必须**同时**以 `api.isVisible` 为准；
+  激活时由 `onDidVisibilityChange`（dockview 自己的 overlay rAF 先于本回调
+  的 rAF，尺寸已写好）+ `onDidDimensionsChange` 补启动/fit。实测：隐藏终端
+  无 xterm、激活后 69 行与容器 240×1046 一致、来回切标签 scrollback 与
+  可执行性保持。
+- **已删**：panel 内页签条（`.term-strip/.term-tab*/.term-add` CSS、
+  `--term-strip-h` 令牌）、`terminal-tabs.ts` 的 `formatTerminalTabTitle` /
+  `nextTerminalIndex`（语义上移到面板标题）。改这套前先看
+  `terminal-tabs.test.ts`（标题/id 去重与 `isTerminalPanelId` 的守卫）。
+- dev 噪声（非本改动引入，StrictMode 双挂载下）：`[terminal] orphan kill
+  failed … os error 6` 与 xterm `Viewport` 的 defer 定时器命中已 dispose 的
+  render service（"reading 'dimensions'"）——生产构建无 StrictMode 双挂载。
+
+## 活动状态面板 = ZCode ConversationStatusPanel 完整移植（2026-11-18 用户："完整移植"→"有意差异去除，全部对齐"）
+
+规格 = 上游 `packages/ui/src/v4/ConversationStatusPanel.tsx`（2293 行）+
+`conversationStatusPanelModel.ts`。宿主落点 `conversation-status-panel.tsx`
+（三态外壳）+ `conversation-status-panel-model.ts`（纯函数推导）。
+
+**结构（对齐结论）**：分区顺序 Git 工具(environment) → 目标(goal) → 会话计划
+(sessionPlans) → 进程 Todo(plan) → 终端(terminal) → 智能体(agent)；限高表
+`STATUS_SECTION_SCROLL_POLICY`（environment null；goal/sessionPlans/terminal/
+agent max-h-48；plan max-h-80）；分区头 = 标题 + 悬停箭头 + trailing 随开合
+切换；智能体分区页脚 EndedDirectoryRow「已结束的智能体 · N ›」；mini 胶囊
+优先级链（运行待办 → 目标(活/暂停) → git 变更 → 目标(完) → 最近完成项 →
+待办计数 → 最新会话计划 → 运行计数 → 无则不渲染）。**卸载闸门照抄上游**
+`if (!model.hasContent) return null`（2026-11-15 的"常驻空态"宿主选择作废，
+用户 11-17 明令"有意差异去除"）；draft（activeId===null）仍不挂。
+
+**数据面无造假口径**：
+
+- git = `fs_git_diff_stat`（干净仓库 → 卡不挂，上游 buildGitModel 同判）；
+- 目标 = rpi-goal `goal-state` 自定义条目 → `pi_goal_state`；用时秒针
+  active 走 now、paused/complete 停 updatedAt；暂停/恢复按钮 = 既有
+  `/goal pause|resume` 扩展命令（`pi_run_command`），错误可见不吞；
+- 会话计划 = **新 IPC `pi_plan_entries`**（`pi_session.rs::plan_entries()`，
+  扫当前分支 custom type `plan-mode`，只收有 markdown 的，seq 降序）+ 新
+  `plan-entries-store.ts`；标题 = 首个 H1 否则首个非空行（上游
+  `getPlanDirectoryTitle` 逐字）；
+- 终端 = jobs-store（`pi_job_list`）；rpi-background-tasks 未装 → 如实 Err
+  → 投影空 → 分区不渲染（有任务时 = 命令行 + 用时 + Stop → `pi_job_cancel`）；
+- 智能体 = 宿主从 delegate_task / subagent / dispatch 工具调用派生
+  （`status-agent-rows.ts`：timing.completedAt 有无分运行/已结束两段，结束段
+  按完成时间倒序）；rpi 子代理运行态只在插件进程内存，`pi_hub_roster` 如实
+  Err，工具调用是唯一宿主真值；
+- **workflow 分区不渲染**：rpi 无 phase/lane/causality 概念（engine-gaps G3），
+  不造假 UI；其余分区有真值时照常。
+
+**详情面落点 = 面板栏标签页**（宿主没有 ZCode 的 workspace side tab）：
+`status-pane-openers.ts` 投递，`dockview-shell.tsx` 注册 ——
+`plan-detail:<entryId>`（每计划一实例，同 id 再点只激活）与
+`agent-directory`（单实例）。目录页自身从线程消息派生 ended 行（与页脚计数
+同源），点击行落既有 `openSubagentDetail` 通道。
+
+**坑**：CDP/脚本手工拼 Windows 路径去调 `pi_open_session` 时注意转义
+（`\s` 之类会被 JS 吃成 `s`）——字符串相等守卫会漏，报「lock …
+Failed to acquire」误导；用同一次求值里 `pi_list_sessions` 返回的 `path`
+原样传即可。
+
+**顺带修复**：`pi_get_state.hasExtensions` 此前硬编码 `false`；实测 rpi 扩展
+实际已装载（`/goal` 等扩展命令可用）——改为读
+`live.reload.extension_session.lock().is_empty()` 的真值（锁中毒如实 Err）。
+实机回读 `{…, hasExtensions: true}`。
+
+**实机断言（CDP）**：`/goal start` 起真目标 → aside 出现且 `data-goal-status=
+active`、秒针在走；UI 暂停/恢复点击真翻转；`/goal stop` 归档后 `!hasContent`
+闸门让面板整块消失；plan-detail / agent-directory 标签页开合与单实例语义实测。
+单测：`conversation-status-panel-model.test.ts`（25）、
+`status-agent-rows.test.ts`（9）、`status-panel-stores.test.ts` 增
+`parsePlanEntries`。
+
+## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
+
+**引擎侧改动都在 `G:\pi-rust-main` 工作树，PR 已提：pi-rust #348**
+（https://github.com/bigfish1913/pi-rust/pull/348，基于上游 main 干净重建；
+diff = task_lease.rs / approval_gate.rs / message_agent.rs 三个新文件 +
+session.rs +50/-3 + 两个 lib.rs 一行。**镜像里用户自己的本地补丁不在 PR 内**）。
+
+| 件 | 引擎文件 | 宿主对偶 |
+|---|---|---|
+| 任务租约（fencing/终局回执/recover） | `rpi-harness/src/task_lease.rs`（落盘 `<session>.tasks.json`） | `pi_bot.rs`（prompt=task 身份+meta；`pi_bot_state` 出 task/tasks；`pi_bot_take_recovered`；`pi_bot_interrupt_task` 带 fencing）→ host-rpc `session.resume`/`task.interrupt` → canonical driver |
+| 审批闸运行时三态 | `rpi-cli/src/approval_gate.rs`（AtomicU8 + handler + before_tool_call 组合在扩展 hook 后） | `pi_engine_bridges.rs`（`mirach://approval-request` + 600s 裁决）→ `engine-bridges.tsx` ApprovalDialog；模式钮三态 |
+| agent 互发 | `rpi-cli/src/message_agent.rs`（内置工具，handler 未装不注册） | `mirach://agent-message` + 30s ack → 前端真投递/回信；**bot-launch 提示词里的 `hermes -p … chat` shell 指令是 hermes 形态，宿主实际走引擎工具** |
+| 本机屏幕 RFB | 无（宿主子系统 `pi_display.rs`：GDI + RFB 3.8 WS + ticket + lease） | screen-pane 经 `resolveSiblingWsUrl('/api/display/ws')` 直连 noVNC |
+
+**必读坑（都实测过）**：
+1. **`durable_binding` 只在 `native_durable` 时填充**（engine session.rs 原逻辑）
+   → 宿主嵌入（从不设 native_durable）里 message_agent 恒报
+   "session binding not ready"。**修复 = 无条件 `set(harness.downgrade())`**，
+   已进 PR 清单。改引擎后宿主需重编（tauri dev 不 watch path 依赖）。
+2. **display lease 契约恒为对象**（gateway-contract：`holder:'agent'|'human'`）：
+   返回 `null` 会让 screen-pane 的 `setScreenLease` 在释放路径读 `null.epoch`
+   抛错（UI 卡"你正在控制"）。宿主 `pi_display.rs` 已按契约修（agent 占位 +
+   单调 epoch）；`running = supported`（本机镜像恒在跑，硬编码 false 会让面板
+   永远停在"已关闭/启动"）。
+3. **display.status 的 `geometry` 是字符串**（面板头部拼文案），不是对象。
+4. canonical driver 的 stop/retry 走 `task.interrupt`（带
+   `execution_generation`）；陈旧 token 会被引擎拒（"stale task identity"），
+   这也是**故意**的——绝不作用到另一轮。
+5. `pi_bot_prompt` 的 taskMeta = 房间坐标（room_id/thread_id/turn_id/…），
+   `recover` 出的 indeterminate 记录由 `session.resume` 的 `recovered_tasks`
+   取出（take-once），driver 回写 `turn.failed` + reason_code `indeterminate`。
+
 ## ZCode 逆向对照环境（2026-11-15，继续对齐对话 UI 时必用）
 
 不再靠读源码猜。ZCode 桌面版支持用环境变量隔离出**第二个实例**并开 CDP：

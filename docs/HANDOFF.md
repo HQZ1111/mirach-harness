@@ -6,6 +6,184 @@
 
 ## 当前状态
 
+**✅ 2026-11-18（夜）：bots 引擎侧四件套全落地 + 实机 E2E 全绿 —— PR 给 pi-rust 是唯一欠账**
+（用户："全部做，做完检查，没问题了pr给pi rust" / "改了引擎测，提pr给ri rust"）
+
+- **引擎侧（`G:\pi-rust-main`，未入宿主仓库；上游 = `github.com/bigfish1913/pi-rust`）**：
+  - `rpi-harness/src/task_lease.rs`（新，6 单测）：持久任务租约——`acquire_with_meta`
+    / `renew` / `finish` / `status` / `list` / `recover`（过期 Running→Indeterminate）
+    / `ensure_live`（fencing：Conflict/Stale/LeaseLost/AlreadyFinished/Invalid/Io）；
+    落盘 `<session>.tasks.json`（tmp+rename）。
+  - `rpi-cli/src/approval_gate.rs`（新，3 单测）：运行时审批模式（AlwaysAsk/Write/Yolo
+    进程级 AtomicU8）+ `ApprovalHandler` + `before_tool_call`（组合在扩展 hook **之后**，
+    只读白名单显式）。
+  - `rpi-cli/src/message_agent.rs`（新，2 单测）：引擎内置 `message_agent` 工具
+    （fire-and-forget；**handler 未装不注册**；caller session id 从 harness 绑定解析）。
+  - `rpi-cli/src/session.rs` 接线 + **绑定修复**：`durable_binding` 原来只在
+    `native_durable` 时填充 → 宿主（从不设它）里 message_agent 恒报
+    "session binding not ready"；改为无条件 `set`（顺带让审批请求带真 session_id）。
+    `lib.rs` 两行 mod 声明。
+- **宿主侧**：`pi_bot.rs`（prompt = task 身份+租约+meta；结束 finish(Settled/Cancelled/
+  Failed+receipt)；state 出 `task`/`tasks`；`pi_bot_take_recovered`、
+  `pi_bot_interrupt_task` 带 fencing）｜`pi_engine_bridges.rs`（agent-message 事件+30s ack、
+  approval-request 事件+600s 裁决）｜`pi_display.rs`（GDI 截屏 + RFB 3.8 WS 服务：ticket
+  单次、lease 契约修复）｜`engine-bridges.tsx`（投递/回信 + 审批弹卡 + 模式恢复）｜
+  host-rpc（display.* 真接线、`task.interrupt`、resume 扩租约面、prompt.submit 传 taskMeta）｜
+  canonical-group-driver（localStorage ledger 删除 → 引擎租约 + recovered→indeterminate
+  回写 + Stop 走 fenced task.interrupt）。
+- **实机 E2E（真模型 BBT/deepseek-v4.1-flash）**：
+  ① 审批：always-ask → bash 弹卡（真 args）→「允许一次」→ `approval-e2e-ok` 真执行；
+  「拒绝」路径回灌 `用户拒绝`、命令未执行。② message_agent：微软 →引擎工具→ `queued`+
+  delivery_id → 真投递 remote-bot（归属前缀）→ 回信进微软会话。③ 屏幕面板：右键「打开
+  屏幕」→ noVNC canvas 1280×720 真帧（像素采样非零）→ 接管「你正在控制」→ 交还
+  「机器人正在控制」（lease epoch 2 / holder:'agent'）。④ 任务租约：running 快照
+  `task{id,gen}`+meta；stale generation interrupt **被拒**（"stale task identity"）；
+  正确 generation → abort → `cancelled`+meta 落盘；崩溃恢复 fixture → `indeterminate`
+  ("driver restarted while the task was running") → take-once 清空。
+- **门禁**：tsc 0 新错（1326 条 = hermes-mirror/sdk-upstream 既有基线）/ vitest
+  **1044**（84 文件）/ cargo test **666** / cargo check 0 / rpi-cli+rpi-harness 新模块
+  单测 11 条全过。
+- **PR 已提（2026-11-18 夜）**：**bigfish1913/pi-rust #348**
+  （https://github.com/bigfish1913/pi-rust/pull/348，
+  head `HQZ1111:feat/task-lease-approval-message-agent`，6 文件：
+  三个新模块 + session.rs +50/-3 + 两个 lib.rs 各一行）。分支基于上游
+  main d3e388d 干净重建（镜像里用户自己的本地补丁如 execution_env /
+  after_tool_call 改动**没有**带进 PR）；克隆在本机
+  `E:\Temp\pi-rust-pr333`。余下：等上游 review；canonical 群聊**含租约**的
+  整房间 UI E2E（各原语已单独实测）。
+- **有意不做**：屏幕的 display.stop/install 面无（宿主无停止语义）；
+  relay 跨网关（单身份宿主无 relay 概念，显式报错）。
+
+
+**✅ 2026-11-18：对话右上角活动状态面板 = ZCode `ConversationStatusPanel` 完整移植**
+（用户："把zcode的对话右上角的状态面板栏完整移植" → "有意差异去除，全部对齐"）。
+
+- **结构对齐**：分区顺序 Git 工具 → 目标 → 会话计划 → 进程 Todo → 终端 →
+  智能体；每区限高滚动（goal/sessionPlans/terminal/agent max-h-48、plan
+  max-h-80）+ separated 上边线 + trailing 随开合切换；智能体分区页脚
+  「已结束的智能体 · N ›」；mini 胶囊完整优先级链（运行待办 → 目标(活) →
+  git 变更 → 目标(完) → 最近完成项 → 待办计数 → 最新会话计划 → 运行计数 →
+  无则不渲染）。
+- **卸载闸门照抄上游**：`!hasContent → null`（只有已结束智能体的会话整块不
+  渲染），推翻 11-15 的"常驻空态"宿主选择。
+- **目标区完整化**：`pi_goal_state`（rpi-goal `goal-state` 条目）→ 用时秒针 +
+  `/goal pause|resume` 按钮走既有 `pi_run_command`；真机：起目标 → 面板
+  出现（active、秒针在走）→ 暂停/恢复按钮真翻转状态 → `/goal stop` 归档后
+  面板整块消失。
+- **会话计划目录**：新 Rust IPC `pi_plan_entries`（rpi-plan-mode 条目，只收
+  有 markdown 的，seq 降序）+ 新 `plan-entries-store`；点行开面板栏标签页
+  `plan-detail:<entryId>`（每计划一实例）。
+- **智能体分区**：rpi 子代理运行态无宿主读取面（`pi_hub_roster` 如实 Err）→
+  从 `delegate_task` / `subagent` / `dispatch` 工具调用派生运行/已结束两段
+  （`status-agent-rows.ts` 纯函数）；页脚开单实例 `agent-directory` 标签页，
+  行可再开子代理详情页。
+- **终端分区**：数据面 = jobs-store（`pi_job_list`，rpi 未装 background-tasks
+  插件 → 如实 Err → 空 → 分区不渲染），有任务时行 = 命令行 + 用时 + Stop。
+- **workflow 分区不渲染**：rpi 无该概念（engine-gaps G3），不造假 UI。
+- 顺带修复：`pi_get_state.hasExtensions` 硬编码 `false` → 读
+  `extension_session` 真值（实机回读 `true`；扩展命令本来就可用）。
+- 门禁：tsc 0 新错（1326 条均在 hermes-mirror / sdk-upstream 既有基线）/
+  vitest 1044（84 文件，新增 25+9 条）/ cargo test 666。
+
+**✅ 2026-11-18：右侧面板栏终端对齐 ZCode 侧栏终端**（用户："我的右侧面板栏
+里的终端，打开怎么和zcode不一样？"）。规格 = 上游
+`docs/ui/side-pane-terminal-tabs.md` + `SidePaneTerminalPane.tsx`：
+
+- **一个面板 = 一个终端**：删掉面板内自绘的二级页签条（`Administrator +`
+  那排）与二级新建钮（上游明令"内部不再嵌套 terminal tabs"）；内容区 =
+  `bg-background p-3`（0.75rem）留白——此前是贴边满铺。
+- **点「终端」= 新建面板**（不复用单例）：`open-page-actions.ts::
+  openTerminalPanel`，标题 = cwd 末段（取不到 = 终端）+ " 2/3"（上游
+  `createTerminalSidePaneTitle` 同源），id = `terminal` / `terminal-2`…；
+  cwd 进 params，存档恢复沿用。`isTerminalPanelId()` 同时接进关标签的
+  栏生命周期判定（dockview-shell）。
+- **保活**：终端面板以 `renderer:'always'` 挂载（dockview overlay），切标签/
+  收栏**不卸载、PTY 不中断**（上游"切换到其他 side pane tab 或收起 side pane
+  时保持挂载"）；关闭面板才卸载 = kill（实机：pwsh 进程 5→4）。boot 时对旧
+  存档里的终端面板补写 `setRenderer('always')`。
+- **坑（已实锤进代码注释）**：`always` 面板隐藏时 overlay 未定位、容器报
+  整坞尺寸（100%×100%）——"有尺寸就 spawn"会按错尺寸起 PTY；spawn/fit 必须
+  同时以 `api.isVisible` 为准，激活时由 visibility/dimensions 回调补启动。
+  实机断言：隐藏终端无 xterm（不 spawn）；激活后面板 69 行、容器 240×1046
+  尺寸一致；A 终端 `echo probe-AAA` → 切到 B → 切回，scrollback 仍在且能
+  继续执行（保活）。
+- 退出条（进程已退出/重新打开）保留——宿主失败可见通道；实机：`exit` →
+  条出现 → 点「重新打开」→ 新会话。
+- 门禁：tsc 0（非镜像树）/ vitest 1044（84 文件）。**未做**：ZCode 标签上的
+  终端图标（宿主面板标签一贯无图标）、右键复制/粘贴菜单（上游
+  TerminalSession 有；宿主未接）——两者都不影响"打开即同形"。
+
+**✅ 2026-11-17：bots 插件补齐轮（用户："先补齐bots……百分百对齐hermes的bots"）**。
+
+- **P0 群聊成员轮次全链接通**：新 `src-tauri/src/pi_bot.rs` = 后台 bot 会话
+  泳道（独立 harness，不抢前台会话；create/open/prompt/interrupt/compact/
+  attach/ask/approval），`host-rpc` 接 `prompt.submit`/`approval.respond`/
+  `clarify.lock`/`file.attach`/`image.attach_bytes` + `session.resume` 富投影
+  （running/inflight/turn_started_at/open_requests/pending_approval +
+  `failed_turn` 边界行）。实机：发消息 → 成员会话真跑 → deepseek 403（key
+  配额用尽）→ 房间活动行如实显示真错误 → 自动轮到下一成员。
+- **贡献面 2/7 → 6/7**：`composer.atCompletions`（@ 补全出机器人行）、
+  `composer.middleware`（发送前管线）、`chat.empty`、`command.palette`
+  （New bot… 行），加既有 panes×2；`profile group header` 无消费面（屏幕
+  不支持）。
+- **`host.openWorkspace` 从空开关变真门**：`plugin-workspaces.ts` +
+  `plugin-workspace-pane.tsx`（主区标签页 + 重启孤儿剪枝）——群聊房间此前
+  点开毫无反应（事件无监听者 + close 返回值被吞）。
+- **修 5 个真 bug**（用户可见）：ctx.storage 值级 KV 被当字符串（bot-meta v2
+  等持久化全坏）；`gatewayActivationEpoch` 写成常量而上游是函数（群聊创建
+  对话框永远"检查中"）；`host.agents().sources` 用错键名（所有行"网关已
+  移除"、群成员 0 可用）；`pi_get_session_messages` 叶子取文件尾行（rpi
+  记录条目无父链 → 投影恒空 → 群聊读不到回复）；`sdk/message-text.tsx`
+  借 assistant-ui part 原语（群聊房间白屏）。
+- **剩余结构性缺口 = canonical（网关驱动）群聊**：新群聊按上游语义要求
+  网关 driver（宿主 legacy 声明 → 对话框如实"版本过旧"）；Rust 已移植
+  hosted_rooms 状态机/规划/控制面，缺 driver runner（上游源
+  `tui_gateway/hosted_room_driver.py` + `hosted_room_service.py`；依赖会话层
+  task 身份/终局回执，rpi 侧未定协议）。详见 `docs/bots-port-gaps.md`。
+- **门禁**：tsc 0（非镜像树）/ vitest 1003（82 文件）/ cargo test 660 /
+  cargo check 0 错误。
+- **2026-11-17 续（用户："其他缺口能补齐的就补齐"）**：
+  - **MCP 真面补全**：`pi_mcp_catalog.rs` + `assets/mcp-catalog.json`（hermes
+    `optional-mcps/` 的宿主可执行子集：10 条 no-auth HTTP）；`mcp.catalog`
+    出目录、`mcp.servers.add {preset}` 一键装、`mcp.servers.test` 对 HTTP
+    做**真实 MCP 探测**（initialize→initialized→tools/list；实机 deepwiki 3
+    工具 + serverInfo）、`mcp.servers.set_api_key` 写 env、
+    `mcp.servers.remove` 真删。56 条 OAuth 条目不入目录（引擎扩展没有 OAuth，
+    见 `docs/pi-host-gaps.md`）。
+  - **能力面板导出**：`sdk/capabilities-views.tsx`（CapabilitiesView /
+    ConnectorsTab / ToolsetConfigPanel）→ 机器人编辑对话框出现
+    技能/插件/连接器/工具集四页签（实机）。
+  - **图像/屏幕面**：`image.generate` probe available:false；`display.*`
+    明确报错（无 display 子系统）。
+  - **canonical 群聊最小驱动落地**（同日）：`canonical-group-driver.ts`
+    （前端驱动）+ `groups_plan` 暴露 task.prompt + `groups.driver_append`
+    写回口 + `groups.capabilities` driver:true。实机：新建群聊 → 发消息 →
+    两名成员依次跑轮次（真实 403）→ turn.failed 如实回写 → room.activity
+    settled；界面出「回合失败」卡 / Round 状态 / Stop。差距：无租约/
+    fencing/indeterminate 恢复、router(auto) 不支持、retry/discard/
+    approvals 未桥接（`docs/bots-port-gaps.md` §3）。
+  - **2026-11-17 收尾（用户提供测试 key：`bbtoken.boywe.cn/v1`）**：
+    models.json 加 `BBT` provider 并设为默认 → **「真模型端到端」硬阻塞解除**。
+    成功链实机验证：主对话 1+1=2；canonical 群聊两成员真实自我介绍 +
+    handoff + settled；legacy 群聊真回复；router(auto) `room.routed` →
+    成员真回复；**MCP 模型内调用**（`mcp_list` 发现 deepwiki → `mcp_call
+    ask_wiki_question(facebook/react)` 返回真实答案并中文总结）；远端错误
+    如实回显。
+  - **新增宿主面**：`pi_mcp_oauth.rs`（MCP OAuth 标准 DCR+PKCE+刷新，目录扩到
+    64 条）；`pi_skills_catalog.rs`（hermes optional-skills 139 技能，
+    skills.manage 搜索/安装/删除，实机装 watchers）；canonical driver 补
+    **approvals 桥 / retry / discard / router(auto)**；`groups.capabilities`
+    方法表 16 项。
+  - **仍未做（引擎侧，见 `docs/pi-host-gaps.md` §6/§7）**：权限闸运行时切换
+    （rpi 迁移后 set_approval_mode/plan 系为只读，approval 卡触发需扩展通道）、
+    message_agent/relay（需会话层工具注册面）、display、canonical 租约级恢复。
+  - **引擎侧缺口文档**：`docs/pi-host-gaps.md`（OAuth MCP / display /
+    canonical 全语义所需 task 身份 / session.reclaimed / 多连接 peer）。
+    结论：本轮所有补齐均在宿主侧完成，未改 `G:\pi-rust-main`（该树无 .git，
+    需要时按文档拆 patch）。
+- **PR**：https://github.com/HQZ1111/mirach-harness/pull/2（分支
+  `bots-plugin-complete`；本轮续的改动追加在同一分支）。
+
 **✅ 2026-11-16：hermes-bots 插件移植落地（c85756a）+ groups_plan 修复（ff41b18）**。
 
 - **内置插件跑通**：`src/sdk`（`@hermes/plugin-sdk` 宿主对偶：host.request 分发
@@ -492,7 +670,9 @@ pi 真引擎（AG-UI HTTP+SSE）全链通。**
    read-aloud / regenerate-menu。
 4. **pi 0.6.x 升级**（breaking：MCP project_trusted）——等真模型基线。
 5. **谱系树嵌套**（`list_sessions` 透出 `branchedFrom`）。
-6. **终端保活**（同组切签会卸载隐藏窗格 → PTY 结束）。
+6. **终端保活**：面板级 `renderer:'always'`（2026-11-18）已解决"同组切标签
+   卸载 → 终端会话结束"；剩余**跨布局重建/重启**的会话恢复 = ZCode 式模块级
+   registry，独立一轮。
 7. 人工验收 + i18n + L5 移动端。
 
 ## 环境速查

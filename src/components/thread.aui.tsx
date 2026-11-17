@@ -133,8 +133,13 @@ import {
   type ComponentType,
   type FC,
   type PropsWithChildren,
+  type ReactNode,
 } from "react";
 import { useStore } from "zustand";
+
+import { ContribBoundary } from "@/hermes-shim/contrib/react/contrib-boundary";
+import { useContributions } from "@/hermes-shim/contrib/react/use-contributions";
+import { sessionCatalog } from "@/components/panes/session-manage/session-catalog";
 
 export type ThreadGroupPart = WorkGroupPart;
 
@@ -906,6 +911,57 @@ const EmptyStateWelcome: FC = () => {
   );
 };
 
+// ── chat.empty 贡献槽（2026-11-17）──────────────────────────────────────────
+// 上游语义（components/assistant-ui/thread/index.tsx:166）：**草稿**（无会话）
+// 看核心 splash；**已存在但为空**的会话交给 chat.empty 贡献（hermes-bots 的
+// BotChatEmpty 用机器人名字/头像替换 splash）。宿主对偶 = 有活动会话 id 时
+// 挂贡献（每个都挂，返回 null 即不渲染——上游同款：各贡献自行认领自己的
+// 会话，首个认领不到的不能压掉真正的主人），无会话 id 时保留核心欢迎屏。
+const CHAT_EMPTY_AREA = "chat.empty";
+
+type ChatEmptyRender = (props: { sessionId: string }) => ReactNode;
+
+function ChatEmptyEntry({
+  id,
+  render,
+  sessionId,
+}: {
+  id: string;
+  render: ChatEmptyRender;
+  sessionId: string;
+}) {
+  // 稳定组件身份：每次 render 换闭包会把插件的空态整个重挂（上游同款注释）。
+  const Render = useMemo(() => render, [render]);
+  return (
+    <ContribBoundary id={id} key={id}>
+      <Render sessionId={sessionId} />
+    </ContribBoundary>
+  );
+}
+
+const ChatEmptyBody: FC<{ Welcome: ComponentType }> = ({ Welcome }) => {
+  const contributions = useContributions(CHAT_EMPTY_AREA);
+  // 宿主的活动会话 id（stored id；pi 的 id 空间单一）。
+  const sessionId = useStore(sessionCatalog, (s) => s.activeId);
+  if (!sessionId || contributions.length === 0) return <Welcome />;
+  return (
+    <>
+      {contributions.map((contribution) => {
+        const render = (contribution.data as { render?: unknown } | undefined)?.render;
+        if (typeof render !== "function") return null;
+        return (
+          <ChatEmptyEntry
+            id={contribution.id}
+            key={contribution.id}
+            render={render as ChatEmptyRender}
+            sessionId={sessionId}
+          />
+        );
+      })}
+    </>
+  );
+};
+
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
@@ -1070,7 +1126,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           }
         >
           <AuiIf condition={isNewChatView}>
-            <Welcome />
+            <ChatEmptyBody Welcome={Welcome} />
           </AuiIf>
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />

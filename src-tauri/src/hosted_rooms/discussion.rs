@@ -476,7 +476,12 @@ fn validate_member_target(
 
     if kind == "local" {
         exact_fields(value, &format!("member {index} local target"), &["kind", "profile"], &[])?;
-        let target_profile = identifier(map.get("profile"), &format!("member {index} target profile"))?;
+        let target_profile = common::identifier_unicode(
+            map.get("profile").and_then(Value::as_str).unwrap_or(""),
+            &format!("member {index} target profile"),
+            128,
+        )
+        .map_err(|e| DiscussionError::validation(e.0))?;
         if target_profile != profile {
             return fail(format!(
                 "member {index} local target profile does not match member profile"
@@ -560,9 +565,25 @@ fn validate_member(
         &["display_name", "target"],
     )?;
 
-    let member_id = identifier(map.get("member_id"), &format!("member {index} id"))?;
-    let profile = identifier(map.get("profile"), &format!("member {index} profile"))?;
-    let handle = identifier(map.get("handle"), &format!("member {index} handle"))?;
+    // 宿主扩展：成员身份字段用 Unicode 标识符（机器人名/群成员名是中文）。
+    let member_id = common::identifier_unicode(
+        map.get("member_id").and_then(Value::as_str).unwrap_or(""),
+        &format!("member {index} id"),
+        128,
+    )
+    .map_err(|e| DiscussionError::validation(e.0))?;
+    let profile = common::identifier_unicode(
+        map.get("profile").and_then(Value::as_str).unwrap_or(""),
+        &format!("member {index} profile"),
+        128,
+    )
+    .map_err(|e| DiscussionError::validation(e.0))?;
+    let handle = common::identifier_unicode(
+        map.get("handle").and_then(Value::as_str).unwrap_or(""),
+        &format!("member {index} handle"),
+        128,
+    )
+    .map_err(|e| DiscussionError::validation(e.0))?;
 
     let target = validate_member_target(map.get("target"), &profile, known_profiles, index)?;
 
@@ -610,7 +631,7 @@ pub fn validate_roster(
     let known_profiles: std::collections::BTreeSet<String> = local_profiles
         .iter()
         .map(|p| {
-            common::identifier(p, "local profile", 128, true, None)
+            common::identifier_unicode(p, "local profile", 128)
                 .map_err(|e| DiscussionError::validation(e.0))
         })
         .collect::<DiscussResult<_>>()?;
@@ -729,9 +750,10 @@ pub fn require_gateway_actor(actor: &Value, room: &DiscussionRoom, message: &str
     Ok(())
 }
 
-/// 上游 `_member_by_id()`。
+/// 上游 `_member_by_id()`。成员 id 走 Unicode 标识符（宿主机器人名可为中文）。
 pub fn member_by_id<'a>(room: &'a DiscussionRoom, member_id: &Value) -> DiscussResult<&'a DiscussionMember> {
-    let normalized = identifier(Some(member_id), "member_id")?;
+    let normalized = common::identifier_unicode(member_id.as_str().unwrap_or(""), "member_id", 128)
+        .map_err(|e| DiscussionError::validation(e.0))?;
     room.members
         .iter()
         .find(|m| m.member_id == normalized)

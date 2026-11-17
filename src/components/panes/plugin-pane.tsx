@@ -24,7 +24,7 @@ import type { ReactNode } from 'react'
 /** 语言偏好与 capabilities-pane 同源（宿主设置页的 `mirach:locale`）。
  *  插件 UI 的 `usePluginI18n(id)` 读的是上游 I18nProvider 的上下文；不挂
  *  Provider 时 locale 恒 DEFAULT_LOCALE('en')，中文界面里的插件面全是英文。 */
-function hostLocale(): 'en' | 'zh' {
+export function hostLocale(): 'en' | 'zh' {
   try {
     return new URLSearchParams(window.location.search).get('lang') === 'en' ||
       localStorage.getItem('mirach:locale') === 'en'
