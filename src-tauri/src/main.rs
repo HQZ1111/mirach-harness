@@ -54,6 +54,9 @@ mod pi_capabilities;
 // （`sync_extension_mcp_registrations` / `extension_ui_handler`）；此前缺的
 // 只是管理 UI，不是能力。
 mod pi_mcp;
+// MCP 预设目录（hermes `optional-mcps/` 的宿主可执行子集；见 pi_mcp_catalog.rs
+// 头注：rpi-mcp-adapter 不支持 OAuth，只收 no-auth HTTP 条目）。
+mod pi_mcp_catalog;
 // pi 扩展的加载面（2026-11-02）：照 pi CLI 的做法用 ResourceLoader 解析
 // 扩展路径并交给会话。此前宿主恒传空 extension_paths，pi::extensions 的
 // 整套能力（工具注册/斜杠命令/事件钩子）在宿主里等于不存在。
@@ -1788,6 +1791,9 @@ fn main() {
             pi_mcp::pi_mcp_upsert_server,
             pi_mcp::pi_mcp_remove_server,
             pi_mcp::pi_mcp_test_server,
+            pi_mcp::pi_mcp_set_api_key,
+            pi_mcp_catalog::pi_mcp_catalog,
+            pi_mcp_catalog::pi_mcp_install_preset,
             pi_extensions::pi_extensions,
             pi_cron::pi_cron_jobs,
             pi_cron::pi_cron_job,

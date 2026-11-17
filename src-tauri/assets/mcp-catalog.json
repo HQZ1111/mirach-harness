@@ -1,0 +1,103 @@
+{
+  "entries": [
+    {
+      "name": "alltrails",
+      "description": "AllTrails: find hikes and trails with reviews and ratings.",
+      "source": "https://www.alltrails.com/mcp",
+      "url": "https://www.alltrails.com/mcp",
+      "suggestKeywords": [
+        "hiking",
+        "trail",
+        "alltrails"
+      ]
+    },
+    {
+      "name": "aws-knowledge",
+      "description": "Authoritative AWS docs, API references, and best practices.",
+      "source": "https://awslabs.github.io/mcp/servers/aws-knowledge-mcp-server/",
+      "url": "https://knowledge-mcp.global.api.aws",
+      "suggestKeywords": [
+        "aws docs",
+        "aws knowledge"
+      ]
+    },
+    {
+      "name": "context7",
+      "description": "Up-to-date, version-specific library docs and code examples.",
+      "source": "https://context7.com/docs/resources/all-clients",
+      "url": "https://mcp.context7.com/mcp",
+      "suggestKeywords": [
+        "context7",
+        "library docs"
+      ]
+    },
+    {
+      "name": "deepwiki",
+      "description": "Ask questions about any public GitHub repo (Devin's DeepWiki).",
+      "source": "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "suggestKeywords": [
+        "deepwiki",
+        "repo wiki"
+      ]
+    },
+    {
+      "name": "kiwi",
+      "description": "Kiwi.com flight search: itineraries with direct booking links.",
+      "source": "https://www.kiwi.com/stories/kiwi-mcp-connector/",
+      "url": "https://mcp.kiwi.com",
+      "suggestKeywords": [
+        "flight search",
+        "kiwi.com"
+      ]
+    },
+    {
+      "name": "microsoft-learn",
+      "description": "Official Microsoft, Azure, and .NET docs and code samples.",
+      "source": "https://learn.microsoft.com/en-us/training/support/mcp-get-started",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "suggestKeywords": [
+        "microsoft docs",
+        "azure docs",
+        "msdn"
+      ]
+    },
+    {
+      "name": "trivago",
+      "description": "trivago hotel search: compare prices by city and dates.",
+      "source": "https://mcp.trivago.com/mcp",
+      "url": "https://mcp.trivago.com/mcp",
+      "suggestKeywords": [
+        "hotel search",
+        "trivago"
+      ]
+    },
+    {
+      "name": "twilio-docs",
+      "description": "Twilio developer docs search (public beta, read-only).",
+      "source": "https://www.twilio.com/docs/ai/mcp",
+      "url": "https://mcp.twilio.com/docs",
+      "suggestKeywords": [
+        "twilio docs"
+      ]
+    },
+    {
+      "name": "unreal-engine",
+      "description": "Drive the Unreal Engine 5.8 editor over its local MCP server.",
+      "source": "https://dev.epicgames.com/documentation/unreal-engine/unreal-mcp-in-unreal-editor",
+      "url": "http://127.0.0.1:8000/mcp",
+      "suggestKeywords": []
+    },
+    {
+      "name": "wolfram",
+      "description": "Wolfram|Alpha computation, math, and curated knowledge.",
+      "source": "https://www.wolfram.com/agent-tools/",
+      "url": "https://agenttools.wolfram.com/mcp",
+      "suggestKeywords": [
+        "wolfram",
+        "wolfram alpha",
+        "computation"
+      ]
+    }
+  ]
+}

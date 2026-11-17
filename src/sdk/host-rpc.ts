@@ -1021,12 +1021,33 @@ export async function dispatchHostRequest<T>(
       return { providers: [...byProvider.values()] } as T
     }
 
+    case 'image.generate': {
+      // hermes 的图像生成后端（avatars / 群聊图片）。宿主没有图片模型接入；
+      // probe 返回 available:false（UI 隐藏生成入口），真生成明确报错。
+      if (params.probe === true) {
+        return { available: false, error: '宿主没有图片生成后端' } as T
+      }
+      throw new Error('image.generate: 宿主没有图片生成后端（机器人头像请用上传图片或图形头像）')
+    }
+
+    case 'display.install':
+    case 'display.observe':
+    case 'display.thumbnail':
+    case 'display.start':
+    case 'display.lease.acquire':
+    case 'display.lease.release': {
+      // Bot Desktop / 屏幕门户：宿主没有显示服务器/租约/截图子系统
+      // （display.status 已如实 supported:false）。
+      throw new Error(`${method}: 宿主没有 Bot Desktop / display 子系统（屏幕不可用）`)
+    }
+
     case 'mcp.catalog': {
-      // 上游的 MCP 目录是**网关侧**的 curated 清单（hermes_cli/mcp_catalog.py
-      // 的 optional-mcps manifests）。宿主没有这份清单，返回空目录——UI 的
-      // "catalog" 区自然为空；已配置的 MCP 服务器仍从 profiles.describe
-      // （pi_mcp 的 mcp.json 读取）显示。
-      return { servers: [] } as T
+      // hermes `mcp.catalog` 的宿主对偶：内置目录 = `optional-mcps/` 里
+      // rpi-mcp-adapter 可执行的子集（no-auth HTTP，2026-11-17 移植 10 条；
+      // OAuth 条目引擎没有 token 管理，不入目录——见 pi_mcp_catalog.rs 头注）。
+      // 已装服务器从 pi_mcp 真快照回读，installed 标记如实。
+      const res = await invoke<{ entries?: unknown[] }>('pi_mcp_catalog')
+      return { servers: res?.entries ?? [] } as T
     }
 
     case 'mcp.servers.list': {
@@ -1042,44 +1063,66 @@ export async function dispatchHostRequest<T>(
     }
 
     case 'mcp.servers.add': {
-      // 上游从目录 preset 安装；宿主没有目录 → preset 无法解析。
-      // 显式 config（url/command/args/env）可以直装（pi_mcp_upsert_server）。
-      const name = String(params.name ?? '')
+      // 两种形态：
+      // 1) `preset: '<catalog name>'`（hermes 目录一键装）——解析内置目录，
+      //    往 `~/.rpi/agent/mcp.json` 写 `{url}`（pi_mcp_install_preset）；
+      // 2) 显式 `config`（url/command/args/env）——直装（pi_mcp_upsert_server）。
+      const name = String(params.name ?? '').trim()
       if (!name) throw new Error('mcp.servers.add 缺少 name')
+      const preset = typeof params.preset === 'string' ? params.preset.trim() : ''
       const config = params.config
       if (!config || typeof config !== 'object' || Array.isArray(config)) {
-        throw new Error(
-          `mcp.servers.add: 宿主没有 MCP 目录预设「${String(params.preset ?? name)}」——请提供显式 config（url/command/args/env）`,
-        )
+        if (!preset) {
+          throw new Error(
+            `mcp.servers.add: 缺少 config（url/command/args/env），且没有可解析的目录预设「${name}」`,
+          )
+        }
+        const installed = await invoke<{ installed?: boolean; url?: string }>('pi_mcp_install_preset', {
+          name: preset === name ? name : preset,
+        })
+        return { ok: true, result: { added: true, name, url: installed?.url } } as T
       }
       const profile = typeof params.profile === 'string' ? params.profile : ''
       const bot = profile ? findBot(profile) : null
       await invoke('pi_mcp_upsert_server', {
-        cwd: bot?.cwd || undefined,
+        // Rust 侧 cwd 是必填 String（写路径固定全局，空串 = 无项目上下文）。
+        cwd: bot?.cwd || '',
         name,
         spec: config,
       })
       return { ok: true, result: { added: true, name } } as T
     }
 
-    case 'mcp.servers.set_api_key': {
-      // 上游为目录条目的 requires 写 env 密钥（服务端 profile 配置）。
-      // 宿主密钥面在 mcp.json 的 env 里；为了避免重写条目时丢其它 env
-      // （pi_mcp_servers 只回 env 键名不回值），这里不做盲写——如实报错。
-      throw new Error(
-        'mcp.servers.set_api_key: 宿主没有 MCP 目录安装流程；请在 mcp.json 的 env 里配置密钥（设置 → MCP）',
-      )
+    case 'mcp.servers.remove': {
+      // 从全局 mcp.json 删服务器（hermes 连接器/编辑器的移除路径）。
+      const name = String(params.name ?? '').trim()
+      if (!name) throw new Error('mcp.servers.remove 缺少 name')
+      const removed = await invoke<boolean>('pi_mcp_remove_server', { cwd: '', name })
+      return { ok: true, result: { removed, name } } as T
+    }
+
+    case 'mcp.servers.set_api_key': {      // 插件对目录条目写 env 密钥（hermes 写 .env；宿主写 mcp.json 的
+      // `mcpServers.<name>.env`——rpi-mcp-adapter 启动 stdio 子进程时读取）。
+      // 服务器必须已安装（不偷偷新建半截条目）；空值 = 清除该键。
+      const name = String(params.name ?? '').trim()
+      const envVar = String(params.env_var ?? params.envVar ?? '').trim()
+      const value = typeof params.value === 'string' ? params.value : ''
+      if (!name) throw new Error('mcp.servers.set_api_key 缺少 name')
+      if (!envVar) throw new Error('mcp.servers.set_api_key 缺少 env_var')
+      await invoke('pi_mcp_set_api_key', { cwd: '', name, envVar, value })
+      return { ok: true, result: { name, env_var: envVar } } as T
     }
 
     case 'mcp.servers.test': {
-      // pi 的 MCP 测试面只做**配置合法性校验**（pi_mcp_test_server 恒
-      // ok:false + 原因；不假装探测成功）。包成上游双层信封，让
-      // mcp-setup 的错误行显示真实原因。
+      // HTTP 条目 = 真实 Streamable HTTP 探测（initialize → initialized →
+      // tools/list，返回真工具表/serverInfo）；stdio 条目 = 配置校验 +
+      // 如实 ok:false（宿主进程驱动不了引擎侧 adapter）。包成上游双层信封，
+      // 让 mcp-setup 的错误行显示真实原因。
       const name = String(params.name ?? '')
       const profile = typeof params.profile === 'string' ? params.profile : ''
       const bot = profile ? findBot(profile) : null
       const result = await invoke<Record<string, unknown>>('pi_mcp_test_server', {
-        cwd: bot?.cwd || undefined,
+        cwd: bot?.cwd || '',
         name,
         projectTrusted: false,
       })

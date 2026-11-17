@@ -69,10 +69,18 @@
 
 ### P2 MCP / 技能市场 / relay（诚实接线，不造假）
 
-- `mcp.catalog` = `{servers: []}`（宿主没有 hermes 的 curated 目录）；
-  `mcp.servers.list` = pi_mcp 真快照；`add` 仅显式 config（preset 明确报错）；
-  `set_api_key` 明确报错（无目录安装流程）；`test` 包 pi_mcp_test_server
-  的真原因。
+- **MCP 目录已补（2026-11-17 续）**：`mcp.catalog` = `src-tauri/src/pi_mcp_catalog.rs`
+  + `assets/mcp-catalog.json`（hermes `optional-mcps/` 的宿主可执行子集：
+  **10 条 no-auth HTTP**，如 deepwiki/context7/wolfram/microsoft-learn）。
+  `mcp.servers.add {preset}` 一键装（写 `~/.rpi/agent/mcp.json` 的
+  `{url}`）；`mcp.servers.test` 对 HTTP 条目做**真实探测**（initialize →
+  initialized → tools/list，实机 deepwiki 返回 3 个工具 + serverInfo）。
+  `mcp.servers.set_api_key` 写 `mcpServers.<name>.env`；`mcp.servers.remove` 真删。
+  **56 条 OAuth 条目不入目录**：rpi-mcp-adapter 没有 OAuth token 管理（见
+  `docs/pi-host-gaps.md` §1），列出来就是假入口。显式 config 的任意
+  HTTP/stdio 服务器仍可加。
+- `mcp.catalog` 的 `installed` 标记从 pi_mcp 真快照回读；`profiles.describe`
+  的 `mcp_servers` 同源。
 - `skills.manage` 搜索 = 空表 + console.warn（宿主没有技能市场），install
   明确报错（本地技能清单见 pi_capabilities → 设置页能力）。
 - `bot_relay.*` = 单身份：roster.sync 0 / drain 空 / reply·deliver 明确报错。
@@ -154,3 +162,19 @@
   `%TEMP%\mirach-click-xy.mjs` / `mirach-type-enter.mjs`（临时，不入库）。
 - 夹具房间与成员会话文件（`~/.rpi/sessions/…01a1e5d6…` / `…01a1e5f7…`）
   为验证产物，可随时删除。
+
+## 6. 2026-11-17 续：能力面板与 MCP 目录
+
+- **能力面板导出补全**：`src/sdk/capabilities-views.tsx` 导出
+  `CapabilitiesView` / `ConnectorsTab` / `ToolsetConfigPanel`（hermes-mirror
+  原件 + 宿主桥/Provider 包装，`supportsFixedConnection=true`）。实机：
+  机器人编辑对话框「高级」出现 技能 / 插件 / 连接器 / 工具集 四页签
+  （此前只有技能/工具集两块列表）。连接器页的"托管应用"区块在宿主如实
+  报错（没有 hermes 云后端），本机 MCP 管理走设置页「连接器」。
+- **MCP 目录/测试/密钥**：见 §1 的 P2 MCP 段（10 条 no-auth HTTP 可一键
+  安装；deepwiki 真实探测返回 3 工具 + serverInfo；56 条 OAuth 条目不
+  入目录——引擎扩展没有 OAuth，见 `docs/pi-host-gaps.md`）。
+- **image.generate**：probe 返回 `available:false`（隐藏生成入口），真生成
+  明确报错；`display.*` 方法明确报"无 display 子系统"。
+- 引擎侧缺口统一收在 **`docs/pi-host-gaps.md`**（OAuth MCP、display、
+  canonical driver 的会话任务身份、session.reclaimed、多连接 peer）。

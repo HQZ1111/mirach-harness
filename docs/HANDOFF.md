@@ -35,8 +35,25 @@
   task 身份/终局回执，rpi 侧未定协议）。详见 `docs/bots-port-gaps.md`。
 - **门禁**：tsc 0（非镜像树）/ vitest 1003（82 文件）/ cargo test 660 /
   cargo check 0 错误。
+- **2026-11-17 续（用户："其他缺口能补齐的就补齐"）**：
+  - **MCP 真面补全**：`pi_mcp_catalog.rs` + `assets/mcp-catalog.json`（hermes
+    `optional-mcps/` 的宿主可执行子集：10 条 no-auth HTTP）；`mcp.catalog`
+    出目录、`mcp.servers.add {preset}` 一键装、`mcp.servers.test` 对 HTTP
+    做**真实 MCP 探测**（initialize→initialized→tools/list；实机 deepwiki 3
+    工具 + serverInfo）、`mcp.servers.set_api_key` 写 env、
+    `mcp.servers.remove` 真删。56 条 OAuth 条目不入目录（引擎扩展没有 OAuth，
+    见 `docs/pi-host-gaps.md`）。
+  - **能力面板导出**：`sdk/capabilities-views.tsx`（CapabilitiesView /
+    ConnectorsTab / ToolsetConfigPanel）→ 机器人编辑对话框出现
+    技能/插件/连接器/工具集四页签（实机）。
+  - **图像/屏幕面**：`image.generate` probe available:false；`display.*`
+    明确报错（无 display 子系统）。
+  - **引擎侧缺口文档**：`docs/pi-host-gaps.md`（OAuth MCP / display /
+    canonical driver 任务身份 / session.reclaimed / 多连接 peer）。结论：
+    本轮所有补齐均在宿主侧完成，未改 `G:\pi-rust-main`（该树无 .git，
+    需要时按文档拆 patch）。
 - **PR**：https://github.com/HQZ1111/mirach-harness/pull/2（分支
-  `bots-plugin-complete`，24 文件 +2542/−312）。
+  `bots-plugin-complete`；本轮续的改动追加在同一分支）。
 
 **✅ 2026-11-16：hermes-bots 插件移植落地（c85756a）+ groups_plan 修复（ff41b18）**。
 

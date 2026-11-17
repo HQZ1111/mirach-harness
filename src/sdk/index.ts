@@ -302,6 +302,13 @@ export { translateNow } from '@/hermes-mirror/i18n'
 export type PluginTranslate = (key: string, vars?: Record<string, unknown>) => string
 export type PluginLocaleBundles = Record<string, Record<string, string>>
 
+// ── 能力面板（bots 编辑机器人对话框的门）──────────────────────────────────
+
+/** 上游 `CapabilitiesView` / `ConnectorsTab` / `ToolsetConfigPanel` 的宿主
+ *  对偶（hermes-mirror 的原件 + 宿主桥/Provider 包装）。hermes-bots 的
+ *  `profile-config.tsx` 用它们渲染"能力总览 / 连接器 / 工具集"三块。 */
+export { CapabilitiesView, ConnectorsTab, ToolsetConfigPanel } from './capabilities-views'
+
 // ── 会话未读 / 激活代际 ─────────────────────────────────────────────────────
 
 /**
