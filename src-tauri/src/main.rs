@@ -53,6 +53,10 @@ mod pi_capabilities;
 // pi **有**这两套系统（`pi::mcp` + `pi::extensions`），宿主会话侧也已经在用
 // （`sync_extension_mcp_registrations` / `extension_ui_handler`）；此前缺的
 // 只是管理 UI，不是能力。
+// 引擎侧宿主桥（message_agent 投递 / 审批询问 → 前端 UI 回执）。
+mod pi_engine_bridges;
+// 本机屏幕（display.* 的宿主对偶：GDI 截屏 + 最小 RFB WS 服务）。
+mod pi_display;
 mod pi_mcp;
 // MCP 预设目录（hermes `optional-mcps/` 的宿主可执行子集；见 pi_mcp_catalog.rs
 // 头注：rpi-mcp-adapter 不支持 OAuth，只收 no-auth HTTP 条目）。
@@ -1012,6 +1016,16 @@ fn pi_goal_state(
     state.engine.goal_state()
 }
 
+/// 会话计划目录（活动面板「会话计划」分区）：当前分支上有 plan 文本的
+/// `plan-mode` 条目（rpi-plan-mode 每次 plan_mode_complete 追加一条，
+/// plan = 完整 markdown）。按 seq 降序返回 `[{entryId, seq, timestamp, plan}]`。
+#[tauri::command(async)]
+fn pi_plan_entries(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.plan_entries()
+}
+
 /// 执行扩展 slash command（`/plan start|exit` 等）——与 rpi-cli RPC 的
 /// `execute_command` 同一 handler 契约；模式芯片据此真的进入/退出计划模式
 /// （计划态下插件只放行 read/bash/docs/plan_mode_complete，write/edit 被拒）。
@@ -1501,6 +1515,10 @@ fn main() {
             // 关窗回调（wire_window）要同步读 closeToTray；保持唤醒的专用
             // 线程也在这里起步。文件损坏 → setup 失败（不静默重置）。
             app.manage(app_prefs::init(app.handle())?);
+            // 引擎侧宿主桥：message_agent 投递门 + 审批闸门（先装门，再建会话）。
+            pi_engine_bridges::install(app.handle());
+            // 本机屏幕 RFB 服务（随机端口；前端经 pi_display_ws_port 读）。
+            pi_display::start_server();
             // 宿主侧模型目录：先同步载入磁盘缓存（不阻塞 UI），再后台拉取
             // models.dev（TTL 24h；失败只记日志，沿用缓存/空目录）。
             model_registry::init(app.handle());
@@ -1709,6 +1727,7 @@ fn main() {
             pi_extension_ui_response,
             pi_mode_state,
             pi_goal_state,
+            pi_plan_entries,
             pi_run_command,
 
             pi_groups::groups_dispatch,
@@ -1727,6 +1746,8 @@ fn main() {
             pi_bot::pi_bot_prompt,
             pi_bot::pi_bot_state,
             pi_bot::pi_bot_interrupt,
+            pi_bot::pi_bot_interrupt_task,
+            pi_bot::pi_bot_take_recovered,
             pi_bot::pi_bot_compact,
             pi_bot::pi_bot_attach_image,
             pi_bot::pi_bot_attach_file,
@@ -1801,6 +1822,15 @@ fn main() {
             pi_mcp_oauth::pi_mcp_oauth_complete,
             pi_mcp_oauth::pi_mcp_oauth_refresh,
             pi_mcp_oauth::pi_mcp_oauth_refresh_all,
+            pi_engine_bridges::pi_agent_message_ack,
+            pi_engine_bridges::pi_approval_decision,
+            pi_display::pi_display_status,
+            pi_display::pi_display_ws_port,
+            pi_display::pi_display_thumbnail,
+            pi_display::pi_display_observe,
+            pi_display::pi_display_start,
+            pi_display::pi_display_lease_acquire,
+            pi_display::pi_display_lease_release,
             pi_skills_catalog::pi_skills_search,
             pi_skills_catalog::pi_skill_install,
             pi_skills_catalog::pi_skill_remove,

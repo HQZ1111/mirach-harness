@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  formatTerminalTabTitle,
-  nextTerminalIndex,
+  isTerminalPanelId,
+  nextTerminalPanelId,
+  nextTerminalPanelTitle,
   terminalProjectName,
 } from './terminal-tabs'
 
@@ -26,30 +27,57 @@ describe('terminalProjectName', () => {
   })
 })
 
-describe('formatTerminalTabTitle', () => {
-  it('leaves the first tab untitled with an index', () => {
-    expect(formatTerminalTabTitle('mirach-harness', 1)).toBe('mirach-harness')
+describe('nextTerminalPanelTitle（ZCode createTerminalSidePaneTitle 同源）', () => {
+  it('uses the base title when it is free', () => {
+    expect(nextTerminalPanelTitle('mirach-harness', new Set())).toBe('mirach-harness')
   })
 
-  it('appends the index for later tabs (ZCode 同款)', () => {
-    expect(formatTerminalTabTitle('mirach-harness', 2)).toBe('mirach-harness 2')
-    expect(formatTerminalTabTitle('mirach-harness', 7)).toBe('mirach-harness 7')
+  it('appends the first free index from 2', () => {
+    expect(nextTerminalPanelTitle('mirach-harness', new Set(['mirach-harness']))).toBe(
+      'mirach-harness 2',
+    )
+    expect(
+      nextTerminalPanelTitle('mirach-harness', new Set(['mirach-harness', 'mirach-harness 2'])),
+    ).toBe('mirach-harness 3')
   })
 
-  it('defends against non-positive indices', () => {
-    expect(formatTerminalTabTitle('mirach-harness', 0)).toBe('mirach-harness')
+  it('reuses a hole left by a closed tab (关掉 2 号后新建仍得 2)', () => {
+    expect(
+      nextTerminalPanelTitle('mirach-harness', new Set(['mirach-harness', 'mirach-harness 3'])),
+    ).toBe('mirach-harness 2')
+  })
+
+  it('falls back to the base after all numbered titles close', () => {
+    expect(nextTerminalPanelTitle('mirach-harness', new Set(['mirach-harness 2']))).toBe(
+      'mirach-harness',
+    )
   })
 })
 
-describe('nextTerminalIndex', () => {
-  it('returns the smallest free index starting at 1', () => {
-    expect(nextTerminalIndex([])).toBe(1)
-    expect(nextTerminalIndex([1])).toBe(2)
-    expect(nextTerminalIndex([1, 2, 3])).toBe(4)
+describe('nextTerminalPanelId', () => {
+  it('returns the smallest free id starting at terminal', () => {
+    expect(nextTerminalPanelId([])).toBe('terminal')
+    expect(nextTerminalPanelId(['terminal'])).toBe('terminal-2')
+    expect(nextTerminalPanelId(['terminal', 'terminal-2'])).toBe('terminal-3')
   })
 
-  it('reuses a hole left by a closed tab (不是只增不减的计数器)', () => {
-    expect(nextTerminalIndex([1, 3])).toBe(2)
-    expect(nextTerminalIndex([2, 3])).toBe(1)
+  it('reuses a hole left by a closed panel', () => {
+    expect(nextTerminalPanelId(['terminal', 'terminal-3'])).toBe('terminal-2')
+  })
+})
+
+describe('isTerminalPanelId', () => {
+  it('accepts terminal and numbered terminal panels only', () => {
+    expect(isTerminalPanelId('terminal')).toBe(true)
+    expect(isTerminalPanelId('terminal-2')).toBe(true)
+    expect(isTerminalPanelId('terminal-17')).toBe(true)
+  })
+
+  it('rejects lookalikes', () => {
+    expect(isTerminalPanelId('terminal-')).toBe(false)
+    expect(isTerminalPanelId('terminal-2x')).toBe(false)
+    expect(isTerminalPanelId('terminal-x')).toBe(false)
+    expect(isTerminalPanelId('terminalabc')).toBe(false)
+    expect(isTerminalPanelId('files')).toBe(false)
   })
 })

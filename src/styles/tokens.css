@@ -286,8 +286,6 @@
   --term-bright-magenta: #c084fc;
   --term-bright-cyan: #22d3ee;
   --term-bright-white: #f9fafb;
-  /* 终端页签条（窗格内页签，非 flexlayout 页签；字号/选中色引用页签系统令牌） */
-  --term-strip-h: 30px;
 
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被

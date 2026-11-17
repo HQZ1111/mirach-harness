@@ -48,8 +48,15 @@ import { ReviewPanelHost } from '@/components/panes/review-pane'
 import { RadioPane } from '@/components/panes/radio-pane'
 import { SubagentDetailPane } from '@/components/panes/subagent-detail-pane'
 import { setSubagentDetailOpener } from '@/components/panes/subagent-detail-opener'
+import { PlanDetailPane } from '@/components/panes/plan-detail-pane'
+import { AgentDirectoryPane } from '@/components/panes/agent-directory-pane'
+import {
+  setAgentDirectoryOpener,
+  setPlanDetailOpener,
+} from '@/components/panes/status-pane-openers'
 import { MainWorkspacePane } from '@/components/panes/main-workspace-pane'
 import { TerminalPane } from '@/components/panes/terminal-pane'
+import { isTerminalPanelId } from '@/components/panes/terminal/terminal-tabs'
 import { OpenPage, type OpenPageKind } from '@/components/panes/open-page'
 import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
 import {
@@ -238,7 +245,7 @@ export function DockviewShell() {
       // fromJSON 完成即成品树（实锤：不复位护栏会把 addPanel 打进半清树，
       // referencePanel 'workspace' does not exist）
       if (layoutResetInProgress()) return
-      const removed = /* 移除前 region 已不可考——用 id 判面板栏域 */ panelId === 'open' || panelId === 'files' || panelId === 'terminal' || panelId.startsWith('preview')
+      const removed = /* 移除前 region 已不可考——用 id 判面板栏域 */ panelId === 'open' || panelId === 'files' || isTerminalPanelId(panelId) || panelId.startsWith('preview')
       if (!removed) return
       // **ZCode 语义**（2026-11-01 用户："只有一个标签的时候是关闭是会关闭
       // 面板栏的"）：面板列不再有实签 = 关闭面板栏，锚不复活。'open' 自身
@@ -357,6 +364,62 @@ export function DockviewShell() {
     return () => setSubagentDetailOpener(null)
   }, [])
 
+  // ── 状态面板详情面（status-pane-openers）：上游 side tab 的宿主对偶。 ──
+  // 计划详情：每个计划条目一个面板（id 带 entryId），重复打开置前不新增。
+  useEffect(() => {
+    setPlanDetailOpener((payload) => {
+      const a = apiRef.current
+      if (!a) {
+        console.error('[dv-shell] 布局 api 不在场——计划详情放弃')
+        return
+      }
+      const id = `plan-detail:${payload.entryId}`
+      const existing = a.getPanel(id)
+      if (existing) {
+        existing.api.setActive()
+        if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+        return
+      }
+      a.addPanel({
+        id,
+        component: 'plan-detail',
+        title: payload.title ?? '会话计划',
+        minimumWidth: RAIL_MIN_WIDTH,
+        params: { region: 'panels', payload },
+        position: panelsDropPosition(a),
+      })
+      if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+    })
+    return () => setPlanDetailOpener(null)
+  }, [])
+
+  // 已结束智能体目录：单实例面板（数据在面板内自行订阅线程消息）。
+  useEffect(() => {
+    setAgentDirectoryOpener(() => {
+      const a = apiRef.current
+      if (!a) {
+        console.error('[dv-shell] 布局 api 不在场——智能体目录放弃')
+        return
+      }
+      const existing = a.getPanel('agent-directory')
+      if (existing) {
+        existing.api.setActive()
+        if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+        return
+      }
+      a.addPanel({
+        id: 'agent-directory',
+        component: 'agent-directory',
+        title: '已结束的智能体',
+        minimumWidth: RAIL_MIN_WIDTH,
+        params: { region: 'panels' },
+        position: panelsDropPosition(a),
+      })
+      if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+    })
+    return () => setAgentDirectoryOpener(null)
+  }, [])
+
   // ── 打开页动作（open-page-actions.ts 单源；面板栏标签条 + 号同源） ────────
   const onOpen = useCallback((kind: OpenPageKind) => {
     const a = apiRef.current
@@ -415,7 +478,14 @@ export function DockviewShell() {
       <SessionThreadPane threadId={props.params.threadId} tabName={props.params.tabName} />
     ),
     files: () => <HermesFileTreePane />,
-    terminal: (props: IDockviewPanelProps) => <TerminalPane api={props.api} />,
+    // 终端：一个面板 = 一个会话（ZCode 侧栏终端标签语义），cwd 由开面板时
+    // 定（params，存档恢复沿用）；缺省回退到当前活动会话 cwd。
+    terminal: (props: IDockviewPanelProps) => (
+      <TerminalPane
+        api={props.api}
+        cwd={typeof props.params?.cwd === 'string' ? props.params.cwd : undefined}
+      />
+    ),
     review: (props: IDockviewPanelProps) => <ReviewPanelHost {...props} />,
     // 电台（2026-11-15）：hermes radio 插件改成 dockview 窗格——宿主已撤除
     // 底栏（用户定稿），所以不再走状态栏注入。播放器随面板挂载/卸载，
@@ -425,6 +495,11 @@ export function DockviewShell() {
     subagent: (props: IDockviewPanelProps) => (
       <SubagentDetailPane payload={props.params.payload ?? {}} />
     ),
+    // 状态面板的两个详情面（上游 side tab 对偶）：计划详情 / 已结束智能体目录。
+    'plan-detail': (props: IDockviewPanelProps) => (
+      <PlanDetailPane payload={props.params.payload ?? { entryId: '', markdown: '' }} />
+    ),
+    'agent-directory': () => <AgentDirectoryPane />,
     // 插件工作区（`host.openWorkspace` 的门；hermes-bots 群聊房间走这条）。
     'plugin-workspace': (props: IDockviewPanelProps<{ workspaceId?: string }>) => (
       <PluginWorkspacePane {...props} />
@@ -615,6 +690,14 @@ export function DockviewShell() {
         // 孤儿面板在这里剪掉；必须在 hydrate 窗口内、React 挂载前关（组件
         // 自己 close 会撞上 fromJSON 恢复过程抛 "invalid operation"）。
         pruneOrphanWorkspacePanels(a)
+        // 终端面板**保持挂载**（`renderer: 'always'`）——旧存档里的终端面板
+        // 没有这个标记，恢复时补写：切到别的标签/收起侧栏时终端不卸载、
+        // PTY 不中断（ZCode side pane terminal 的 keepalive 语义）。
+        for (const p of a.panels) {
+          if (isTerminalPanelId(p.id) && p.api.renderer !== 'always') {
+            p.api.setRenderer('always')
+          }
+        }
         // **打开页标签名以代码为准，不认存档**（2026-10-31）。
         //
         // 用户："打开页的标题把打开换个说明文字"。改 `addPanel` 的 title 只

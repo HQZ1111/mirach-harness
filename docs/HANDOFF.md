@@ -6,6 +6,108 @@
 
 ## 当前状态
 
+**✅ 2026-11-18（夜）：bots 引擎侧四件套全落地 + 实机 E2E 全绿 —— PR 给 pi-rust 是唯一欠账**
+（用户："全部做，做完检查，没问题了pr给pi rust" / "改了引擎测，提pr给ri rust"）
+
+- **引擎侧（`G:\pi-rust-main`，未入宿主仓库；上游 = `github.com/bigfish1913/pi-rust`）**：
+  - `rpi-harness/src/task_lease.rs`（新，6 单测）：持久任务租约——`acquire_with_meta`
+    / `renew` / `finish` / `status` / `list` / `recover`（过期 Running→Indeterminate）
+    / `ensure_live`（fencing：Conflict/Stale/LeaseLost/AlreadyFinished/Invalid/Io）；
+    落盘 `<session>.tasks.json`（tmp+rename）。
+  - `rpi-cli/src/approval_gate.rs`（新，3 单测）：运行时审批模式（AlwaysAsk/Write/Yolo
+    进程级 AtomicU8）+ `ApprovalHandler` + `before_tool_call`（组合在扩展 hook **之后**，
+    只读白名单显式）。
+  - `rpi-cli/src/message_agent.rs`（新，2 单测）：引擎内置 `message_agent` 工具
+    （fire-and-forget；**handler 未装不注册**；caller session id 从 harness 绑定解析）。
+  - `rpi-cli/src/session.rs` 接线 + **绑定修复**：`durable_binding` 原来只在
+    `native_durable` 时填充 → 宿主（从不设它）里 message_agent 恒报
+    "session binding not ready"；改为无条件 `set`（顺带让审批请求带真 session_id）。
+    `lib.rs` 两行 mod 声明。
+- **宿主侧**：`pi_bot.rs`（prompt = task 身份+租约+meta；结束 finish(Settled/Cancelled/
+  Failed+receipt)；state 出 `task`/`tasks`；`pi_bot_take_recovered`、
+  `pi_bot_interrupt_task` 带 fencing）｜`pi_engine_bridges.rs`（agent-message 事件+30s ack、
+  approval-request 事件+600s 裁决）｜`pi_display.rs`（GDI 截屏 + RFB 3.8 WS 服务：ticket
+  单次、lease 契约修复）｜`engine-bridges.tsx`（投递/回信 + 审批弹卡 + 模式恢复）｜
+  host-rpc（display.* 真接线、`task.interrupt`、resume 扩租约面、prompt.submit 传 taskMeta）｜
+  canonical-group-driver（localStorage ledger 删除 → 引擎租约 + recovered→indeterminate
+  回写 + Stop 走 fenced task.interrupt）。
+- **实机 E2E（真模型 BBT/deepseek-v4.1-flash）**：
+  ① 审批：always-ask → bash 弹卡（真 args）→「允许一次」→ `approval-e2e-ok` 真执行；
+  「拒绝」路径回灌 `用户拒绝`、命令未执行。② message_agent：微软 →引擎工具→ `queued`+
+  delivery_id → 真投递 remote-bot（归属前缀）→ 回信进微软会话。③ 屏幕面板：右键「打开
+  屏幕」→ noVNC canvas 1280×720 真帧（像素采样非零）→ 接管「你正在控制」→ 交还
+  「机器人正在控制」（lease epoch 2 / holder:'agent'）。④ 任务租约：running 快照
+  `task{id,gen}`+meta；stale generation interrupt **被拒**（"stale task identity"）；
+  正确 generation → abort → `cancelled`+meta 落盘；崩溃恢复 fixture → `indeterminate`
+  ("driver restarted while the task was running") → take-once 清空。
+- **门禁**：tsc 0 新错（1326 条 = hermes-mirror/sdk-upstream 既有基线）/ vitest
+  **1044**（84 文件）/ cargo test **666** / cargo check 0 / rpi-cli+rpi-harness 新模块
+  单测 11 条全过。
+- **未做（交接）**：① **PR 给 pi-rust 上游**——`G:\pi-rust-main` 无 .git，需
+  clone/fork `github.com/bigfish1913/pi-rust` 后移植 5 处改动（task_lease.rs /
+  approval_gate.rs / message_agent.rs 三个新文件 + session.rs 接线与绑定修复 + lib.rs
+  两行）；② 屏幕的 display.stop/install 面无（宿主无停止语义，有意不做）；
+  ③ canonical 群聊**含租约**的整房间 UI E2E（各原语已单独实测：快照/fencing/恢复）。
+
+
+**✅ 2026-11-18：对话右上角活动状态面板 = ZCode `ConversationStatusPanel` 完整移植**
+（用户："把zcode的对话右上角的状态面板栏完整移植" → "有意差异去除，全部对齐"）。
+
+- **结构对齐**：分区顺序 Git 工具 → 目标 → 会话计划 → 进程 Todo → 终端 →
+  智能体；每区限高滚动（goal/sessionPlans/terminal/agent max-h-48、plan
+  max-h-80）+ separated 上边线 + trailing 随开合切换；智能体分区页脚
+  「已结束的智能体 · N ›」；mini 胶囊完整优先级链（运行待办 → 目标(活) →
+  git 变更 → 目标(完) → 最近完成项 → 待办计数 → 最新会话计划 → 运行计数 →
+  无则不渲染）。
+- **卸载闸门照抄上游**：`!hasContent → null`（只有已结束智能体的会话整块不
+  渲染），推翻 11-15 的"常驻空态"宿主选择。
+- **目标区完整化**：`pi_goal_state`（rpi-goal `goal-state` 条目）→ 用时秒针 +
+  `/goal pause|resume` 按钮走既有 `pi_run_command`；真机：起目标 → 面板
+  出现（active、秒针在走）→ 暂停/恢复按钮真翻转状态 → `/goal stop` 归档后
+  面板整块消失。
+- **会话计划目录**：新 Rust IPC `pi_plan_entries`（rpi-plan-mode 条目，只收
+  有 markdown 的，seq 降序）+ 新 `plan-entries-store`；点行开面板栏标签页
+  `plan-detail:<entryId>`（每计划一实例）。
+- **智能体分区**：rpi 子代理运行态无宿主读取面（`pi_hub_roster` 如实 Err）→
+  从 `delegate_task` / `subagent` / `dispatch` 工具调用派生运行/已结束两段
+  （`status-agent-rows.ts` 纯函数）；页脚开单实例 `agent-directory` 标签页，
+  行可再开子代理详情页。
+- **终端分区**：数据面 = jobs-store（`pi_job_list`，rpi 未装 background-tasks
+  插件 → 如实 Err → 空 → 分区不渲染），有任务时行 = 命令行 + 用时 + Stop。
+- **workflow 分区不渲染**：rpi 无该概念（engine-gaps G3），不造假 UI。
+- 顺带修复：`pi_get_state.hasExtensions` 硬编码 `false` → 读
+  `extension_session` 真值（实机回读 `true`；扩展命令本来就可用）。
+- 门禁：tsc 0 新错（1326 条均在 hermes-mirror / sdk-upstream 既有基线）/
+  vitest 1044（84 文件，新增 25+9 条）/ cargo test 666。
+
+**✅ 2026-11-18：右侧面板栏终端对齐 ZCode 侧栏终端**（用户："我的右侧面板栏
+里的终端，打开怎么和zcode不一样？"）。规格 = 上游
+`docs/ui/side-pane-terminal-tabs.md` + `SidePaneTerminalPane.tsx`：
+
+- **一个面板 = 一个终端**：删掉面板内自绘的二级页签条（`Administrator +`
+  那排）与二级新建钮（上游明令"内部不再嵌套 terminal tabs"）；内容区 =
+  `bg-background p-3`（0.75rem）留白——此前是贴边满铺。
+- **点「终端」= 新建面板**（不复用单例）：`open-page-actions.ts::
+  openTerminalPanel`，标题 = cwd 末段（取不到 = 终端）+ " 2/3"（上游
+  `createTerminalSidePaneTitle` 同源），id = `terminal` / `terminal-2`…；
+  cwd 进 params，存档恢复沿用。`isTerminalPanelId()` 同时接进关标签的
+  栏生命周期判定（dockview-shell）。
+- **保活**：终端面板以 `renderer:'always'` 挂载（dockview overlay），切标签/
+  收栏**不卸载、PTY 不中断**（上游"切换到其他 side pane tab 或收起 side pane
+  时保持挂载"）；关闭面板才卸载 = kill（实机：pwsh 进程 5→4）。boot 时对旧
+  存档里的终端面板补写 `setRenderer('always')`。
+- **坑（已实锤进代码注释）**：`always` 面板隐藏时 overlay 未定位、容器报
+  整坞尺寸（100%×100%）——"有尺寸就 spawn"会按错尺寸起 PTY；spawn/fit 必须
+  同时以 `api.isVisible` 为准，激活时由 visibility/dimensions 回调补启动。
+  实机断言：隐藏终端无 xterm（不 spawn）；激活后面板 69 行、容器 240×1046
+  尺寸一致；A 终端 `echo probe-AAA` → 切到 B → 切回，scrollback 仍在且能
+  继续执行（保活）。
+- 退出条（进程已退出/重新打开）保留——宿主失败可见通道；实机：`exit` →
+  条出现 → 点「重新打开」→ 新会话。
+- 门禁：tsc 0（非镜像树）/ vitest 1044（84 文件）。**未做**：ZCode 标签上的
+  终端图标（宿主面板标签一贯无图标）、右键复制/粘贴菜单（上游
+  TerminalSession 有；宿主未接）——两者都不影响"打开即同形"。
+
 **✅ 2026-11-17：bots 插件补齐轮（用户："先补齐bots……百分百对齐hermes的bots"）**。
 
 - **P0 群聊成员轮次全链接通**：新 `src-tauri/src/pi_bot.rs` = 后台 bot 会话
@@ -563,7 +665,9 @@ pi 真引擎（AG-UI HTTP+SSE）全链通。**
    read-aloud / regenerate-menu。
 4. **pi 0.6.x 升级**（breaking：MCP project_trusted）——等真模型基线。
 5. **谱系树嵌套**（`list_sessions` 透出 `branchedFrom`）。
-6. **终端保活**（同组切签会卸载隐藏窗格 → PTY 结束）。
+6. **终端保活**：面板级 `renderer:'always'`（2026-11-18）已解决"同组切标签
+   卸载 → 终端会话结束"；剩余**跨布局重建/重启**的会话恢复 = ZCode 式模块级
+   registry，独立一轮。
 7. 人工验收 + i18n + L5 移动端。
 
 ## 环境速查

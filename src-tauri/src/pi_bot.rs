@@ -53,6 +53,19 @@ struct BotRunState {
     started_at: Option<f64>,
     last_error: Option<String>,
     last_finished_at: Option<f64>,
+    /// 引擎任务租约（rpi-harness task_lease）：轮次身份 + fencing token。
+    current_task: Option<CurrentTask>,
+    /// 任务身份代际（每次提交 +1；fencing/重试都用它）。
+    next_generation: u64,
+    /// 启动时 recover 出的 indeterminate 任务（等前端读取后清）。
+    recovered: Vec<Value>,
+}
+
+#[derive(Clone)]
+struct CurrentTask {
+    task_id: String,
+    generation: u64,
+    lease_id: String,
 }
 
 struct BotSession {
@@ -154,6 +167,24 @@ fn insert_session(session: Arc<BotSession>) -> Arc<BotSession> {
     session
 }
 
+/// 启动时把过期运行中的任务标成 indeterminate（引擎 task_lease），存入
+/// state.recovered 等前端读取。错误可见（stderr）但不阻断会话打开。
+fn recover_tasks(session: &BotSession) {
+    match rpi_harness::task_lease::recover(&session.path) {
+        Ok(records) if !records.is_empty() => {
+            let rows: Vec<Value> = records
+                .iter()
+                .filter_map(|record| serde_json::to_value(record).ok())
+                .collect();
+            if let Ok(mut state) = session.state.lock() {
+                state.recovered.extend(rows);
+            }
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("[bot] task_lease recover 失败 {}: {error}", session.path.display()),
+    }
+}
+
 fn find_session(session_id: &str) -> Option<Arc<BotSession>> {
     lane()
         .sessions
@@ -199,6 +230,7 @@ fn ensure_session(
     }
     let session = make_session(built, config);
     apply_config(&session, config)?;
+    recover_tasks(&session);
     Ok(insert_session(session))
 }
 
@@ -425,6 +457,7 @@ pub fn pi_bot_prompt(
     app: AppHandle,
     session_id: String,
     text: String,
+    task_meta: Option<Value>,
     path: Option<String>,
     system_prompt: Option<String>,
     provider: Option<String>,
@@ -449,18 +482,51 @@ pub fn pi_bot_prompt(
             .lock()
             .expect("bot pending_images poisoned"),
     );
-    {
+    // 引擎任务租约（rpi-harness task_lease）：一次提交 = 一个 task 身份 +
+    // fencing token；并发/陈旧提交在这里被拒（不静默排队）。
+    let (identity, lease_id) = {
         let mut state = session.state.lock().expect("bot state poisoned");
         if state.running {
             return Err(format!(
                 "bot 会话 {session_id} 正在运行（本宿主不做忙时排队——群聊引擎不会并发提交）"
             ));
         }
+        state.next_generation += 1;
+        (
+            rpi_harness::task_lease::TaskIdentity::new(
+                format!("task-{}", uuid::Uuid::new_v4().simple()),
+                state.next_generation,
+            ),
+            format!("lease-{}", uuid::Uuid::new_v4().simple()),
+        )
+    };
+    rpi_harness::task_lease::acquire_with_meta(
+        &session.path,
+        &identity,
+        &lease_id,
+        3600.0,
+        task_meta,
+    )
+    .map_err(|e| format!("prompt.submit: 任务租约获取失败: {e}"))?;
+    {
+        let mut state = session.state.lock().expect("bot state poisoned");
         state.running = true;
         state.started_at = Some(now_secs());
         state.last_error = None;
+        state.current_task = Some(CurrentTask {
+            task_id: identity.task_id.clone(),
+            generation: identity.execution_generation,
+            lease_id: lease_id.clone(),
+        });
     }
-    spawn_turn(app, Arc::clone(&session), text, images)?;
+    spawn_turn(
+        app,
+        Arc::clone(&session),
+        text,
+        images,
+        identity,
+        lease_id,
+    )?;
     Ok(json!({ "status": "streaming", "session_id": session.id }))
 }
 
@@ -469,8 +535,12 @@ fn spawn_turn(
     session: Arc<BotSession>,
     text: String,
     images: Vec<ImageContent>,
+    identity: rpi_harness::task_lease::TaskIdentity,
+    lease_id: String,
 ) -> Result<(), String> {
     let session_for_thread = Arc::clone(&session);
+    let identity_for_thread = identity.clone();
+    let lease_for_thread = lease_id.clone();
     std::thread::Builder::new()
         .name("mirach-bot-turn".into())
         .stack_size(16 * 1024 * 1024)
@@ -492,7 +562,48 @@ fn spawn_turn(
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 pump.abort();
                 collect_dialogs(&session_for_thread);
-                let error = result.err().map(|e| e.to_string());
+                let error = result.as_ref().err().map(|e| e.to_string());
+                // 引擎终局回执：run outcome 映射任务状态（aborted→cancelled）。
+                let (status, receipt) = match &result {
+                    Ok(run) => match &run.outcome {
+                        rpi_harness::agent_harness::HarnessRunOutcome::Completed {
+                            final_entry_id,
+                            ..
+                        } => (
+                            rpi_harness::task_lease::TaskStatus::Settled,
+                            Some(format!("{}:{final_entry_id}", run.run_id)),
+                        ),
+                        rpi_harness::agent_harness::HarnessRunOutcome::Aborted {
+                            final_entry_id,
+                            ..
+                        } => (
+                            rpi_harness::task_lease::TaskStatus::Cancelled,
+                            Some(format!("{}:{final_entry_id}", run.run_id)),
+                        ),
+                        rpi_harness::agent_harness::HarnessRunOutcome::Failed { error, .. } => (
+                            rpi_harness::task_lease::TaskStatus::Failed,
+                            Some(format!("{}:{}", run.run_id, error.code)),
+                        ),
+                        rpi_harness::agent_harness::HarnessRunOutcome::Suspended { .. } => (
+                            rpi_harness::task_lease::TaskStatus::Failed,
+                            Some(format!("{}:suspended", run.run_id)),
+                        ),
+                    },
+                    Err(_) => (rpi_harness::task_lease::TaskStatus::Failed, None),
+                };
+                if let Err(e) = rpi_harness::task_lease::finish(
+                    &session_for_thread.path,
+                    &identity_for_thread,
+                    &lease_for_thread,
+                    status,
+                    error.as_deref(),
+                    receipt.as_deref(),
+                ) {
+                    eprintln!(
+                        "[bot] task_lease finish 失败 {}: {e}",
+                        session_for_thread.path.display()
+                    );
+                }
                 {
                     let mut state = session_for_thread
                         .state
@@ -501,6 +612,7 @@ fn spawn_turn(
                     state.running = false;
                     state.last_finished_at = Some(now_secs());
                     state.last_error = error.clone();
+                    state.current_task = None;
                 }
                 let payload = json!({
                     "session_id": session_for_thread.id,
@@ -517,8 +629,17 @@ fn spawn_turn(
             });
         })
         .map_err(|e| {
+            let _ = rpi_harness::task_lease::finish(
+                &session.path,
+                &identity,
+                &lease_id,
+                rpi_harness::task_lease::TaskStatus::Failed,
+                Some("bot 轮次线程启动失败"),
+                None,
+            );
             let mut state = session.state.lock().expect("bot state poisoned");
             state.running = false;
+            state.current_task = None;
             state.last_error = Some(format!("bot 轮次线程启动失败: {e}"));
             format!("bot 轮次线程启动失败: {e}")
         })?;
@@ -559,7 +680,64 @@ pub fn pi_bot_state(session_id: String) -> Result<Value, String> {
         "path": session.path.to_string_lossy(),
         "open_requests": open_requests(&session),
         "pending_approval": pending_approval(&session),
+        // 引擎任务租约快照（canonical driver 用 task 身份做 fencing/重试）。
+        "task": state.current_task.as_ref().map(|task| json!({
+            "task_id": task.task_id,
+            "execution_generation": task.generation,
+        })),
+        "tasks": rpi_harness::task_lease::list(&session.path)
+            .map(|records| serde_json::to_value(records).unwrap_or(Value::Null))
+            .unwrap_or(Value::Null),
+        "recovered_tasks": state.recovered,
     }))
+}
+
+/// 取走启动时 recover 出来的 indeterminate 任务记录（读取后清空）。
+#[tauri::command(rename_all = "camelCase", async)]
+pub fn pi_bot_take_recovered(session_id: String) -> Result<Value, String> {
+    let Some(session) = find_session(&session_id) else {
+        return Ok(json!({ "tasks": [] }));
+    };
+    let mut state = session.state.lock().expect("bot state poisoned");
+    let tasks = std::mem::take(&mut state.recovered);
+    Ok(json!({ "tasks": tasks }))
+}
+
+/// 带 fencing 的中断：只有 task_id + generation 精确匹配当前运行时才 abort
+/// （陈旧 token 拒绝，绝不作用到另一轮）。成功后把任务标成 cancelled。
+#[tauri::command(rename_all = "camelCase", async)]
+pub fn pi_bot_interrupt_task(
+    session_id: String,
+    task_id: String,
+    execution_generation: u64,
+) -> Result<Value, String> {
+    let Some(session) = find_session(&session_id) else {
+        return Err(format!("bot 会话 {session_id} 不在泳道注册表"));
+    };
+    let identity =
+        rpi_harness::task_lease::TaskIdentity::new(task_id.clone(), execution_generation);
+    let record = rpi_harness::task_lease::ensure_live(&session.path, &identity, None)
+        .map_err(|e| format!("task.interrupt 被拒绝: {e}"))?;
+    lane().rt.block_on(async {
+        AgentLane::abort(session.harness.as_ref())
+            .await
+            .map_err(|e| format!("bot 会话中断失败: {e}"))
+    })?;
+    let lease = record
+        .lease
+        .as_ref()
+        .map(|lease| lease.lease_id.clone())
+        .ok_or_else(|| "task.interrupt: 当前任务没有租约".to_string())?;
+    rpi_harness::task_lease::finish(
+        &session.path,
+        &identity,
+        &lease,
+        rpi_harness::task_lease::TaskStatus::Cancelled,
+        Some("interrupted"),
+        None,
+    )
+    .map_err(|e| format!("task.interrupt 终局落盘失败: {e}"))?;
+    Ok(json!({ "status": "interrupted", "session_id": session_id, "task_id": task_id }))
 }
 
 #[tauri::command(rename_all = "camelCase", async)]

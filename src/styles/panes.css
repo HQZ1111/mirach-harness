@@ -56,10 +56,30 @@
   position: relative;
 }
 
-/* Thread 根吃剩余高度（列头占位后消息区不溢出容器） */
-.assistant-thread-pane > .aui-root {
+/* Thread 根吃剩余高度（列头占位后消息区不溢出容器）。
+   2026-11-17：Thread 现在包在 `.assistant-conversation-area` 里（状态面板
+   与上游同构的定位容器），选择器同步指向内层；外层选择器保留给其它可能的
+   直接挂载（历史/降级布局）。 */
+.assistant-thread-pane > .aui-root,
+.assistant-conversation-area > .aui-root {
   flex: 1 1 0;
   min-height: 0;
+}
+
+/* 会话区 = ZCode 的 conversation 容器（列头之外）：
+   - `position: relative`：状态面板 `absolute top-0 right-4` 的定位祖先
+     （上游同一 DOM 层级语义；不再需要 `top-[--logo-strip-h]` 特例）；
+   - `container: thread / inline-size`：与上游 `@container/conversation`
+     同义——面板 auto 态按会话区宽度裁决（外层 .assistant-thread-pane
+     也有同名容器，内层覆盖后查询基准 = 会话区本身）；
+   - flex 纵排：Thread 吃满，面板浮层不占流。 */
+.assistant-conversation-area {
+  container: thread / inline-size;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  position: relative;
 }
 
 /* 对话工作区 = ZCode 的 16px 根字号口径（2026-11-15 用户："上下间距和
@@ -278,151 +298,23 @@
   white-space: pre;
 }
 
-/* ── 终端窗格（terminal-pane.tsx，真终端；令牌 = tokens.css 的 --term-*） ── */
+/* ── 终端窗格（terminal-pane.tsx，真终端；令牌 = tokens.css 的 --term-*） ──
+   2026-11-17 对齐 ZCode 侧栏终端（docs/ui/side-pane-terminal-tabs.md）：
+   一个窗格 = 一个终端会话，**没有内层页签栏**；内容区 = `bg-background p-3`
+   （0.75rem = Tailwind p-3，随宿主根字号按同比例缩放）。多终端 = 面板栏的
+   多个标签（open-page-actions.ts::openTerminalPanel）。 */
 
 .term-pane {
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  padding: 0.75rem;
   position: relative;
 }
 
-/* 页签条（窗格内页签）：字号/选中色/悬停引用页签系统令牌。
-   2026-11-15 与面板栏/对话签对齐（ZCode TabsList 语义）：条内不出现
-   可见滚动条（横滚仍可程序化/滚轮驱动），长标题在签内省略而不是把
-   标签撑宽。 */
-.term-strip {
-  align-items: stretch;
-  border-bottom: 1px solid var(--stroke-soft);
-  display: flex;
-  flex: none;
-  height: var(--term-strip-h);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.term-strip::-webkit-scrollbar {
-  display: none;
-}
-
-.term-tab {
-  align-items: center;
-  border-bottom: 2px solid transparent;
-  border-right: 1px solid var(--stroke-soft);
-  display: flex;
-  /* ZCode side-pane tab 同款收缩语义：按内容宽排，空间不足时等比收缩
-     （下限 60px = 3.75rem），收缩到底仍不够才溢出——长标题先截断，
-     不会把标签条挤成滚动条。 */
-  flex: 0 1 auto;
-  /* 宽度上限与面板栏标签同值（--tab-max-w）：长标题省略，不撑宽标签条 */
-  max-width: var(--tab-max-w);
-  min-width: var(--tab-min-w);
-  padding: 0 var(--tab-pad-x);
-  position: relative; /* ✕ 绝对定位锚点（见下） */
-}
-
-.term-tab.active {
-  border-bottom-color: var(--tab-accent);
-}
-
-.term-tab-label {
-  --term-close-reveal: 0px;
-  background: none;
-  border: none;
-  color: var(--tab-text);
-  cursor: pointer;
-  /* 关闭钮显形时标题右端渐隐（与 .dv-default-tab-content 同语义） */
-  mask-image: linear-gradient(
-    to right,
-    #000 calc(100% - var(--term-close-reveal)),
-    transparent 100%
-  );
-  flex: 0 1 auto;
-  font-family: inherit;
-  font-size: var(--tab-font-size);
-  font-weight: var(--tab-font-weight);
-  min-width: 0;
-  overflow: hidden;
-  padding: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.term-tab:hover .term-tab-label,
-.term-tab:focus-within .term-tab-label {
-  --term-close-reveal: var(--tab-fade-offset);
-}
-
-.term-tab.active .term-tab-label {
-  color: var(--tab-text-active);
-}
-
-.term-tab:not(.active) .term-tab-label:hover {
-  color: var(--tab-text-active);
-}
-
-/* 关闭钮：绝对定位在标签右内缘（不给长标题/窄签留静态占位），常态
-   不显示不接收指针；hover 或键盘聚焦该签才显形（与面板栏标签同一
-   交互语义）。 */
-.term-tab-close {
-  align-items: center;
-  background: none;
-  border: none;
-  color: var(--tab-close-color);
-  cursor: pointer;
-  display: flex;
-  height: var(--tab-close-hit);
-  justify-content: center;
-  opacity: 0;
-  padding: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
-  transition:
-    opacity var(--dur-hover),
-    visibility 0s linear var(--dur-hover);
-  visibility: hidden;
-  width: var(--tab-close-hit);
-}
-
-.term-tab:hover .term-tab-close,
-.term-tab:focus-within .term-tab-close {
-  opacity: 1;
-  pointer-events: auto;
-  transition-delay: 0s;
-  visibility: visible;
-}
-
-.term-tab-close:hover {
-  color: var(--tab-close-color-hover);
-}
-
-/* 终端条「+」新建页签。2026-10-16 阶段 3：原 `padding:0 10px` + 字形撑开 →
-   尺寸不定，改**正方形 24×24 圆形**（与标签条「+」同款）。字号沿用
-   --zone-btn-font（图标字形，非文字标签）。 */
-.term-add {
-  align-items: center;
-  background: none;
-  border: none;
-  border-radius: var(--radius-icon-btn);
-  color: var(--text-2);
-  cursor: pointer;
-  display: flex;
-  flex: none;
-  font-size: var(--zone-btn-font);
-  height: var(--size-icon-btn);
-  justify-content: center;
-  padding: 0;
-  width: var(--size-icon-btn);
-}
-
-.term-add:hover {
-  color: var(--tab-text-active);
-}
-
-/* 终端体：hostEl 容器命令式管理（React 不掺和），空态提示浮在其上 */
+/* 终端体：hostEl 容器命令式管理（React 不掺和） */
 .term-body {
   flex: 1;
   min-height: 0;
@@ -437,15 +329,6 @@
 .term-host {
   height: 100%;
   width: 100%;
-}
-
-.term-empty {
-  align-items: center;
-  color: var(--text-3);
-  display: flex;
-  inset: 0;
-  justify-content: center;
-  position: absolute;
 }
 
 /* 退出/错误条：盖在终端体底部（进程已退出 (code N) + 重新打开钮） */

@@ -343,9 +343,44 @@ export function markSessionUnreadFinished(_sessionId: string): void {}
 /** 上游 `forgetSessionUnread`：忘掉某会话的未读状态。 */
 export function forgetSessionUnread(_sessionId: string): void {}
 
-/** 上游 `resolveSiblingWsUrl`：解析 sibling 窗口的 WebSocket URL。 */
-export function resolveSiblingWsUrl(_args?: unknown): null {
-  // 宿主没有 sibling 窗口概念（单主窗 + 设置窗），返回 null
+/**
+ * 上游 `resolveSiblingWsUrl`：解析 sibling 窗口的 WebSocket URL。
+ *
+ * 宿主没有 sibling 窗口概念（单主窗 + 设置窗），但**本机屏幕的 RFB 流**是
+ * 一个真实的本地 WS 服务：`display.observe` 拿到的 ticket 配这个 URL 给
+ * noVNC 用（`/api/display/ws`）。其它 path 仍返回 null（无 sibling socket）。
+ */
+let displayWsPortCache: number | null = null
+let displayWsPortPending: Promise<number | null> | null = null
+
+async function displayWsPort(): Promise<number | null> {
+  if (displayWsPortCache !== null) return displayWsPortCache
+  if (!displayWsPortPending) {
+    displayWsPortPending = import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<{ port?: number | null }>('pi_display_ws_port'))
+      .then((res) => {
+        displayWsPortCache = typeof res?.port === 'number' ? res.port : null
+        return displayWsPortCache
+      })
+      .catch((e) => {
+        console.error('[display] 读取本机屏幕端口失败', e)
+        return null
+      })
+      .finally(() => {
+        displayWsPortPending = null
+      })
+  }
+  return displayWsPortPending
+}
+
+export async function resolveSiblingWsUrl(
+  _args?: unknown,
+  path?: string,
+): Promise<null | string> {
+  if (path === '/api/display/ws') {
+    const port = await displayWsPort()
+    if (port) return `ws://127.0.0.1:${port}/api/display/ws`
+  }
   return null
 }
 

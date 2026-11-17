@@ -1417,13 +1417,21 @@ impl PiEngine {
         // composer-wired 按字符串回填档位。
         let thinking_level = serde_json::to_value(thinking)
             .map_err(|e| format!("思考档位序列化失败: {e}"))?;
+        // 扩展装载真值（此前硬编码 false：rpi 插件实际已加载，扩展 slash
+        // 命令可用——假值会误导前端做能力判断）。
+        let has_extensions = live
+            .reload
+            .extension_session
+            .lock()
+            .map(|session| !session.is_empty())
+            .map_err(|_| "扩展会话锁中毒".to_string())?;
         Ok(serde_json::json!({
             "sessionId": session_id,
             "provider": model.provider,
             "modelId": model.id,
             "thinkingLevel": thinking_level,
             "messageCount": message_count,
-            "hasExtensions": false,
+            "hasExtensions": has_extensions,
         }))
     }
 
@@ -1602,6 +1610,8 @@ impl PiEngine {
             }
         }
         wire["permissionGate"] = serde_json::json!(gate);
+        // 运行时审批模式（rpi-cli approval_gate；宿主桥安装后由前端切换）。
+        wire["approvalMode"] = serde_json::json!(rpi_cli::approval_gate::mode().as_wire());
         Ok(wire)
     }
 
@@ -1617,8 +1627,85 @@ impl PiEngine {
             .unwrap_or(serde_json::Value::Null))
     }
 
-    pub fn set_approval_mode(&self, _mode: &str) -> Result<(), String> {
-        Err("审批模式切换不可用：rpi 无 always-ask/write/yolo 三态概念（权限由 rpi-permissions / rpi-permission-gate 的规则文件与 ask 对话框承担），插件未暴露切换面".into())
+    /// 会话计划目录（活动面板「会话计划」分区）：rpi-plan-mode 每次
+    /// `plan_mode_complete` 都 AppendEntry 一条 `plan-mode` 条目
+    /// （customType `plan-mode`，data `{active, plan}`，plan = 完整 markdown，
+    /// 见 pi_plugin_state.rs 模块头证据）。沿当前分支枚举**有 plan 文本**的
+    /// 条目（= 已完成计划；active 条目 plan 为 null 不算），按 seq 降序 —
+    /// 上游 sessionPlans 目录同序（最新在前）。
+    ///
+    /// 返回 `[{entryId, seq, timestamp, plan}]`；无条目 = 空数组（诚实空态）。
+    /// 条目缺 data / plan 非字符串 = Err（条目损坏，不静默丢行）。
+    pub fn plan_entries(&self) -> Result<serde_json::Value, String> {
+        let Some(live) = self.live_opt()? else {
+            return Ok(serde_json::Value::Array(Vec::new()));
+        };
+        let entries = self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .find_entries_on_branch(
+                    &EntryQuery {
+                        entry_type: Some("custom"),
+                        custom_type: Some(crate::pi_plugin_state::PLAN_ENTRY.to_string()),
+                        ..Default::default()
+                    },
+                    &BranchBounds::default(),
+                )
+                .await
+                .map_err(|e| format!("会话条目读取失败（plan-mode）: {e}"))
+        })?;
+        let mut rows: Vec<(u64, serde_json::Value)> = Vec::new();
+        for entry in entries {
+            let Entry::Custom(custom) = entry else {
+                continue;
+            };
+            if custom.custom_type != crate::pi_plugin_state::PLAN_ENTRY {
+                continue;
+            }
+            let data = custom.data.as_ref().ok_or_else(|| {
+                format!(
+                    "plan-mode 条目缺少 data（条目损坏：{}）",
+                    custom.base.id
+                )
+            })?;
+            match data.get("plan") {
+                // 进入/未完成态：plan 尚未产出（attached 为 null）。
+                None | Some(serde_json::Value::Null) => {}
+                Some(serde_json::Value::String(text)) => {
+                    if !text.trim().is_empty() {
+                        rows.push((
+                            custom.base.seq,
+                            serde_json::json!({
+                                "entryId": custom.base.id,
+                                "seq": custom.base.seq,
+                                "timestamp": custom.base.timestamp,
+                                "plan": text,
+                            }),
+                        ));
+                    }
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "plan-mode 条目 data.plan 不是字符串（条目损坏：{}）",
+                        custom.base.id
+                    ))
+                }
+            }
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        Ok(serde_json::Value::Array(
+            rows.into_iter().map(|(_, row)| row).collect(),
+        ))
+    }
+
+    pub fn set_approval_mode(&self, mode: &str) -> Result<(), String> {
+        let parsed = rpi_cli::approval_gate::ApprovalMode::parse(mode).ok_or_else(|| {
+            format!(
+                "未知审批模式 `{mode}`（可用：always-ask / write / yolo）"
+            )
+        })?;
+        rpi_cli::approval_gate::set_mode(parsed);
+        Ok(())
     }
 
     /// 执行已注册的扩展 slash command（与 rpi-cli RPC `execute_command` 同一
@@ -1670,8 +1757,11 @@ impl PiEngine {
         .unwrap_or_else(|_| Err(format!("扩展命令 panic：{name}")))
     }
 
-    pub fn set_plan_mode(&self, _enabled: bool) -> Result<(), String> {
-        Err("plan 模式切换不可用：rpi-plan-mode 只注册 `/plan` 命令与 plan_mode_start / plan_mode_complete 工具，进入退出由插件自身完成；宿主只有读取面（pi_mode_state）".into())
+    pub fn set_plan_mode(&self, enabled: bool) -> Result<(), String> {
+        // rpi-plan-mode 的进入/退出是扩展命令 `/plan start|exit`；宿主通过
+        // 既有 run_command 通道转发（没有活动会话时如实 Err，不假装切了）。
+        self.run_command("/plan", if enabled { "start" } else { "exit" })
+            .map(|_| ())
     }
 
     pub fn decide_plan(&self, _approve: bool) -> Result<(), String> {

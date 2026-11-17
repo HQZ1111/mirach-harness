@@ -221,3 +221,22 @@ provider，defaultProvider=BBT/deepseek-v4.1-flash）。**「真模型端到端�
 同日新增宿主面：MCP OAuth（标准 DCR+PKCE+刷新）、本地技能目录（139 技能）、
 canonical approvals/retry/discard/router。**仍未做**：lead 路由、权限闸运行时
 切换（引擎侧，见 pi-host-gaps §6）、message_agent/relay（引擎扩展）、display。
+
+## 8. 2026-11-18 夜：引擎侧四件套落地后，§7 清单里的"仍缺"全部闭环
+
+（用户："全部做，做完检查，没问题了 pr 给 pi rust"。引擎/宿主改动与实机
+证据的完整清单见 `docs/HANDOFF.md` 同轮条目 + `AGENTS.md`「引擎侧四件套」
++ `docs/pi-host-gaps.md`。）
+
+| 此前的"仍缺" | 现状（2026-11-18） |
+|---|---|
+| 权限闸运行时切换 | ✅ 引擎 `approval_gate.rs` 三态 + 宿主弹卡；always-ask 下 bash 真弹卡、允许真执行、拒绝真回灌 |
+| message_agent | ✅ 引擎内置工具 + 宿主投递/回信；微软→remote-bot 真链通过（含回信落回发送者） |
+| display（屏幕面板） | ✅ 宿主 `pi_display.rs`（GDI+RFB）→ screen-pane noVNC 1280×720 真帧；接管/交还 lease 闭环 |
+| 任务身份/终局回执/租约 | ✅ 引擎 `task_lease.rs` + canonical driver 接线；fencing 拒陈旧 token、cancelled/settled receipt、recovered→indeterminate 全部实测 |
+| relay（跨网关） | ❌ 有意不做（单身份宿主无 relay 概念，显式报错） |
+| lead 路由 | ❌ 仍未做（与租约无关；可后续补一次廉价模型调用） |
+
+**engine E2E 残留**：canonical 群聊**含租约**的整房间 UI 流程未再跑一遍
+（建房→多成员→settled）；各原语（快照/fencing/恢复/meta 落盘）已单独实测，
+driver 消费面单测在 vitest 门禁内。

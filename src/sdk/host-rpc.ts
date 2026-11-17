@@ -896,6 +896,13 @@ export async function dispatchHostRequest<T>(
       const laneState = await invoke<Record<string, unknown>>('pi_bot_state', {
         sessionId: row.id,
       })
+      // 启动时 recover 出的 indeterminate 任务（引擎 task_lease）：取一次即清。
+      const recovered = await invoke<{ tasks?: unknown[] }>('pi_bot_take_recovered', {
+        sessionId: row.id,
+      }).catch((e) => {
+        console.error('[host-rpc] pi_bot_take_recovered 失败', e)
+        return { tasks: [] as unknown[] }
+      })
       return {
         session_id: row.id,
         session_key: row.id,
@@ -918,6 +925,10 @@ export async function dispatchHostRequest<T>(
           laneState && laneState.pending_approval !== null && laneState.pending_approval !== undefined
             ? laneState.pending_approval
             : undefined,
+        // 引擎任务租约面（canonical driver 的 fencing / 重试用）。
+        task: laneState?.task ?? null,
+        tasks: Array.isArray(laneState?.tasks) ? laneState.tasks : [],
+        recovered_tasks: Array.isArray(recovered?.tasks) ? recovered.tasks : [],
       } as T
     }
 
@@ -936,10 +947,30 @@ export async function dispatchHostRequest<T>(
       const result = await invoke<Record<string, unknown>>('pi_bot_prompt', {
         sessionId: row.id,
         text,
+        // 引擎任务租约的元数据（canonical driver 存房间坐标，恢复时用）。
+        taskMeta:
+          params.task_meta !== null && typeof params.task_meta === 'object'
+            ? params.task_meta
+            : undefined,
         path: row.path,
         ...config,
       })
       return { ...result, session_id: row.id } as T
+    }
+
+    case 'task.interrupt': {
+      // 引擎任务租约的带 fencing 中断（canonical driver 的 Stop/retry 用）。
+      const sessionId = String(params.session_id ?? '')
+      const taskId = String(params.task_id ?? '')
+      const generation = Number(params.execution_generation ?? 0)
+      if (!sessionId || !taskId || !Number.isSafeInteger(generation) || generation < 1) {
+        throw new Error('task.interrupt 缺少 session_id / task_id / execution_generation')
+      }
+      return (await invoke('pi_bot_interrupt_task', {
+        sessionId,
+        taskId,
+        executionGeneration: generation,
+      })) as T
     }
 
     case 'approval.respond': {
@@ -1038,15 +1069,45 @@ export async function dispatchHostRequest<T>(
       throw new Error('image.generate: 宿主没有图片生成后端（机器人头像请用上传图片或图形头像）')
     }
 
-    case 'display.install':
-    case 'display.observe':
-    case 'display.thumbnail':
-    case 'display.start':
-    case 'display.lease.acquire':
+    case 'display.install': {
+      // 宿主不安装远程桌面服务；display.install.* 事件也不会有生产者。
+      throw new Error('display.install: 宿主没有安装流程（本机屏幕镜像无需安装）')
+    }
+
+    case 'display.observe': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_observe', {
+        profile: profile || undefined,
+        viewerId: typeof params.viewer_id === 'string' ? params.viewer_id : undefined,
+      })) as T
+    }
+
+    case 'display.thumbnail': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_thumbnail', { profile: profile || undefined })) as T
+    }
+
+    case 'display.start': {
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_start', { profile: profile || undefined })) as T
+    }
+
+    case 'display.lease.acquire': {
+      // 租约 = 本机屏幕的"谁在控制"记账（只有持 hash 的 viewer 可释放）。
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_lease_acquire', {
+        profile: profile || undefined,
+        viewerId: String(params.viewer_id ?? ''),
+      })) as T
+    }
+
     case 'display.lease.release': {
-      // Bot Desktop / 屏幕门户：宿主没有显示服务器/租约/截图子系统
-      // （display.status 已如实 supported:false）。
-      throw new Error(`${method}: 宿主没有 Bot Desktop / display 子系统（屏幕不可用）`)
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      return (await invoke('pi_display_lease_release', {
+        profile: profile || undefined,
+        viewerId: typeof params.viewer_id === 'string' ? params.viewer_id : undefined,
+        force: params.force === true,
+      })) as T
     }
 
     case 'mcp.catalog': {
@@ -1191,14 +1252,14 @@ export async function dispatchHostRequest<T>(
     }
 
     case 'display.status': {
-      // 宿主没有 Bot Desktop / display 后端（pi 引擎无 display.* 概念）。
-      // 按上游契约给**已定型的不支持**答复：supported:false → 屏幕门户/
-      // 例程头图走 unsupported 分支把自己藏起来；抛"未接线"只会让 portalTone
-      // 停在 'unknown'——UI 永远显示"正在检查屏幕…"的假 spinner。
+      // 本机屏幕镜像（pi_display.rs）：supported 取决于平台截屏能力，
+      // 几何/就绪状态全部真读。profile 从参数透传（status 里带该 profile
+      // 的租约与 profile_key）。
+      const status = await invoke<Record<string, unknown>>('pi_display_status', {
+        profile: typeof params.profile === 'string' ? params.profile : undefined,
+      })
       return {
-        supported: false,
-        installed: false,
-        running: false,
+        ...status,
         profile_key: typeof params.profile === 'string' ? params.profile : null,
       } as T
     }

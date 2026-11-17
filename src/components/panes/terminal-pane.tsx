@@ -1,7 +1,21 @@
 /**
- * 终端窗格（真终端）——多页签（每页签一个 PTY 会话，「+」新开）+ xterm.js。
- * 结构照抄 ZCode packages/ui/src/terminal/TerminalSession.tsx（2026-11-15
- * 对齐第二轮）：
+ * 终端窗格（真终端）——**一个窗格 = 一个终端会话**。
+ *
+ * 结构照抄 ZCode 侧栏终端（2026-11-17 对齐）：
+ *   - 上游 `SidePaneTerminalPane.tsx`：`<section class="h-full min-h-0
+ *     overflow-hidden bg-background p-3">` + 单个 `TerminalSession`，
+ *     **内部不嵌第二层 terminal tabs、也没有第二层新建终端按钮**
+ *     （`docs/ui/side-pane-terminal-tabs.md` 行为定义第 3 条）；
+ *   - 多终端 = 面板栏的多个标签（见 `open-page-actions.ts` 的
+ *     `openTerminalPanel`：每次点「终端」新建一个面板，标题 = cwd 末段 +
+ *     序号，对应上游 `useAppPanels.createTerminalSidePaneTitle`）；
+ *   - 终端面板以 `renderer: 'always'` 挂载：切到别的标签时内容不卸载、
+ *     PTY 不中断（上游"切换到其他 side pane tab 或收起 side pane 时保持
+ *     挂载"）；关闭标签才卸载本组件 = kill 该 PTY（上游关闭 tab 同语义）。
+ *     隐藏面板容器报的是整坞尺寸（overlay 未定位），所以 spawn/fit 以
+ *     `api.isVisible` 为准，激活时补启动。
+ *
+ * 会话内部仍逐段照抄 ZCode `TerminalSession.tsx`：
  *   - xterm + FitAddon + ClipboardAddon（OSC 52/选区复制）；先 fit 后 spawn
  *     （启动输出不按默认尺寸重排，ZCode 同款时序）
  *   - PTY 输出（Tauri Event，通道裁定见 src-tauri/src/terminal.rs 模块头）
@@ -12,14 +26,13 @@
  *   - resize = ResizeObserver → rAF fit → 尺寸去重 + 在途守卫 → terminal_resize
  *     （ptyId 未就绪先排队，attach 后 flush）；面板重新可见时补一次 fit+focus
  *   - 链接 = OSC 8 linkHandler + buffer 行扫描 provider → terminal_open_url
- *   - 页签名 = 项目名（cwd 末段）+ 序号（ZCode formatTerminalTabTitle）
  *
  * 【首屏输出】spawn 返回后才有 id，订阅事件之前 shell 已经可能写过 banner
  * ——宿主把这些字节存进 backlog，`terminal_attach` 一次性回放；未订阅就
  * 退出的会话同样靠 attach 的 exit 补发（否则页签永远停在"运行中"）。
  *
- * 【生命周期】窗格卸载（关窗格/布局重建）= kill 该窗格全部会话（清理路径
- * 定稿）；应用退出由 Rust TerminalRegistry::drop 兜底。StrictMode 双挂载：
+ * 【生命周期】窗格卸载（关窗格/布局重建）= kill 该会话（清理路径定稿）；
+ * 应用退出由 Rust TerminalRegistry::drop 兜底。StrictMode 双挂载：
  * cancelled 守卫——卸载时未就绪的 spawn 被识别为孤儿 PTY 立即回收。
  */
 
@@ -32,7 +45,6 @@ import type { DockviewPanelApi } from 'dockview-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
-import { CloseIcon } from '@/components/ui/codicons'
 import { inTauri } from '@/lib/tauri-window'
 import { PlaceholderPane } from './placeholder-pane'
 import {
@@ -48,15 +60,10 @@ import {
   type TerminalInputFallbackKeydownCandidate,
 } from './terminal/terminal-composed-input'
 import { pickTerminalCwd } from './terminal/terminal-cwd'
-import { base64ToBytes, formatShellLabel } from './terminal/terminal-format'
+import { base64ToBytes } from './terminal/terminal-format'
 import { normalizePowerShellReadlineRedraw } from './terminal/terminal-data-transform'
 import { getHttpLinksForTerminalBufferLine } from './terminal/terminal-links'
 import { TerminalOutputGate } from './terminal/terminal-output-gate'
-import {
-  formatTerminalTabTitle,
-  nextTerminalIndex,
-  terminalProjectName,
-} from './terminal/terminal-tabs'
 import {
   getTerminalFont,
   getTerminalTheme,
@@ -88,24 +95,10 @@ interface TerminalSize {
   rows: number
 }
 
-type TabStatus = 'starting' | 'ready' | 'exited' | 'error'
+type TerminalStatus = 'starting' | 'ready' | 'exited' | 'error'
 
-interface TerminalTab {
-  key: string
-  /** 页签序号（同工作区内的第几个；关掉 2 号后新建仍是 2，见 terminal-tabs） */
-  index: number
-  /** 项目名 = 该页签 cwd 的末段；null = 未知（显示「终端」） */
-  projectName: string | null
-  cwd: string | null
-  shellLabel: string | null
-  status: TabStatus
-  exitCode: number | null
-  error: string | null
-}
-
-/** 单页签的运行时对象（xterm + PTY 订阅）——React 状态之外，Map 持有 */
+/** 会话运行时对象（xterm + PTY 订阅）——React 状态之外，ref 持有 */
 interface TerminalSessionRT {
-  key: string
   hostEl: HTMLDivElement
   term: XTerm
   fitAddon: FitAddon
@@ -117,7 +110,7 @@ interface TerminalSessionRT {
   attached: boolean
   exited: boolean
   pendingExit: TerminalExit | null
-  /** StrictMode 卸载/页签关闭竞态：spawn 未就绪的会话被标记后回收孤儿 PTY */
+  /** StrictMode 卸载竞态：spawn 未就绪的会话被标记后回收孤儿 PTY */
   cancelled: boolean
   unlisten: UnlistenFn[]
   detachTextareaInput: (() => void) | null
@@ -126,7 +119,7 @@ interface TerminalSessionRT {
   resizeInFlight: boolean
   /** xterm.open 已执行（隐藏面板延迟到可见时，见 ensureSpawned） */
   opened: boolean
-  /** PTY 已启动（延迟启动的幂等闸门，见 createSession 的 ensureSpawned） */
+  /** PTY 已启动（延迟启动的幂等闸门，见 ensureSpawned） */
   spawnStarted: boolean
   /** 有效尺寸就绪后 fit+spawn；面板隐藏/零尺寸时由布局回调重试 */
   ensureSpawned: (() => void) | null
@@ -136,24 +129,29 @@ interface TerminalSessionRT {
   recentHandled: TerminalInputFallbackHandledData[]
 }
 
-export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
-  // 容器：活动页签的 hostEl 挂在这里（命令式管理，React 不掺和它的子节点）
+export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: string }) {
+  // 终端宿主：命令式管理（React 不掺和它的子节点）
   const containerRef = useRef<HTMLDivElement>(null)
-  const sessionsRef = useRef(new Map<string, TerminalSessionRT>())
-  const seqRef = useRef(0)
+  const sessionRef = useRef<TerminalSessionRT | null>(null)
+  /**
+   * 面板可见性（ZCode `isVisible` 语义）。**保持挂载的 `renderer:'always'`
+   * 面板在隐藏时容器仍报整坞尺寸**（dockview 的 overlay 未定位前默认
+   * 100%×100%）——所以"有尺寸就 spawn"不足以判断，必须同时可见：
+   * 隐藏的终端不 spawn、不 fit，等激活（onDidVisibilityChange）再补。
+   */
+  const panelVisibleRef = useRef(api ? api.isVisible : true)
+  /** 页面级状态（页签状态 = 面板状态，本窗格只有一个会话） */
+  const [status, setStatus] = useState<TerminalStatus>('starting')
+  const [exitCode, setExitCode] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  /** 重启用：最近一次会话的 cwd（spawn 返回的为准，其次面板参数） */
+  const cwdRef = useRef<string | undefined>(cwd ?? pickTerminalCwd(sessionCatalog.getState()))
 
-  const [tabs, setTabs] = useState<TerminalTab[]>([])
-  const tabsRef = useRef(tabs)
-  tabsRef.current = tabs
-  const [activeKey, setActiveKey] = useState<string | null>(null)
-  const activeKeyRef = useRef<string | null>(null)
-
-  const setTabState = useCallback(
-    (key: string, patch: Partial<TerminalTab>) => {
-      setTabs((ts) => ts.map((t) => (t.key === key ? { ...t, ...patch } : t)))
-    },
-    [],
-  )
+  const resetStatus = useCallback(() => {
+    setStatus('starting')
+    setExitCode(null)
+    setError(null)
+  }, [])
 
   // ── resize 管线（ZCode 的去重 + 在途守卫简化版） ─────────────────────────
 
@@ -173,6 +171,8 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
 
   const fitAndQueueResize = useCallback(
     (rt: TerminalSessionRT) => {
+      // 隐藏（含 renderer:'always' 未激活）不给 fit：容器尺寸此刻不可信
+      if (!panelVisibleRef.current) return
       const container = containerRef.current
       if (!container || container.clientWidth <= 0 || container.clientHeight <= 0) return
       try {
@@ -199,8 +199,8 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
 
   // ── 会话生命周期 ─────────────────────────────────────────────────────────
 
-  const disposeSession = useCallback((key: string) => {
-    const rt = sessionsRef.current.get(key)
+  const disposeSession = useCallback(() => {
+    const rt = sessionRef.current
     if (!rt) return
     rt.cancelled = true
     for (const un of rt.unlisten) un()
@@ -208,7 +208,7 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
     rt.detachTextareaInput?.()
     rt.detachTextareaInput = null
     if (rt.ptyId != null) {
-      // 关闭 = kill（退出码事件随后到达，页签已不在，事件被丢弃）
+      // 关闭 = kill（退出码事件随后到达，会话已不在，事件被丢弃）
       killTerminal(rt.ptyId).catch((err) => console.error('[terminal] kill on close failed:', err))
     }
     try {
@@ -217,21 +217,18 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       console.error('[terminal] term dispose failed:', err)
     }
     rt.hostEl.remove()
-    sessionsRef.current.delete(key)
+    sessionRef.current = null
   }, [])
 
-  const disposeAllSessions = useCallback(() => {
-    for (const key of [...sessionsRef.current.keys()]) disposeSession(key)
-  }, [disposeSession])
-
   const createSession = useCallback(
-    (key: string, cwd: string | undefined) => {
+    (initialCwd: string | undefined) => {
       const container = containerRef.current
       if (!container) {
-        // 容器缺席 = 布局竞态。禁止留一个永远 "starting" 的页签（规矩 12：
-        // 失败必须可见），页签转 error，退出条会显示原因并给"重新打开"。
+        // 容器缺席 = 布局竞态。禁止留一个永远 "starting" 的状态（规矩 12：
+        // 失败必须可见），转 error，退出条会显示原因并给"重新打开"。
         console.error('[terminal] 容器不在场——会话未创建')
-        setTabState(key, { status: 'error', error: '终端容器不在场（布局未就绪）' })
+        setStatus('error')
+        setError('终端容器不在场（布局未就绪）')
         return
       }
 
@@ -264,7 +261,6 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       // "Cannot read properties of undefined (reading 'dimensions')"）。
 
       const rt: TerminalSessionRT = {
-        key,
         hostEl,
         term,
         fitAddon,
@@ -287,7 +283,7 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
         keydownCandidate: null,
         recentHandled: [],
       }
-      sessionsRef.current.set(key, rt)
+      sessionRef.current = rt
 
       /** 输出落屏（PSReadLine 重绘归一需要 shell 名） */
       const writeOutput = (text: string) => {
@@ -303,7 +299,7 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
         )
       }
 
-      /** 退出落地：写提示 + 页签转 exited（事件与 attach 回放可能各来一次） */
+      /** 退出落地：写提示 + 状态转 exited（事件与 attach 回放可能各来一次） */
       const applyExit = (exit: TerminalExit) => {
         if (rt.exited || rt.cancelled) return
         rt.exited = true
@@ -313,11 +309,9 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
           ? `\r\n\x1b[31m${exit.error}\x1b[0m\r\n`
           : `\r\n\x1b[2m进程已退出 (code ${exit.exitCode})\x1b[0m\r\n`
         rt.term.write(line)
-        setTabState(key, {
-          status: 'exited',
-          exitCode: exit.exitCode,
-          error: exit.error,
-        })
+        setStatus('exited')
+        setExitCode(exit.exitCode)
+        setError(exit.error)
       }
 
       // Ctrl/Cmd+C 有选区走复制（否则 SIGINT）、Ctrl/Cmd+V 走粘贴（否则当
@@ -450,7 +444,7 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       // 所以：**只有拿到真实尺寸才 spawn**；隐藏时由布局回调重试。
       const spawnPty = async (initial: TerminalSize) => {
         try {
-          const spawned = await spawnTerminal({ cols: initial.cols, rows: initial.rows, cwd })
+          const spawned = await spawnTerminal({ cols: initial.cols, rows: initial.rows, cwd: initialCwd })
           if (rt.cancelled) {
             // 卸载竞态：孤儿 PTY 立即回收，不进会话
             killTerminal(spawned.id).catch((err) =>
@@ -460,21 +454,17 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
           }
           rt.ptyId = spawned.id
           rt.shell = spawned.shell
+          if (spawned.cwd) cwdRef.current = spawned.cwd
           if (IS_WINDOWS) term.options.windowsPty = { backend: 'conpty' }
-          setTabState(key, {
-            status: 'ready',
-            shellLabel: formatShellLabel(spawned.shell) ?? spawned.shell,
-            cwd: spawned.cwd,
-            projectName: terminalProjectName(spawned.cwd) ?? terminalProjectName(cwd),
-          })
+          setStatus('ready')
 
           // 订阅必须在 attach 之前：attach 之后的输出只走事件，
           // attach 之前的在 backlog 里（terminal.rs 模块头）。
           // 每次订阅落位后复查 cancelled：dispose 可能抢在 await 之间完成
           // （已 drain 过 rt.unlisten，晚到的订阅必须自己拆掉防泄漏）
           const outUn = await onTerminalOutput(spawned.id, (ev) => {
-            // 已取消（页签关闭/重启）：unlisten 是异步的，队列里残留的事件
-            // 不能再写进新实例（重启复用同一个 key）
+            // 已取消（关闭/重启）：unlisten 是异步的，队列里残留的事件
+            // 不能再写进已 dispose 的 xterm
             if (rt.cancelled) return
             writeOutput(rt.gate.push(base64ToBytes(ev.data)))
           })
@@ -519,17 +509,19 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
           if (rt.cancelled) return
           console.error('[terminal] spawn failed:', err)
           const message = err instanceof Error ? err.message : String(err)
-          // 失败必须可见：写进终端 + 页签转 error（退出条带"重新打开"）
+          // 失败必须可见：写进终端 + 状态转 error（退出条带"重新打开"）
           rt.exited = true
           writeOutput(rt.gate.finish())
           rt.term.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`)
-          setTabState(key, { status: 'error', error: message })
+          setStatus('error')
+          setError(message)
         }
       }
 
-      /** 容器有真实尺寸才 open+启动；否则等 ResizeObserver/可见性回调重试。 */
+      /** 容器有真实尺寸且面板可见才 open+启动；否则等可见性/尺寸回调重试。 */
       const ensureSpawned = () => {
         if (rt.cancelled || rt.spawnStarted) return
+        if (!panelVisibleRef.current) return
         const c = containerRef.current
         if (!c || c.clientWidth <= 0 || c.clientHeight <= 0) return
         rt.spawnStarted = true
@@ -538,13 +530,11 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
             term.open(rt.hostEl)
             rt.opened = true
           } catch (err) {
-            // 失败必须可见（规矩 12）：页签转 error，退出条给"重新打开"
+            // 失败必须可见（规矩 12）：状态转 error，退出条给"重新打开"
             console.error('[terminal] open failed:', err)
             rt.exited = true
-            setTabState(key, {
-              status: 'error',
-              error: err instanceof Error ? err.message : String(err),
-            })
+            setStatus('error')
+            setError(err instanceof Error ? err.message : String(err))
             return
           }
           attachTextareaFallback()
@@ -556,112 +546,30 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       rt.ensureSpawned = ensureSpawned
       ensureSpawned()
     },
-    [fitAndQueueResize, flushResize, setTabState],
+    [fitAndQueueResize, flushResize],
   )
 
-  // ── 页签操作 ─────────────────────────────────────────────────────────────
-
-  const addTab = useCallback(() => {
-    seqRef.current += 1
-    const key = `t${seqRef.current}`
-    const index = nextTerminalIndex(tabsRef.current.map((t) => t.index))
-    // 新终端开在当前会话的工作区（ZCode：terminal 用 workspace cwd）
-    const cwd = pickTerminalCwd(sessionCatalog.getState())
-    setTabs((ts) => [
-      ...ts,
-      {
-        key,
-        index,
-        projectName: terminalProjectName(cwd),
-        cwd: cwd ?? null,
-        shellLabel: null,
-        status: 'starting',
-        exitCode: null,
-        error: null,
-      },
-    ])
-    activeKeyRef.current = key
-    setActiveKey(key)
-    createSession(key, cwd)
-  }, [createSession])
-
-  const switchTab = useCallback((key: string) => {
-    if (activeKeyRef.current === key) return
-    activeKeyRef.current = key
-    setActiveKey(key)
-  }, [])
-
-  const closeTab = useCallback(
-    (key: string) => {
-      disposeSession(key)
-      const ts = tabsRef.current
-      const idx = ts.findIndex((t) => t.key === key)
-      const next = ts.filter((t) => t.key !== key)
-      setTabs(next)
-      if (activeKeyRef.current === key) {
-        // 关活动页签 → 激活邻居（右邻优先、左邻兜底、空则无）
-        const neighbor = next[Math.min(Math.max(idx, 0), next.length - 1)]?.key ?? null
-        activeKeyRef.current = neighbor
-        setActiveKey(neighbor)
-      }
-    },
-    [disposeSession],
-  )
-
-  const restartSession = useCallback(
-    (key: string) => {
-      const previous = tabsRef.current.find((t) => t.key === key)
-      disposeSession(key)
-      setTabState(key, {
-        status: 'starting',
-        exitCode: null,
-        error: null,
-        shellLabel: null,
-      })
-      createSession(key, previous?.cwd ?? undefined)
-    },
-    [createSession, disposeSession, setTabState],
-  )
+  const restartSession = useCallback(() => {
+    disposeSession()
+    resetStatus()
+    createSession(cwdRef.current)
+  }, [createSession, disposeSession, resetStatus])
 
   // ── effects ──────────────────────────────────────────────────────────────
 
-  // 挂载：建第一个页签。卸载（关窗格/布局重建/StrictMode 重跑）=
-  // kill 该窗格全部会话（清理路径定稿）；应用退出由 Rust Drop 兜底。
+  // 挂载：建会话。卸载（关窗格/布局重建/StrictMode 重跑）= kill 本会话
+  // （清理路径定稿）；应用退出由 Rust Drop 兜底。
   useEffect(() => {
     if (!inTauri) return
-    addTab()
+    resetStatus()
+    createSession(cwdRef.current)
     return () => {
-      disposeAllSessions()
-      setTabs([])
-      activeKeyRef.current = null
-      setActiveKey(null)
+      disposeSession()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 活动页签切换：DOM 归位 + fit（页签间尺寸不同）+ flush + 聚焦
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    if (!activeKey) {
-      container.replaceChildren()
-      return
-    }
-    const rt = sessionsRef.current.get(activeKey)
-    if (!rt) return
-    container.replaceChildren(rt.hostEl)
-    const raf = requestAnimationFrame(() => {
-      // 一帧内可能已被关闭/重启（term 已 dispose，读 cols 会炸）
-      if (rt.cancelled) return
-      // 隐藏期间创建的页签：hostEl 归属活动签后才有真实尺寸，此时补启动
-      rt.ensureSpawned?.()
-      fitAndQueueResize(rt)
-      rt.term.focus()
-    })
-    return () => cancelAnimationFrame(raf)
-  }, [activeKey, fitAndQueueResize])
-
-  // 容器尺寸变化（分隔条拖拽/整栏 resize）→ fit 活动会话 → 排队后端 resize
+  // 容器尺寸变化（分隔条拖拽/整栏 resize）→ fit 会话 → 排队后端 resize
   useEffect(() => {
     const container = containerRef.current
     if (!container || !inTauri) return
@@ -670,9 +578,7 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
       if (raf) cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         raf = 0
-        const rt = activeKeyRef.current
-          ? sessionsRef.current.get(activeKeyRef.current)
-          : undefined
+        const rt = sessionRef.current
         if (rt) {
           rt.ensureSpawned?.()
           fitAndQueueResize(rt)
@@ -686,24 +592,37 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
     }
   }, [fitAndQueueResize])
 
-  // 面板重新可见（从「文件树/预览」切回终端、栏收放展开）：xterm 的 DOM
-  // 在隐藏期间是被摘下来的，重新挂回后必须补 fit + focus——否则键盘焦点
-  // 留在别处，用户以为终端"点不动"（ZCode 的 isVisible 语义）。
+  // 面板重新可见（从「文件树/预览」切回终端、栏收放展开、终端标签间切换）：
+  // 隐藏期间 xterm 的 DOM 可能被摘走/不可见，重新可见后必须补启动 + fit +
+  // focus——否则键盘焦点留在别处，用户以为终端"点不动"（ZCode isVisible 语义）。
+  // 尺寸变化事件（onDidDimensionsChange）是第二道保险：overlay 定位写入后
+  // dockview 会按新尺寸回调，隐藏期被跳过的 fit 在这里补齐。
   useEffect(() => {
     if (!api) return
-    const disposable = api.onDidVisibilityChange((event) => {
+    panelVisibleRef.current = api.isVisible
+    const refit = () => {
+      const rt = sessionRef.current
+      if (!rt || rt.cancelled || !panelVisibleRef.current) return
+      rt.ensureSpawned?.()
+      fitAndQueueResize(rt)
+    }
+    const visibility = api.onDidVisibilityChange((event) => {
+      panelVisibleRef.current = event.isVisible
       if (!event.isVisible) return
-      const key = activeKeyRef.current
-      const rt = key ? sessionsRef.current.get(key) : undefined
-      if (!rt) return
+      // 等 dockview 把 overlay 定位写进样式（它的 rAF 先于本回调的 rAF）
       requestAnimationFrame(() => {
-        if (rt.cancelled) return
-        rt.ensureSpawned?.()
-        fitAndQueueResize(rt)
-        rt.term.focus()
+        refit()
+        sessionRef.current?.term.focus()
       })
     })
-    return () => disposable.dispose()
+    const dimensions = api.onDidDimensionsChange(() => {
+      if (!panelVisibleRef.current) return
+      refit()
+    })
+    return () => {
+      visibility.dispose()
+      dimensions.dispose()
+    }
   }, [api, fitAndQueueResize])
 
   // ── 渲染 ─────────────────────────────────────────────────────────────────
@@ -719,68 +638,25 @@ export function TerminalPane({ api }: { api?: DockviewPanelApi }) {
     )
   }
 
-  const activeTab = tabs.find((t) => t.key === activeKey) ?? null
-  const showExitBar =
-    activeTab && (activeTab.status === 'exited' || activeTab.status === 'error')
-
-  const tabTitle = (t: TerminalTab) => formatTerminalTabTitle(t.projectName ?? '终端', t.index)
-  const tabHint = (t: TerminalTab) => {
-    const shell = t.shellLabel ?? '终端'
-    const where = t.cwd ? ` — ${t.cwd}` : ''
-    if (t.status === 'exited') return `${shell}${where}（进程已退出, code ${t.exitCode}）`
-    if (t.status === 'error') return `${shell}${where}（启动失败）`
-    return `${shell}${where}`
-  }
+  const showExitBar = status === 'exited' || status === 'error'
 
   return (
     <div className="term-pane">
-      <div className="term-strip" role="tablist" aria-label="终端页签">
-        {tabs.map((t) => (
-          <div
-            key={t.key}
-            className={`term-tab${t.key === activeKey ? ' active' : ''}`}
-            role="tab"
-            aria-selected={t.key === activeKey}
-          >
-            <button
-              type="button"
-              className="term-tab-label"
-              title={tabHint(t)}
-              onClick={() => switchTab(t.key)}
-            >
-              {tabTitle(t)}
-              {t.status === 'starting' ? '…' : ''}
-            </button>
-            <button
-              type="button"
-              className="term-tab-close"
-              aria-label={`关闭 ${tabTitle(t)}`}
-              onClick={() => closeTab(t.key)}
-            >
-              <CloseIcon size={10} />
-            </button>
-          </div>
-        ))}
-        <button type="button" className="term-add" aria-label="新建终端" onClick={() => addTab()}>
-          +
-        </button>
-      </div>
       <div className="term-body">
         <div ref={containerRef} className="term-host-container" />
-        {tabs.length === 0 && <div className="term-empty">无终端页签——点「+」新建。</div>}
+        {showExitBar && (
+          <div className="term-exit-bar">
+            <span>
+              {status === 'error'
+                ? `终端启动失败：${error ?? '未知错误'}`
+                : (error ?? `进程已退出 (code ${exitCode})`)}
+            </span>
+            <button type="button" className="term-exit-reopen" onClick={restartSession}>
+              重新打开
+            </button>
+          </div>
+        )}
       </div>
-      {showExitBar && activeTab && (
-        <div className="term-exit-bar">
-          <span>
-            {activeTab.status === 'error'
-              ? `终端启动失败：${activeTab.error ?? '未知错误'}`
-              : (activeTab.error ?? `进程已退出 (code ${activeTab.exitCode})`)}
-          </span>
-          <button type="button" className="term-exit-reopen" onClick={() => restartSession(activeTab.key)}>
-            重新打开
-          </button>
-        </div>
-      )}
     </div>
   )
 }

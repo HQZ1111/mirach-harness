@@ -86,6 +86,8 @@ interface RoomRun {
   task?: PlannedTask
   discussionEventId?: string | null
   threadId?: string | null
+  /** 引擎 task_lease 身份（prompt.submit 后由 session.resume 回读）。 */
+  engineTask?: { task_id: string; execution_generation: number }
   /** 在途审批（lane 的 pending_approval）→ canonical pending_actions。 */
   pending?: {
     request_id: string
@@ -255,6 +257,14 @@ async function resumeSnapshot(sessionId: string, profile: string): Promise<{
   running?: boolean
   messages?: ResumeMessage[]
   pending_approval?: unknown
+  task?: { task_id?: string; execution_generation?: number } | null
+  recovered_tasks?: {
+    task_id?: string
+    execution_generation?: number
+    status?: string
+    error?: string
+    meta?: Record<string, unknown> | null
+  }[]
 }> {
   return request('session.resume', { session_id: sessionId, profile })
 }
@@ -278,6 +288,35 @@ async function runMemberTurn(
 
   const before = await resumeSnapshot(sessionId, member.profile)
   const baseline = Array.isArray(before.messages) ? before.messages.length : 0
+  // 引擎 task_lease 的启动恢复：上次进程死在轮次中 → indeterminate 记录
+  // （meta 里存了房间坐标）。如实写 turn.failed，不静默丢。
+  for (const record of before.recovered_tasks ?? []) {
+    const meta = record.meta
+    if (!meta || meta.room_id !== run.roomId || typeof meta.discussion_event_id !== 'string') {
+      continue
+    }
+    try {
+      await appendEvent(
+        run.roomId,
+        'turn.failed',
+        { kind: 'gateway', id: '' },
+        {
+          discussion_event_id: meta.discussion_event_id,
+          member_id: meta.member_id,
+          member_index: meta.member_index,
+          round_index: meta.round_index,
+          task_id: meta.task_id,
+          thread_id: meta.thread_id,
+          turn_id: meta.turn_id,
+          seen_through_seq: meta.seen_through_seq,
+          error: record.error || '应用重启时该轮次状态未知（indeterminate）',
+          reason_code: 'indeterminate',
+        },
+      )
+    } catch (e) {
+      console.error('[canonical-driver] indeterminate 轮次回写失败', e)
+    }
+  }
   run.baseline = baseline
   run.memberId = task.member_id
   run.startedAt = Date.now()
@@ -287,6 +326,18 @@ async function runMemberTurn(
     session_id: sessionId,
     text: task.prompt,
     profile: member.profile,
+    // 引擎任务租约元数据（room 坐标随任务落盘，重启恢复时用）。
+    task_meta: {
+      room_id: run.roomId,
+      discussion_event_id: run.discussionEventId ?? null,
+      thread_id: task.thread_id,
+      task_id: task.task_id,
+      turn_id: task.turn_id,
+      round_index: task.round_index,
+      member_id: task.member_id,
+      member_index: task.member_index,
+      seen_through_seq: task.seen_through_seq,
+    },
   })
 
   // 轮询到不忙为止（rpi 的 run 失败在消息里留 failed_turn 行；lane 层
@@ -294,11 +345,17 @@ async function runMemberTurn(
   for (;;) {
     if (run.cancelled) return { kind: 'failed', error: 'been cancelled' }
     await new Promise((resolve) => setTimeout(resolve, 1500))
-    let snapshot: { running?: boolean; messages?: ResumeMessage[]; pending_approval?: unknown }
+    let snapshot: Awaited<ReturnType<typeof resumeSnapshot>>
     try {
       snapshot = await resumeSnapshot(sessionId, member.profile)
     } catch (e) {
       return { kind: 'failed', error: e instanceof Error ? e.message : String(e) }
+    }
+    if (snapshot.task?.task_id && typeof snapshot.task.execution_generation === 'number') {
+      run.engineTask = {
+        task_id: snapshot.task.task_id,
+        execution_generation: snapshot.task.execution_generation,
+      }
     }
     // 审批阻塞：把 lane 的 pending_approval 投影成 canonical pending action，
     // 轮次继续等（用户 once/deny 后 lane 继续跑）。
@@ -605,7 +662,16 @@ export async function stopCanonicalRoom(roomId: string): Promise<void> {
   notify()
   if (run.sessionId) {
     try {
-      await request('session.interrupt', { session_id: run.sessionId })
+      if (run.engineTask) {
+        // 引擎租约的带 fencing 中断：只有精确 task/generation 才生效。
+        await request('task.interrupt', {
+          session_id: run.sessionId,
+          task_id: run.engineTask.task_id,
+          execution_generation: run.engineTask.execution_generation,
+        })
+      } else {
+        await request('session.interrupt', { session_id: run.sessionId })
+      }
     } catch (e) {
       console.error('[canonical-driver] 中断成员会话失败（驱动仍会退出）', e)
     }

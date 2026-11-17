@@ -1,9 +1,10 @@
 # pi / rpi 引擎侧缺口清单（宿主无法补齐的部分）
 
-> 2026-11-17。口径：这里只记**必须动引擎（`G:\pi-rust-main`）或引擎扩展**才能
-> 补齐的项。能在 mirach 宿主（Tauri 前端 + `src-tauri`）解决的都已在宿主侧
-> 落地，不进本文。`G:\pi-rust-main` 当前是**无 .git 的源码镜像**，无法直接开
-> PR；需要时把本文条目拆成 patch 交给 pi 仓库。
+> 2026-11-17 建；**2026-11-18 全线更新**：§2/§3/§6/§7 四项已在引擎
+> `G:\pi-rust-main` 工作树落地并实机验证（用户裁定"全部做，做完检查，
+> 没问题了 pr 给 pi rust"）。`G:\pi-rust-main` 是**无 .git 的源码镜像**——
+> 移植清单（5 处改动）见文末「PR 待办」；宿主侧对偶全部接通，见各节
+> 「已落地」段。
 
 ## 1. ~~rpi-mcp-adapter 的 OAuth 支持~~（宿主侧已补，2026-11-17 收尾）
 
@@ -18,41 +19,45 @@ token 存 OS keyring），可省掉宿主写 headers 这一层；非阻塞。
 
 ## 2. Display / Bot Desktop（屏幕门户、屏幕面板、display.lease/observe）
 
-**事实**：hermes 的 display 是网关侧子系统（屏幕服务器 + 租约 + 缩略图 +
-安装媒体流）。rpi 没有显示服务器、没有截屏/串流协议，也没有租约概念。
+**✅ 已落地（2026-11-18，宿主侧全实现，引擎零改动）**：
+`src-tauri/src/pi_display.rs` = 本机桌面镜像子系统：
+- GDI 截屏（`CAPTUREBLT`，virtual screen，JPEG/PNG 缩略图）+ **RFB 3.8 服务**
+  经 tokio-tungstenite WS（`/api/display/ws?display_ticket=…`，ticket 单次
+  30s 有效；`serverinit` 1280×720，raw 帧，350ms 节流）。
+- IPC：`pi_display_status / ws_port / thumbnail / observe / start /
+  lease_acquire / lease_release`；lease 契约 = 上游 gateway-contract
+  （`holder:'agent'|'human'`，**恒为对象非 null**，epoch 单调递增——释放后
+  仍以 agent 占位对象返回；`running = supported`，本机镜像恒在跑）。
+- 前端：screen-pane 经 `display.observe` 拿 viewer+ticket → `resolveSiblingWsUrl`
+  返回 `ws://127.0.0.1:<port>/api/display/ws` → noVNC 1.7 直连。
+- **实机**：右键 bot 行 →「打开屏幕」→ canvas 1280×720 真帧（像素非零）→
+  「接管」→「你正在控制」→「交还」→「机器人正在控制」（lease epoch 2）。
 
-**宿主现状**：`display.status` 如实 `supported:false`；其余 `display.*`
-显式报错；screen-portal / 屏幕面板不渲染假 UI。
-
-**要引擎补的**：一条 display 协议（或一个官方扩展）：
-`display.status / install / observe / thumbnail / start / lease.acquire /
-lease.release`，含帧编码（PNG/WebP 流）与租约仲裁。工作量在新子系统，不在
-现有代码的小改。
+**有意不做**：`display.stop` / `display.install`（宿主无"停掉本机屏幕"语义，
+上游面板也不消费 stop）；非 Windows 平台 `supported:false` 如实报错。
+远程 bot 的"独立虚拟屏"不做——本机镜像的 `detail` 字段已如实标注。
 
 ## 3. 会话层的「任务身份 / 终局回执」（canonical 群聊 driver 的地基）
 
-**事实**：hermes 的 hosted-room driver（`tui_gateway/hosted_room_driver.py`）
-把每个成员轮次当成带身份的 task：`submit(task=…, on_terminal=…)`、
-history 里的 terminal receipt、`expected_task_id` 的精确中断、失败
-`indeterminate` 的恢复判定。rpi 的 harness 目前只有 run 粒度
-（prompt → 事件流 → 结束），没有 task_id / execution_generation / 回执。
+**✅ 已落地（2026-11-18，引擎 `rpi-harness/src/task_lease.rs` + 宿主接线）**：
+- 引擎：持久任务租约模块——`acquire_with_meta / renew / finish / status /
+  list / recover / ensure_live`；fencing 语义（Conflict / Stale / LeaseLost /
+  AlreadyFinished / Invalid / Io）；落盘 `<session>.tasks.json`（tmp+rename，
+  崩溃安全）。`recover` 把过期 Running 折成 `Indeterminate`。
+- 宿主：每次 `pi_bot_prompt` = 一个 task 身份（task_id + execution_generation
+  + 租约 + meta 坐标）；结束按 `HarnessRunOutcome` finish（Completed→Settled
+  / Aborted→Cancelled / Failed→Failed，receipt = `runId:finalEntryId`）；
+  `session.resume` 快照出 `task` / `tasks` / `recovered_tasks`；
+  `task.interrupt` 走 `ensure_live` fencing；canonical driver 的 Stop 用
+  fenced 中断、重启后 recovered → `turn.failed`（reason_code
+  `indeterminate`）回写房间。localStorage 版 ledger 已删除。
+- **实机**：running 快照/持久（重启后 tasks 仍在）✓；stale generation 中断
+  被拒（"stale task identity (generation moved)"）✓；正确 generation →
+  `cancelled`+meta 落盘 ✓；fixture 过期 Running → `indeterminate`
+  （"driver restarted while the task was running"）→ take-once 清空 ✓。
 
-**宿主现状（2026-11-17 更新）**：**路线 B 已落地最小版**——宿主前端驱动
-（`src/components/panes/hub/canonical-group-driver.ts`）在 `pi_bot.rs` 泳道
-上自己维护 task 坐标与终局：`groups_plan`（Rust 规划，含成员 prompt）→
-成员会话 `Group: <room_id>` → `prompt.submit` → 轮询 → `groups.driver_append`
-写回 message.member / turn.* / room.activity。实机：建房 → 两名成员依次跑
-轮次 → 403 失败如实回写 → room.activity settled。`groups.capabilities` 已
-`driver:true`（新建群聊可用）。
-
-**仍缺（引擎补才到 hermes 全语义）**：
-- harness 的 submit/history 加 **task 身份与终局回执**（task_id /
-  execution_generation / terminal receipt / `expected_task_id` 中断）——
-  这才能实现 hermes 的**租约/fencing/indeterminate 恢复**（当前重启 = 在途
-  轮次丢失，启动扫描重驱动）。
-- router(auto) / lead 路由需要一次廉价模型调用（宿主当前把 route 计划按
-  bounded 收尾）。
-- approvals 的 pending_actions 投影与 groups.approve 桥接（当前不桥接）。
+**仍缺（引擎后续可选项）**：router(auto) / lead 路由的一次廉价模型调用
+（宿主当前按 bounded 收尾）——与租约无关。
 
 ## 4. 会话回收事件 `session.reclaimed`
 
@@ -73,34 +78,55 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
 
 ## 6. 权限闸运行时切换 / 审批卡触发（rpi 迁移后的欠账）
 
-**事实**：rpi 把「审批模式」拆给扩展承担——`RPI_PERMISSION_GATE=1` 或
-`rpi-permissions` / `rpi-permission-gate` 扩展在**会话构建时**读规则与 env；
-宿主没有运行时切换面。实测宿主：
-`pi_session.rs::set_approval_mode` / `set_plan_mode` / `decide_plan` 在 rpi
-迁移后都是**显式 Err**（早前 pi_agent_rust 的三态开关已不存在），
-`mode_state` 是只读投影。宿主前端的「计划/文件内修改/完全访问」切换与
-PlanReviewCard 目前是**只显示、切换报错**的降级态（代码里有注释，
-UI 未再承诺可用）。
-
-**影响**：canonical 群聊的 approvals 桥（lane `pending_approval` →
-driver_status.pending_actions → `groups.approve` → `approval.respond`）已实现，
-但**只有当成员会话里权限闸真的向宿主弹审批时才会出现卡片**；当前默认规则下
-bash/write 直接放行，卡片不触发。
-
-**要引擎/扩展补的**：①approval 三态（AlwaysAsk / Write / Yolo）的运行时
-切换接口（或让宿主设置 env + 重建会话的正式通道）；②权限闸把「工具要审批」
-经扩展 UI 邮箱（宿主已 attach）弹到宿主卡片的稳定通道。两者都属 pi 侧。
+**✅ 已落地（2026-11-18，引擎 `rpi-cli/src/approval_gate.rs` + 宿主桥）**：
+- 引擎：三态模式（AlwaysAsk / Write / Yolo）进程级 AtomicU8，**运行时切换、
+  即时生效于在途轮次**；`ApprovalHandler` 由宿主安装；`before_tool_call`
+  组合在扩展 hook **之后**（扩展否决优先）；只读白名单显式（read/ls/grep/
+  find/web_search/web_fetch/docs/todo），未知工具按需审批（保守）。
+- 宿主：`pi_mode_state` 回读 `approvalMode`；`pi_set_approval_mode` 真切换
+  （未知值 Err）；审批请求 emit `mirach://approval-request`（真 session_id +
+  tool + args）→ 前端 ApprovalDialog（允许一次 / 拒绝）→
+  `pi_approval_decision` 回执；输入框模式钮菜单三态可选。
+- **实机**：always-ask → bash 弹卡（真 args）→ 允许 → 命令真执行；拒绝 →
+  回灌「用户拒绝」、命令未执行。canonical approvals 桥（已有）从此有真卡片
+  可弹。
+- **注**：计划模式（plan gate）本就可用（`/plan start|exit`），
+  `set_plan_mode` 已从 Err 改为走引擎命令。
 
 ## 7. agent 互发（message_agent 工具 / relay）
 
-**事实**：hermes 里 agent 互发 = 每个会话注入 `message_agent` 工具，工具经
-网关 relay 投递到目标 bot 的 canonical 会话。宿主没有工具注入口
-（`SessionOptions` 等价面不存在），relay RPC 也只是跨网关 mailbox
-（单身份 → 空）。宿主侧已如实返回空/报错，不伪造。
+**✅ 已落地（2026-11-18，引擎 `rpi-cli/src/message_agent.rs` + 宿主桥）**：
+- 引擎内置 `message_agent` 工具（fire-and-forget）：schema = target /
+  message（≤16000）/ constraints / expecting / expects_reply / cancel；
+  **handler 未安装则工具不注册**（CLI 会话不见不可服务的工具）；caller 的
+  session id 由引擎从 harness 绑定解析（不信模型输入）。
+- 宿主：`HostMessageAgent` emit `mirach://agent-message` + 30s ack 超时；
+  前端 engine-bridges 校验目标 bot 花名册锚点 → ack queued →
+  真投递进目标 canonical 会话（`Message from 🤖 <名> (@<名>): …` + 期望行）→
+  目标真跑一轮 → 回信（expects_reply 时）送进发送者会话。
+- **实机**：微软 → 引擎工具 `{status:"queued", delivery_id}` → 真投递
+  remote-bot → 回信落进微软会话 ✓。
+- **绑定修复（引擎）**：`durable_binding` 原来只在 `native_durable` 分支
+  填充 → 宿主会话里工具恒报 "session binding not ready"；改为无条件 set
+  （顺带让审批请求带真 session_id）。**这是本轮 PR 给 pi-rust 必带的修正**。
+- **relay（跨网关）仍不做**：单身份宿主无 relay outbox 概念，
+  `bot_relay.deliver` 保持显式报错（§5 同因）。
 
-**要引擎补的**：①会话层暴露「宿主自定义工具」注册面（或官方 message_agent
-扩展）——工具实现可回调宿主（本地 HTTP / CLI 均可），宿主把消息写进目标 bot
-的 bot-lane 会话；②或提供 relay outbox 的本地实现（单机 = 直投）。
+## PR 待办（给 `github.com/bigfish1913/pi-rust`）
+
+`G:\pi-rust-main` 工作树已完成并验证的 5 处改动（本轮实测全过；`G:\pi-rust-main`
+无 .git，需 clone/fork 上游后移植）：
+
+| 文件 | 改动 |
+|---|---|
+| `crates/rpi-harness/src/task_lease.rs` | **新**（持久任务租约 + fencing + recover；6 单测） |
+| `crates/rpi-cli/src/approval_gate.rs` | **新**（运行时审批三态 + handler + before_tool_call；3 单测） |
+| `crates/rpi-cli/src/message_agent.rs` | **新**（内置 message_agent 工具 + 全局 handler；2 单测） |
+| `crates/rpi-cli/src/session.rs` | 接线：before_tool_call 组合（扩展 hook 后）+ message_agent 注册 + **durable_binding 无条件填充**（宿主嵌入的关键修复） |
+| `crates/rpi-cli/src/lib.rs` / `rpi-harness/src/lib.rs` | `pub mod` 各一行 |
+
+两个 lib.rs 之外无公共 API 破坏；默认行为不变（未装 handler 时审批闸 = no-op、
+message_agent 不注册）。建议 PR 描述里带上宿主实测证据（见 HANDOFF 同轮条目）。
 
 ---
 

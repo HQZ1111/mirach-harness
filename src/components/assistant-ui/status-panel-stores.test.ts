@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { agentHubBridge, isSettled, parseChildEntries } from './agent-hub-store'
 import { jobsBridge, parseJobs } from './jobs-store'
+import { planEntriesBridge, parsePlanEntries } from './plan-entries-store'
 import { gitBridge, parseGitDiffStat } from './git-store'
 import { flatTasks, parseTodoList, todoBridge } from './todo-store'
 import { dispatchToolDetails } from './tool-sidecar'
@@ -31,6 +32,7 @@ beforeEach(() => {
   jobsBridge.setState({ jobs: [] })
   todoBridge.setState({ todo: null })
   gitBridge.setState({ stat: null })
+  planEntriesBridge.setState({ entries: [] })
 })
 
 describe('isSettled（ChildStatus 终态，与 pi ChildStatus::settled 同语义）', () => {
@@ -172,6 +174,28 @@ describe('parseTodoList（pi todo_list.v1 details.list）', () => {
       phases: [{ name: '阶段一', tasks: [{ content: 'a', state: 'open' }] }],
     })
     expect(proj!.phases[0]!.name).toBe('阶段一')
+  })
+})
+
+describe('parsePlanEntries（pi_plan_entries 裸数组）', () => {
+  const good = { entryId: 'e-1', seq: 3, timestamp: 1000, plan: '# 计划\n内容' }
+
+  it('正常行逐字段解析', () => {
+    const out = parsePlanEntries([good])
+    expect(out).toEqual([good])
+  })
+
+  it('非数组 → [] + 错误可见', () => {
+    const spy = silenceErrors()
+    expect(parsePlanEntries({ nope: true })).toEqual([])
+    expect(spy).toHaveBeenCalled()
+  })
+
+  it('字段缺失 / 空文本行 → 跳过，好行保留', () => {
+    const spy = silenceErrors()
+    expect(parsePlanEntries([good, { entryId: 'x' }])).toHaveLength(1)
+    expect(parsePlanEntries([good, { ...good, entryId: 'e-2', plan: '   ' }])).toHaveLength(1)
+    expect(spy).toHaveBeenCalled()
   })
 })
 

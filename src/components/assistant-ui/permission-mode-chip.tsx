@@ -25,10 +25,13 @@ import { cn } from '@/lib/utils'
 interface ModeState {
   /** 'planning' | 'off' */
   planMode?: string
+  /** 运行时审批模式：always-ask / write / yolo（rpi-cli approval_gate） */
+  approvalMode?: string
   /** rpi-permission-gate 是否在启动期启用（env RPI_PERMISSION_GATE） */
   permissionGate?: boolean
 }
 
+type ApprovalId = 'always-ask' | 'write' | 'yolo'
 type ModeId = 'plan' | 'full'
 
 const MODES: { id: ModeId; label: string; description: string }[] = [
@@ -39,10 +42,30 @@ const MODES: { id: ModeId; label: string; description: string }[] = [
   },
   {
     id: 'full',
-    label: '完全访问',
-    description: '正常执行任务（可写文件）。',
+    label: '正常执行',
+    description: '退出计划态；审批按下方策略。',
   },
 ]
+
+const APPROVALS: { id: ApprovalId; label: string; description: string }[] = [
+  {
+    id: 'always-ask',
+    label: '默认',
+    description: '每次变更/命令前询问（只读工具直接放行）。',
+  },
+  {
+    id: 'write',
+    label: '文件内修改',
+    description: '写文件自动批准；命令仍需确认。',
+  },
+  {
+    id: 'yolo',
+    label: '完全访问',
+    description: '不逐次询问（硬策略闸仍生效）。',
+  },
+]
+
+const APPROVAL_STORAGE_KEY = 'mirach:approval-mode'
 
 export function PermissionModeChip({
   className,
@@ -58,6 +81,7 @@ export function PermissionModeChip({
   const [state, setState] = useState<ModeState | null>(null)
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState<ModeId | null>(null)
+  const [approvalBusy, setApprovalBusy] = useState<ApprovalId | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
@@ -74,8 +98,41 @@ export function PermissionModeChip({
     if (!running) refresh()
   }, [refresh, running])
 
-  const current: ModeId = state?.planMode === 'planning' ? 'plan' : 'full'
-  const currentLabel = MODES.find((m) => m.id === current)?.label ?? '完全访问'
+  const currentApproval: ApprovalId =
+    state?.approvalMode === 'always-ask' || state?.approvalMode === 'write'
+      ? state.approvalMode
+      : 'yolo'
+  const currentPlan = state?.planMode === 'planning'
+  const currentLabel = currentPlan
+    ? '计划模式'
+    : (APPROVALS.find((m) => m.id === currentApproval)?.label ?? '完全访问')
+
+  const selectApproval = (id: ApprovalId) => {
+    if (id === currentApproval) {
+      setOpen(false)
+      return
+    }
+    setApprovalBusy(id)
+    setError(null)
+    invoke<unknown>('pi_set_approval_mode', { mode: id })
+      .then(() => {
+        try {
+          localStorage.setItem(APPROVAL_STORAGE_KEY, id)
+        } catch {
+          /* 偏好持久化失败不阻断本次切换（下次启动回默认，console 无敏感信息） */
+        }
+        refresh()
+        setOpen(false)
+      })
+      .catch((e) => {
+        const message = e instanceof Error ? e.message : String(e)
+        setError(message)
+        console.error('[mode] pi_set_approval_mode 失败', e)
+      })
+      .finally(() => setApprovalBusy(null))
+  }
+
+  const current: ModeId = currentPlan ? 'plan' : 'full'
 
   const select = (id: ModeId) => {
     if (id === current) {
@@ -164,6 +221,39 @@ export function PermissionModeChip({
                 </span>
                 <span className="text-muted-foreground block text-[12px] leading-[17px]">
                   {mode.description}
+                </span>
+              </span>
+            </button>
+          )
+        })}
+        <div className="bg-foreground/[0.06] mx-2 my-1 h-px" role="separator" />
+        <div className="text-muted-foreground/70 px-2 pt-1 pb-0.5 text-[11px] font-medium">审批策略</div>
+        {APPROVALS.map((approval) => {
+          const active = approval.id === currentApproval
+          const switching = approvalBusy === approval.id
+          return (
+            <button
+              key={approval.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={active}
+              disabled={approvalBusy !== null}
+              onClick={() => selectApproval(approval.id)}
+              className={cn(
+                'hover:bg-foreground/[0.06] flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors disabled:opacity-60',
+                active && 'bg-foreground/[0.06]',
+              )}
+            >
+              <span className="mt-[2px] flex size-4 shrink-0 items-center justify-center">
+                {active ? <CheckIcon className="size-[14px]" /> : null}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] leading-[19px] font-medium">
+                  {approval.label}
+                  {switching ? <span className="text-muted-foreground"> · 切换中…</span> : null}
+                </span>
+                <span className="text-muted-foreground block text-[12px] leading-[17px]">
+                  {approval.description}
                 </span>
               </span>
             </button>
