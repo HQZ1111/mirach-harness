@@ -2586,9 +2586,10 @@ active`、秒针在走；UI 暂停/恢复点击真翻转；`/goal stop` 归档�
 
 ## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
 
-**引擎侧改动都在 `G:\pi-rust-main` 工作树**（无 .git；PR 待办清单见
-`docs/pi-host-gaps.md` 末尾表：task_lease.rs / approval_gate.rs /
-message_agent.rs 三个新文件 + session.rs 接线 + 两个 lib.rs 一行）。
+**引擎侧改动都在 `G:\pi-rust-main` 工作树，PR 已提：pi-rust #348**
+（https://github.com/bigfish1913/pi-rust/pull/348，基于上游 main 干净重建；
+diff = task_lease.rs / approval_gate.rs / message_agent.rs 三个新文件 +
+session.rs +50/-3 + 两个 lib.rs 一行。**镜像里用户自己的本地补丁不在 PR 内**）。
 
 | 件 | 引擎文件 | 宿主对偶 |
 |---|---|---|

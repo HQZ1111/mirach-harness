@@ -43,11 +43,16 @@
 - **门禁**：tsc 0 新错（1326 条 = hermes-mirror/sdk-upstream 既有基线）/ vitest
   **1044**（84 文件）/ cargo test **666** / cargo check 0 / rpi-cli+rpi-harness 新模块
   单测 11 条全过。
-- **未做（交接）**：① **PR 给 pi-rust 上游**——`G:\pi-rust-main` 无 .git，需
-  clone/fork `github.com/bigfish1913/pi-rust` 后移植 5 处改动（task_lease.rs /
-  approval_gate.rs / message_agent.rs 三个新文件 + session.rs 接线与绑定修复 + lib.rs
-  两行）；② 屏幕的 display.stop/install 面无（宿主无停止语义，有意不做）；
-  ③ canonical 群聊**含租约**的整房间 UI E2E（各原语已单独实测：快照/fencing/恢复）。
+- **PR 已提（2026-11-18 夜）**：**bigfish1913/pi-rust #348**
+  （https://github.com/bigfish1913/pi-rust/pull/348，
+  head `HQZ1111:feat/task-lease-approval-message-agent`，6 文件：
+  三个新模块 + session.rs +50/-3 + 两个 lib.rs 各一行）。分支基于上游
+  main d3e388d 干净重建（镜像里用户自己的本地补丁如 execution_env /
+  after_tool_call 改动**没有**带进 PR）；克隆在本机
+  `E:\Temp\pi-rust-pr333`。余下：等上游 review；canonical 群聊**含租约**的
+  整房间 UI E2E（各原语已单独实测）。
+- **有意不做**：屏幕的 display.stop/install 面无（宿主无停止语义）；
+  relay 跨网关（单身份宿主无 relay 概念，显式报错）。
 
 
 **✅ 2026-11-18：对话右上角活动状态面板 = ZCode `ConversationStatusPanel` 完整移植**

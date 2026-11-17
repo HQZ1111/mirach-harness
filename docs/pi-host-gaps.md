@@ -114,8 +114,12 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
 
 ## PR 待办（给 `github.com/bigfish1913/pi-rust`）
 
-`G:\pi-rust-main` 工作树已完成并验证的 5 处改动（本轮实测全过；`G:\pi-rust-main`
-无 .git，需 clone/fork 上游后移植）：
+> **✅ 已提（2026-11-18）：[bigfish1913/pi-rust #348](https://github.com/bigfish1913/pi-rust/pull/348)**
+> （head `HQZ1111:feat/task-lease-approval-message-agent`，基于上游 main
+> d3e388d 干净重建；diff = 三个新文件 + session.rs +50/-3 + 两个 lib.rs 各
+> 一行。`cargo check -p rpi-cli` 与模块测试均在上游 main 上复跑通过。）
+
+`G:\pi-rust-main` 工作树已完成并验证的改动（本轮实测全过）：
 
 | 文件 | 改动 |
 |---|---|
@@ -126,7 +130,9 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
 | `crates/rpi-cli/src/lib.rs` / `rpi-harness/src/lib.rs` | `pub mod` 各一行 |
 
 两个 lib.rs 之外无公共 API 破坏；默认行为不变（未装 handler 时审批闸 = no-op、
-message_agent 不注册）。建议 PR 描述里带上宿主实测证据（见 HANDOFF 同轮条目）。
+message_agent 不注册）。**注意**：镜像 `G:\pi-rust-main` 里还混有用户自己的
+本地补丁（`execution_env(cwd)`、`after_tool_call: None` 等）——**不在本 PR 内**，
+移植时只取上表五处。
 
 ---
 
