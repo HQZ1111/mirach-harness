@@ -331,6 +331,30 @@
   width: 100%;
 }
 
+/* 终端文本必须是等宽栈：harmonyos-sans-sc-webfont-splitted 的
+   `:lang(zh) { font-family: 'HarmonyOS Sans SC', sans-serif }` 会直接命中
+   xterm 内部的 span（DOM renderer 逐字符 span 继承比例字体），xterm 只能
+   用逐 span 的 letter-spacing 硬凑单元格 → 终端里拉丁字变成
+   "Power Shell" 那种怪字距、小写 l 长成 I。这里用更高优先级把
+   xterm 整棵子树钉回 --term-font-family（比 :lang 伪类多一个 class）。 */
+.term-host .xterm,
+.term-host .xterm *,
+.term-host .xterm-helper-textarea {
+  font-family: var(--term-font-family);
+}
+
+/* 终端滚动交给 xterm 内部处理；隐藏原生滚动条，避免全局滚动条样式
+   （scrollbar-overlay）在终端右侧露出第二条滚动条（ZCode
+   `.terminal-xterm-shell .xterm-viewport` 同款）。 */
+.term-host .xterm-viewport {
+  scrollbar-width: none;
+}
+.term-host .xterm-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* 退出/错误条：盖在终端体底部（进程已退出 (code N) + 重新打开钮） */
 .term-exit-bar {
   align-items: center;

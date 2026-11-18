@@ -132,6 +132,7 @@ fn router(server: Arc<PeerServer>) -> Router {
         .route("/v1/mirach/sessions/{id}/prompt", post(peer_prompt))
         .route("/v1/mirach/sessions/{id}/interrupt", post(peer_interrupt))
         .route("/v1/mirach/sessions/{id}/compact", post(peer_compact))
+        .route("/v1/mirach/rooms/{id}/replicate", post(peer_room_replicate))
         .with_state(server)
 }
 
@@ -422,6 +423,78 @@ async fn peer_compact(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": {"code": "compact_failed", "message": e}})),
+        )
+            .into_response(),
+    }
+}
+
+/// HA replica 接收：peer 收到 authority 的房间事件页，ingest 进本地 replica 表。
+async fn peer_room_replicate(
+    State(server): State<Arc<PeerServer>>,
+    headers: HeaderMap,
+    Path(room_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !authorized(&headers, &server) {
+        return unauthorized();
+    }
+    let room_name = body
+        .get("room_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let members_json = body
+        .get("members")
+        .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "[]".into()))
+        .unwrap_or_else(|| "[]".into());
+    let raw_page = body.get("page").cloned().unwrap_or(Value::Null);
+    let replica_page =
+        match crate::hosted_rooms::replicas::validate_page(&raw_page) {
+            Ok(page) => page,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"code": e.code, "message": e.message}})),
+                )
+                    .into_response()
+            }
+        };
+    let db_path = match crate::pi_paths::agent_dir() {
+        Ok(dir) => dir.join("state.db"),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "db_path_failed", "message": e}})),
+            )
+                .into_response()
+        }
+    };
+    let mut conn = match rusqlite::Connection::open(&db_path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"code": "db_open_failed", "message": e.to_string()}})),
+            )
+                .into_response()
+        }
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    match crate::hosted_rooms::replicas::ingest_page(
+        &mut conn,
+        &room_id,
+        &room_name,
+        &members_json,
+        &replica_page,
+        now,
+    ) {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"code": e.code, "message": e.message}})),
         )
             .into_response(),
     }

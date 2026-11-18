@@ -257,35 +257,48 @@
   --code-note-size: 12px;                     /* 超预算提示行字号 */
   --code-btn-radius: 4px;                     /* 复制钮圆角 */
 
-  /* ── 终端（xterm，terminal-pane；2026-10-01）──
-     终端体 = 暗色块（ZCode 终端配色同源；浅色壳内嵌暗色终端是常规桌面
-     形态）。颜色经 terminal-theme.ts 的 canvas 归一喂给 xterm（xterm 不认
-     var()），样式规则里只许引用这里的令牌。 */
+  /* ── 终端（xterm，terminal-pane）──
+     2026-11-18 对齐 ZCode 默认**浅色**主题的 @theme 终端配色
+     （packages/ui/src/styles.css `@theme` 段；Tailwind v4 默认调色板，
+     数值 = oklch 经 Chromium 量化为 sRGB）：bg/fg = neutral-50/950，
+     ANSI = red/green/yellow/sky/fuchsia/cyan-500 + neutral 灰阶。
+     之前误取了 `.dark` 段的值（#171717 黑底浅字）——浅色应用里是一块
+     突兀的黑块，用户报"有黑色背景，文字也不对"。
+     颜色经 terminal-theme.ts 的 canvas 归一喂给 xterm（xterm 不认
+     var()/color-mix），样式规则里只许引用这里的令牌。
+     ZCode 的 `.dark` 段（neutral-950 底 / neutral-50 字 + 600 系 ANSI）
+     等宿主真需要深色主题时再按同法移植——宿主当前只有浅色主题。 */
   --term-font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas,
-    'Cascadia Mono', 'JetBrains Mono', monospace;
+    'Cascadia Mono', 'JetBrains Mono', 'MesloLGS NF', 'Hack Nerd Font', monospace;
   --term-font-size: 13px;
-  --term-bg: #171717;
-  --term-fg: #e5e5e5;
-  --term-cursor: #e5e5e5;
-  --term-cursor-accent: #171717;
-  --term-selection: rgba(125, 125, 125, 0.35);
-  --term-selection-inactive: rgba(125, 125, 125, 0.2);
-  --term-black: #1f2937;
-  --term-red: #ef4444;
-  --term-green: #22c55e;
-  --term-yellow: #eab308;
-  --term-blue: #3b82f6;
-  --term-magenta: #a855f7;
-  --term-cyan: #06b6d4;
-  --term-white: #e5e7eb;
-  --term-bright-black: #6b7280;
-  --term-bright-red: #f87171;
-  --term-bright-green: #4ade80;
-  --term-bright-yellow: #facc15;
-  --term-bright-blue: #60a5fa;
-  --term-bright-magenta: #c084fc;
-  --term-bright-cyan: #22d3ee;
-  --term-bright-white: #f9fafb;
+  /* 底色/光标反色取**面板表面色**：ZCode 的 @theme 是 neutral-50、其
+     `.theme-zai-*` 变体直接写 `var(--color-background)`——语义都是"终端
+     底色 = 应用背景"，读起来和面板一体。宿主面板表面 = --surface。 */
+  --term-bg: var(--surface);
+  --term-fg: #0a0a0a;                                            /* neutral-950 */
+  --term-cursor: #0a0a0a;                                        /* neutral-950 */
+  --term-cursor-accent: var(--surface);
+  --term-selection: color-mix(in oklab, #00a6f4 32%, transparent);           /* sky-500 32%（ZCode 同式） */
+  --term-selection-inactive: color-mix(in oklab, #00a6f4 22%, transparent);  /* sky-500 22% */
+  --term-black: #404040;                                         /* neutral-700 */
+  --term-red: #fb2c36;                                           /* red-500 */
+  --term-green: #00c950;                                         /* green-500 */
+  --term-yellow: #f0b100;                                        /* yellow-500 */
+  --term-blue: #00a6f4;                                          /* sky-500 */
+  --term-magenta: #e12afb;                                       /* fuchsia-500 */
+  --term-cyan: #00b8db;                                          /* cyan-500 */
+  --term-white: #737373;                                         /* neutral-500 */
+  --term-bright-black: #737373;                                  /* neutral-500 */
+  --term-bright-red: #fb2c36;                                    /* red-500 */
+  --term-bright-green: #00c950;                                  /* green-500 */
+  --term-bright-yellow: #f0b100;                                 /* yellow-500 */
+  --term-bright-blue: #00a6f4;                                   /* sky-500 */
+  --term-bright-magenta: #e12afb;                                /* fuchsia-500 */
+  --term-bright-cyan: #00b8db;                                   /* cyan-500 */
+  --term-bright-white: #0a0a0a;                                  /* neutral-950 */
+  /* 终端标签图标（面板栏标签上的 SquareTerminal，ZCode SidePaneTabTrigger
+     同款 lucide 图标；mask 上色 currentColor → 选中态自动跟随 --on-brand） */
+  --term-tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 11 2-2-2-2'/%3E%3Cpath d='M11 13h4'/%3E%3Crect width='18' height='18' x='3' y='3' rx='2'/%3E%3C/svg%3E");
 
   /* ── flexlayout 输入变量（light.css 的 --fl-* 从这里取值；
      必须用 --flexlayout-* 名——直接覆盖 --fl-* 会被

@@ -1,36 +1,36 @@
 //! 目标完成校验器 —— ZCode goal completion verifier 的宿主对偶
 //! （`apps/zcode-cli/packages/core/src/runtime/methods/target-completion-verification.ts`
-//! + `packages/contracts/src/tools/target.ts` 的逐条照抄，落点换成宿主 + rpi
-//! 原语）。
+//! + `packages/contracts/src/tools/target.ts` 逐条照抄；状态机住在 rpi-goal，
+//! 宿主只负责触发与模型裁判）。
 //!
-//! ZCode 语义（`runtime-active-target-loop-plan.md`）：每轮结束后、续跑目标
-//! 之前先跑校验（`verifyBeforeFirstContinue: true`）——
-//! - 校验通过 → 目标完成（ZCode 置 `complete`）；
-//! - 未通过 → 记录 `notSatisfied` + `nextAction`（成为下一轮迭代标题），
-//!   目标继续；
-//! - 有后台任务在跑 → **延后**（ZCode 同判，`deferred_background_running`）；
-//! - verifier 自身失败（请求失败/超时）→ `failed`，不是模型结论。
+//! **状态真源 = rpi-goal 插件**（vendored fork，`G:\mirach-plugins\rpi-goal`）：
+//! 它的 `goal-state` 条目现在自带 ZCode 形状的 `status`
+//! （active / paused / verifying / verified / notSatisfied→active + 结论 /
+//! failed）、`iterations[]`、`verifications[]`。宿主通过插件的内部命令面驱动
+//! 校验边界：
 //!
-//! 宿主实现（与上游的差异都有因）：
-//! - **模型调用走 rpi 的 side-question 原语**（`RuntimeActionHost::side_question`
-//!   → `AgentHarness::create_side_question`）：无工具、单轮、独立于主 run，
-//!   会话历史按 64KB 文本摘录喂入——与 ZCode "verifier = 无工具的独立模型
-//!   请求，消费现有历史" 同形。摘录**只含 user/assistant 文本**（工具的输入/
-//!   结果不进摘录），所以问句里补上当前迭代的 todo 快照（ZCode 让 verifier
-//!   从历史里的 TodoWrite 结果自查；宿主把等价事实直接给它）。
-//! - **结论落盘 = `goal-verification` 自定义条目**（宿主经
-//!   `RuntimeActionHost::append_entry`，与插件状态条目同一 AppendEntry 通道，
-//!   不写消息、不进模型上下文）；`pi_goal_state` 按 goalTitle+goalStartedAt
-//!   并入 `active.verifications`，面板迭代行据此渲染结论。
-//! - **在途态**（`verifying`）是宿主进程内事实：`pi_goal_state` 输出
-//!   `active.verifying = {iteration, startedAt}`，面板显示「目标校验中」。
-//! - **通过不自动收口目标**：rpi-goal 的 complete = 归档（目标从面板消失），
-//!   与上游"置 complete 仍在场"不同 → 结论如实记录，目标状态仍由用户/模型
-//!   决定（`/goal stop`）。上游的自动续跑（nextAction 开下一轮）同样不在
-//!   本轮范围。
-//! - **坏 JSON = fail-open 通过 + 保留 reason**（上游 `failOpen...` 原语义，
-//!   防止裁判链路故障把已交付目标卡在无限迭代）；请求失败/超时 = `failed`
-//!   结论（可见，不吞）。
+//! 1. 一次 run 收尾（`AgentEvent::AgentEnd`）→ 闸门（当前会话 / goal
+//!    `active` / 后台作业不在跑 / 单槽在途，照上游 `verifyBeforeFirstContinue`）；
+//! 2. `"/goal" "_verify-start {items:[…]}"` → 插件开新迭代行、status →
+//!    `verifying`（面板「目标校验中」）；
+//! 3. 宿主用 rpi 的 side-question 原语跑无工具单轮裁判
+//!    （`RuntimeActionHost::side_question` → `create_side_question`：独立会话、
+//!    64KB 文本摘录；摘录不含工具输入/结果，所以问句里带本轮 todo 快照）；
+//! 4. `"_verify-result {outcome, reason, nextAction}"` → 插件落结论并执行
+//!    ZCode 的后续语义：pass → `verified`（终态可见，不归档）；notSatisfied →
+//!    保持 `active` 并用 **model-only 自定义消息**自动续跑（nextAction）；
+//!    failed → `failed`；请求失败/超时 → 宿主发 `cancelled` → 插件置 `paused`
+//!    （上游 cancel 语义）。坏 JSON = fail-open `pass` + 保留 reason（上游
+//!    `failOpen…` 原语义，防止裁判链路故障把已交付目标卡死）。
+//!
+//! **孤儿校验修复**：会话在 `verifying` 期间被切走/应用退出，状态会留在会话
+//! 分支里。会话每次上台（`install_live`）跑一次修复：goal 仍是 `verifying`
+//! 且本进程没有对应在途校验 → 发 `cancelled`（回 `paused`）。
+//!
+//! **为什么模型调用在宿主**：rpi 的模型原语（runtime action 24/25
+//! ChildAgent / SideQuestion）只挂在工具/命令的 invocation bridge 上，
+//! 插件的 `on_turn_end` 事件处理器里拿不到——这是插件只能在收到宿主裁决后
+//! 更新状态的引擎事实。
 
 use std::sync::{Arc, Mutex};
 
@@ -39,10 +39,7 @@ use rpi_harness::agent_harness::AgentHarness;
 use rpi_harness::session::types::{BranchBounds, Entry, EntryQuery};
 use serde_json::{json, Value};
 
-/// 宿主校验结论的条目类型（与 goal-state / goal-iterations 并列的会话元数据）。
-pub(crate) const VERIFICATION_ENTRY: &str = "goal-verification";
 const GOAL_STATE_ENTRY: &str = "goal-state";
-const GOAL_ITERATIONS_ENTRY: &str = crate::pi_plugin_state::GOAL_ITERATIONS_ENTRY;
 const TODO_ENTRY: &str = crate::pi_plugin_state::TODO_ENTRY;
 const BACKGROUND_TASKS_ENTRY: &str = "background-tasks";
 
@@ -56,13 +53,16 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500)
 const FALLBACK_REASON: &str =
     "The completion verifier could not confirm that every goal requirement is complete.";
 
-// ── 在途态 ──────────────────────────────────────────────────────────────
+/// 宿主 → 插件 `/goal` 命令的调用面（`PiEngine::run_command` 的闭包形态；
+/// 校验线程不能借用 `&PiEngine`）。
+pub(crate) type GoalCommand = Arc<dyn Fn(&str, &str) -> Result<Value, String> + Send + Sync>;
+
+// ── 在途态（去重 + 面板展示；状态本体在插件的 goal-state 里）──────────────
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InFlightVerification {
     pub session_id: String,
-    pub goal_title: String,
-    pub goal_started_at: i64,
+    /// 展示用（= 插件即将开的迭代号估计；插件自己决定最终编号）。
     pub iteration: u32,
     pub started_at_ms: i64,
 }
@@ -100,32 +100,14 @@ impl GoalVerifier {
     }
 
     /// 当前在途校验（无 = None）。
-    fn current(&self) -> Option<InFlightVerification> {
+    pub fn current(&self) -> Option<InFlightVerification> {
         self.slot.lock().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-
-    /// 在途态 wire（`{iteration, startedAt}`）：只在该校验属于给定目标时返回，
-    /// 否则 None（切换目标后旧校验不得挂在目标上）。
-    pub fn verifying_wire_for(
-        &self,
-        goal_title: &str,
-        goal_started_at: Option<i64>,
-    ) -> Option<Value> {
-        let flight = self.current()?;
-        (flight.goal_title == goal_title && Some(flight.goal_started_at) == goal_started_at).then(
-            || {
-                json!({
-                    "iteration": flight.iteration,
-                    "startedAt": flight.started_at_ms,
-                })
-            },
-        )
     }
 }
 
 // ── 会话条目读取（与 pi_session::latest_plugin_entry 同口径）──────────────
 
-async fn list_custom(harness: &AgentHarness, custom_type: &str) -> Result<Vec<Value>, String> {
+async fn latest_custom(harness: &AgentHarness, custom_type: &str) -> Result<Option<Value>, String> {
     let entries = harness
         .session()
         .find_entries_on_branch(
@@ -138,14 +120,20 @@ async fn list_custom(harness: &AgentHarness, custom_type: &str) -> Result<Vec<Va
         )
         .await
         .map_err(|e| format!("会话条目读取失败（{custom_type}）: {e}"))?;
-    let mut rows: Vec<(u64, Value)> = Vec::new();
+    let mut latest: Option<(u64, Value)> = None;
     for entry in entries {
         match entry {
             Entry::Custom(entry) if entry.custom_type == custom_type => {
                 let data = entry.data.ok_or_else(|| {
                     format!("{custom_type} 条目缺少 data（条目损坏：{}）", entry.base.id)
                 })?;
-                rows.push((entry.base.seq, data));
+                if latest
+                    .as_ref()
+                    .map(|(seq, _)| entry.base.seq > *seq)
+                    .unwrap_or(true)
+                {
+                    latest = Some((entry.base.seq, data));
+                }
             }
             Entry::Custom(entry) => {
                 return Err(format!(
@@ -161,12 +149,7 @@ async fn list_custom(harness: &AgentHarness, custom_type: &str) -> Result<Vec<Va
             }
         }
     }
-    rows.sort_by_key(|(seq, _)| *seq);
-    Ok(rows.into_iter().map(|(_, data)| data).collect())
-}
-
-async fn latest_custom(harness: &AgentHarness, custom_type: &str) -> Result<Option<Value>, String> {
-    Ok(list_custom(harness, custom_type).await?.pop())
+    Ok(latest.map(|(_, data)| data))
 }
 
 // ── 目标事实 ────────────────────────────────────────────────────────────
@@ -181,14 +164,17 @@ pub(crate) struct ActiveGoal {
     pub max_turns: Option<u32>,
 }
 
-/// `goal-state` 条目里的 active 目标（status 非 active 也返回——调用方决定
-/// 是否只对 active 校验）。
+/// `goal-state` 条目里的 active 目标（任何状态都返回——调用方决定要不要校验）。
 pub(crate) fn active_goal(state: &Value) -> Option<ActiveGoal> {
     let active = state.get("active")?;
     if !active.is_object() {
         return None;
     }
-    let title = active.get("title").and_then(Value::as_str)?.trim().to_string();
+    let title = active
+        .get("title")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
     if title.is_empty() {
         return None;
     }
@@ -207,25 +193,25 @@ pub(crate) fn active_goal(state: &Value) -> Option<ActiveGoal> {
             .unwrap_or("")
             .to_string(),
         started_at,
-        turns_used: active.get("turnsUsed").and_then(Value::as_u64).unwrap_or(0) as u32,
-        max_turns: active
-            .get("maxTurns")
+        turns_used: active
+            .get("turnsUsed")
             .and_then(Value::as_u64)
-            .map(|v| v as u32),
+            .unwrap_or(0) as u32,
+        max_turns: active.get("maxTurns").and_then(Value::as_u64).map(|v| v as u32),
     })
 }
 
-/// 属于该目标的既有迭代行（按 at 升序；上一个目标的残留不参与计数）。
-pub(crate) fn matching_attempts<'a>(entries: &'a [Value], goal: &ActiveGoal) -> Vec<&'a Value> {
-    let mut rows: Vec<&Value> = entries
-        .iter()
-        .filter(|entry| {
-            entry.get("goalTitle").and_then(Value::as_str) == Some(goal.title.as_str())
-                && entry.get("goalStartedAt").and_then(Value::as_i64) == Some(goal.started_at)
-        })
-        .collect();
-    rows.sort_by_key(|entry| entry.get("updatedAt").and_then(Value::as_i64).unwrap_or(0));
-    rows
+/// 即将开始的迭代号估计（插件 `verify-start` 会开 `last+1`；问句展示同号）。
+pub(crate) fn next_iteration(state: &Value) -> u32 {
+    state
+        .get("active")
+        .and_then(|active| active.get("iterations"))
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.last())
+        .and_then(|row| row.get("iteration"))
+        .and_then(Value::as_u64)
+        .map(|last| (last as u32).saturating_add(1))
+        .unwrap_or(1)
 }
 
 /// rpi-todo 快照 → 迭代条目（`{content, status}` 词表 = pending/inProgress/completed）。
@@ -316,10 +302,9 @@ fn read_trimmed_string(value: Option<&Value>) -> Option<String> {
 /// `passed === true` 才通过（缺失/非布尔 = 未通过），reason 缺失用兜底文案，
 /// nextAction 只在非空时出现。
 pub(crate) fn parse_verification_text(text: &str) -> Verdict {
-    let parsed = json_object_candidates(text).into_iter().find_map(|candidate| {
-        let value = parse_json_object(&candidate)?;
-        Some(value)
-    });
+    let parsed = json_object_candidates(text)
+        .into_iter()
+        .find_map(|candidate| parse_json_object(&candidate));
     let Some(parsed) = parsed else {
         return Verdict {
             passed: true,
@@ -338,8 +323,7 @@ pub(crate) fn parse_verification_text(text: &str) -> Verdict {
 // ── 校验问句（ZCode `formatGoalCompletionVerificationPrompt` 的宿主对偶）──
 
 /// 上游问句全文 + 两处宿主替换：token 计数不存在 → 换成轮次预算；
-/// 追加当前迭代 todo 快照（上游摘录带工具结果，宿主的 side-question 摘录
-/// 只有文本，等价事实直接给）。
+/// 追加当前迭代 todo 快照（上游摘录带工具结果，side-question 摘录只有文本）。
 pub(crate) fn verification_prompt(
     goal: &ActiveGoal,
     iteration: u32,
@@ -380,7 +364,10 @@ pub(crate) fn verification_prompt(
         format!("- Turns used: {}", goal.turns_used),
         format!(
             "- Turn budget: {}",
-            goal.max_turns.map(|m| m.to_string()).unwrap_or_else(|| "none".into())
+            goal
+                .max_turns
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "none".into())
         ),
         format!("- Time used: {elapsed_seconds} seconds"),
     ];
@@ -437,22 +424,33 @@ pub(crate) fn background_running(entry: Option<&Value>) -> bool {
 fn noop_sink() -> SideQuestionSink {
     Arc::new(|args: Value| -> Result<Value, String> {
         Ok(match args.get("op").and_then(Value::as_str) {
-            Some("check") => json!({"protocolVersion": 2, "sideChat": true, "queuedFollowUps": true}),
+            Some("check") => {
+                json!({"protocolVersion": 2, "sideChat": true, "queuedFollowUps": true})
+            }
             _ => json!({}),
         })
     })
 }
 
-/// 每轮 run 正常结束后调用（非阻塞：由调用方 `rt.spawn`）。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 一次 run 收尾后的目标校验周期（非阻塞：由调用方 `rt.spawn`）。
 ///
-/// 触发闸门（照 ZCode）：goal 非 active / 有后台作业在跑 / 已有校验在途 /
-/// 会话已切换 → 跳过（都不是错误）。闸门通过后：先记一条本轮迭代行
-/// （todo 快照），再跑校验并把结论落盘。
+/// 闸门（照 ZCode）：会话不是当前会话 / goal 非 `active` / 有后台作业在跑 /
+/// 已有校验在途 → 跳过（都不是错误）。通过后：`_verify-start`（插件开迭代行
+/// + `verifying`）→ side-question 裁判 → `_verify-result`（插件落结论、可能
+/// 自动续跑）。
 pub(crate) async fn run_verification(
     harness: Arc<AgentHarness>,
     host: Arc<dyn RuntimeActionHost>,
     verifier: Arc<GoalVerifier>,
     is_current_session: Arc<dyn Fn() -> bool + Send + Sync>,
+    run_goal_command: GoalCommand,
 ) -> Result<(), String> {
     // 早退守卫：事件观察者按会话常驻，退到后台的旧会话仍可能收到自己 run 的
     // 事件——不是当前会话就不花模型调用。
@@ -467,15 +465,13 @@ pub(crate) async fn run_verification(
         return Ok(());
     };
     if goal.status != "active" {
+        // verifying（另一路在跑）/ verified / failed / paused 都不再校验。
         return Ok(());
     }
     if background_running(latest_custom(&harness, BACKGROUND_TASKS_ENTRY).await?.as_ref()) {
-        // 延后：本轮不校验（下一个 run 收尾再试）。
         return Ok(());
     }
-    let attempts = list_custom(&harness, GOAL_ITERATIONS_ENTRY).await?;
-    let previous_attempts = matching_attempts(&attempts, &goal);
-    let iteration = (previous_attempts.len() as u32).saturating_add(1).max(1);
+    let iteration = next_iteration(&goal_state);
     // 本轮 todo 快照（真实进度；goal 会话没列 todo = 空迭代行）。
     let items = latest_custom(&harness, TODO_ENTRY)
         .await?
@@ -485,69 +481,99 @@ pub(crate) async fn run_verification(
         .map(|todos| todo_items(todos))
         .unwrap_or_default();
     let started_at_ms = now_ms();
-
-    // 先记录本轮迭代（面板与校验问句共用这份快照），再校验。
-    host.append_entry(json!({
-        "customType": GOAL_ITERATIONS_ENTRY,
-        "data": {
-            "goalTitle": goal.title,
-            "goalStartedAt": goal.started_at,
-            "iteration": iteration,
-            "items": items,
-            "updatedAt": started_at_ms,
-        }
-    }))
-    .await
-    .map_err(|e| format!("迭代行落盘失败: {e}"))?;
-
     let flight = InFlightVerification {
         session_id: session_id.clone(),
-        goal_title: goal.title.clone(),
-        goal_started_at: goal.started_at,
         iteration,
         started_at_ms,
     };
-    if !verifier.begin(flight.clone()) {
+    if !verifier.begin(flight) {
         return Ok(());
     }
-    let elapsed_seconds = started_at_ms.saturating_sub(goal.started_at).max(0) / 1000;
-    let outcome = run_side_question(&host, &goal, iteration, &items, elapsed_seconds).await;
+
+    let outcome = verify_cycle(
+        &host,
+        &run_goal_command,
+        &goal,
+        iteration,
+        &items,
+        started_at_ms,
+    )
+    .await;
     verifier.finish(started_at_ms);
 
-    // 结论落盘前守卫：会话已切换 = 结论属于别的分支，不写。
+    // 会话已切换：把旧会话的 verifying 收口成 cancelled（插件把状态回 paused）。
+    // `run_goal_command` 打的是**当前**会话——切走时这里如实跳过，由下次会话
+    // 上台的孤儿修复收口（见 `repair_orphaned_verification`）。
     if !is_current_session() {
         return Ok(());
     }
-    let data = match outcome {
+    let payload = match outcome {
         Ok(verdict) => json!({
-            "goalTitle": goal.title,
-            "goalStartedAt": goal.started_at,
-            "iteration": iteration,
             "outcome": if verdict.passed { "pass" } else { "notSatisfied" },
             "reason": verdict.reason,
             "nextAction": verdict.next_action,
-            "at": now_ms(),
         }),
         Err(error) => json!({
-            "goalTitle": goal.title,
-            "goalStartedAt": goal.started_at,
-            "iteration": iteration,
-            "outcome": "failed",
+            "outcome": "cancelled",
             "reason": error,
-            "at": now_ms(),
         }),
     };
-    host.append_entry(json!({"customType": VERIFICATION_ENTRY, "data": data}))
-        .await
+    run_goal_command("/goal", &format!("_verify-result {payload}"))
         .map(|_| ())
-        .map_err(|e| format!("校验结论落盘失败: {e}"))
+        .map_err(|e| format!("校验结论回写失败: {e}"))
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// `_verify-start` → side-question → 解析结论。`Err` = 请求失败/超时
+/// （由调用方转成 `cancelled` 回写，插件回 `paused`——上游 cancel 语义）。
+async fn verify_cycle(
+    host: &Arc<dyn RuntimeActionHost>,
+    run_goal_command: &GoalCommand,
+    goal: &ActiveGoal,
+    iteration: u32,
+    items: &[Value],
+    started_at_ms: i64,
+) -> Result<Verdict, String> {
+    run_goal_command(
+        "/goal",
+        &format!(
+            "_verify-start {}",
+            json!({"items": items})
+        ),
+    )
+    .map_err(|e| format!("校验开始失败: {e}"))?;
+    let elapsed_seconds = started_at_ms.saturating_sub(goal.started_at).max(0) / 1000;
+    run_side_question(host, goal, iteration, items, elapsed_seconds).await
+}
+
+/// 会话上台时的孤儿校验修复：goal 卡在 `verifying` 且本进程没有在途校验
+/// （应用退出、会话切走后回来）→ 发 `cancelled` 收口回 `paused`。
+pub(crate) async fn repair_orphaned_verification(
+    harness: &AgentHarness,
+    verifier: &GoalVerifier,
+    run_goal_command: &GoalCommand,
+) -> Result<(), String> {
+    let session_id = harness.session().storage().metadata().id.clone();
+    let Some(goal_state) = latest_custom(harness, GOAL_STATE_ENTRY).await? else {
+        return Ok(());
+    };
+    let Some(goal) = active_goal(&goal_state) else {
+        return Ok(());
+    };
+    if goal.status != "verifying" {
+        return Ok(());
+    }
+    if verifier
+        .current()
+        .is_some_and(|flight| flight.session_id == session_id)
+    {
+        return Ok(());
+    }
+    run_goal_command(
+        "/goal",
+        r#"_verify-result {"outcome":"cancelled","reason":"verification interrupted (session reopened)"}"#,
+    )
+    .map(|_| ())
+    .map_err(|e| format!("孤儿校验收口失败: {e}"))
 }
 
 /// side-question 单轮问询 + 轮询结论。`Err` = 校验过程失败（不是模型结论）。
@@ -617,9 +643,8 @@ mod tests {
 
     #[test]
     fn parse_verdict_reads_strict_json_and_fenced_json() {
-        let plain = parse_verification_text(
-            r#"{"passed": true, "reason": "done", "nextAction": ""}"#,
-        );
+        let plain =
+            parse_verification_text(r#"{"passed": true, "reason": "done", "nextAction": ""}"#);
         assert!(plain.passed);
         assert_eq!(plain.reason, "done");
         assert_eq!(plain.next_action, None);
@@ -630,14 +655,11 @@ mod tests {
         assert!(!fenced.passed);
         assert_eq!(fenced.next_action.as_deref(), Some("补测试"));
 
-        // 前后有噪声 + 非字符串 reason 之类都按上游语义处理
-        let noisy = parse_verification_text(
-            "Verification:\n{\"passed\": false, \"reason\": 42}\nDone.",
-        );
+        let noisy =
+            parse_verification_text("Verification:\n{\"passed\": false, \"reason\": 42}\nDone.");
         assert!(!noisy.passed);
         assert_eq!(noisy.reason, FALLBACK_REASON);
 
-        // passed 不是布尔 true → 未通过（上游 `parsed.passed === true`）
         let loose = parse_verification_text(r#"{"passed": "true", "reason": "x"}"#);
         assert!(!loose.passed);
     }
@@ -661,7 +683,8 @@ mod tests {
             json!({"content": "写正文", "status": "inProgress"}),
         ];
         let prompt = verification_prompt(&target, 2, &items, 65);
-        assert!(prompt.contains("<untrusted_objective>\n写 &lt;报告&gt; &amp; 提交\n</untrusted_objective>"));
+        assert!(prompt
+            .contains("<untrusted_objective>\n写 &lt;报告&gt; &amp; 提交\n</untrusted_objective>"));
         assert!(prompt.contains("- [x] 收集数据"));
         assert!(prompt.contains("- [ ] 写正文"));
         assert!(prompt.contains("- Iteration: 2"));
@@ -678,18 +701,17 @@ mod tests {
     }
 
     #[test]
-    fn attempts_count_only_this_goal_and_sort_by_stamp() {
-        let rows = vec![
-            json!({"goalTitle": "发布 v1", "goalStartedAt": 1_000, "iteration": 2, "updatedAt": 20}),
-            json!({"goalTitle": "别的目标", "goalStartedAt": 1_000, "iteration": 1, "updatedAt": 10}),
-            json!({"goalTitle": "发布 v1", "goalStartedAt": 1_000, "iteration": 1, "updatedAt": 10}),
-            json!({"goalTitle": "发布 v1", "goalStartedAt": 7, "iteration": 9, "updatedAt": 99}),
-        ];
-        let goal = goal();
-        let matching = matching_attempts(&rows, &goal);
-        assert_eq!(matching.len(), 2, "只数本目标（同名不同 startedAt 也不算）");
-        assert_eq!(matching[0]["iteration"], 1);
-        assert_eq!(matching[1]["iteration"], 2);
+    fn next_iteration_counts_the_plugin_rows() {
+        let state = json!({
+            "active": {
+                "title": "t",
+                "status": "active",
+                "startedAt": 1,
+                "iterations": [{"iteration": 1}, {"iteration": 2}],
+            }
+        });
+        assert_eq!(next_iteration(&state), 3);
+        assert_eq!(next_iteration(&json!({})), 1);
     }
 
     #[test]
@@ -708,36 +730,44 @@ mod tests {
     fn background_running_detects_live_jobs() {
         assert!(!background_running(None));
         assert!(!background_running(Some(&json!({"jobs": []}))));
-        assert!(background_running(Some(&json!({"jobs": [{"status": "running"}]}))));
+        assert!(background_running(Some(
+            &json!({"jobs": [{"status": "running"}]})
+        )));
         assert!(!background_running(Some(
             &json!({"jobs": [{"status": "completed"}]})
         )));
     }
 
     #[test]
-    fn verifier_slot_is_single_and_scoped() {
+    fn verifier_slot_is_single_and_matched_on_finish() {
         let verifier = GoalVerifier::new();
         let flight = InFlightVerification {
             session_id: "s1".into(),
-            goal_title: "g".into(),
-            goal_started_at: 1,
             iteration: 1,
             started_at_ms: 5,
         };
         assert!(verifier.begin(flight.clone()));
         assert!(!verifier.begin(flight.clone()), "同一时刻只允许一个校验");
-        assert_eq!(
-            verifier.verifying_wire_for("g", Some(1)),
-            Some(json!({"iteration": 1, "startedAt": 5}))
-        );
-        // 别的目标（同名不同 startedAt）不得挂上在途态。
-        assert!(verifier.verifying_wire_for("g", Some(2)).is_none());
+        assert_eq!(verifier.current().map(|f| f.session_id), Some("s1".into()));
         verifier.finish(6);
-        assert!(
-            verifier.verifying_wire_for("g", Some(1)).is_some(),
-            "不匹配的 finish 不清槽"
-        );
+        assert!(verifier.current().is_some(), "不匹配的 finish 不清槽");
         verifier.finish(5);
-        assert!(verifier.verifying_wire_for("g", Some(1)).is_none());
+        assert!(verifier.current().is_none());
+    }
+
+    #[test]
+    fn active_goal_reads_statuses_and_turns() {
+        let state = json!({
+            "active": {"title": " g ", "status": "verifying", "startedAt": 7, "turnsUsed": 4,
+                        "maxTurns": 12, "notes": "n"}
+        });
+        let goal = active_goal(&state).expect("goal");
+        assert_eq!(goal.title, "g");
+        assert_eq!(goal.status, "verifying");
+        assert_eq!(goal.turns_used, 4);
+        assert_eq!(goal.max_turns, Some(12));
+        assert!(active_goal(&json!({"active": null})).is_none());
+        assert!(active_goal(&json!({"active": {"title": " ", "status": "active", "startedAt": 1}}))
+            .is_none());
     }
 }

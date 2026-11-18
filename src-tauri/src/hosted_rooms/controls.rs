@@ -70,6 +70,11 @@ pub const GROUP_METHODS: &[(&str, &str)] = &[
     ("groups.peer.register", "session:control"),
     ("groups.peer.invite", "session:operator"),
     ("groups.peer.revoke", "session:operator"),
+    // HA replica（宿主扩展：`groups.replicate/replica_state/demote/promote`）
+    ("groups.replicate", "session:control"),
+    ("groups.replica_state", "session:read"),
+    ("groups.demote", "session:control"),
+    ("groups.promote", "session:control"),
     // profiles.list 不在 GROUP_METHODS 里走默认 session:read（上游 `get(method, 'session:read')`）
 ];
 
@@ -119,6 +124,10 @@ pub const METHOD_FIELDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("groups.peer.revoke", &["grant"]),
+    ("groups.replicate", &["room_id", "target_connection_id"]),
+    ("groups.replica_state", &["room_id"]),
+    ("groups.demote", &["room_id", "observed_gateway_id", "observed_epoch"]),
+    ("groups.promote", &["room_id", "reason"]),
     ("profiles.list", &["include_sessions"]),
 ];
 
@@ -317,14 +326,16 @@ mod tests {
     #[test]
     fn method_count_matches_upstream() {
         // 上游 GROUP_METHODS 19 项 + profiles.list = 20；宿主扩展
-        // （groups.driver_append，非上游协议）额外 +1。
+        // （groups.driver_append + HA replica 四项）额外 +5。
+        let host_exts = ["groups.driver_append", "groups.replicate", "groups.replica_state",
+                         "groups.demote", "groups.promote"];
         let upstream = GROUP_METHODS
             .iter()
-            .filter(|(m, _)| *m != "groups.driver_append")
+            .filter(|(m, _)| !host_exts.contains(m))
             .count();
         assert_eq!(upstream, 19);
-        assert_eq!(GROUP_METHODS.len(), 20);
-        assert_eq!(METHOD_FIELDS.len(), 21);
+        assert_eq!(GROUP_METHODS.len(), 24);
+        assert_eq!(METHOD_FIELDS.len(), 25);
     }
 
     #[test]

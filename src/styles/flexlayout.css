@@ -316,6 +316,21 @@
   height: var(--tab-close-size);
   width: var(--tab-close-size);
 }
+/* 终端标签的图标（2026-11-18：ZCode 侧栏终端签 = SquareTerminal + 标题；
+   宿主用 mask 把 --term-tab-icon 上成 currentColor——选中态自动跟随
+   --on-brand，未选中跟随 --tab-text）。判据 = id 精确 `terminal` 或
+   `terminal-N`（与 isTerminalPanelId 同语义，不用 `^=` 免误伤）。 */
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab[data-tab-panel-id='terminal'] .dv-default-tab::before,
+.dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab[data-tab-panel-id^='terminal-'] .dv-default-tab::before {
+  background: currentColor;
+  content: '';
+  flex: none;
+  height: var(--size-icon-md);
+  margin-right: var(--space-inline-xs);
+  -webkit-mask: var(--term-tab-icon) center / contain no-repeat;
+  mask: var(--term-tab-icon) center / contain no-repeat;
+  width: var(--size-icon-md);
+}
 /* 自定义「打开」签的标题同款截断（该签无 ✕——根面板不可关） */
 .dv-groupview > .dv-tabs-and-actions-container:not([style*='display: none']) .dv-tab .dv-open-tab-title {
   min-width: 0;

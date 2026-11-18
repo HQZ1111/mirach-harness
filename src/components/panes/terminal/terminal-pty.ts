@@ -1,5 +1,5 @@
 /**
- * 终端 PTY 的 IPC 面——src-tauri/src/terminal.rs 六命令 + 两条 Tauri Event
+ * 终端 PTY 的 IPC 面——src-tauri/src/terminal.rs 七命令 + 两条 Tauri Event
  * 的前端侧封装。
  *
  * 事件通道裁定（terminal.rs 模块头）：终端是系统设施不是 Agent 数据，
@@ -11,12 +11,37 @@
  * 提示符已经可能写出，所以宿主把它们存进 backlog，由 `attachTerminal`
  * 一次性回放；未订阅到就退出的会话也靠它补发退出态。订阅顺序必须是
  * 先 listen、后 attach（见 terminal-pane.tsx）。
+ *
+ * 【页面归属 / 孤儿回收（2026-11-18）】spawn 带上（webview label + 页面
+ * token）：页面 reload（dev HMR / webview 重启）后旧页面的 kill 钩子随
+ * 页面消失，Rust 侧靠 token 识别并回收遗留 PTY——`reapStaleTerminals()`
+ * 在页面加载时调用一次（见 app/index.tsx）。
  */
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 export type { UnlistenFn }
+
+/**
+ * 页面 token：**每次页面加载**一个新 uuid。挂在 globalThis 上——
+ * HMR 重挂模块不换 token（同一个页面），页面 reload 才换新（新 globalThis）。
+ */
+const PAGE_TOKEN: string = (() => {
+  const key = '__mirachTerminalPageToken'
+  const holder = globalThis as unknown as Record<string, unknown>
+  const existing = holder[key]
+  if (typeof existing === 'string' && existing.length > 0) return existing
+  const token = crypto.randomUUID()
+  holder[key] = token
+  return token
+})()
+
+/** 本页面的归属描述（spawn / reap 共用同一份，永远同源） */
+function pageOwner(): { ownerLabel: string; ownerToken: string } {
+  return { ownerLabel: getCurrentWindow().label, ownerToken: PAGE_TOKEN }
+}
 
 export interface TerminalSpawned {
   id: number
@@ -51,6 +76,7 @@ export interface TerminalAttached {
 /**
  * 开新 PTY。cwd = 当前会话工作区（缺省 = 系统 home，裁定见 terminal.rs
  * 模块头【cwd 裁定】）；cols/rows = 前端先 fit 出来的真实尺寸。
+ * 归属（label + token）由本模块注入，调用方不用关心。
  */
 export function spawnTerminal(params: {
   cols?: number
@@ -61,7 +87,16 @@ export function spawnTerminal(params: {
     cols: params.cols,
     rows: params.rows,
     cwd: params.cwd,
+    ...pageOwner(),
   })
+}
+
+/**
+ * 回收本窗口上一代页面遗留的终端会话（页面 reload 后旧页面的 kill 钩子
+ * 已不存在）。页面加载时调用一次；返回被回收的会话数。
+ */
+export function reapStaleTerminals(): Promise<number> {
+  return invoke<number>('terminal_reap', pageOwner())
 }
 
 /** 取走 attach 前的 backlog + 退出补发；此后输出走 terminal-output 事件 */

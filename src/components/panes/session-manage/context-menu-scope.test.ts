@@ -52,6 +52,15 @@ describe('resolveContextMenuScope', () => {
     ).toBe('owned')
   })
 
+  it('终端窗格根（data-slot="terminal-pane"，2026-11-18）→ owned', () => {
+    // 右键 = ZCode TerminalSession 的复制/粘贴菜单（terminal-pane.tsx 自管）
+    expect(
+      resolveContextMenuScope(
+        stubElMatching(['[data-slot="terminal-pane"]', CONTEXT_MENU_OWNER_SELECTOR]),
+      ),
+    ).toBe('owned')
+  })
+
   it('editable wins over owned (a field inside an owned surface stays native)', () => {
     expect(resolveContextMenuScope(stubEl(CONTEXT_MENU_EDITABLE_SELECTOR, false))).toBe('editable')
   })

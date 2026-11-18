@@ -821,6 +821,12 @@ function GoalStatusSection({
     () => buildConversationGoalIterationSummaries(goal),
     [goal],
   )
+  // 在途校验的迭代行（插件 `verifying` 状态下最后开的那一行——spinner 挂它；
+  // rows 会被「完成优先」重排，所以按 iteration 最大值判定，不用数组末位）。
+  const verifyingIteration =
+    goal.status === 'verifying'
+      ? goal.iterations.reduce((max, row) => Math.max(max, row.iteration), 0)
+      : null
   // 控制：上游同判——active/verifying/notSatisfied → 暂停；paused → 恢复；
   // verified → 完成图标；failed → 无控件。
   const isPausable =
@@ -892,7 +898,11 @@ function GoalStatusSection({
           <GoalIterationRow
             key={row.iteration}
             row={row}
-            verifying={goal.verifying?.iteration === row.iteration}
+            verifying={
+              verifyingIteration !== null
+                ? row.iteration === verifyingIteration
+                : goal.verifying?.iteration === row.iteration
+            }
           />
         ))}
         {actionError !== null ? (

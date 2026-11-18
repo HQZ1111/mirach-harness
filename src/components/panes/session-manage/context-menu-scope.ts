@@ -45,12 +45,14 @@ export const CONTEXT_MENU_EDITABLE_SELECTOR = 'input, textarea'
  *  assistant-ui 的 Trigger 仍带这个 slot）；文件树行 =
  *  WorkspaceFileTreeRowView 的 role="treeitem"；机器人行 =
  *  bots-pane.tsx 的行根（`data-roster-key`，2026-11-07 机器人页移植——
- *  行与分区头都自管右键）。
+ *  行与分区头都自管右键）；终端窗格 = terminal-pane.tsx 的窗格根
+ *  （`data-slot="terminal-pane"`，2026-11-18 对齐 ZCode TerminalSession
+ *  的右键复制/粘贴菜单）。
  *
  *  **行根必须登记**：右键落在行内边距/行尾标注上时，`closest()` 不会命中
  *  触发器槽，只命中行根——漏登记会让全局菜单抢走这一次右键。 */
 export const CONTEXT_MENU_OWNER_SELECTOR =
-  '[data-slot="aui_thread-list-item"], [data-slot="aui_thread-list-item-trigger"], [role="treeitem"], [data-roster-key], [data-slot="bots-pane"] [data-slot="bots-roster"] > div > div'
+  '[data-slot="aui_thread-list-item"], [data-slot="aui_thread-list-item-trigger"], [role="treeitem"], [data-roster-key], [data-slot="bots-pane"] [data-slot="bots-roster"] > div > div, [data-slot="terminal-pane"]'
 
 export type ContextMenuScope = 'editable' | 'owned' | 'app'
 

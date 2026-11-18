@@ -96,6 +96,62 @@ pub(crate) fn on_big_stack<T: Send + 'static>(
         })
 }
 
+/// `/goal` 命令调用面（`PiEngine::run_command` 的自由函数形态）——校验任务在
+/// 引擎运行时上跑，借不到 `&PiEngine`，只能拿 `Arc<EngineShared>` + 这个入口。
+pub(crate) fn run_goal_command(
+    shared: &EngineShared,
+    command: &str,
+    args: &str,
+) -> Result<serde_json::Value, String> {
+    let live = shared
+        .live
+        .lock()
+        .map_err(|_| "锁中毒".to_string())?
+        .clone()
+        .ok_or_else(|| NO_ACTIVE_SESSION.to_string())?;
+    let snapshot = {
+        let session = live
+            .reload
+            .extension_session
+            .lock()
+            .map_err(|_| "扩展会话锁中毒".to_string())?;
+        session.snapshot_arc()
+    }
+    .ok_or_else(|| format!("扩展命令不可用：当前会话没有加载扩展（{command}）"))?;
+    let cmd = snapshot
+        .commands()
+        .iter()
+        .find(|c| c.name.trim_start_matches('/') == command.trim_start_matches('/'))
+        .ok_or_else(|| format!("未知扩展命令：{command}"))?;
+    let input = serde_json::json!({ "command": command, "args": args }).to_string();
+    let handler = cmd.handler;
+    let user_data = cmd.user_data;
+    let name = cmd.name.clone();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut out = rpi_plugin_sdk::StbString::empty();
+        let rc = handler(
+            rpi_plugin_sdk::StbStringRef::from_str(&input),
+            &mut out,
+            user_data,
+        );
+        // SAFETY: the callback transfers its output using the host allocator —
+        // same contract as rpi-cli's rpc_execute_command and the TUI command
+        // invocation.
+        let out = unsafe {
+            rpi_plugin_sdk::callbacks::OwnedString::from_raw(
+                out,
+                Some(rpi_extensions::host_free_string),
+            )
+        };
+        if rc != 0 {
+            return Err(format!("扩展命令失败：{name}（code {rc}）"));
+        }
+        serde_json::from_str(&out.to_string_lossy())
+            .map_err(|_| format!("扩展命令返回非 JSON：{name}"))
+    }))
+    .unwrap_or_else(|_| Err(format!("扩展命令 panic：{name}")))
+}
+
 /// 「本轮结束后校验目标」的宿主入口（ZCode `verifyBeforeFirstContinue` 对偶）。
 ///
 /// 非阻塞：把校验任务 spawn 到引擎运行时；真正的闸门（无目标 / 非 active /
@@ -137,12 +193,55 @@ fn spawn_goal_verification(
                 .unwrap_or(false)
         })
     };
+    let command: crate::pi_goal_verify::GoalCommand = {
+        let shared = Arc::clone(&shared);
+        Arc::new(move |command, args| run_goal_command(&shared, command, args))
+    };
     shared.rt.spawn(async move {
         if let Err(error) =
-            crate::pi_goal_verify::run_verification(harness, host, verifier, is_current).await
+            crate::pi_goal_verify::run_verification(harness, host, verifier, is_current, command)
+                .await
         {
-            // 基础设施失败可见（校验结论里的失败另有 `failed` 条目路径）。
             eprintln!("[goal-verify] {error}");
+        }
+    });
+}
+
+/// 会话上台时的孤儿校验修复（应用退出/会话切走留下的 `verifying` 状态）。
+fn repair_orphaned_goal_verification(
+    shared: Arc<EngineShared>,
+    live: Arc<HarnessLive>,
+    verifier: Arc<crate::pi_goal_verify::GoalVerifier>,
+) {
+    let is_current: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let shared = Arc::clone(&shared);
+        let live = Arc::clone(&live);
+        Arc::new(move || {
+            shared
+                .live
+                .lock()
+                .ok()
+                .and_then(|guard| {
+                    guard
+                        .as_ref()
+                        .map(|current| Arc::ptr_eq(current, &live))
+                })
+                .unwrap_or(false)
+        })
+    };
+    let command: crate::pi_goal_verify::GoalCommand = {
+        let shared = Arc::clone(&shared);
+        Arc::new(move |command, args| run_goal_command(&shared, command, args))
+    };
+    let harness = Arc::clone(&live.harness);
+    shared.rt.spawn(async move {
+        if !is_current() {
+            return;
+        }
+        if let Err(error) =
+            crate::pi_goal_verify::repair_orphaned_verification(&harness, &verifier, &command).await
+        {
+            eprintln!("[goal-verify] 孤儿修复失败：{error}");
         }
     });
 }
@@ -589,8 +688,14 @@ impl PiEngine {
     }
 
     /// 常驻 run 事件观察者：收到 `AgentEnd`（一次 run 收尾）就触发目标校验
-    /// （闸门/去重都在 `pi_goal_verify::run_verification` 里）。
+    /// （闸门/去重都在 `pi_goal_verify::run_verification` 里）。上台时先跑一次
+    /// 孤儿校验修复（应用退出/切走留下的 `verifying`）。
     fn watch_runs(&self, live: Arc<HarnessLive>) {
+        repair_orphaned_goal_verification(
+            Arc::clone(&self.shared),
+            Arc::clone(&live),
+            Arc::clone(&self.verifier),
+        );
         let mut rx = live.events.resubscribe();
         let shared = Arc::clone(&self.shared);
         let verifier = Arc::clone(&self.verifier);
@@ -1720,55 +1825,21 @@ impl PiEngine {
     }
 
     /// 目标态（活动面板「目标」分区）：rpi-goal 把状态存成当前分支的
-    /// `goal-state` custom 条目（data = `{active, archived}`，见
-    /// rpi-package/rpi-goal/src/lib.rs）。无条目 = Null（诚实空态）。
+    /// `goal-state` custom 条目（data = `{active, archived}`）。无条目 =
+    /// Null（诚实空态）。
     ///
-    /// `active` 上再并入**宿主在 rpi-goal 之上记录的两份真值**
-    /// （`pi_goal_verify.rs` 每次 run 收尾写一条）：
-    /// - `goal-attempts` 迭代行（`iterations[]`：本轮 todo 快照）；
-    /// - `goal-verification` 校验结论（`verifications[]`）与在途态
-    ///   `verifying`（宿主进程内事实）。
-    /// 两者都按 goalTitle+goalStartedAt 匹配当前目标——上一个目标的残留不并。
+    /// **状态真源就是插件**（vendored fork）：`active` 里带 ZCode 形状的
+    /// `status`（active / paused / verifying / verified / failed）、
+    /// `iterations[]`、`verifications[]`，由宿主校验流程经 `/goal _verify-*`
+    /// 驱动（见 `pi_goal_verify.rs`）。宿主不再另写条目、也不再合成
+    /// `verifying`——面板拿到的每个字段都是插件持久化的真值。
     pub fn goal_state(&self) -> Result<serde_json::Value, String> {
         let Some(live) = self.live_opt()? else {
             return Ok(serde_json::Value::Null);
         };
-        let mut wire = self
+        Ok(self
             .latest_plugin_entry(&live, "goal-state")?
-            .unwrap_or(serde_json::Value::Null);
-        if wire.is_null() {
-            return Ok(wire);
-        }
-        let attempts = self.plugin_entries(
-            &live,
-            crate::pi_plugin_state::GOAL_ITERATIONS_ENTRY,
-        )?;
-        let verifications =
-            self.plugin_entries(&live, crate::pi_goal_verify::VERIFICATION_ENTRY)?;
-        crate::pi_plugin_state::merge_goal_timeline(&mut wire, &attempts, &verifications)?;
-        if let Some(object) = wire
-            .get_mut("active")
-            .and_then(serde_json::Value::as_object_mut)
-        {
-            let title = object
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let started_at = object
-                .get("startedAt")
-                .and_then(serde_json::Value::as_i64);
-            let verifying = self.verifier.verifying_wire_for(&title, started_at);
-            match verifying {
-                Some(flight) => {
-                    object.insert("verifying".to_string(), flight);
-                }
-                None => {
-                    object.remove("verifying");
-                }
-            }
-        }
-        Ok(wire)
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// 会话计划目录（活动面板「会话计划」分区）：rpi-plan-mode 每次
@@ -1857,48 +1928,7 @@ impl PiEngine {
     ///
     /// 没有加载扩展 / 命令未知 / handler 返回非 JSON = Err（不静默）。
     pub fn run_command(&self, command: &str, args: &str) -> Result<serde_json::Value, String> {
-        let live = self.live()?;
-        let snapshot = {
-            let session = live
-                .reload
-                .extension_session
-                .lock()
-                .map_err(|_| "扩展会话锁中毒".to_string())?;
-            session.snapshot_arc()
-        }
-        .ok_or_else(|| format!("扩展命令不可用：当前会话没有加载扩展（{command}）"))?;
-        let cmd = snapshot
-            .commands()
-            .iter()
-            .find(|c| c.name.trim_start_matches('/') == command.trim_start_matches('/'))
-            .ok_or_else(|| format!("未知扩展命令：{command}"))?;
-        let input = serde_json::json!({ "command": command, "args": args }).to_string();
-        let handler = cmd.handler;
-        let user_data = cmd.user_data;
-        let name = cmd.name.clone();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut out = rpi_plugin_sdk::StbString::empty();
-            let rc = handler(
-                rpi_plugin_sdk::StbStringRef::from_str(&input),
-                &mut out,
-                user_data,
-            );
-            // SAFETY: the callback transfers its output using the host
-            // allocator — same contract as rpi-cli's rpc_execute_command and
-            // the TUI command invocation.
-            let out = unsafe {
-                rpi_plugin_sdk::callbacks::OwnedString::from_raw(
-                    out,
-                    Some(rpi_extensions::host_free_string),
-                )
-            };
-            if rc != 0 {
-                return Err(format!("扩展命令失败：{name}（code {rc}）"));
-            }
-            serde_json::from_str(&out.to_string_lossy())
-                .map_err(|_| format!("扩展命令返回非 JSON：{name}"))
-        }))
-        .unwrap_or_else(|_| Err(format!("扩展命令 panic：{name}")))
+        run_goal_command(&self.shared, command, args)
     }
 
     pub fn set_plan_mode(&self, enabled: bool) -> Result<(), String> {

@@ -42,9 +42,16 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import type { ILink } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import type { DockviewPanelApi } from 'dockview-react'
+import { ClipboardPaste, Copy } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+} from '@/components/motion/context-menu'
 import { inTauri } from '@/lib/tauri-window'
 import { PlaceholderPane } from './placeholder-pane'
 import {
@@ -211,11 +218,18 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
       // 关闭 = kill（退出码事件随后到达，会话已不在，事件被丢弃）
       killTerminal(rt.ptyId).catch((err) => console.error('[terminal] kill on close failed:', err))
     }
-    try {
-      rt.term.dispose()
-    } catch (err) {
-      console.error('[terminal] term dispose failed:', err)
-    }
+    // xterm 5.5 的 Viewport 构造函数里有一个未被追踪的
+    // setTimeout(syncScrollArea)，同步 dispose 会让它命中已释放的 render
+    // service（"Cannot read properties of undefined (reading 'dimensions')"）。
+    // 延后一个宏任务 dispose：让该定时器先跑完，再释放。
+    const term = rt.term
+    setTimeout(() => {
+      try {
+        term.dispose()
+      } catch (err) {
+        console.error('[terminal] term dispose failed:', err)
+      }
+    }, 0)
     rt.hostEl.remove()
     sessionRef.current = null
   }, [])
@@ -625,6 +639,38 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
     }
   }, [api, fitAndQueueResize])
 
+  // ── 右键菜单（ZCode TerminalSession 的复制/粘贴菜单） ─────────────────────
+  // 窗格根带 data-slot="terminal-pane"，已在全局右键范围登记为 owned
+  // （context-menu-scope.ts）——全局监听早退，这里自己开菜单。
+
+  const [menuPoint, setMenuPoint] = useState<{ x: number; y: number } | null>(null)
+
+  /** 复制选区（无选区不动作——ZCode 同款：复制是"有则复制"的动作） */
+  const copySelection = useCallback(() => {
+    const term = sessionRef.current?.term
+    if (!term) return
+    if (term.hasSelection()) {
+      void navigator.clipboard
+        .writeText(term.getSelection())
+        .catch((err) => console.error('[terminal] copy failed:', err))
+    }
+    // 菜单关闭后键盘焦点还给终端（否则原地打字进不了 PTY）
+    term.focus()
+  }, [])
+
+  /** 粘贴剪贴板（xterm paste 走 bracketed-paste 语义，与 Ctrl+V 同路径） */
+  const pasteClipboard = useCallback(() => {
+    const term = sessionRef.current?.term
+    if (!term) return
+    term.focus()
+    void navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) term.paste(text)
+      })
+      .catch((err) => console.error('[terminal] paste failed:', err))
+  }, [])
+
   // ── 渲染 ─────────────────────────────────────────────────────────────────
 
   if (!inTauri) {
@@ -641,7 +687,14 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
   const showExitBar = status === 'exited' || status === 'error'
 
   return (
-    <div className="term-pane">
+    <div
+      className="term-pane"
+      data-slot="terminal-pane"
+      onContextMenu={(e) => {
+        e.preventDefault()
+        setMenuPoint({ x: e.clientX, y: e.clientY })
+      }}
+    >
       <div className="term-body">
         <div ref={containerRef} className="term-host-container" />
         {showExitBar && (
@@ -657,6 +710,32 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
           </div>
         )}
       </div>
+      {/* 右键菜单（受控 point——bots-pane 同款形态）。
+          **必须 portal 到 body**：终端面板走 renderer:'always'，内容在
+          .dv-render-overlay 里（它带 transform/contain，会给 position:fixed
+          建包含块）——直接内联渲染时菜单的 fixed 坐标会被叠加 overlay 偏移
+          （实测 x=1619 被画到 3030）。portal 到 body 后恢复视口坐标。 */}
+      {createPortal(
+        <ContextMenu
+          onOpenChange={(open) => {
+            if (!open) setMenuPoint(null)
+          }}
+          open={menuPoint !== null}
+          point={menuPoint ?? { x: 0, y: 0 }}
+        >
+          <ContextMenuContent>
+            <ContextMenuItem onSelect={copySelection}>
+              <Copy className="mr-1.5 size-[var(--size-icon-sm)]" />
+              复制
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={pasteClipboard}>
+              <ClipboardPaste className="mr-1.5 size-[var(--size-icon-sm)]" />
+              粘贴
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>,
+        document.body,
+      )}
     </div>
   )
 }

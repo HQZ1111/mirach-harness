@@ -43,30 +43,31 @@ function normalizeCssColor(raw: string, fallback: string): string {
   }
 }
 
-/** 令牌名 → xterm 主题键（fallback 与 tokens.css 的 --term-* 同值） */
+/** 令牌名 → xterm 主题键（fallback 与 tokens.css 的 --term-* 同值；
+ *  2026-11-18 起 = ZCode 默认浅色主题配色，bg 用宿主面板色 #ffffff） */
 const TERMINAL_THEME_TOKENS = {
-  background: ['--term-bg', '#171717'],
-  foreground: ['--term-fg', '#e5e5e5'],
-  cursor: ['--term-cursor', '#e5e5e5'],
-  cursorAccent: ['--term-cursor-accent', '#171717'],
-  selectionBackground: ['--term-selection', 'rgba(125, 125, 125, 0.35)'],
-  selectionInactiveBackground: ['--term-selection-inactive', 'rgba(125, 125, 125, 0.2)'],
-  black: ['--term-black', '#1f2937'],
-  red: ['--term-red', '#ef4444'],
-  green: ['--term-green', '#22c55e'],
-  yellow: ['--term-yellow', '#eab308'],
-  blue: ['--term-blue', '#3b82f6'],
-  magenta: ['--term-magenta', '#a855f7'],
-  cyan: ['--term-cyan', '#06b6d4'],
-  white: ['--term-white', '#e5e7eb'],
-  brightBlack: ['--term-bright-black', '#6b7280'],
-  brightRed: ['--term-bright-red', '#f87171'],
-  brightGreen: ['--term-bright-green', '#4ade80'],
-  brightYellow: ['--term-bright-yellow', '#facc15'],
-  brightBlue: ['--term-bright-blue', '#60a5fa'],
-  brightMagenta: ['--term-bright-magenta', '#c084fc'],
-  brightCyan: ['--term-bright-cyan', '#22d3ee'],
-  brightWhite: ['--term-bright-white', '#f9fafb'],
+  background: ['--term-bg', '#ffffff'],
+  foreground: ['--term-fg', '#0a0a0a'],
+  cursor: ['--term-cursor', '#0a0a0a'],
+  cursorAccent: ['--term-cursor-accent', '#ffffff'],
+  selectionBackground: ['--term-selection', 'rgba(0, 166, 244, 0.32)'],
+  selectionInactiveBackground: ['--term-selection-inactive', 'rgba(0, 166, 244, 0.22)'],
+  black: ['--term-black', '#404040'],
+  red: ['--term-red', '#fb2c36'],
+  green: ['--term-green', '#00c950'],
+  yellow: ['--term-yellow', '#f0b100'],
+  blue: ['--term-blue', '#00a6f4'],
+  magenta: ['--term-magenta', '#e12afb'],
+  cyan: ['--term-cyan', '#00b8db'],
+  white: ['--term-white', '#737373'],
+  brightBlack: ['--term-bright-black', '#737373'],
+  brightRed: ['--term-bright-red', '#fb2c36'],
+  brightGreen: ['--term-bright-green', '#00c950'],
+  brightYellow: ['--term-bright-yellow', '#f0b100'],
+  brightBlue: ['--term-bright-blue', '#00a6f4'],
+  brightMagenta: ['--term-bright-magenta', '#e12afb'],
+  brightCyan: ['--term-bright-cyan', '#00b8db'],
+  brightWhite: ['--term-bright-white', '#0a0a0a'],
 } as const satisfies Partial<Record<keyof ITheme, readonly [string, string]>>
 
 /** 从 CSS 变量读取终端主题色（每次建 xterm 实例时取一次） */
@@ -80,12 +81,13 @@ export function getTerminalTheme(): ITheme {
   ) as ITheme
 }
 
-/** 终端字体（--term-font-family/--term-font-size 令牌；取不到值用 fallback） */
+/** 终端字体（--term-font-family/--term-font-size 令牌；取不到值用
+ *  ZCode DEFAULT_TERMINAL_FONT_FAMILY 同款 fallback） */
 export function getTerminalFont(): { fontFamily: string; fontSize: number } {
   const style = getComputedStyle(document.documentElement)
   const fontFamily =
     style.getPropertyValue('--term-font-family').trim() ||
-    "ui-monospace, SFMono-Regular, Consolas, 'Cascadia Mono', monospace"
+    "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Cascadia Mono', 'JetBrains Mono', 'MesloLGS NF', 'Hack Nerd Font', monospace"
   const fontSize = Number.parseFloat(style.getPropertyValue('--term-font-size'))
   return { fontFamily, fontSize: Number.isFinite(fontSize) ? fontSize : 13 }
 }

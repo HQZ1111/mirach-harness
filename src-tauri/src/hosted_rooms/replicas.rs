@@ -31,7 +31,7 @@
 //!   （依赖 store 的私有连接与 actor_json 序列化）。
 
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::common;
 use super::store::{HostedRoomError, RoomResult};
@@ -391,6 +391,428 @@ pub fn demote_requires_newer_epoch(state: &ReplicaState, incoming_epoch: i64) ->
         return fail_epoch("demotion carries an older authority epoch than stored");
     }
     Ok(())
+}
+
+// ── SQL 写入层（上游 `ingest_page` / `promote_replica` / `demote_room` 的完整移植）────
+
+/// 上游 `_replica_row_state()`：读当前 replica 行状态。
+fn read_replica_row(
+    conn: &Connection,
+    room_id: &str,
+) -> ReplicaResult<Option<ReplicaState>> {
+    let result = conn.query_row(
+        "SELECT authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes \
+         FROM hosted_room_replicas WHERE room_id=?1",
+        [room_id],
+        |row| {
+            Ok(ReplicaState {
+                room_id: room_id.to_string(),
+                authority_gateway_id: row.get::<_, String>(0)?,
+                authority_epoch: row.get::<_, i64>(1)?,
+                last_seq: row.get::<_, i64>(2)?,
+                latest_seq: row.get::<_, i64>(3)?,
+                event_bytes: row.get::<_, i64>(4)?,
+            })
+        },
+    );
+    match result {
+        Ok(state) => Ok(Some(state)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(ReplicaError::new(format!("replica row read: {e}"))),
+    }
+}
+
+/// 上游 `_replica_row_state()` 的房间容量检查。
+fn replica_row_state(
+    conn: &Connection,
+    room_id: &str,
+) -> ReplicaResult<Option<ReplicaState>> {
+    let existing = read_replica_row(conn, room_id)?;
+    if existing.is_none() {
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM hosted_room_replicas", [], |row| row.get(0))
+            .map_err(|e| ReplicaError::new(format!("replica count: {e}")))?;
+        if count >= MAX_REPLICA_ROOMS {
+            return fail("replica room capacity exhausted");
+        }
+    }
+    Ok(existing)
+}
+
+/// 上游 `_store_replica()`：INSERT 新行或 UPDATE 已有行。
+fn store_replica(
+    conn: &Connection,
+    is_new: bool,
+    room_id: &str,
+    room_name: &str,
+    members_json: &str,
+    authority: &PageAuthority,
+    new_last: i64,
+    latest_seq: i64,
+    added_bytes: i64,
+    now: f64,
+) -> ReplicaResult<()> {
+    if is_new {
+        conn.execute(
+            "INSERT INTO hosted_room_replicas (room_id, name, members_json, \
+             authority_gateway_id, authority_epoch, last_seq, latest_seq, event_bytes, \
+             created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                room_id, room_name, members_json,
+                authority.gateway_id, authority.epoch, new_last,
+                latest_seq.max(new_last), added_bytes, now, now
+            ],
+        )
+        .map_err(|e| ReplicaError::new(format!("replica insert: {e}")))?;
+    } else {
+        conn.execute(
+            "UPDATE hosted_room_replicas SET name=?1, members_json=?2, authority_gateway_id=?3, \
+             authority_epoch=?4, last_seq=?5, latest_seq=?6, event_bytes=event_bytes+?7, \
+             updated_at=?8 WHERE room_id=?9",
+            rusqlite::params![
+                room_name, members_json, authority.gateway_id, authority.epoch,
+                new_last, latest_seq.max(new_last), added_bytes, now, room_id
+            ],
+        )
+        .map_err(|e| ReplicaError::new(format!("replica update: {e}")))?;
+    }
+    Ok(())
+}
+
+/// 上游 `_event_bytes()`：事件的记账字节数。
+fn event_size(event: &PageEvent) -> i64 {
+    let actor = common::compact_json(&event.actor, false);
+    let payload = common::compact_json(&event.payload, false);
+    (event.event_id.len() + event.kind.len() + actor.len() + payload.len()) as i64
+}
+
+/// 上游 `ingest_page()`：完整 SQL 写入版。
+/// 持久化一个 `read_events()` 页面，幂等，拒绝 seq 缺口和 epoch 回退。
+pub fn ingest_page(
+    conn: &mut Connection,
+    room_id: &str,
+    room_name: &str,
+    members_json: &str,
+    page: &ReplicaPage,
+    now: f64,
+) -> ReplicaResult<Value> {
+    let _ = initialize_replica_schema(conn);
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| ReplicaError::new(format!("replica tx: {e}")))?;
+    let _ = initialize_replica_schema(&tx);
+
+    let existing = read_replica_row(&tx, room_id)?;
+    let is_new = existing.is_none();
+    let state = existing.unwrap_or_else(|| {
+        ReplicaState {
+            room_id: room_id.to_string(),
+            authority_gateway_id: page.authority.gateway_id.clone(),
+            authority_epoch: 0,
+            last_seq: 0,
+            latest_seq: 0,
+            event_bytes: 0,
+        }
+    });
+
+    // epoch 回退
+    if page.authority.epoch < state.authority_epoch {
+        return fail_epoch("page authority epoch is older than the stored replica epoch");
+    }
+
+    // 过滤已见过的
+    let fresh: Vec<&PageEvent> = page
+        .events
+        .iter()
+        .filter(|event| event.seq > state.last_seq)
+        .collect();
+
+    // 缺口检测
+    if let Some(first) = fresh.first() {
+        if first.seq != state.last_seq + 1 {
+            return fail_gap("page skips sequences the replica has not stored");
+        }
+    }
+
+    let mut added_bytes: i64 = 0;
+    for event in &fresh {
+        let size = event_size(event);
+        if state.event_bytes + added_bytes + size > MAX_REPLICA_EVENT_BYTES {
+            return fail("replica event storage exhausted");
+        }
+        let actor_json = common::compact_json(&event.actor, false);
+        let payload_json = common::compact_json(&event.payload, false);
+        tx.execute(
+            "INSERT INTO hosted_room_replica_events (room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                room_id, event.seq, event.event_id, event.kind,
+                actor_json,
+                Option::<i64>::None,
+                payload_json,
+                now
+            ],
+        )
+        .map_err(|e| ReplicaError::new(format!("replica event insert: {e}")))?;
+        added_bytes += size;
+    }
+
+    let new_last = fresh.last().map(|e| e.seq).unwrap_or(state.last_seq);
+    store_replica(
+        &tx, is_new, room_id, room_name, members_json,
+        &page.authority, new_last, new_last, added_bytes, now,
+    )?;
+
+    tx.commit()
+        .map_err(|e| ReplicaError::new(format!("replica commit: {e}")))?;
+    Ok(json!({
+        "room_id": room_id,
+        "stored_seq": new_last,
+        "ingested": fresh.len(),
+        "caught_up": true,
+    }))
+}
+
+/// 上游 `replica_state()`：读 replica 覆盖范围与权威谱系。
+pub fn replica_state_query(conn: &Connection, room_id: &str) -> ReplicaResult<Value> {
+    let _ = initialize_replica_schema(conn);
+    let row = conn.query_row(
+        "SELECT * FROM hosted_room_replicas WHERE room_id=?1",
+        [room_id],
+        |row| {
+            Ok(json!({
+                "room_id": row.get::<_, String>("room_id")?,
+                "name": row.get::<_, String>("name")?,
+                "members": serde_json::from_str::<Value>(&row.get::<_, String>("members_json")?)
+                    .unwrap_or(Value::Null),
+                "authority": {
+                    "gateway_id": row.get::<_, String>("authority_gateway_id")?,
+                    "epoch": row.get::<_, i64>("authority_epoch")?,
+                },
+                "last_seq": row.get::<_, i64>("last_seq")?,
+                "latest_seq": row.get::<_, i64>("latest_seq")?,
+                "event_bytes": row.get::<_, i64>("event_bytes")?,
+                "created_at": row.get::<_, f64>("created_at")?,
+                "updated_at": row.get::<_, f64>("updated_at")?,
+            }))
+        },
+    );
+    match row {
+        Ok(value) => Ok(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => fail("replica not found"),
+        Err(e) => Err(ReplicaError::new(format!("replica read: {e}"))),
+    }
+}
+
+/// 上游 `_control_event()`：构造 `authority.<kind>` 控制事件的四元组。
+fn control_event(
+    kind: &str,
+    epoch: i64,
+    payload: Value,
+) -> (String, String, String, String) {
+    let event_id = format!("system:authority-{kind}:{epoch}");
+    let event_kind = format!("authority.{kind}");
+    let actor = json!({"kind": "system", "id": "authority-control"});
+    let actor_json = common::compact_json(&actor, false);
+    let payload_json = common::compact_json(&payload, false);
+    (event_id, event_kind, actor_json, payload_json)
+}
+
+/// 上游 `_append_control_event()`：把控制事件写进 authoritative events 表。
+fn append_control_event(
+    conn: &Connection,
+    room_id: &str,
+    seq: i64,
+    epoch: i64,
+    event: &(String, String, String, String),
+    now: f64,
+) -> ReplicaResult<()> {
+    let (event_id, kind, actor_json, payload_json) = event;
+    conn.execute(
+        "INSERT INTO hosted_room_events (room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![room_id, seq, event_id, kind, actor_json, epoch, payload_json, now],
+    )
+    .map_err(|e| ReplicaError::new(format!("control event append: {e}")))?;
+    Ok(())
+}
+
+/// 上游 `promote_replica()`：在本地 epoch+1 续跑，复制 replica 日志到 authoritative store。
+pub fn promote_replica(
+    conn: &mut Connection,
+    room_id: &str,
+    reason: &str,
+    local_gateway: &str,
+    now: f64,
+) -> ReplicaResult<Value> {
+    if reason.is_empty() || reason.len() > 200 {
+        return fail("reason must be a non-empty string of at most 200 chars");
+    }
+    let _ = initialize_replica_schema(conn);
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| ReplicaError::new(format!("promote tx: {e}")))?;
+    let _ = initialize_replica_schema(&tx);
+
+    let replica = tx
+        .query_row(
+            "SELECT name, members_json, authority_gateway_id, authority_epoch, last_seq, event_bytes \
+             FROM hosted_room_replicas WHERE room_id=?1",
+            [room_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>("name")?,
+                    row.get::<_, String>("members_json")?,
+                    row.get::<_, String>("authority_gateway_id")?,
+                    row.get::<_, i64>("authority_epoch")?,
+                    row.get::<_, i64>("last_seq")?,
+                    row.get::<_, i64>("event_bytes")?,
+                ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => ReplicaError::new("replica not found"),
+            other => ReplicaError::new(format!("replica read: {other}")),
+        })?;
+    let (ref name, ref members_json, ref prev_gateway, prev_epoch, last_seq, event_bytes) = replica;
+
+    if prev_gateway == local_gateway {
+        return fail("this gateway already holds the room authority");
+    }
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_rooms WHERE room_id=?1)",
+            [room_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| ReplicaError::new(format!("room check: {e}")))?;
+    if exists {
+        return fail("room_id already exists in the local authoritative store");
+    }
+    let retired: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?1)",
+            [room_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| ReplicaError::new(format!("retired check: {e}")))?;
+    if retired {
+        return fail("room_id belongs to a disbanded room");
+    }
+
+    let target_epoch = prev_epoch + 1;
+    let claim_seq = last_seq + 1;
+    let claim = control_event("claimed", target_epoch, json!({
+        "previous_gateway_id": prev_gateway,
+        "authority_gateway_id": local_gateway,
+        "authority_epoch": target_epoch,
+        "promoted_from_replica": true,
+        "reason": reason,
+    }));
+    let claim_bytes = (claim.0.len() + claim.1.len() + claim.2.len() + claim.3.len()) as i64;
+
+    tx.execute(
+        "INSERT INTO hosted_rooms (room_id, name, members_json, authority_gateway_id, authority_epoch, \
+         next_seq, event_bytes, revision, created_at, updated_at, disbanded_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, NULL)",
+        rusqlite::params![room_id, name, members_json, local_gateway, target_epoch,
+                         claim_seq + 1, event_bytes + claim_bytes, now, now],
+    )
+    .map_err(|e| ReplicaError::new(format!("promote room insert: {e}")))?;
+
+    tx.execute(
+        "INSERT INTO hosted_room_events (room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at) \
+         SELECT room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at \
+         FROM hosted_room_replica_events WHERE room_id=?1",
+        [room_id],
+    )
+    .map_err(|e| ReplicaError::new(format!("promote event copy: {e}")))?;
+
+    append_control_event(&tx, room_id, claim_seq, target_epoch, &claim, now)?;
+
+    tx.execute("DELETE FROM hosted_room_replica_events WHERE room_id=?1", [room_id])
+        .map_err(|e| ReplicaError::new(format!("promote cleanup: {e}")))?;
+    tx.execute("DELETE FROM hosted_room_replicas WHERE room_id=?1", [room_id])
+        .map_err(|e| ReplicaError::new(format!("promote cleanup: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| ReplicaError::new(format!("promote commit: {e}")))?;
+    Ok(json!({
+        "room_id": room_id,
+        "authority_gateway_id": local_gateway,
+        "authority_epoch": target_epoch,
+        "previous_gateway_id": prev_gateway,
+        "previous_epoch": prev_epoch,
+        "claim_seq": claim_seq,
+        "latest_seq": claim_seq,
+    }))
+}
+
+/// 上游 `demote_room()`：当回旧的权威网关发现对端已有更高 epoch 时，追加 authority.lost。
+pub fn demote_room(
+    conn: &mut Connection,
+    room_id: &str,
+    observed_gateway_id: &str,
+    observed_epoch: i64,
+    local_gateway: &str,
+    now: f64,
+) -> ReplicaResult<Value> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| ReplicaError::new(format!("demote tx: {e}")))?;
+    let row = tx
+        .query_row(
+            "SELECT authority_gateway_id, authority_epoch, next_seq \
+             FROM hosted_rooms WHERE room_id=?1 AND disbanded_at IS NULL",
+            [room_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => ReplicaError::new("room not found in the local authoritative store"),
+            other => ReplicaError::new(format!("demote read: {other}")),
+        })?;
+    let (ref current_gateway, current_epoch, next_seq) = row;
+
+    if current_gateway == observed_gateway_id && current_epoch == observed_epoch {
+        return Ok(json!({
+            "room_id": room_id,
+            "authority_gateway_id": current_gateway,
+            "authority_epoch": current_epoch,
+            "idempotent": true,
+        }));
+    }
+    if observed_epoch <= current_epoch {
+        return fail_epoch("observed epoch does not supersede the stored authority");
+    }
+    if current_gateway != local_gateway {
+        return fail("room is not locally authoritative; nothing to demote");
+    }
+    let lost = control_event("lost", observed_epoch, json!({
+        "previous_gateway_id": current_gateway,
+        "authority_gateway_id": observed_gateway_id,
+        "authority_epoch": observed_epoch,
+    }));
+    append_control_event(&tx, room_id, next_seq, observed_epoch, &lost, now)?;
+    tx.execute(
+        "UPDATE hosted_rooms SET authority_gateway_id=?1, authority_epoch=?2, next_seq=next_seq+1, \
+         revision=revision+1, updated_at=?3 WHERE room_id=?4",
+        rusqlite::params![observed_gateway_id, observed_epoch, now, room_id],
+    )
+    .map_err(|e| ReplicaError::new(format!("demote update: {e}")))?;
+    tx.commit()
+        .map_err(|e| ReplicaError::new(format!("demote commit: {e}")))?;
+    Ok(json!({
+        "room_id": room_id,
+        "authority_gateway_id": observed_gateway_id,
+        "authority_epoch": observed_epoch,
+        "idempotent": false,
+    }))
 }
 
 #[cfg(test)]

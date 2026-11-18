@@ -15,6 +15,15 @@
 //! 编造退出码）。进程退出 = TerminalRegistry::drop 兜底全部 kill（Drop
 //! 无法传播——规矩 12 的既注例外）；窗格关闭由前端 unmount 钩子逐个 kill。
 //!
+//! 【页面归属与孤儿回收（2026-11-18）】会话登记带页面归属（webview label +
+//! 页面 token，前端 terminal-pty.ts 生成）。**页面 reload（dev HMR / webview
+//! 重启）后旧页面的 kill 钩子随页面消失**，遗留 PTY 会一直活着——此前的
+//! 8 条会话上限就是这么被打满的（用户报"显示达到上限 8 无法打开"）。
+//! 修法 = 新页面加载时 `terminal_reap(label, token)` 回收同 label 下旧
+//! token 的会话（spawn 内也兜一遍）；会话数上限随之撤除（ZCode 不设上限）。
+//! **无上限不是无限兜底**：泄漏源已由 reap 关闭，界面上的每个标签仍是
+//! 一个显式会话。
+//!
 //! 【首屏输出不能丢（2026-11-15，对齐 ZCode createBufferedTerminalOutputEmitter）】
 //! spawn 与前端 `listen()` 之间存在真实窗口：`terminal_spawn` 一返回就
 //! 起输出泵，而前端还要等 invoke 回包 + `listen` 两次 IPC 才拿得到事件。
@@ -50,10 +59,6 @@ use base64::Engine as _;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
-
-/// 会话数上限：防失控（每会话 = 一个 shell 进程 + 两条线程）。
-/// 超出 spawn 明确 Err——不静默挤掉旧会话。
-const MAX_SESSIONS: usize = 8;
 
 /// 输出泵单次读块（PTY 输出是逐段到达的流，块大小只影响事件粒度）
 const READ_CHUNK: usize = 8192;
@@ -123,17 +128,63 @@ impl OutputState {
 #[derive(Default)]
 struct RegistryInner {
     sessions: HashMap<u32, Arc<SessionHandle>>,
+    /// 会话所有权（id → 页面归属）。页面 reload（dev HMR / webview 重启）
+    /// 后旧页面的 kill 钩子随页面消失，遗留的 PTY 永远无人认领——新页面
+    /// 用同一 label 但新 token 的 `terminal_reap` 回收它们（见 reap 命令）。
+    owners: HashMap<u32, SessionOwner>,
     next_id: u32,
 }
 
+/// 页面归属：webview label + 页面 token（前端 `terminal-pty.ts` 生成，
+/// 每次页面加载一个新值；HMR 重挂不换）。
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct SessionOwner {
+    label: String,
+    token: String,
+}
+
 impl RegistryInner {
-    /// 容量检查 + 分配 id（纯逻辑，单测覆盖）。
-    fn alloc_id(&mut self) -> Result<u32, String> {
-        if self.sessions.len() >= MAX_SESSIONS {
-            return Err(format!("终端会话数已达上限（{MAX_SESSIONS}），请先关闭不用的终端"));
-        }
+    /// 分配 id：单调递增，**不复用**（旧页面迟到的 kill/attach 不会误伤
+    /// 新会话；ZCode 的 session id 同语义）。
+    ///
+    /// 无会话数上限（2026-11-18 用户报"上限 8 打不开"）。ZCode 同样不设
+    /// 上限；此前的 8 上限是在泄漏真因（页面 reload 遗留会话）未解决时的
+    /// 止血，解掉泄漏后按上游对齐撤除。
+    fn alloc_id(&mut self) -> u32 {
         self.next_id += 1;
-        Ok(self.next_id)
+        self.next_id
+    }
+
+    /// 该页面（label）下 token 不是当前的会话 = 上一代页面遗留的孤儿。
+    /// 纯逻辑（单测覆盖）。
+    fn stale_sessions_for(&self, owner: &SessionOwner) -> Vec<u32> {
+        let mut ids: Vec<u32> = self
+            .owners
+            .iter()
+            .filter(|(_, o)| o.label == owner.label && o.token != owner.token)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+/// 尽力终止一个会话。**返回值不可信**：portable-pty 0.8.1 的
+/// `WinChildKiller::kill` 把成功判定写反了（`if res != 0 { Err }`，
+/// 而 TerminateProcess 是"非 0 = 成功"）——Windows 上每次成功 kill 都会
+/// 返回 Err（带上一次调用的陈旧 errno，曾日志成"句柄无效 os error 6"）。
+/// 真正的结果由 wait 线程观察：进程退出 → 摘除登记 + 上报 exit 事件。
+fn kill_session(id: u32, handle: &Arc<SessionHandle>) {
+    match handle.killer.lock() {
+        Ok(mut killer) => {
+            if let Err(e) = killer.kill() {
+                eprintln!(
+                    "[terminal:{id}] kill returned Err ({e})——portable-pty 0.8.1 的 Windows \
+                     返回值反了，是否真正终止以 exit 事件为准"
+                );
+            }
+        }
+        Err(_) => eprintln!("[terminal:{id}] killer mutex poisoned, kill skipped"),
     }
 }
 
@@ -147,11 +198,12 @@ impl TerminalRegistry {
 
     /// 短暂取锁登记（返回会话句柄的 Arc，锁即释——后续 write/resize/kill
     /// 各自锁会话自己的 Mutex，一条写满的 PTY 不会拖住整个注册表）。
-    fn insert(&self, id: u32, handle: Arc<SessionHandle>) -> Result<(), String> {
+    fn insert(&self, id: u32, owner: SessionOwner, handle: Arc<SessionHandle>) -> Result<(), String> {
         let mut inner = self
             .0
             .lock()
             .map_err(|_| "terminal registry mutex poisoned".to_string())?;
+        inner.owners.insert(id, owner);
         inner.sessions.insert(id, handle);
         Ok(())
     }
@@ -164,8 +216,59 @@ impl TerminalRegistry {
             .lock()
             .map_err(|_| "terminal registry mutex poisoned".to_string())?;
         inner.sessions.remove(&id);
+        inner.owners.remove(&id);
         Ok(())
     }
+}
+
+/// 回收同一窗口上一代页面遗留的会话（kill 后由 wait 线程统一摘登记）。
+/// 纯读登记 + 逐个 kill，registry 锁不跨 kill 持有。
+fn reap_stale_sessions(
+    state: &State<Arc<TerminalRegistry>>,
+    owner: &SessionOwner,
+) -> Result<usize, String> {
+    let stale = {
+        let inner = state
+            .0
+            .lock()
+            .map_err(|_| "terminal registry mutex poisoned".to_string())?;
+        inner.stale_sessions_for(owner)
+    };
+    let mut reaped = 0;
+    for id in stale {
+        let handle = {
+            let inner = state
+                .0
+                .lock()
+                .map_err(|_| "terminal registry mutex poisoned".to_string())?;
+            inner.sessions.get(&id).cloned()
+        };
+        if let Some(handle) = handle {
+            eprintln!("[terminal:{id}] reaping stale session from previous page load");
+            kill_session(id, &handle);
+            reaped += 1;
+        }
+    }
+    Ok(reaped)
+}
+
+/// 回收本窗口上一代页面遗留的终端会话（2026-11-18：用户报"上限 8 打不开"
+/// 的根因——页面 reload（dev HMR / webview 重启）后旧页面发不出 kill，
+/// 遗留 PTY 占满注册表）。页面加载时由前端调用一次；spawn 内也会兜一遍。
+/// 返回被回收的会话数。
+#[tauri::command(async)]
+pub fn terminal_reap(
+    state: State<Arc<TerminalRegistry>>,
+    owner_label: String,
+    owner_token: String,
+) -> Result<usize, String> {
+    reap_stale_sessions(
+        &state,
+        &SessionOwner {
+            label: owner_label,
+            token: owner_token,
+        },
+    )
 }
 
 /// 应用退出清场：全部会话尽力 kill。Drop 无法传播错误（规矩 12 既注
@@ -177,14 +280,7 @@ impl Drop for TerminalRegistry {
             return;
         };
         for (id, handle) in inner.sessions.iter() {
-            match handle.killer.lock() {
-                Ok(mut killer) => {
-                    if let Err(e) = killer.kill() {
-                        eprintln!("[terminal:{id}] kill at drop failed: {e}");
-                    }
-                }
-                Err(_) => eprintln!("[terminal:{id}] killer mutex poisoned at drop"),
-            }
+            kill_session(*id, handle);
         }
     }
 }
@@ -343,18 +439,28 @@ pub fn terminal_spawn(
     cols: Option<u16>,
     rows: Option<u16>,
     cwd: Option<String>,
+    owner_label: String,
+    owner_token: String,
 ) -> Result<Spawned, String> {
     // 先解析 shell/cwd（便宜且可能失败），再占 id——失败不消耗会话号
     let cwd = resolve_cwd(cwd)?;
     let shell = resolve_shell()?;
+    let owner = SessionOwner {
+        label: owner_label,
+        token: owner_token,
+    };
 
-    // 容量检查前置：超限就不开 PTY（开了再拒会漏孤儿进程）
+    // 同一窗口上一代页面遗留的会话先回收（页面 reload 后旧页面发不出 kill；
+    // spawn 是权威入口，顺带把孤儿清掉——boot 的 terminal_reap 之外的兜底）
+    reap_stale_sessions(&state, &owner)?;
+
+    // id 分配（owner 随会话句柄一起落登记——PTY 创建失败不留半条记录）
     let id = {
         let mut inner = state
             .0
             .lock()
             .map_err(|_| "terminal registry mutex poisoned".to_string())?;
-        inner.alloc_id()?
+        inner.alloc_id()
     };
 
     // 初始尺寸：前端先 fit 再 spawn（ZCode 同款时序，避免启动输出按错
@@ -402,7 +508,7 @@ pub fn terminal_spawn(
         killer: Mutex::new(killer),
         output: Mutex::new(OutputState::default()),
     });
-    state.insert(id, handle.clone())?;
+    state.insert(id, owner, handle.clone())?;
 
     // 输出泵：读 PTY → terminal-output:{id}。未 attach 时先进 backlog
     // （见模块头【首屏输出不能丢】）。EOF（子进程退出/PTY 关闭）或事件
@@ -582,6 +688,10 @@ pub fn terminal_resize(
 /// 杀会话：kill 本身不编造退出码——实际退出（含退出码）由 wait 线程经
 /// terminal-exit:{id} 上报。会话已不存在 = Err（前端只对自己还持有的
 /// 页签调 kill，正常流程不会撞上）。
+///
+/// killer 的返回值**不作为成败**（portable-pty 0.8.1 Windows 判定反了，
+/// 见 `kill_session` 注释）：调用后照常返回 Ok，终止与否以 exit 事件 +
+/// 登记摘除为准。
 #[tauri::command(async)]
 pub fn terminal_kill(state: State<Arc<TerminalRegistry>>, id: u32) -> Result<(), String> {
     let handle = {
@@ -595,11 +705,8 @@ pub fn terminal_kill(state: State<Arc<TerminalRegistry>>, id: u32) -> Result<(),
             .cloned()
             .ok_or_else(|| format!("终端会话 {id} 不存在"))?
     };
-    let mut killer = handle
-        .killer
-        .lock()
-        .map_err(|_| format!("终端会话 {id} killer mutex poisoned"))?;
-    killer.kill().map_err(|e| format!("终止终端会话 {id} 失败: {e}"))
+    kill_session(id, &handle);
+    Ok(())
 }
 
 /// 系统默认浏览器打开终端里的 http(s) 链接（ZCode onOpenBrowserUrl 的
@@ -616,13 +723,14 @@ pub fn terminal_open_url(url: String) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// id 注册表纯逻辑：顺序分配；容量上限明确 Err；摘除释放容量。
+    /// id 注册表纯逻辑：单调递增、**不复用**（旧页面迟到的 kill/attach
+    /// 不会误伤新会话），且**没有会话数上限**（ZCode 对齐，2026-11-18）。
     #[test]
-    fn alloc_id_enforces_cap_and_reuse_of_capacity() {
+    fn alloc_id_is_monotonic_and_uncapped() {
         let mut inner = RegistryInner::default();
         let mut ids = Vec::new();
-        for _ in 0..MAX_SESSIONS {
-            let id = inner.alloc_id().expect("cap not reached yet");
+        for _ in 0..32 {
+            let id = inner.alloc_id();
             inner.sessions.insert(id, Arc::new(SessionHandle {
                 writer: Mutex::new(Box::new(std::io::sink())),
                 master: Mutex::new(unreachable_master()),
@@ -631,14 +739,34 @@ mod tests {
             }));
             ids.push(id);
         }
-        // 打满：明确 Err，不挤旧会话
-        assert!(inner.alloc_id().is_err());
-        // id 单调递增
-        assert_eq!(ids, (1..=MAX_SESSIONS as u32).collect::<Vec<_>>());
-        // 摘除一个 → 容量释放，能再分配且 id 不复用
+        assert_eq!(ids, (1..=32).collect::<Vec<_>>());
+        // 摘除后 id 不复用（下一个是 33，不是 1）
         inner.sessions.remove(&ids[0]);
-        let next = inner.alloc_id().expect("freed slot allows alloc");
-        assert_eq!(next, (MAX_SESSIONS + 1) as u32);
+        assert_eq!(inner.alloc_id(), 33);
+    }
+
+    /// 孤儿判定：同 webview label、token 不是当前页面的会话 = 上一代页面
+    /// 遗留（reap 目标）；当前 token 与其他 label 的会话都不动。
+    #[test]
+    fn stale_sessions_are_scoped_by_label_and_token() {
+        let mut inner = RegistryInner::default();
+        inner.owners.insert(
+            1,
+            SessionOwner { label: "main".into(), token: "old".into() },
+        );
+        inner.owners.insert(
+            2,
+            SessionOwner { label: "main".into(), token: "new".into() },
+        );
+        inner.owners.insert(
+            3,
+            SessionOwner { label: "quick".into(), token: "old".into() },
+        );
+        let current = SessionOwner { label: "main".into(), token: "new".into() };
+        assert_eq!(inner.stale_sessions_for(&current), vec![1]);
+        // 首次加载（无任何本 label 会话）= 没有孤儿
+        let fresh = SessionOwner { label: "hud".into(), token: "t0".into() };
+        assert_eq!(inner.stale_sessions_for(&fresh), Vec::<u32>::new());
     }
 
     // ── 测试替身：SessionHandle 的字段必须装箱 trait 对象，注册表纯逻辑

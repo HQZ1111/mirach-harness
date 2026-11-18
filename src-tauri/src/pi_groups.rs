@@ -443,6 +443,120 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             Ok(json!({"ok": true}))
         }
 
+        // ── HA replica（宿主扩展：`groups.replicate/replica_state/demote/promote`）──
+
+        "groups.replica_state" => {
+            // 读本地 replica 覆盖范围与权威谱系（上游 `replica_state()`）。
+            let mut conn = open_store()?;
+            let room_id = params
+                .get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let state = super::hosted_rooms::replicas::replica_state_query(&conn, &room_id)
+                .map_err(|e| e.to_string())?;
+            Ok(state)
+        }
+
+        "groups.demote" => {
+            // 本机权威过期：确认对端已有更高 epoch，追加 authority.lost 并采纳新谱系。
+            let mut conn = open_store()?;
+            let room_id = params
+                .get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let observed_gateway_id = params
+                .get("observed_gateway_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let observed_epoch = params
+                .get("observed_epoch")
+                .and_then(common::json_i64)
+                .unwrap_or(0);
+            let local_gateway = local_gateway_id()?;
+            let result = super::hosted_rooms::replicas::demote_room(
+                &mut conn,
+                &room_id,
+                &observed_gateway_id,
+                observed_epoch,
+                &local_gateway,
+                common::clock(None),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(result)
+        }
+
+        "groups.promote" => {
+            // 本机 replica 接管为 authority（epoch+1），复制日志 + authority.claimed。
+            let mut conn = open_store()?;
+            let room_id = params
+                .get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let reason = params
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("authority-unreachable")
+                .to_string();
+            let local_gateway = local_gateway_id()?;
+            let result = super::hosted_rooms::replicas::promote_replica(
+                &mut conn,
+                &room_id,
+                &reason,
+                &local_gateway,
+                common::clock(None),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(result)
+        }
+
+        "groups.replicate" => {
+            // 读房间事件 → 构建 ReplicaPage（authority + events），调用方发到 peer。
+            let conn = open_store()?;
+            let room_id = params
+                .get("room_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let room = store::room_state(&conn, &Value::String(room_id.clone()), false)
+                .map_err(|e| e.to_string())?;
+            let events = store::read_events(&conn, &Value::String(room_id.clone()), 0, 100_000)
+                .map_err(|e| e.to_string())?;
+            let event_rows: Vec<Value> = events
+                .iter()
+                .map(|event| {
+                    json!({
+                        "seq": event.seq,
+                        "event_id": event.event_id,
+                        "kind": event.kind,
+                        "actor": serde_json::from_str::<Value>(&event.actor_json)
+                            .unwrap_or(Value::Null),
+                        "payload": serde_json::from_str::<Value>(&event.payload_json)
+                            .unwrap_or(Value::Null),
+                        "authority_epoch": event.authority_epoch,
+                        "created_at": event.created_at,
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "room_id": room_id,
+                "room_name": room.name,
+                "members": serde_json::from_str::<Value>(&room.members_json)
+                    .unwrap_or(json!([])),
+                "page": {
+                    "events": event_rows,
+                    "authority": {
+                        "gateway_id": room.authority_gateway_id,
+                        "epoch": room.authority_epoch,
+                    },
+                },
+                "latest_seq": room.next_seq - 1,
+            }))
+        }
+
         "groups.driver_append" => {
             // canonical 驱动的写回口：宿主前端 driver 把成员轮次的结果
             // （message.member / turn.settled / turn.failed / turn.cancelled /
