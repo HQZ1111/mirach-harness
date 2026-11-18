@@ -6,20 +6,30 @@
 
 ## 当前状态
 
-**✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行（插件补）+ 工作流分区（orchestrator 派生）**
+**✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行 + 完成校验（宿主在 rpi-goal 之上）+ 工作流分区（orchestrator 派生）**
 
-- **目标迭代行（插件侧，真数据）**：新 vendored 插件
-  `G:\mirach-plugins\rpi-goal-iterations`（DLL 装到
-  `~/.rpi/agent/extensions/rpi_goal_iterations.dll`）：监听 `TurnEnd`，
-  goal 为 active 时把当前 `todo-state` 快照写进自己的 `goal-iterations`
-  条目（按 title+startedAt 分代、自数 TurnEnd、上限 50 轮、重启恢复、
-  subagent 跳过）。宿主 `pi_goal_state` 按 goalTitle+goalStartedAt 匹配并入
-  `active.iterations`（`merge_goal_iterations`，4 单测；残留目标不并、坏条目
-  Err）。面板 GoalStatusSection 换成 ZCode 迭代行结构
-  （`buildConversationGoalIterationSummaries` 逐条照抄；插件 complete →
-  `verified`；verifying/notSatisfied/failed 解析与 UI 就绪，但 rpi 没有
-  goal-verifier 子系统——**不造假校验结论**）。实机：6 轮 goal（4 轮带
-  todo 快照）→ `pi_goal_state` 6 行 → 面板 6 行、计数/属性全对。
+- **目标迭代行 + 完成校验（宿主侧，在 rpi-goal 之上；ZCode verifier 对偶）**：
+  `pi_goal_verify.rs`——常驻订阅每个在场会话的 `AgentEnd`（run 收尾）触发；
+  闸门 = 当前会话 / goal active / 后台作业不在跑 / 单槽在途（照上游
+  verifyBeforeFirstContinue）；通过后先 `append_entry` 一条 `goal-attempts`
+  迭代行（本轮 todo 快照，iteration = 本目标既有行数 + 1），再跑校验：
+  问句逐条照抄上游 `formatGoalCompletionVerificationPrompt`（token 计数换成
+  轮次预算，附同一份 todo 快照）；执行 = 宿主克隆的
+  `RuntimeActionHost::side_question`（无工具单轮、独立会话），轮询到
+  done/failed；坏 JSON fail-open 成 `pass` + reason，请求失败 = `failed`
+  结论。结论 `append_entry` 落 `goal-verification` 条目；`pi_goal_state`
+  用 `merge_goal_timeline` 按 goalTitle+goalStartedAt 并入
+  `active.iterations` / `active.verifications`，在途时输出 `active.verifying`。
+  面板 GoalStatusSection 换成 ZCode 迭代行结构
+  （`buildConversationGoalIterationSummaries` 逐条照抄；rpi-goal 的 complete
+  → `verified`）并渲染结论徽章。**架构事实**：rpi 的模型原语（action 24/25）
+  只挂在 invocation bridge 上，`on_turn_end` 里不可用——校验必须在宿主做；
+  迭代行也因此放宿主记录（曾试旁路监听插件，已退役卸载）。**只做校验，
+  不自动 `/goal stop`、不自动续跑 nextAction**（否则会抹掉已验证目标/无限
+  续跑，独立一轮再定）。实机：①`/goal start`+用户消息 → `verifying` →
+  `pass` 徽章；②`/goal start` 无用户消息（插件驱动首轮）→ 宿主记 iteration 1
+  → `notSatisfied`（verifier 查出会话里旧 todo 未完成，按上游规则拒绝）+
+  `nextAction` 真值。
 - **工作流分区（宿主派生）**：`status-workflow-runs.ts` 从本线程 `plan` /
   `dispatch` 工具调用派生（`details.nodes` 真形状：id/task/deps/status ∈
   pending/running/done/failed/skipped）；plan set = 一条 run，dispatch 波更新
@@ -30,7 +40,7 @@
   `workflow-directory` 面板栏标签（`workflow-run-detail-pane.tsx`）。
   实机：真模型 plan(set) 两节点 → 面板「工作流 1 个运行中」+ 真行；
   真 dispatch 结果含 `details.nodes`，与派生规则一致。
-- **门禁**：vitest **1072**（86 文件）/ cargo test **692** / tsc 0 新错
+- **门禁**：vitest **1073**（86 文件）/ cargo test **702** / tsc 0 新错
   （hermes-mirror + sdk-upstream 既有基线不变）。
 
 **✅ 2026-11-18（第四波）：bots 剩余未接面收口——远端 token / image.generate / pet 画廊 + keyring 真后端修复**

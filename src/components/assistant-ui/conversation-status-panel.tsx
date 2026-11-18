@@ -72,6 +72,7 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CircleAlertIcon,
   CircleIcon,
   EllipsisIcon,
   FileDiffIcon,
@@ -87,6 +88,7 @@ import {
   SquareTerminalIcon,
   TargetIcon,
   Workflow,
+  XCircleIcon,
 } from 'lucide-react'
 import type { DockviewApi } from 'dockview-react'
 
@@ -180,10 +182,11 @@ const L = {
   goalPause: '暂停目标',
   goalResume: '恢复目标',
   // ZCode 校验器面词表（chat.goalVerification.* zh 原文；failed 上游没有
-  // 对应字串——宿主补一个中性词，只有引擎校验器落地后才会显示）。
+  // 对应字串——宿主补一个中性词）。
   goalVerifying: '目标校验中',
   goalNotSatisfied: '目标未完成，任务继续',
   goalFailed: '目标校验失败',
+  goalVerified: '目标已完成，任务结束',
   goalIteration: (n: number) => `第 ${n} 次迭代`,
   agentsRunning: (n: number) => `${n} 个运行中`,
   endedAgents: '已结束的智能体',
@@ -701,15 +704,53 @@ function GitStatusSection({
  *  items 计数只在有 items 时出现（0/0 不渲染）。 */
 function GoalIterationRow({
   row,
+  verifying,
 }: {
   row: ReturnType<typeof buildConversationGoalIterationSummaries>[number]
+  /** 该轮正在校验（宿主在途态 `verifying.iteration === row.iteration`）。 */
+  verifying: boolean
 }) {
   const title = row.title ?? L.goalIteration(row.iteration)
+  // 校验结论徽章（上游行里只有 `data-goal-verification-outcome` 属性；
+  // 宿主把它渲染出来——结论词/颜色/提示语都来自真实结论，没有就不画）。
+  const badge = verifying ? (
+    <span title={L.goalVerifying} aria-label={L.goalVerifying} className="flex shrink-0">
+      <LoaderCircle className="text-foreground/45 size-[var(--size-icon-sm)] animate-spin" />
+    </span>
+  ) : row.verificationOutcome === 'pass' ? (
+    <span
+      role="img"
+      aria-label={L.goalVerified}
+      title={row.verificationReason ?? L.goalVerified}
+      className="flex shrink-0"
+    >
+      <CheckCircle2Icon className="text-emerald-600 dark:text-emerald-400 size-[var(--size-icon-sm)]" />
+    </span>
+  ) : row.verificationOutcome === 'notSatisfied' ? (
+    <span
+      role="img"
+      aria-label={L.goalNotSatisfied}
+      title={row.verificationReason ?? L.goalNotSatisfied}
+      className="flex shrink-0"
+    >
+      <CircleAlertIcon className="size-[var(--size-icon-sm)] text-amber-600 dark:text-amber-400" />
+    </span>
+  ) : row.verificationOutcome === 'failed' ? (
+    <span
+      role="img"
+      aria-label={L.goalFailed}
+      title={row.verificationReason ?? L.goalFailed}
+      className="flex shrink-0"
+    >
+      <XCircleIcon className="text-destructive size-[var(--size-icon-sm)]" />
+    </span>
+  ) : null
   return (
     <div
       data-goal-iteration={row.iteration}
       data-goal-iteration-completed={row.completed}
       data-goal-verification-outcome={row.verificationOutcome ?? undefined}
+      data-goal-verifying={verifying ? 'true' : undefined}
       title={title}
       className="hover:bg-foreground/[0.04] flex min-w-0 cursor-default items-start gap-2 rounded-lg px-2 py-2"
     >
@@ -721,6 +762,7 @@ function GoalIterationRow({
         <TargetIcon className="text-foreground/30 size-4 shrink-0" aria-hidden />
       )}
       <p className="text-foreground line-clamp-3 min-w-0 flex-1 text-[14px] leading-4">{title}</p>
+      {badge}
       {row.totalCount > 0 ? (
         <span className="text-foreground/45 shrink-0 text-[12px] tabular-nums">
           {row.completedCount}/{row.totalCount}
@@ -745,10 +787,16 @@ function GoalStatusSection({
   actionPending: boolean
   actionError: string | null
 }) {
+  // 展示态：宿主校验在途 = verifying（goal.status 仍是引擎的 active——
+  // 校验结论不改目标状态，上游是把 status 置 verifying 的宿主对偶）。
+  const displayStatus: StatusPanelGoalModel['status'] =
+    goal.verifying !== null ? 'verifying' : goal.status
   // 用时秒针只看「在不在跑」这一个布尔（上游注释同文：不能以整个 goal
   // 对象为依赖重建 interval）。
   const ticking =
-    goal.status === 'active' || goal.status === 'verifying' || goal.status === 'notSatisfied'
+    displayStatus === 'active' ||
+    displayStatus === 'verifying' ||
+    displayStatus === 'notSatisfied'
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!ticking) return
@@ -758,15 +806,15 @@ function GoalStatusSection({
   }, [ticking])
   const elapsedSeconds = goalElapsedSeconds(goal, now)
   const statusLabel =
-    goal.status === 'paused'
+    displayStatus === 'paused'
       ? L.goalPaused
-      : goal.status === 'verified'
+      : displayStatus === 'verified'
         ? L.goalComplete
-        : goal.status === 'verifying'
+        : displayStatus === 'verifying'
           ? L.goalVerifying
-          : goal.status === 'notSatisfied'
+          : displayStatus === 'notSatisfied'
             ? L.goalNotSatisfied
-            : goal.status === 'failed'
+            : displayStatus === 'failed'
               ? L.goalFailed
               : L.goalActive
   const iterationRows = useMemo(
@@ -776,7 +824,9 @@ function GoalStatusSection({
   // 控制：上游同判——active/verifying/notSatisfied → 暂停；paused → 恢复；
   // verified → 完成图标；failed → 无控件。
   const isPausable =
-    goal.status === 'active' || goal.status === 'verifying' || goal.status === 'notSatisfied'
+    displayStatus === 'active' ||
+    displayStatus === 'verifying' ||
+    displayStatus === 'notSatisfied'
   const control =
     isPausable && onPauseGoal !== undefined ? (
       <button
@@ -790,7 +840,7 @@ function GoalStatusSection({
       >
         <PauseIcon className="size-3.5" />
       </button>
-    ) : goal.status === 'paused' && onResumeGoal !== undefined ? (
+    ) : displayStatus === 'paused' && onResumeGoal !== undefined ? (
       <button
         type="button"
         data-goal-action="resume"
@@ -802,7 +852,7 @@ function GoalStatusSection({
       >
         <PlayIcon className="size-3.5" />
       </button>
-    ) : goal.status === 'verified' ? (
+    ) : displayStatus === 'verified' ? (
       <CheckCircle2Icon
         aria-label={L.goalComplete}
         className="text-emerald-600 dark:text-emerald-400 size-4 shrink-0"
@@ -839,7 +889,11 @@ function GoalStatusSection({
           </div>
         ) : null}
         {iterationRows.map((row) => (
-          <GoalIterationRow key={row.iteration} row={row} />
+          <GoalIterationRow
+            key={row.iteration}
+            row={row}
+            verifying={goal.verifying?.iteration === row.iteration}
+          />
         ))}
         {actionError !== null ? (
           <p role="alert" className="text-destructive px-2 py-1 text-[12px]">
@@ -1823,7 +1877,9 @@ function ConversationStatusPanelImpl() {
         aria-label={L.panelTitle}
         data-state={variant === 'mini' ? 'collapsed' : 'expanded'}
         data-display-mode={variant}
-        data-goal-status={model.goal?.status}
+        data-goal-status={
+          model.goal === null ? undefined : model.goal.verifying !== null ? 'verifying' : model.goal.status
+        }
         data-goal-title={model.goal?.title}
         data-running-terminal-count={model.runningJobs.length}
         data-running-workflow-count={model.runningWorkflows.length}

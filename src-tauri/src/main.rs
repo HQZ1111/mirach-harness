@@ -15,6 +15,11 @@ mod pi_bot;
 // rpi 插件状态只读投影（rpi-todo / rpi-plan-mode 的 AppendEntry 条目 → 旧
 // wire）：pi_session.rs 的 todo_state / mode_state 消费
 mod pi_plugin_state;
+
+// 目标完成校验器（ZCode goal verifier 的宿主对偶，2026-11-18 第五波续）：
+// 每轮 run 结束后用 rpi side-question 原语校验目标，结论落
+// `goal-verification` 条目（pi_goal_state 并入 active.verifications）
+mod pi_goal_verify;
 mod agui;
 mod pi_paths;
 

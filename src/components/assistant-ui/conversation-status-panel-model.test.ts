@@ -64,6 +64,7 @@ describe('parseGoalState（rpi-goal goal-state 条目）', () => {
       deadlineMs: 60000,
       iterations: [],
       verifications: [],
+      verifying: null,
     })
   })
 
@@ -114,7 +115,25 @@ describe('parseGoalState（rpi-goal goal-state 条目）', () => {
       deadlineMs: null,
       iterations: [],
       verifications: [],
+      verifying: null,
     })
+  })
+
+  it('verifying：在途校验解析（坏形状 → null + 错误可见）', () => {
+    const spy = silenceErrors()
+    const goal = parseGoalState({
+      active: { title: 'x', status: 'active', verifying: { iteration: 4, startedAt: 99 } },
+    })
+    expect(goal?.verifying).toEqual({ iteration: 4, startedAt: 99 })
+
+    expect(
+      parseGoalState({ active: { title: 'x', status: 'active', verifying: { iteration: 0 } } })
+        ?.verifying,
+    ).toBeNull()
+    expect(
+      parseGoalState({ active: { title: 'x', status: 'active', verifying: 'yes' } })?.verifying,
+    ).toBeNull()
+    expect(spy).toHaveBeenCalled()
   })
 
   it('iterations：逐行解析 + 单行损坏只丢该行（错误可见）', () => {
@@ -163,6 +182,7 @@ describe('buildConversationGoalIterationSummaries（上游逐条照抄）', () =
     deadlineMs: null,
     iterations: [],
     verifications: [],
+    verifying: null,
     ...over,
   })
 
@@ -192,7 +212,7 @@ describe('buildConversationGoalIterationSummaries（上游逐条照抄）', () =
           ] },
         ],
         verifications: [
-          { iteration: 1, outcome: 'pass', at: 1, nextAction: '继续发布 v2' },
+          { iteration: 1, outcome: 'pass', at: 1, reason: '全部完成', nextAction: '继续发布 v2' },
         ],
       }),
     )
@@ -201,6 +221,7 @@ describe('buildConversationGoalIterationSummaries（上游逐条照抄）', () =
     expect(first.completed).toBe(true)
     expect(first.completedCount).toBe(2)
     expect(first.verificationOutcome).toBe('pass')
+    expect(first.verificationReason).toBe('全部完成')
     const second = rows.find((row) => row.iteration === 2)!
     expect(second.title).toBe('继续发布 v2')
     expect(second.completed).toBe(false)
@@ -248,6 +269,7 @@ describe('goalElapsedSeconds（目标用时）', () => {
     deadlineMs: null,
     iterations: [],
     verifications: [],
+    verifying: null,
     ...over,
   })
 

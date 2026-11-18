@@ -96,6 +96,57 @@ pub(crate) fn on_big_stack<T: Send + 'static>(
         })
 }
 
+/// 「本轮结束后校验目标」的宿主入口（ZCode `verifyBeforeFirstContinue` 对偶）。
+///
+/// 非阻塞：把校验任务 spawn 到引擎运行时；真正的闸门（无目标 / 非 active /
+/// 后台作业在跑 / 已有校验在途 / 会话已切换）都在 `pi_goal_verify::run_verification`
+/// 里判定并静默跳过——这里只负责取桥、拼「会话仍是当前会话」的守卫、起任务。
+/// 桥缺失（无扩展）= 目标系统根本不在场，不报错也不重试。
+fn spawn_goal_verification(
+    shared: Arc<EngineShared>,
+    live: Arc<HarnessLive>,
+    verifier: Arc<crate::pi_goal_verify::GoalVerifier>,
+) {
+    let host = match live
+        .reload
+        .action_bridge
+        .lock()
+        .map_err(|_| "扩展桥锁中毒".to_string())
+        .and_then(|guard| {
+            guard
+                .clone()
+                .ok_or_else(|| "当前会话没有扩展桥".to_string())
+        }) {
+        Ok(bridge) => bridge.clone_host(),
+        Err(_) => return,
+    };
+    let harness = Arc::clone(&live.harness);
+    let is_current: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let shared = Arc::clone(&shared);
+        let live = Arc::clone(&live);
+        Arc::new(move || {
+            shared
+                .live
+                .lock()
+                .ok()
+                .and_then(|guard| {
+                    guard
+                        .as_ref()
+                        .map(|current| Arc::ptr_eq(current, &live))
+                })
+                .unwrap_or(false)
+        })
+    };
+    shared.rt.spawn(async move {
+        if let Err(error) =
+            crate::pi_goal_verify::run_verification(harness, host, verifier, is_current).await
+        {
+            // 基础设施失败可见（校验结论里的失败另有 `failed` 条目路径）。
+            eprintln!("[goal-verify] {error}");
+        }
+    });
+}
+
 // ── UiBridgeHandle（形状不变——agui.rs/main.rs 继续构造传递）────────────────
 // rpi 迁移后字段暂无读取方：事件转发（broadcast → ThreadBuffers）待接；
 // 审批/ask 已改走 `ReloadContext.ui_dialog` 邮箱（不经过这里），字段保留以
@@ -122,6 +173,15 @@ impl PiRuntime {
             .build()
             .expect("tokio runtime 构建失败");
         Self { rt }
+    }
+
+    /// 在引擎运行时上 spawn 一个后台任务（立即返回，不阻塞调用线程）。
+    /// 目标校验器用它把「本轮之后的校验」放到后台（不能挡住本轮返回）。
+    pub fn spawn<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.rt.spawn(future);
     }
 
     /// 在引擎运行时上驱动 future。
@@ -202,6 +262,8 @@ pub struct PiEngine {
     shared: Arc<EngineShared>,
     approvals: Arc<ApprovalRegistry>,
     asks: Arc<AskRegistry>,
+    /// 目标完成校验器（ZCode goal verifier 的宿主对偶；在途态 + 单槽门）。
+    verifier: Arc<crate::pi_goal_verify::GoalVerifier>,
 }
 
 // ── harness 装配（PiEngine 与后台 bot 泳道共用）───────────────────────────
@@ -417,6 +479,7 @@ impl PiEngine {
             }),
             approvals,
             asks,
+            verifier: crate::pi_goal_verify::GoalVerifier::new(),
         }
     }
 
@@ -506,16 +569,50 @@ impl PiEngine {
     /// 旧会话的挂起对话框一律 `cancel_all`：插件侧 poll 立刻看到 cancelled
     /// （不留到超时），宿主侧已取出的卡片随注册表清空（防鬼影卡片）。
     fn install_live(&self, live: HarnessLive) -> Result<(), String> {
+        let installed = Arc::new(live);
+        // 目标校验的触发源 = **本会话每一次 run 结束**（AgentEnd），不是
+        // 「宿主 prompt 返回」——目标的首个工作轮由 rpi-goal 经
+        // SendUserMessage 直接驱动引擎，不经过 PiEngine::prompt；只在
+        // prompt_inner 挂钩会漏掉这类 run（2026-11-18 实机踩中：goal 首轮
+        // 结束后无任何校验发生）。常驻订阅本会话事件流，每个会话一个。
+        self.watch_runs(Arc::clone(&installed));
         let previous = self
             .shared
             .live
             .lock()
             .map_err(|_| "锁中毒".to_string())?
-            .replace(Arc::new(live));
+            .replace(installed);
         self.retire_previous(previous)?;
         self.approvals.cleanup();
         self.asks.cleanup();
         Ok(())
+    }
+
+    /// 常驻 run 事件观察者：收到 `AgentEnd`（一次 run 收尾）就触发目标校验
+    /// （闸门/去重都在 `pi_goal_verify::run_verification` 里）。
+    fn watch_runs(&self, live: Arc<HarnessLive>) {
+        let mut rx = live.events.resubscribe();
+        let shared = Arc::clone(&self.shared);
+        let verifier = Arc::clone(&self.verifier);
+        let watcher_shared = Arc::clone(&shared);
+        let watcher_verifier = Arc::clone(&verifier);
+        shared.rt.spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(AgentEvent::AgentEnd { .. }) => {
+                        spawn_goal_verification(
+                            Arc::clone(&watcher_shared),
+                            Arc::clone(&live),
+                            Arc::clone(&watcher_verifier),
+                        );
+                    }
+                    Ok(_) => {}
+                    // 广播滞后只丢事件不丢订阅（下一次 AgentEnd 仍会触发）。
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
     }
 
     /// 把活动会话移入 retired 缓存（不 drop：见 EngineShared::retired 注释）。
@@ -555,19 +652,15 @@ impl PiEngine {
         })
     }
 
-    /// 当前分支上**最新**一条插件自定义条目的 `data`（rpi 插件经
-    /// `runtime_action(AppendEntry)` 落盘的状态快照，见 pi_plugin_state.rs）。
+    /// 当前分支上**全部**插件自定义条目的 `data`（按 seq 升序）。
     ///
-    /// 取法照插件自己的 `restore_state`/`restore_from_branch`：筛
-    /// `entry_type="custom"` + `customType=<type>`，取 **seq 最大**的那条
-    /// （不依赖存储层返回顺序/NewestFirst+limit 的游标细节）。
-    /// 无条目 = `Ok(None)`（诚实空态）；最新条目缺 data / 类型不符 = Err
-    /// （条目损坏，不静默回退到更旧快照——插件对坏快照同样 Blocked）。
-    fn latest_plugin_entry(
+    /// `latest_plugin_entry` 的实现底座；目标校验结论（`goal-verification`）
+    /// 需要全量列表（逐轮累积），故暴露为一个口。
+    fn plugin_entries(
         &self,
         live: &HarnessLive,
         custom_type: &str,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Vec<serde_json::Value>, String> {
         let entries = self.shared.rt.block_on(async {
             live.harness
                 .session()
@@ -582,20 +675,14 @@ impl PiEngine {
                 .await
                 .map_err(|e| format!("会话条目读取失败（{custom_type}）: {e}"))
         })?;
-        let mut latest: Option<(u64, serde_json::Value)> = None;
+        let mut rows: Vec<(u64, serde_json::Value)> = Vec::new();
         for entry in entries {
             match entry {
                 Entry::Custom(entry) if entry.custom_type == custom_type => {
                     let data = entry.data.ok_or_else(|| {
                         format!("{custom_type} 条目缺少 data（条目损坏：{}）", entry.base.id)
                     })?;
-                    if latest
-                        .as_ref()
-                        .map(|(seq, _)| entry.base.seq > *seq)
-                        .unwrap_or(true)
-                    {
-                        latest = Some((entry.base.seq, data));
-                    }
+                    rows.push((entry.base.seq, data));
                 }
                 Entry::Custom(entry) => {
                     return Err(format!(
@@ -611,7 +698,24 @@ impl PiEngine {
                 }
             }
         }
-        Ok(latest.map(|(_, data)| data))
+        rows.sort_by_key(|(seq, _)| *seq);
+        Ok(rows.into_iter().map(|(_, data)| data).collect())
+    }
+
+    /// 当前分支上**最新**一条插件自定义条目的 `data`（rpi 插件经
+    /// `runtime_action(AppendEntry)` 落盘的状态快照，见 pi_plugin_state.rs）。
+    ///
+    /// 取法照插件自己的 `restore_state`/`restore_from_branch`：筛
+    /// `entry_type="custom"` + `customType=<type>`，取 **seq 最大**的那条
+    /// （不依赖存储层返回顺序/NewestFirst+limit 的游标细节）。
+    /// 无条目 = `Ok(None)`（诚实空态）；最新条目缺 data / 类型不符 = Err
+    /// （条目损坏，不静默回退到更旧快照——插件对坏快照同样 Blocked）。
+    fn latest_plugin_entry(
+        &self,
+        live: &HarnessLive,
+        custom_type: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        Ok(self.plugin_entries(live, custom_type)?.pop())
     }
 
     // ── 会话生命周期 ────────────────────────────────────────────────────────
@@ -1619,10 +1723,12 @@ impl PiEngine {
     /// `goal-state` custom 条目（data = `{active, archived}`，见
     /// rpi-package/rpi-goal/src/lib.rs）。无条目 = Null（诚实空态）。
     ///
-    /// `active` 上再并入 rpi-goal-iterations 插件的 `goal-iterations` 条目
-    /// （`iterations[]`，ZCode 面板的迭代行数据面；按 goalTitle+goalStartedAt
-    /// 匹配当前目标——上一个目标的残留快照不并入）。插件未安装 = 无迭代
-    /// 字段（面板迭代行只因缺数据而不渲染，不造假）。
+    /// `active` 上再并入**宿主在 rpi-goal 之上记录的两份真值**
+    /// （`pi_goal_verify.rs` 每次 run 收尾写一条）：
+    /// - `goal-attempts` 迭代行（`iterations[]`：本轮 todo 快照）；
+    /// - `goal-verification` 校验结论（`verifications[]`）与在途态
+    ///   `verifying`（宿主进程内事实）。
+    /// 两者都按 goalTitle+goalStartedAt 匹配当前目标——上一个目标的残留不并。
     pub fn goal_state(&self) -> Result<serde_json::Value, String> {
         let Some(live) = self.live_opt()? else {
             return Ok(serde_json::Value::Null);
@@ -1633,11 +1739,35 @@ impl PiEngine {
         if wire.is_null() {
             return Ok(wire);
         }
-        let iterations = self.latest_plugin_entry(
+        let attempts = self.plugin_entries(
             &live,
             crate::pi_plugin_state::GOAL_ITERATIONS_ENTRY,
         )?;
-        crate::pi_plugin_state::merge_goal_iterations(&mut wire, iterations.as_ref())?;
+        let verifications =
+            self.plugin_entries(&live, crate::pi_goal_verify::VERIFICATION_ENTRY)?;
+        crate::pi_plugin_state::merge_goal_timeline(&mut wire, &attempts, &verifications)?;
+        if let Some(object) = wire
+            .get_mut("active")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let title = object
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let started_at = object
+                .get("startedAt")
+                .and_then(serde_json::Value::as_i64);
+            let verifying = self.verifier.verifying_wire_for(&title, started_at);
+            match verifying {
+                Some(flight) => {
+                    object.insert("verifying".to_string(), flight);
+                }
+                None => {
+                    object.remove("verifying");
+                }
+            }
+        }
         Ok(wire)
     }
 

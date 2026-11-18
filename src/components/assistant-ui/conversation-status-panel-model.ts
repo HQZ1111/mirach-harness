@@ -145,8 +145,15 @@ export interface StatusPanelGoalModel {
   deadlineMs: number | null
   /** 迭代行构建源（ZCode `GoalState.iterations`）：每轮一次快照。 */
   iterations: StatusPanelGoalIteration[]
-  /** 校验结论（ZCode `GoalState.verifications`）；rpi 无校验器 → 空。 */
+  /** 校验结论（ZCode `GoalState.verifications`；宿主校验器逐轮累积）。 */
   verifications: StatusPanelGoalVerification[]
+  /** 在途校验（宿主 `pi_goal_verify` 的真实进程内事实；无 = null）。 */
+  verifying: StatusPanelGoalVerifying | null
+}
+
+export interface StatusPanelGoalVerifying {
+  iteration: number
+  startedAt: number | null
 }
 
 export interface StatusPanelSessionPlanItem {
@@ -338,6 +345,31 @@ export function parseGoalState(raw: unknown): StatusPanelGoalModel | null {
     deadlineMs: numOrNull(goal.deadlineMs),
     iterations: parseGoalIterations(goal.iterations),
     verifications: parseGoalVerifications(goal.verifications),
+    verifying: parseGoalVerifying(goal.verifying),
+  }
+}
+
+/** 在途校验：`{iteration, startedAt}`；形状不对 → null + console.error
+ *  （不知道状态就不说"校验中"，不猜）。 */
+function parseGoalVerifying(value: unknown): StatusPanelGoalVerifying | null {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    console.error('[status-panel] goal verifying 非对象——忽略', value)
+    return null
+  }
+  const row = value as Record<string, unknown>
+  const iteration =
+    typeof row.iteration === 'number' && Number.isInteger(row.iteration) && row.iteration >= 1
+      ? row.iteration
+      : null
+  if (iteration === null) {
+    console.error('[status-panel] goal verifying 缺合法 iteration——忽略', row)
+    return null
+  }
+  return {
+    iteration,
+    startedAt:
+      typeof row.startedAt === 'number' && Number.isFinite(row.startedAt) ? row.startedAt : null,
   }
 }
 
@@ -371,6 +403,8 @@ export interface StatusPanelGoalIterationSummary {
   totalCount: number
   completed: boolean
   verificationOutcome: StatusPanelGoalVerificationOutcome | null
+  /** 结论的 reason（宿主行渲染 title 提示用；上游只有 data 属性）。 */
+  verificationReason: string | null
 }
 
 function visibleNextAction(value: string | undefined): string | null {
@@ -415,6 +449,7 @@ export function buildConversationGoalIterationSummaries(
     const items = todoByIteration.get(iteration) ?? []
     const completedCount = items.filter((item) => item.status === 'completed').length
     const previousVerification = verificationByIteration.get(iteration - 1)
+    const verification = verificationByIteration.get(iteration)
     rows.push({
       iteration,
       title:
@@ -423,7 +458,8 @@ export function buildConversationGoalIterationSummaries(
       completedCount,
       totalCount: items.length,
       completed: items.length > 0 && completedCount >= items.length,
-      verificationOutcome: verificationByIteration.get(iteration)?.outcome ?? null,
+      verificationOutcome: verification?.outcome ?? null,
+      verificationReason: verification?.reason ?? null,
     })
   }
 
