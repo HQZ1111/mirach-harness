@@ -284,7 +284,7 @@ async function ensureSessionByTitle(title: string, profile: string): Promise<str
       err?.code === 4007 ||
       err?.data?.code === 4007 ||
       err?.data?.reason === 'not_found' ||
-      /session not found|not found|不存在|\[4007\]/i.test(String(err?.message ?? e))
+      /session[_ ]?not[_ ]?found|not found|不存在|\[4007\]/i.test(String(err?.message ?? e))
     if (!missing) throw e
   }
   const created = await memberRequest<{ session_id?: string }>(profile, 'session.create', {

@@ -84,6 +84,18 @@
   建房 → unjoined=[] → 本机真模型回复 + 两名远端成员均回复
   （actor.connection_id=mock-install-1）→ 4 turn.settled → room.activity
   settled（silent_round）。
+- **peer lending 侧（本机被借出）已接（2026-11-19）**：`pi_peer.rs` 原生
+  HTTP 服务（127.0.0.1:9731，Bearer 配对令牌走 OS 凭据管理器
+  `mirach.peer/token`，首次启动生成）——对端 mirach 用 URL + 令牌接入后，
+  canonical driver 的 remote 路由经 `pi_peer_call` 走对端
+  `session.create/resume/prompt.submit/interrupt/compact`。`pi_gateway_call`
+  对已登记 peer 连接自动改走 peer HTTP 面（host.ts `remoteInvoke` 自动探测
+  并记住）；连接页「本机 Peer 服务」块展示 URL + 令牌（复制给对端）。
+  实机（mock peer + 真 canonical driver）：1 本机 + 1 远端 mirach 成员建房 →
+  本机真模型回复 + 远端 peer bot 经 peer HTTP 回复 → 双 turn.settled →
+  settled。**限制（如实）**：hermes 网关 wire 不兼容（`groups.peer.invite`
+  WS 方法 + `/v1/room-members/*` HTTP 路由是 hermes 网关 HTTP 服务端，
+  宿主没有）；对端必须也是 mirach。
 - **per-bot MCP 已接**：bots 对话框 MCP 页 = 全局 `mcp.json` 服务器多选；
   启动 `pi_bot_mcp_config` 只过滤所选服务器生成
   `~/.rpi/agent/bot-mcp/<bot>.json`，`configPath` 注入 system prompt

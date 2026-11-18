@@ -68,6 +68,8 @@ mod pi_relay;
 // 跨网关传输（hermes Desktop 的 gateway 客户端对偶：JSON-RPC 2.0 over WS
 // /api/ws；remote/cloud/ssh 连接经它拉名册/发 RPC/收事件）。
 mod pi_gateway;
+// 跨网关 hosted-room peer 面（本机 bot 借给对端 canonical 房间；原生 HTTP 面）。
+mod pi_peer;
 // 图像生成（hermes image.generate 的宿主对偶：OpenAI 兼容 images 端点，
 // provider/baseUrl/key 走 settings.json + models.json + auth.json）。
 mod pi_image;
@@ -1602,6 +1604,11 @@ fn main() {
             pi_engine_bridges::install(app.handle());
             // 本机屏幕 RFB 服务（随机端口；前端经 pi_display_ws_port 读）。
             pi_display::start_server();
+            // 跨网关 peer 服务（hosted-room lending）：固定回环端口 + Bearer 配对令牌。
+            // 起不来只影响「借出本机 bot」这一面，如实打日志、不阻塞主壳。
+            if let Err(e) = pi_peer::ensure_server(app.handle().clone()) {
+                eprintln!("[peer] peer 服务启动失败（借出不可用）: {e}");
+            }
             // `gateway.ready` 的生产者（本地网关恒就绪）：canonical workspace 在
             // 该事件上重拉 rooms 状态（hermes 网关 accept 后必发同款帧）。
             let _ = app
@@ -1933,6 +1940,11 @@ fn main() {
             pi_gateway::pi_gateway_status,
             pi_gateway::pi_gateway_call,
             pi_image::pi_image_generate,
+            pi_peer::pi_peer_info,
+            pi_peer::pi_peer_publish_bots,
+            pi_peer::pi_peer_probe,
+            pi_peer::pi_peer_connect,
+            pi_peer::pi_peer_call,
             pi_pet::pi_pet_gallery,
             pi_pet::pi_pet_thumb,
             pi_skills_catalog::pi_skills_search,

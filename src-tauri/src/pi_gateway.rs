@@ -337,6 +337,11 @@ pub fn status() -> Value {
             conn.status.lock().expect("gateway status poisoned").clone(),
         );
     }
+    drop(guard);
+    // mirach peer 连接（原生 HTTP 面）同样报 open，让前端连接探活不再反复重拨 WS。
+    for (id, row) in crate::pi_peer::status_map() {
+        out.insert(id, row);
+    }
     json!(out)
 }
 
@@ -347,6 +352,11 @@ pub async fn call(
     params: Value,
     timeout_ms: Option<u64>,
 ) -> Result<Value, String> {
+    // 已登记为 mirach peer 的连接走原生 peer 面（session.create / resume /
+    // prompt.submit / interrupt / compress）；其余照旧走 WS JSON-RPC。
+    if let Some(result) = crate::pi_peer::try_peer_call(connection_id, method, &params).await {
+        return result;
+    }
     let (tx, pending, status) = {
         let guard = registry().lock().expect("gateway registry poisoned");
         let Some(conn) = guard.get(connection_id) else {

@@ -143,14 +143,47 @@ interface RemoteRoster {
   profiles: RemoteRosterProfile[]
   /** 对端网关的 `/api/status` install_id（peer 成员的 pinned 身份）。 */
   installId?: string
+  /** 连接 URL（hermes 网关 WS / mirach peer HTTP 共用这个入口）。 */
+  url?: string
   fetchedAt: number
 }
 
 const remoteRosterCache = new Map<string, RemoteRoster>()
 const REMOTE_ROSTER_TTL_MS = 30_000
+/** 已确认走 mirach peer 原生 HTTP 面的连接（connectionId → url）。 */
+const peerTransports = new Map<string, string>()
 
 async function tauriCore() {
   return import('@tauri-apps/api/core')
+}
+
+/** 远端调用：先按 hermes 网关 WS 发；失败且知道 url 时探一次 peer 面并改用
+ *  peer HTTP（对端若是 mirach，profiles.list 在 WS 侧永远不是 hermes 帧）。
+ *  两边都失败时抛原始网关错误，信息不丢（规矩 12）。 */
+async function remoteInvoke<T>(
+  connectionId: string,
+  url: null | string | undefined,
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<T> {
+  const { invoke } = await tauriCore()
+  const peerUrl = peerTransports.get(connectionId)
+  if (peerUrl) {
+    return invoke<T>('pi_peer_call', { connectionId, method, params, timeoutMs })
+  }
+  try {
+    return await invoke<T>('pi_gateway_call', { connectionId, method, params, timeoutMs })
+  } catch (error) {
+    if (!url) throw error
+    try {
+      await invoke('pi_peer_connect', { connectionId, url })
+    } catch {
+      throw error
+    }
+    peerTransports.set(connectionId, url)
+    return invoke<T>('pi_peer_call', { connectionId, method, params, timeoutMs })
+  }
 }
 
 async function remoteConnections(): Promise<
@@ -197,26 +230,30 @@ async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
       if (statusMap?.[connection.id]?.state !== 'open') {
         // token: null = 由 Rust 侧取该连接在 OS 凭据管理器里存的 token
         // （连接页可录入/清除；token 永不回显到前端）。
-        await invoke('pi_gateway_connect', {
-          connectionId: connection.id,
-          url: connection.url,
-          token: null,
-        })
-        // gateway.ready 之前 profiles.list 会被拒；等就绪（≤10s）。
-        for (let i = 0; i < 50; i += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 200))
-          statusMap = await invoke<Record<string, { state?: string }>>('pi_gateway_status')
-          if (statusMap?.[connection.id]?.state === 'open') break
+        try {
+          await invoke('pi_gateway_connect', {
+            connectionId: connection.id,
+            url: connection.url,
+            token: null,
+          })
+          // gateway.ready 之前 profiles.list 会被拒；等就绪（≤10s）。
+          for (let i = 0; i < 50; i += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 200))
+            statusMap = await invoke<Record<string, { state?: string }>>('pi_gateway_status')
+            if (statusMap?.[connection.id]?.state === 'open') break
+          }
+        } catch (e) {
+          // 对端可能不是 hermes 网关而是 mirach peer：交给 remoteInvoke
+          // 探 peer 面（探不到时抛原始网关错误）。
+          console.error(`[host] 远程网关 ${connection.id} WS 连接失败，尝试 peer 面`, e)
         }
       }
-      const res = await invoke<{ profiles?: Array<Record<string, unknown>>; install_id?: unknown }>(
-        'pi_gateway_call',
-        {
-          connectionId: connection.id,
-          method: 'profiles.list',
-          params: { include_sessions: false },
-          timeoutMs: 15_000,
-        },
+      const res = await remoteInvoke<{ profiles?: Array<Record<string, unknown>>; install_id?: unknown }>(
+        connection.id,
+        connection.url,
+        'profiles.list',
+        { include_sessions: false },
+        15_000,
       )
       const profiles: RemoteRosterProfile[] = []
       for (const profile of res?.profiles ?? []) {
@@ -239,6 +276,7 @@ async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
         kind: 'remote',
         profiles,
         ...(typeof res?.install_id === 'string' && res.install_id ? { installId: res.install_id } : {}),
+        ...(connection.url ? { url: connection.url } : {}),
         fetchedAt: Date.now(),
       }
       remoteRosterCache.set(connection.id, roster)
@@ -253,6 +291,22 @@ async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
     if (!live.has(id)) remoteRosterCache.delete(id)
   }
   return out
+}
+
+/** 把本机名册发布给 peer 服务（对端拉 profiles.list 时看到的就是它）。 */
+async function publishPeerBots(agents: ReadonlyArray<HostRosterAgent>): Promise<void> {
+  try {
+    const { invoke } = await tauriCore()
+    await invoke('pi_peer_publish_bots', {
+      bots: agents.map((agent) => ({
+        name: agent.profile,
+        title: agent.title ?? '',
+        description: '',
+      })),
+    })
+  } catch (e) {
+    console.error('[host] peer 名册发布失败（对端将看不到本机 bot）', e)
+  }
 }
 
 export const host = {
@@ -373,6 +427,8 @@ export const host = {
       // 源健康标注（`annotateBotSource`）；写成 `{id}` 会让索引恒空，
       // 所有 sourceScoped 行被标成"网关已移除"（实测：机器人群聊里
       // 2 个中 0 个可用 + 行尾红字）。
+      // 本机名册发布给 peer 面（对端 canonical 房间拉 profiles.list 才能看到它们）。
+      void publishPeerBots(agents)
       return {
         sources: [
           { connectionId: 'local', kind: 'local' as const, label: '本机', reachable: true },
@@ -584,7 +640,6 @@ export const host = {
     const merged = profile && params.profile === undefined ? { ...params, profile } : params
     const connectionId = typeof r?.connectionId === 'string' ? r.connectionId : ''
     if (r?.mode === 'remote' && connectionId && connectionId !== 'local') {
-      const { invoke } = await import('@tauri-apps/api/core')
       const budget =
         typeof timeoutMs === 'number' && timeoutMs > 0
           ? timeoutMs
@@ -593,12 +648,14 @@ export const host = {
             : method === 'bot_relay.deliver'
               ? 1_500_000
               : 30_000
-      return invoke<T>('pi_gateway_call', {
+      // hermes 网关走 WS；mirach peer 走原生 HTTP（remoteInvoke 自动探测并记住）。
+      return remoteInvoke<T>(
         connectionId,
+        remoteRosterCache.get(connectionId)?.url,
         method,
-        params: merged,
-        timeoutMs: budget,
-      })
+        merged,
+        budget,
+      )
     }
     const { dispatchHostRequest } = await import('./host-rpc')
     return dispatchHostRequest<T>(method, merged)

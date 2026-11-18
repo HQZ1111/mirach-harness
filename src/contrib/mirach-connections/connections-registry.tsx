@@ -122,13 +122,28 @@ export const ConnectionsRegistrySection: FC = () => {
   const [testResult, setTestResult] = useState<Record<string, { ok?: boolean; stub?: boolean; error?: string }>>({})
   const [removeTarget, setRemoveTarget] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [peer, setPeer] = useState<null | { url: string; port: number; token: string }>(null)
+  const [copied, setCopied] = useState<null | string>(null)
   const refresh = useBotsStore((s) => s.load) // 机器人页监听同源刷新（松耦合：store 触碰）
 
   useEffect(() => {
     void invoke<ConnectionRegistry>('pi_connections_list')
       .then(setRegistry)
       .catch((e) => setError(String(e).slice(0, 200)))
+    void invoke<{ url: string; port: number; token: string }>('pi_peer_info')
+      .then(setPeer)
+      .catch((e) => console.error('[connections] peer 服务信息读取失败', e))
   }, [])
+
+  const copy = (label: string, value: string) => {
+    void navigator.clipboard
+      ?.writeText(value)
+      .then(() => {
+        setCopied(label)
+        setTimeout(() => setCopied(null), 1500)
+      })
+      .catch((e) => console.error('[connections] 复制失败', e))
+  }
 
   const openBots = useStore(botsPanelStore, (s) => s.open)
 
@@ -517,6 +532,49 @@ export const ConnectionsRegistrySection: FC = () => {
             >
               {editor.id ? '保存' : '添加'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 本机 Peer 服务（跨网关借出面，2026-11-18）：对端 mirach 用
+          URL + 令牌接入后，可把本机 bot 拉进它的 canonical 房间。 */}
+      {peer && (
+        <div className="border-border/70 rounded-xl border px-3 py-2" data-slot="peer-service">
+          <div className="flex items-center justify-between">
+            <h3 className="text-foreground text-sm font-semibold">本机 Peer 服务</h3>
+            <span className="text-muted-foreground/70 text-[0.625rem]">跨网关借出</span>
+          </div>
+          <div className="text-muted-foreground mt-1 text-xs">
+            对端把 URL 和令牌填进它自己的连接配置后，就能把本机机器人拉进房间。
+          </div>
+          <div className="mt-1.5 flex items-center gap-2">
+            <span className="text-muted-foreground text-xs">URL</span>
+            <code className="bg-muted/60 min-w-0 flex-1 truncate rounded px-1.5 py-0.5 text-[0.6875rem]">
+              {peer.url}
+            </code>
+            <button
+              className="set-btn shrink-0"
+              onClick={() => copy('url', peer.url)}
+              type="button"
+            >
+              {copied === 'url' ? '已复制' : '复制'}
+            </button>
+          </div>
+          <div className="mt-1 flex items-center gap-2">
+            <span className="text-muted-foreground text-xs">令牌</span>
+            <code className="bg-muted/60 min-w-0 flex-1 truncate rounded px-1.5 py-0.5 text-[0.6875rem]">
+              {'•'.repeat(12)}…{peer.token.slice(-6)}
+            </code>
+            <button
+              className="set-btn shrink-0"
+              onClick={() => copy('token', peer.token)}
+              type="button"
+            >
+              {copied === 'token' ? '已复制' : '复制'}
+            </button>
+          </div>
+          <div className="text-muted-foreground/60 mt-1 text-[0.625rem]">
+            令牌等同本机网关访问权，只交给受信任的对端。
           </div>
         </div>
       )}
