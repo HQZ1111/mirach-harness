@@ -30,6 +30,13 @@
 //!   ∈ running / completed / failed / interrupted / cancelled。宿主原来以
 //!   "缺 wire 字段"为由 Err；2026-11-18 起改为投影这组真字段（占位字段不再
 //!   要求——面板行只显示命令行/标签 + 用时），插件未安装时条目恒空。
+//! - `mirach-plugins/rpi-goal-iterations`（宿主 vendored，2026-11-18）：
+//!   `ITERATIONS_ENTRY = "goal-iterations"`，每次父进程 TurnEnd（goal 为
+//!   active 时）AppendEntry 一条全量快照
+//!   `{goalTitle, goalStartedAt, updatedAt, iterations:[{iteration, items:
+//!   [{id,content,status}], updatedAt}]}`；`status` ∈ pending / inProgress /
+//!   completed（ZCode plan-item 词表）。宿主 `goal_state` 读入后按
+//!   goalTitle+goalStartedAt 匹配并入 active（`merge_goal_iterations`）。
 
 use serde_json::{json, Value};
 
@@ -206,6 +213,62 @@ pub fn background_tasks_wire(data: Option<&Value>) -> Result<Value, String> {
     Ok(Value::Array(rows))
 }
 
+/// `rpi-goal-iterations` 的会话条目 customType（宿主 vendored 插件，见
+/// `G:/mirach-plugins/rpi-goal-iterations`）。
+pub const GOAL_ITERATIONS_ENTRY: &str = "goal-iterations";
+
+/// 把 `rpi-goal-iterations` 的条目并入 `goal-state` wire（面板「目标」分区的
+/// ZCode 迭代行数据面）。
+///
+/// 规则（与插件侧写入契约一一对应，见插件模块头）：
+/// - goal-state 无 active / 非对象 = 无可并（Iterations 是目标的从属数据）；
+/// - 条目形状损坏（缺 goalTitle / goalStartedAt / iterations）→ Err（规矩 12：
+///   坏条目可见，不静默丢行）；
+/// - `goalTitle` + `goalStartedAt` 与 active 不一致 = 上一个目标的残留条目，
+///   不并入（面板不显示过期目标的迭代）；
+/// - 一致 → `active.iterations = [...]`（cameraCase 原样透出：`iteration` /
+///   `items[{id,content,status}]` / `updatedAt`）。
+pub fn merge_goal_iterations(
+    goal_state: &mut Value,
+    iterations: Option<&Value>,
+) -> Result<(), String> {
+    let Some(iterations) = iterations else {
+        return Ok(());
+    };
+    let Some(active) = goal_state.get_mut("active") else {
+        return Ok(());
+    };
+    if !active.is_object() {
+        return Ok(());
+    }
+    let entry = iterations
+        .as_object()
+        .ok_or_else(|| "goal-iterations 条目不是对象".to_string())?;
+    let goal_title = entry
+        .get("goalTitle")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "goal-iterations 条目缺少 goalTitle".to_string())?;
+    let goal_started_at = entry
+        .get("goalStartedAt")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "goal-iterations 条目缺少 goalStartedAt".to_string())?;
+    let rows = entry
+        .get("iterations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "goal-iterations 条目缺少 iterations 数组".to_string())?;
+    let active_title = active.get("title").and_then(Value::as_str).unwrap_or("");
+    let active_started = active.get("startedAt").and_then(Value::as_i64);
+    if active_title != goal_title || active_started != Some(goal_started_at) {
+        // 上一个目标的残留快照——不并入（语义：迭代属于当前活跃目标）。
+        return Ok(());
+    }
+    active
+        .as_object_mut()
+        .expect("checked above")
+        .insert("iterations".to_string(), Value::Array(rows.clone()));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +423,76 @@ mod tests {
         })))
         .is_err());
         assert!(background_tasks_wire(Some(&Value::Null)).is_err());
+    }
+
+    fn goal_state(title: &str, started_at: i64) -> Value {
+        json!({
+            "active": { "title": title, "status": "active", "startedAt": started_at },
+            "archived": []
+        })
+    }
+
+    fn iterations_entry(title: &str, started_at: i64) -> Value {
+        json!({
+            "goalTitle": title,
+            "goalStartedAt": started_at,
+            "updatedAt": 9,
+            "iterations": [
+                { "iteration": 1, "items": [ { "id": "t1", "content": "读仓库", "status": "completed" } ], "updatedAt": 8 },
+                { "iteration": 2, "items": [], "updatedAt": 9 },
+            ]
+        })
+    }
+
+    #[test]
+    fn merge_goal_iterations_attaches_matching_snapshot() {
+        let mut state = goal_state("修面板", 1_000);
+        merge_goal_iterations(&mut state, Some(&iterations_entry("修面板", 1_000))).expect("merge");
+        let rows = state["active"]["iterations"].as_array().expect("iterations");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["iteration"], 1);
+        assert_eq!(rows[0]["items"][0]["status"], "completed");
+        assert_eq!(rows[1]["items"].as_array().expect("items").len(), 0);
+    }
+
+    #[test]
+    fn merge_goal_iterations_skips_stale_goal_snapshots() {
+        // 上一个目标的残留条目：标题/起始时间对不上 → 不并入（不显示过期迭代）。
+        let mut state = goal_state("新目标", 2_000);
+        merge_goal_iterations(&mut state, Some(&iterations_entry("旧目标", 1_000))).expect("merge");
+        assert!(state["active"].get("iterations").is_none());
+        // 同标题但重新开始（startedAt 变了）同样不并入。
+        let mut state = goal_state("同名", 3_000);
+        merge_goal_iterations(&mut state, Some(&iterations_entry("同名", 2_000))).expect("merge");
+        assert!(state["active"].get("iterations").is_none());
+    }
+
+    #[test]
+    fn merge_goal_iterations_is_noop_without_goal_or_entry() {
+        let mut null_state = Value::Null;
+        merge_goal_iterations(&mut null_state, Some(&iterations_entry("t", 1))).expect("noop");
+        assert!(null_state.is_null());
+
+        let mut archived = json!({ "active": Value::Null, "archived": [] });
+        merge_goal_iterations(&mut archived, Some(&iterations_entry("t", 1))).expect("noop");
+        assert!(archived["active"].is_null());
+
+        let mut state = goal_state("t", 1);
+        merge_goal_iterations(&mut state, None).expect("noop");
+        assert!(state["active"].get("iterations").is_none());
+    }
+
+    #[test]
+    fn merge_goal_iterations_rejects_corrupt_entry() {
+        let mut state = goal_state("t", 1);
+        assert!(merge_goal_iterations(&mut state, Some(&json!(42))).is_err());
+        assert!(merge_goal_iterations(&mut state, Some(&json!({ "goalTitle": "t" }))).is_err());
+        assert!(
+            merge_goal_iterations(
+                &mut state,
+                Some(&json!({ "goalTitle": "t", "goalStartedAt": 1 }))
+            )
+            .is_err()
+        );
     }
 }

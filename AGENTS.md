@@ -2593,8 +2593,11 @@ agent max-h-48；plan max-h-80）；分区头 = 标题 + 悬停箭头 + trailing
   （`status-agent-rows.ts`：timing.completedAt 有无分运行/已结束两段，结束段
   按完成时间倒序）；rpi 子代理运行态只在插件进程内存，`pi_hub_roster` 如实
   Err，工具调用是唯一宿主真值；
-- **workflow 分区不渲染**：rpi 无 phase/lane/causality 概念（engine-gaps G3），
-  不造假 UI；其余分区有真值时照常。
+- workflow = 宿主从 rpi-orchestrator 的 `plan` / `dispatch` 工具调用派生
+  （`status-workflow-runs.ts`，2026-11-18 第五波；旧的"不渲染"口径作废，
+  见下节）；
+- 目标迭代 = rpi-goal-iterations 插件的 `goal-iterations` 逐轮快照并入
+  `active.iterations`（2026-11-18 第五波，见下节）。
 
 **详情面落点 = 面板栏标签页**（宿主没有 ZCode 的 workspace side tab）：
 `status-pane-openers.ts` 投递，`dockview-shell.tsx` 注册 ——
@@ -2630,8 +2633,8 @@ active`、秒针在走；UI 暂停/恢复点击真翻转；`/goal stop` 归档�
 | 缺口 | 上游插件面 | 处置 |
 |---|---|---|
 | 终端 / 后台作业 | `rpi-background-tasks` **有源码**（`background` / `jobs` 工具 + `background-tasks` 快照；无 release tag、本机未装） | **就地补齐**：vendored 到 `G:\mirach-plugins\rpi-background-tasks`，`cargo build --release` 后装到 `~/.rpi/agent/extensions/rpi_background_tasks.dll`；宿主 `pi_job_list` 改读最新 `background-tasks` 条目（`data.jobs`），`pi_job_cancel` 仍如实 Err（kill 由模型经 `jobs` 工具发出） |
-| 目标迭代/验证徽章 | 无（`rpi-goal` 只有 active/paused/complete + archived；runtime.rs 全文无 verify/iteration 概念） | 无可移植面，面板不渲染（沿用现行映射） |
-| workflow 分区 | 无（`rpi-orchestrator` 的 DAG 只在本进程内存，且由模型工具驱动，无会话投影面） | 不渲染 |
+| 目标迭代/验证徽章 | 无（`rpi-goal` 只有 active/paused/complete + archived；runtime.rs 全文无 verify/iteration 概念） | **第五波已补**：新 vendored 监听插件 `rpi-goal-iterations` 产逐轮快照（见下节）；verifying 仍无引擎校验器，UI 就绪 |
+| workflow 分区 | 无（`rpi-orchestrator` 的 DAG 只在本进程内存，且由模型工具驱动，无会话投影面） | **第五波已补**：宿主从 plan/dispatch 工具调用派生 `details.nodes`（见下节） |
 | 子代理名册/Stop/子会话 | 无（`delegate_task` 的子运行是 `ChildAgents`，`pub(crate)` 进程内注册表，无 AppendEntry/SetStatus 面） | 沿用「工具调用派生」方案 |
 
 **插件源码的本地适配（必须记住）**：上游 `resolve_shell` 只探
@@ -2726,9 +2729,48 @@ pt 15px、transform `matrix(1,0,0,1,-157.5,0)`。
   `resource_fixture` 2 条构建失败在干净 `upstream/main`（v0.25.0）上同样
   复现（环境性，与补丁无关）。
 
-**仍无数据面（不造假 UI）**：workflow 分区、目标 verifying/迭代徽章——
-rpi 无对应概念/字段，ZCode 的数据来自它自己的后端；若要补齐需再设计引擎
-概念（独立一轮）。
+### 第五波：目标迭代行 + 工作流分区（2026-11-18，用户："缺点补啊，不是说了吗，可以从zcode复制"）
+
+**目标迭代行（插件补数据面）**：新增宿主 vendored 插件
+`G:\mirach-plugins\rpi-goal-iterations`（`rpi_goal_iterations.dll` 装到
+`~/.rpi/agent/extensions`）：监听 `TurnEnd`，goal 为 active 时把当前
+`todo-state` 快照写进自己的 `goal-iterations` 自定义条目（`{goalTitle,
+goalStartedAt, updatedAt, iterations:[{iteration, items:[{id,content,status}],
+updatedAt}]}`）；按 `(title,startedAt)` 分代、自数 TurnEnd（不依赖 rpi-goal
+`turnsUsed` 的写入顺序——两个插件同收 TurnEnd，handler 顺序未定义）、上限
+50 轮、重启从自己的最新条目恢复、subagent 跳过。**不改官方 rpi-goal DLL**：
+替换会与 native-packages 注册表的哈希/版本记录冲突；监听式插件只读
+`goal-state`/`todo-state` 并追加自己的条目，不抢状态所有权。
+宿主 `pi_goal_state` 读入后调 `merge_goal_iterations`（`pi_plugin_state.rs`，
+4 单测）：标题+起始时间匹配才并入，上一个目标的残留不并，坏条目 Err。
+
+前端：`StatusPanelGoalModel` 扩成 ZCode 六态（插件 complete → `verified`；
+verifying/notSatisfied/failed 接受但 rpi 无校验器、不会产出）；新增
+`buildConversationGoalIterationSummaries`（上游 `conversationGoalSummaryModel.ts`
+逐条照抄：首轮标题 = 目标、后续轮 = 上轮 nextAction、完成轮数字圆环、N/M
+计数、`data-goal-*` 断言属性；**requiredIterationCount 不再 +1**——上游的
+"续跑开行"在宿主会多出一行空迭代，宿主最后一轮快照就是当前轮）。
+**verifying 无生产者是引擎事实**（rpi 无 goal-verifier 子系统）；UI 就绪，
+真数据到场即渲染。实机：`/goal start` → 6 轮真 goal（4 轮带 todo 快照
+0/1、0/2）→ `pi_goal_state.active.iterations[]` 6 行 → 面板 6 行、计数与
+属性全对。
+
+**工作流分区（宿主派生）**：`status-workflow-runs.ts` 从本线程 `plan` /
+`dispatch` 工具调用派生（成功结果 `details.nodes` = 引擎
+`Graph::to_details` 真形状：id/task/deps/status ∈ pending/running/done/
+failed/skipped）。一次成功 `plan(action=set)` = 一条 run；dispatch 波更新
+同图；pending/running 进分区，全 settled 进「已结束的工作流」页脚计数；
+图快照缺席 → 步数字段缺席（不造 0/0）；被新 plan 替换且未收敛的旧图不伪装
+终态（console.warn 后丢弃，引擎侧它已不存在）。UI 照抄上游
+`WorkflowStatusSection` / `WorkflowRunRow`（灯 + 步数词 + 时长；Stop 不渲染
+——orchestrator 没有取消面）。行/页脚 → 面板栏 `workflow-run:<runId>` /
+`workflow-directory` 标签（新 `workflow-run-detail-pane.tsx`，节点图实时
+派生）。**坑**：分区开合必须非受控（`defaultOpen={runs.length>0}` +
+`key={activeId}`）；接成受控 state 默认 false 时，运行中的 run 只出现在
+标题、行永远不可见（实机踩中）。实机：真模型 `plan(set)` 两节点 → 面板
+「工作流 1 个运行中」+ 行（首节点任务、pending、时长）；真 `dispatch`
+结果含 `details.nodes`（failed+skipped）——与派生规则一致（errored → 目录）。
+单测：`status-workflow-runs.test.ts` 9 条 + 面板模型/goal 迭代 33 条。
 
 ## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
 

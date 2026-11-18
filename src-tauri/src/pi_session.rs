@@ -1618,13 +1618,27 @@ impl PiEngine {
     /// 目标态（活动面板「目标」分区）：rpi-goal 把状态存成当前分支的
     /// `goal-state` custom 条目（data = `{active, archived}`，见
     /// rpi-package/rpi-goal/src/lib.rs）。无条目 = Null（诚实空态）。
+    ///
+    /// `active` 上再并入 rpi-goal-iterations 插件的 `goal-iterations` 条目
+    /// （`iterations[]`，ZCode 面板的迭代行数据面；按 goalTitle+goalStartedAt
+    /// 匹配当前目标——上一个目标的残留快照不并入）。插件未安装 = 无迭代
+    /// 字段（面板迭代行只因缺数据而不渲染，不造假）。
     pub fn goal_state(&self) -> Result<serde_json::Value, String> {
         let Some(live) = self.live_opt()? else {
             return Ok(serde_json::Value::Null);
         };
-        Ok(self
+        let mut wire = self
             .latest_plugin_entry(&live, "goal-state")?
-            .unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null);
+        if wire.is_null() {
+            return Ok(wire);
+        }
+        let iterations = self.latest_plugin_entry(
+            &live,
+            crate::pi_plugin_state::GOAL_ITERATIONS_ENTRY,
+        )?;
+        crate::pi_plugin_state::merge_goal_iterations(&mut wire, iterations.as_ref())?;
+        Ok(wire)
     }
 
     /// 会话计划目录（活动面板「会话计划」分区）：rpi-plan-mode 每次

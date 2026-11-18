@@ -14,8 +14,12 @@
  *   （`getPlanDirectoryTitle` 逐字照抄）；
  * - goal 模型：真源 = rpi-goal `goal-state` 条目
  *   `{active:{title,status,notes,startedAt,updatedAt,turnsUsed,maxTurns,
- *   deadlineMs}, archived}`；未知 status 一律 console.error + 整行丢弃
- *   （不猜成 active——规矩 12）；
+ *   deadlineMs}, archived}` + rpi-goal-iterations 插件的 `goal-iterations`
+ *   逐轮快照（宿主 `pi_goal_state` 已按 goalTitle+goalStartedAt 并进 active，
+ *   2026-11-18）；插件原生 status active/paused/complete 映射为 ZCode 六态
+ *   （complete → verified），未知 status 一律 console.error + 整行丢弃
+ *   （不猜成 active——规矩 12）；迭代行构建 `buildConversationGoalIterationSummaries`
+ *   逐条照抄上游 `conversationGoalSummaryModel.ts`；
  * - 运行项：jobs（终端，数据面 = rpi-background-tasks 插件的 `background-tasks`
  *   会话快照，宿主 `pi_job_list` 只读投影）与智能体（宿主从工具调用派生，
  *   见面板组件）。
@@ -24,6 +28,7 @@
  * 一行有没有时长、能不能停。
  */
 import type { PlanEntryRow } from './plan-entries-store'
+import type { StatusPanelWorkflowRun } from './status-workflow-runs'
 
 /** 宿主侧输入（全部来自宿主 store / IPC 投影）。 */
 export interface StatusPanelInput {
@@ -50,6 +55,10 @@ export interface StatusPanelInput {
   runningAgents: readonly StatusPanelAgentRow[]
   /** 已结束子代理计数（同派生面；目录入口的行数）。 */
   endedAgentCount: number
+  /** 运行中的工作流实例（宿主从 plan / dispatch 工具调用派生）。 */
+  runningWorkflows: readonly StatusPanelWorkflowRun[]
+  /** 已结束工作流实例计数（目录入口的行数）。 */
+  endedWorkflowCount: number
 }
 
 export interface StatusPanelJobInput {
@@ -88,16 +97,56 @@ export interface StatusPanelGitModel {
   removed: number
 }
 
-/** rpi-goal 的 Goal（`goal-state` 条目 data.active）。 */
+/** rpi-goal 的 Goal（`goal-state` 条目 data.active）+ `goal-iterations` 的
+ *  迭代并集（ZCode `GoalState` 的宿主对偶）。
+ *
+ *  status 词表 = ZCode 六态：插件原生只发 active / paused / complete
+ *  （complete 映射为 verified——ZCode 的"已验证完成"）；verifying /
+ *  notSatisfied / failed 为引擎校验器面，rpi 无此子系统，真实数据里不会
+ *  出现（解析层接受，UI 按到场渲染，不造假）。 */
+export type StatusPanelGoalStatus =
+  | 'active'
+  | 'paused'
+  | 'verifying'
+  | 'verified'
+  | 'notSatisfied'
+  | 'failed'
+
+export interface StatusPanelGoalItem {
+  id: string
+  content: string
+  status: 'pending' | 'inProgress' | 'completed'
+}
+
+export interface StatusPanelGoalIteration {
+  iteration: number
+  items: StatusPanelGoalItem[]
+  updatedAt: number | null
+}
+
+export type StatusPanelGoalVerificationOutcome = 'pass' | 'notSatisfied' | 'failed'
+
+export interface StatusPanelGoalVerification {
+  iteration: number
+  outcome: StatusPanelGoalVerificationOutcome
+  at: number | null
+  reason?: string
+  nextAction?: string
+}
+
 export interface StatusPanelGoalModel {
   title: string
-  status: 'active' | 'paused' | 'complete'
+  status: StatusPanelGoalStatus
   notes: string
   startedAt: number | null
   updatedAt: number | null
   turnsUsed: number
   maxTurns: number | null
   deadlineMs: number | null
+  /** 迭代行构建源（ZCode `GoalState.iterations`）：每轮一次快照。 */
+  iterations: StatusPanelGoalIteration[]
+  /** 校验结论（ZCode `GoalState.verifications`）；rpi 无校验器 → 空。 */
+  verifications: StatusPanelGoalVerification[]
 }
 
 export interface StatusPanelSessionPlanItem {
@@ -137,17 +186,118 @@ export interface StatusPanelModel {
   runningJobs: StatusPanelJobRow[]
   runningAgents: StatusPanelAgentRow[]
   endedAgentCount: number
+  runningWorkflows: StatusPanelWorkflowRun[]
+  endedWorkflowCount: number
   hasContent: boolean
 }
 
 // ── goal ────────────────────────────────────────────────────────────
 
-const GOAL_STATUSES = new Set(['active', 'paused', 'complete'])
+/** 插件原生三态 → ZCode 六态（complete = 上游 verified 的宿主对偶）。 */
+const GOAL_STATUS_MAP: Record<string, StatusPanelGoalStatus> = {
+  active: 'active',
+  paused: 'paused',
+  complete: 'verified',
+  // ZCode 校验器面：rpi 无此子系统，但解析层接受（真到场就真渲染）。
+  verifying: 'verifying',
+  verified: 'verified',
+  notSatisfied: 'notSatisfied',
+  failed: 'failed',
+}
+
+const GOAL_ITEM_STATUSES = new Set(['pending', 'inProgress', 'completed'])
+const GOAL_VERIFICATION_OUTCOMES = new Set(['pass', 'notSatisfied', 'failed'])
+
+function parseGoalIterations(value: unknown): StatusPanelGoalIteration[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    console.error('[status-panel] goal iterations 非数组——丢弃', value)
+    return []
+  }
+  const rows: StatusPanelGoalIteration[] = []
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null) {
+      console.error('[status-panel] goal iteration 非对象——丢弃该行', raw)
+      continue
+    }
+    const row = raw as Record<string, unknown>
+    const iteration =
+      typeof row.iteration === 'number' && Number.isInteger(row.iteration) && row.iteration >= 1
+        ? row.iteration
+        : null
+    if (iteration === null) {
+      console.error('[status-panel] goal iteration 缺合法序号——丢弃该行', row)
+      continue
+    }
+    const rawItems = row.items
+    if (!Array.isArray(rawItems)) {
+      console.error('[status-panel] goal iteration 缺 items 数组——丢弃该行', row)
+      continue
+    }
+    const items: StatusPanelGoalItem[] = []
+    for (const rawItem of rawItems) {
+      if (typeof rawItem !== 'object' || rawItem === null) continue
+      const item = rawItem as Record<string, unknown>
+      const content = typeof item.content === 'string' ? item.content.trim() : ''
+      const status = typeof item.status === 'string' ? item.status : ''
+      if (content === '' || !GOAL_ITEM_STATUSES.has(status)) {
+        console.error('[status-panel] goal iteration 条目损坏——丢弃该条', item)
+        continue
+      }
+      items.push({
+        id: typeof item.id === 'string' && item.id !== '' ? item.id : `item-${items.length + 1}`,
+        content,
+        status: status as StatusPanelGoalItem['status'],
+      })
+    }
+    rows.push({
+      iteration,
+      items,
+      updatedAt:
+        typeof row.updatedAt === 'number' && Number.isFinite(row.updatedAt) ? row.updatedAt : null,
+    })
+  }
+  return rows.sort((left, right) => left.iteration - right.iteration)
+}
+
+function parseGoalVerifications(value: unknown): StatusPanelGoalVerification[] {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value)) {
+    console.error('[status-panel] goal verifications 非数组——丢弃', value)
+    return []
+  }
+  const rows: StatusPanelGoalVerification[] = []
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const row = raw as Record<string, unknown>
+    const iteration =
+      typeof row.iteration === 'number' && Number.isInteger(row.iteration) && row.iteration >= 1
+        ? row.iteration
+        : null
+    const outcome = typeof row.outcome === 'string' ? row.outcome : ''
+    if (iteration === null || !GOAL_VERIFICATION_OUTCOMES.has(outcome)) {
+      console.error('[status-panel] goal verification 条目损坏——丢弃该条', row)
+      continue
+    }
+    rows.push({
+      iteration,
+      outcome: outcome as StatusPanelGoalVerificationOutcome,
+      at: typeof row.at === 'number' && Number.isFinite(row.at) ? row.at : null,
+      ...(typeof row.reason === 'string' && row.reason !== '' ? { reason: row.reason } : {}),
+      ...(typeof row.nextAction === 'string' && row.nextAction !== ''
+        ? { nextAction: row.nextAction }
+        : {}),
+    })
+  }
+  return rows.sort((left, right) => left.iteration - right.iteration)
+}
 
 /**
- * 严格解析 rpi-goal `goal-state` 条目（`{active, archived}`）：
+ * 严格解析 rpi-goal `goal-state` 条目（`{active, archived}`，active 上可能已
+ * 并入 `goal-iterations` 的 `iterations`）：
  * 无 active / 标题空 = null（诚实空态）；字段损坏 = console.error + null
  * （条目不渲染，不造假行——与插件自身恢复失败 Blocked 同语义）。
+ * 迭代/校验数组内**单行**损坏只丢该行（可见的 console.error），不牵连整目标。
  */
 export function parseGoalState(raw: unknown): StatusPanelGoalModel | null {
   if (raw === null || raw === undefined) return null
@@ -168,9 +318,10 @@ export function parseGoalState(raw: unknown): StatusPanelGoalModel | null {
     console.error('[status-panel] goal-state.active.title 缺失/空——丢弃', goal)
     return null
   }
-  const status = typeof goal.status === 'string' ? goal.status : ''
-  if (!GOAL_STATUSES.has(status)) {
-    console.error(`[status-panel] goal-state 未知 status（${status}）——丢弃`, goal)
+  const rawStatus = typeof goal.status === 'string' ? goal.status : ''
+  const status = GOAL_STATUS_MAP[rawStatus]
+  if (status === undefined) {
+    console.error(`[status-panel] goal-state 未知 status（${rawStatus}）——丢弃`, goal)
     return null
   }
   const numOrNull = (v: unknown): number | null =>
@@ -178,30 +329,108 @@ export function parseGoalState(raw: unknown): StatusPanelGoalModel | null {
   const notes = typeof goal.notes === 'string' ? goal.notes : ''
   return {
     title,
-    status: status as StatusPanelGoalModel['status'],
+    status,
     notes,
     startedAt: numOrNull(goal.startedAt),
     updatedAt: numOrNull(goal.updatedAt),
     turnsUsed: numOrNull(goal.turnsUsed) ?? 0,
     maxTurns: numOrNull(goal.maxTurns),
     deadlineMs: numOrNull(goal.deadlineMs),
+    iterations: parseGoalIterations(goal.iterations),
+    verifications: parseGoalVerifications(goal.verifications),
   }
 }
 
 /**
  * 目标用时（秒）：
- * - active → now - startedAt（秒针照走）；
- * - paused / complete → updatedAt - startedAt（停在最后一次状态写入，
- *   没有 updatedAt/startedAt 就不报时长——不拿 now 假装还在跑）。
+ * - active / verifying / notSatisfied → now - startedAt（秒针照走）；
+ * - paused / verified / failed → updatedAt - startedAt（停在最后一次状态
+ *   写入，没有 updatedAt/startedAt 就不报时长——不拿 now 假装还在跑）。
  */
 export function goalElapsedSeconds(
   goal: StatusPanelGoalModel,
   now: number,
 ): number | null {
   if (goal.startedAt === null) return null
-  const end =
-    goal.status === 'active' ? now : (goal.updatedAt ?? goal.startedAt)
+  const running =
+    goal.status === 'active' || goal.status === 'verifying' || goal.status === 'notSatisfied'
+  const end = running ? now : (goal.updatedAt ?? goal.startedAt)
   return Math.max(0, Math.floor((end - goal.startedAt) / 1000))
+}
+
+// ── goal 迭代行（ZCode conversationGoalSummaryModel.ts 逐条照抄）────────
+
+const INTERNAL_GOAL_VERIFICATION_FALLBACK_NEXT_ACTION =
+  'Continue verifying and completing the goal.'
+
+export interface StatusPanelGoalIterationSummary {
+  iteration: number
+  title: string | null
+  items: StatusPanelGoalItem[]
+  completedCount: number
+  totalCount: number
+  completed: boolean
+  verificationOutcome: StatusPanelGoalVerificationOutcome | null
+}
+
+function visibleNextAction(value: string | undefined): string | null {
+  const nextAction = value?.trim()
+  if (!nextAction || nextAction === INTERNAL_GOAL_VERIFICATION_FALLBACK_NEXT_ACTION) {
+    return null
+  }
+  return nextAction
+}
+
+/**
+ * 需要的行数（上游 requiredIterationCount 的宿主对偶）。
+ *
+ * 上游用 `goal.iteration`（校验器边界计数）再对"续跑中"加一行；宿主的迭代
+ * 计数就来自 rpi-goal-iterations 的逐轮快照（最后一轮 = 当前打开的迭代），
+ * 所以直接取两侧最大值、**不再 +1** —— 否则活跃目标永远多出一行空迭代
+ * （按上游字面照抄会产生这个假行）。
+ */
+function requiredIterationCount(goal: StatusPanelGoalModel): number {
+  const maxTodoIteration = goal.iterations.reduce(
+    (maximum, entry) => Math.max(maximum, entry.iteration),
+    0,
+  )
+  const maxVerificationIteration = goal.verifications.reduce(
+    (maximum, entry) => Math.max(maximum, entry.iteration),
+    0,
+  )
+  return Math.max(1, maxTodoIteration, maxVerificationIteration)
+}
+
+/** 从 goal 模型构造右上角逐轮摘要；不从 renderer timeline 反推轮次。 */
+export function buildConversationGoalIterationSummaries(
+  goal: StatusPanelGoalModel,
+): StatusPanelGoalIterationSummary[] {
+  const todoByIteration = new Map(goal.iterations.map((entry) => [entry.iteration, entry.items]))
+  const verificationByIteration = new Map(
+    goal.verifications.map((entry) => [entry.iteration, entry] as const),
+  )
+  const rows: StatusPanelGoalIterationSummary[] = []
+
+  for (let iteration = 1; iteration <= requiredIterationCount(goal); iteration += 1) {
+    const items = todoByIteration.get(iteration) ?? []
+    const completedCount = items.filter((item) => item.status === 'completed').length
+    const previousVerification = verificationByIteration.get(iteration - 1)
+    rows.push({
+      iteration,
+      title:
+        iteration === 1 ? goal.title.trim() || null : visibleNextAction(previousVerification?.nextAction),
+      items,
+      completedCount,
+      totalCount: items.length,
+      completed: items.length > 0 && completedCount >= items.length,
+      verificationOutcome: verificationByIteration.get(iteration)?.outcome ?? null,
+    })
+  }
+
+  return rows.sort((left, right) => {
+    if (left.completed !== right.completed) return left.completed ? -1 : 1
+    return left.iteration - right.iteration
+  })
 }
 
 // ── sessionPlans ────────────────────────────────────────────────────
@@ -297,6 +526,8 @@ export function buildStatusPanelModel(input: StatusPanelInput): StatusPanelModel
   const runningJobs = buildJobRows(input.jobs)
   const runningAgents = [...input.runningAgents]
   const endedAgentCount = Math.max(0, input.endedAgentCount)
+  const runningWorkflows = [...input.runningWorkflows]
+  const endedWorkflowCount = Math.max(0, input.endedWorkflowCount)
 
   return {
     git,
@@ -306,6 +537,8 @@ export function buildStatusPanelModel(input: StatusPanelInput): StatusPanelModel
     runningJobs,
     runningAgents,
     endedAgentCount,
+    runningWorkflows,
+    endedWorkflowCount,
     // 上游 hasContent 只认活内容；已结束目录行不单独开门（只有已结束
     // 智能体的会话整块不渲染——上游同判，2026-11-17 对齐轮照抄）。
     hasContent: Boolean(
@@ -314,7 +547,9 @@ export function buildStatusPanelModel(input: StatusPanelInput): StatusPanelModel
         sessionPlans ||
         plan ||
         runningJobs.length > 0 ||
-        runningAgents.length > 0,
+        runningAgents.length > 0 ||
+        // 上游同判：已结束目录计数不单独开门（只有历史实例的会话整块不渲染）。
+        runningWorkflows.length > 0,
     ),
   }
 }

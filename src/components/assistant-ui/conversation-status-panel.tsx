@@ -14,7 +14,7 @@
  *   上游菜单只挂了 auto 一项（panel/mini 的 i18n 键与 handler 都在但条目
  *   缺失——上游缺陷），这里补全三项。
  * - **分区顺序**（上游同序）：Git 工具 → 目标 → 会话计划 → 进程 Todo →
- *   终端 → 智能体。每类限高滚动（STATUS_SECTION_SCROLL_POLICY）+
+ *   终端 → 工作流 → 智能体。每类限高滚动（STATUS_SECTION_SCROLL_POLICY）+
  *   separated 上边线 + trailing 随开合切换；分区标题行 = 标题 + 悬停出现的
  *   箭头 + 内联 trailing。
  * - **已结束目录行**（上游 EndedDirectoryRow）：智能体分区的页脚行
@@ -27,8 +27,10 @@
  * 数据面（全部真值）：
  * - 待办（rpi-todo todo-state 条目 → todo-store）；
  * - git 变更（fs_git_diff_stat → git-store）；
- * - 目标（rpi-goal goal-state 条目 → pi_goal_state；暂停/恢复走
- *   `/goal pause|resume` 扩展命令）；
+ * - 目标（rpi-goal goal-state 条目 → pi_goal_state；迭代行 = rpi-goal-iterations
+ *   插件的 `goal-iterations` 逐轮快照并入 active.iterations——ZCode
+ *   `GoalStatusSection` 的行结构逐条照抄；暂停/恢复走 `/goal pause|resume`
+ *   扩展命令）；
  * - 会话计划（rpi-plan-mode plan-mode 条目 → pi_plan_entries → 新 store）；
  * - 终端（pi_job_list → jobs-store；真源 = rpi-background-tasks 插件的
  *   `background-tasks` 会话快照，插件未安装时为空、分区不渲染——上游
@@ -36,6 +38,10 @@
  * - 智能体（宿主从 delegate_task / subagent / dispatch 工具调用派生：未完成
  *   = 运行中，已完成 = 已结束目录；rpi 子代理运行态在插件进程内，没有
  *   roster 面，工具调用是唯一真值）。
+ * - 工作流（宿主从 rpi-orchestrator 的 plan / dispatch 工具调用派生：一次
+ *   plan set = 一条 run，dispatch 波次更新节点状态；ZCode
+ *   WorkflowStatusSection 的行结构照抄。rpi 没有 CreateWorkflow 子系统，
+ *   DAG 是唯一可核对真值；Stop 面不存在 → 不渲染）。
  *
  * **与上游的宿主适配（都有因）**：
  * 1. Todo 折叠预览：上游 HoverCard，宿主无 → motion Popover trigger="hover"
@@ -80,6 +86,7 @@ import {
   SquareIcon,
   SquareTerminalIcon,
   TargetIcon,
+  Workflow,
 } from 'lucide-react'
 import type { DockviewApi } from 'dockview-react'
 
@@ -123,6 +130,7 @@ import {
   sessionProjectCwd,
 } from '@/components/panes/session-manage/session-catalog'
 import {
+  buildConversationGoalIterationSummaries,
   buildStatusPanelModel,
   getStatusPanelTodoFocusWindow,
   goalElapsedSeconds,
@@ -135,8 +143,18 @@ import {
 } from '@/components/assistant-ui/conversation-status-panel-model'
 import { statusPanelStore, type StatusPanelVariant } from '@/components/assistant-ui/status-panel-store'
 import { openSubagentDetail } from '@/components/panes/subagent-detail-opener'
-import { openAgentDirectory, openPlanDetail } from '@/components/panes/status-pane-openers'
+import {
+  openAgentDirectory,
+  openPlanDetail,
+  openWorkflowRun,
+} from '@/components/panes/status-pane-openers'
 import { deriveAgentRows, type EndedAgentRow } from '@/components/assistant-ui/status-agent-rows'
+import {
+  deriveWorkflowRuns,
+  workflowRunDisplayName,
+  workflowRunWords,
+  type StatusPanelWorkflowRun,
+} from '@/components/assistant-ui/status-workflow-runs'
 import { formatWorkDuration } from '@/components/assistant-ui/work-segment'
 
 // ── 文案（ZCode zh-CN 原文，硬编码——宿主无 i18n）───────────────────
@@ -161,8 +179,22 @@ const L = {
   goalComplete: '已完成',
   goalPause: '暂停目标',
   goalResume: '恢复目标',
+  // ZCode 校验器面词表（chat.goalVerification.* zh 原文；failed 上游没有
+  // 对应字串——宿主补一个中性词，只有引擎校验器落地后才会显示）。
+  goalVerifying: '目标校验中',
+  goalNotSatisfied: '目标未完成，任务继续',
+  goalFailed: '目标校验失败',
+  goalIteration: (n: number) => `第 ${n} 次迭代`,
   agentsRunning: (n: number) => `${n} 个运行中`,
   endedAgents: '已结束的智能体',
+  workflows: '工作流',
+  workflowsLive: (n: number) => `${n} 个运行中`,
+  endedWorkflows: '已结束的工作流',
+  workflowFallbackName: '工作流脚本',
+  workflowStatusPending: '待启动',
+  workflowStatusRunning: '运行中',
+  workflowSteps: (done: number, total: number) => `${done}/${total} 步`,
+  openWorkflowRun: '查看实例详情',
   stopAgent: '停止子代理',
   cancel: '停止',
   openPlan: (title: string) => `查看计划：${title}`,
@@ -174,7 +206,14 @@ const L = {
 // 份策略；本组件还负责把"此刻以面板形态在场"写回 store）。
 
 // ── 可折叠分区（上游 StatusSection 逐条照抄）────────────────────────
-type StatusSectionKind = 'environment' | 'goal' | 'sessionPlans' | 'plan' | 'terminal' | 'agent'
+type StatusSectionKind =
+  | 'environment'
+  | 'goal'
+  | 'sessionPlans'
+  | 'plan'
+  | 'terminal'
+  | 'workflow'
+  | 'agent'
 
 const STATUS_SECTION_SCROLL_POLICY = {
   environment: null,
@@ -186,6 +225,8 @@ const STATUS_SECTION_SCROLL_POLICY = {
   plan: 'max-h-80',
   // 并行后台任务通常个位数；超过后滚动。
   terminal: 'max-h-48',
+  // 并行工作流实例通常个位数；超过后滚动（上游同策略）。
+  workflow: 'max-h-48',
   // 并行子代理通常个位数；超过后滚动。
   agent: 'max-h-48',
 } as const satisfies Record<StatusSectionKind, string | null>
@@ -652,29 +693,37 @@ function GitStatusSection({
   )
 }
 
-// ── 分区：目标（上游 GoalStatusSection；数据 = rpi-goal goal-state）───
-/** 目标行：title（line-clamp-3）+ 预算（turnsUsed/maxTurns）。notes 非空时
- *  作为第二行如实展示（上游迭代行没有 notes 概念，宿主有真字段就显示）。 */
-function GoalRow({ goal }: { goal: StatusPanelGoalModel }) {
+// ── 分区：目标（上游 GoalStatusSection；数据 = rpi-goal goal-state +
+// rpi-goal-iterations 逐轮快照）────────────────────────────────────
+/** 迭代行（上游 GoalStatusSection 的行结构逐条照抄）：完成轮 = 数字圆环，
+ *  未完成 = 目标图标；标题取行的 title（首轮 = 目标标题，后续轮 =
+ *  上一轮校验的 nextAction——rpi 无校验器时退回「第 N 次迭代」）；
+ *  items 计数只在有 items 时出现（0/0 不渲染）。 */
+function GoalIterationRow({
+  row,
+}: {
+  row: ReturnType<typeof buildConversationGoalIterationSummaries>[number]
+}) {
+  const title = row.title ?? L.goalIteration(row.iteration)
   return (
     <div
-      data-slot="aui_status-goal-row"
+      data-goal-iteration={row.iteration}
+      data-goal-iteration-completed={row.completed}
+      data-goal-verification-outcome={row.verificationOutcome ?? undefined}
+      title={title}
       className="hover:bg-foreground/[0.04] flex min-w-0 cursor-default items-start gap-2 rounded-lg px-2 py-2"
     >
-      <TargetIcon className="text-foreground/45 mt-0.5 size-3.5 shrink-0" aria-hidden />
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <p className="text-foreground line-clamp-3 min-w-0 text-[14px] leading-4">
-          {goal.title}
-        </p>
-        {goal.notes.trim() !== '' ? (
-          <p className="text-foreground/45 line-clamp-2 min-w-0 text-[12px] leading-4">
-            {goal.notes.trim()}
-          </p>
-        ) : null}
-      </div>
-      {goal.maxTurns !== null && goal.maxTurns > 0 ? (
-        <span className="text-muted-foreground shrink-0 text-[12px] tabular-nums">
-          {goal.turnsUsed}/{goal.maxTurns}
+      {row.completed ? (
+        <span className="border-emerald-600 text-emerald-600 dark:border-emerald-400 dark:text-emerald-400 flex size-4 shrink-0 items-center justify-center rounded-full border text-[10px] tabular-nums">
+          {row.iteration}
+        </span>
+      ) : (
+        <TargetIcon className="text-foreground/30 size-4 shrink-0" aria-hidden />
+      )}
+      <p className="text-foreground line-clamp-3 min-w-0 flex-1 text-[14px] leading-4">{title}</p>
+      {row.totalCount > 0 ? (
+        <span className="text-foreground/45 shrink-0 text-[12px] tabular-nums">
+          {row.completedCount}/{row.totalCount}
         </span>
       ) : null}
     </div>
@@ -698,7 +747,8 @@ function GoalStatusSection({
 }) {
   // 用时秒针只看「在不在跑」这一个布尔（上游注释同文：不能以整个 goal
   // 对象为依赖重建 interval）。
-  const ticking = goal.status === 'active'
+  const ticking =
+    goal.status === 'active' || goal.status === 'verifying' || goal.status === 'notSatisfied'
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!ticking) return
@@ -710,12 +760,25 @@ function GoalStatusSection({
   const statusLabel =
     goal.status === 'paused'
       ? L.goalPaused
-      : goal.status === 'complete'
+      : goal.status === 'verified'
         ? L.goalComplete
-        : L.goalActive
-  // 控制：上游 active → 暂停钮；paused → 恢复钮；complete → 完成图标。
+        : goal.status === 'verifying'
+          ? L.goalVerifying
+          : goal.status === 'notSatisfied'
+            ? L.goalNotSatisfied
+            : goal.status === 'failed'
+              ? L.goalFailed
+              : L.goalActive
+  const iterationRows = useMemo(
+    () => buildConversationGoalIterationSummaries(goal),
+    [goal],
+  )
+  // 控制：上游同判——active/verifying/notSatisfied → 暂停；paused → 恢复；
+  // verified → 完成图标；failed → 无控件。
+  const isPausable =
+    goal.status === 'active' || goal.status === 'verifying' || goal.status === 'notSatisfied'
   const control =
-    goal.status === 'active' && onPauseGoal !== undefined ? (
+    isPausable && onPauseGoal !== undefined ? (
       <button
         type="button"
         data-goal-action="pause"
@@ -739,12 +802,13 @@ function GoalStatusSection({
       >
         <PlayIcon className="size-3.5" />
       </button>
-    ) : goal.status === 'complete' ? (
+    ) : goal.status === 'verified' ? (
       <CheckCircle2Icon
         aria-label={L.goalComplete}
         className="text-emerald-600 dark:text-emerald-400 size-4 shrink-0"
       />
     ) : null
+  const showBudget = goal.maxTurns !== null && goal.maxTurns > 0
 
   return (
     <StatusSection
@@ -762,7 +826,21 @@ function GoalStatusSection({
       )}
     >
       <div className="space-y-0">
-        <GoalRow goal={goal} />
+        {/* notes / 轮次预算是宿主真字段（上游 goal 没有这两项）——守在迭代行
+            上方一行小字，不占行数。 */}
+        {goal.notes.trim() !== '' || showBudget ? (
+          <div className="text-foreground/45 flex min-w-0 items-start gap-2 px-2 pt-1 pb-0.5 text-[12px] leading-4">
+            <p className="line-clamp-2 min-w-0 flex-1">{goal.notes.trim()}</p>
+            {showBudget ? (
+              <span className="shrink-0 tabular-nums">
+                {goal.turnsUsed}/{goal.maxTurns}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        {iterationRows.map((row) => (
+          <GoalIterationRow key={row.iteration} row={row} />
+        ))}
         {actionError !== null ? (
           <p role="alert" className="text-destructive px-2 py-1 text-[12px]">
             {actionError}
@@ -1183,6 +1261,158 @@ function AgentStatusSection({
   )
 }
 
+// ── 分区：工作流（上游 WorkflowStatusSection 的宿主派生面）────────────
+/** 单盏状态灯（上游 WorkflowRunLamp 同形：pending 空心、running 脉冲）。 */
+function WorkflowRunLamp({ status }: { status: 'pending' | 'running' }) {
+  return (
+    <span
+      aria-hidden="true"
+      data-workflow-run-lamp={status}
+      className={cn(
+        'size-1.5 shrink-0 rounded-full',
+        status === 'pending'
+          ? 'border-foreground/40 border'
+          : 'animate-pulse bg-emerald-600 dark:bg-emerald-400',
+      )}
+    />
+  )
+}
+
+/** run 行（上游 WorkflowRunRow 的两行结构：名字 + 时长 / 灯 + 在做什么）；
+ *  Stop 不渲染——orchestrator 没有取消面（不放假按钮）；详情按钮 = 面板栏
+ *  标签页（openWorkflowRun），与上游 onOpenWorkflowRun 同义。 */
+function WorkflowRunRow({
+  run,
+  now,
+  onOpen,
+}: {
+  run: StatusPanelWorkflowRun
+  now: number
+  onOpen?: (run: StatusPanelWorkflowRun) => void
+}) {
+  const name = workflowRunDisplayName(run)
+  const displayName = name ?? L.workflowFallbackName
+  const words = workflowRunWords(run)
+  const wordsText =
+    words === null
+      ? null
+      : words.kind === 'status'
+        ? words.status === 'pending'
+          ? L.workflowStatusPending
+          : L.workflowStatusRunning
+        : L.workflowSteps(words.done, words.total)
+  const elapsed =
+    run.startedAt === null
+      ? null
+      : formatWorkDuration(Math.max(0, now - run.startedAt))
+  return (
+    <li
+      data-workflow-run-id={run.runId}
+      data-work-status={run.status}
+      className={cn(
+        'group/wf-run hover:bg-foreground/[0.04] relative grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-x-2 rounded-lg p-2',
+        onOpen && 'cursor-pointer',
+      )}
+    >
+      {onOpen ? (
+        <button
+          type="button"
+          aria-label={`${L.openWorkflowRun} ${displayName}`}
+          title={displayName}
+          onClick={() => onOpen(run)}
+          className="focus-visible:ring-foreground/20 absolute inset-0 z-0 rounded-lg focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
+        />
+      ) : null}
+      <Workflow className="text-foreground/45 pointer-events-none relative z-[1] mt-0.5 size-4 shrink-0 self-start" />
+      <div className="pointer-events-none relative z-[1] flex min-w-0 flex-col gap-0.5">
+        <div className="flex h-5 min-w-0 items-baseline gap-2 leading-5">
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-[14px]',
+              name ? 'text-foreground' : 'text-foreground/45',
+            )}
+          >
+            {displayName}
+          </span>
+          {elapsed !== null ? (
+            <span className="text-foreground/45 shrink-0 text-[12px] tabular-nums">{elapsed}</span>
+          ) : null}
+        </div>
+        {wordsText !== null ? (
+          <div className="text-foreground/45 flex h-4.5 min-w-0 items-center gap-1.5 text-[13px]">
+            <WorkflowRunLamp status={run.status === 'pending' ? 'pending' : 'running'} />
+            <span className="min-w-0 flex-1 truncate">{wordsText}</span>
+          </div>
+        ) : null}
+      </div>
+    </li>
+  )
+}
+
+/** Workflows 分区（上游 WorkflowStatusSection）：活动行 + 已结束目录页脚；
+ *  `runs.length === 0 && endedRunCount <= 0` 整区不渲染。数据 = 本线程的
+ *  plan / dispatch 调用派生（`status-workflow-runs.ts`），无数据不造假。 */
+function WorkflowStatusSection({
+  model,
+  separated,
+  open,
+  onOpenChange,
+  onOpenRun,
+  onOpenDirectory,
+}: {
+  model: StatusPanelModel
+  separated: boolean
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  onOpenRun?: (run: StatusPanelWorkflowRun) => void
+  onOpenDirectory?: () => void
+}) {
+  const runs = model.runningWorkflows
+  const endedRunCount = model.endedWorkflowCount
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (runs.length === 0) return
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [runs.length])
+  if (runs.length === 0 && endedRunCount <= 0) return null
+
+  return (
+    <StatusSection
+      section="workflow"
+      defaultOpen={runs.length > 0}
+      open={open}
+      onOpenChange={onOpenChange}
+      separated={separated}
+      title={L.workflows}
+      trailing={() =>
+        runs.length > 0 ? (
+          <>
+            <WorkflowRunLamp status="running" />
+            <span>{L.workflowsLive(runs.length)}</span>
+          </>
+        ) : null
+      }
+      footer={
+        <EndedDirectoryRow
+          count={endedRunCount}
+          icon={<CheckCircle2Icon className="text-foreground/45 size-4 shrink-0" />}
+          label={L.endedWorkflows}
+          separated={runs.length > 0}
+          onOpen={onOpenDirectory}
+        />
+      }
+    >
+      <ul className="space-y-0">
+        {runs.map((run) => (
+          <WorkflowRunRow key={run.runId} run={run} now={now} onOpen={onOpenRun} />
+        ))}
+      </ul>
+    </StatusSection>
+  )
+}
+
 // ── 已结束智能体目录 = 面板栏标签页（status-pane-openers，上游 side tab 对偶）──
 
 // ── mini 胶囊（上游 StatusSummaryRow，完整优先级链）───────────────────
@@ -1222,8 +1452,12 @@ function StatusSummaryRow({
   const currentPlanItem = getCurrentPlanItem(model.plan)
   const completedPlanItem = getCompletedPlanItem(model.plan)
   const goalTitle = model.goal?.title ?? null
-  const isActiveGoal = model.goal?.status === 'active' || model.goal?.status === 'paused'
-  const isDoneGoal = model.goal?.status === 'complete'
+  const isActiveGoal =
+    model.goal?.status === 'active' ||
+    model.goal?.status === 'paused' ||
+    model.goal?.status === 'verifying' ||
+    model.goal?.status === 'notSatisfied'
+  const isDoneGoal = model.goal?.status === 'verified'
   const added = model.git?.added ?? 0
   const removed = model.git?.removed ?? 0
   const hasGitMiniSummary = Boolean(model.git && added + removed > 0)
@@ -1400,6 +1634,12 @@ function ConversationStatusPanelImpl() {
     () => deriveAgentRows(threadMessages as readonly unknown[]),
     [threadMessages],
   )
+  // 工作流行：本线程 plan / dispatch 工具调用派生（rpi-orchestrator 的 DAG
+  // 是唯一真值面；活动 = pending/running，终态折进目录计数）。
+  const workflowRuns = useMemo(
+    () => deriveWorkflowRuns(threadMessages as readonly unknown[]),
+    [threadMessages],
+  )
   const engineRunningAgents = useMemo<StatusPanelAgentRow[]>(
     () =>
       childAgents
@@ -1434,8 +1674,10 @@ function ConversationStatusPanelImpl() {
         runningAgents:
           engineRunningAgents.length > 0 ? engineRunningAgents : agentRows.running,
         endedAgentCount: agentRows.ended.length,
+        runningWorkflows: workflowRuns.running,
+        endedWorkflowCount: workflowRuns.ended.length,
       }),
-    [todo, gitStat, goalRaw, planEntries, jobs, agentRows, engineRunningAgents],
+    [todo, gitStat, goalRaw, planEntries, jobs, agentRows, engineRunningAgents, workflowRuns],
   )
 
   // 面板在场 → 写共享 store（对话内容列的让位判定；卸载即清除）。
@@ -1463,6 +1705,10 @@ function ConversationStatusPanelImpl() {
   useEffect(() => {
     if (model.runningAgents.length === 0) setAgentOpen(false)
   }, [model.runningAgents.length])
+  // 工作流分区是**非受控**的（上游 defaultOpen = runs.length > 0）：有活 run
+  // 默认展开，用户收起后保持；换会话用 key={activeId} 强重挂载复位。此前把它
+  // 接成受控 state 且初值 false，运行中的 run 只出现在分区标题、行永远不可见
+  // （2026-11-18 实机踩中）。
 
   // 目标暂停/恢复（rpi-goal 扩展命令 /goal pause|resume）。
   const [goalActionPending, setGoalActionPending] = useState(false)
@@ -1544,11 +1790,22 @@ function ConversationStatusPanelImpl() {
       .catch((e) => console.error('[status-panel] 子代理取消失败', childId, e))
   }, [])
 
+  // 工作流实例详情 / 目录 = 面板栏标签页（status-pane-openers 投递）。
+  const onOpenWorkflowRun = useCallback((run: StatusPanelWorkflowRun) => {
+    const name = workflowRunDisplayName(run)
+    openWorkflowRun({ runId: run.runId, ...(name !== null ? { title: name } : {}) })
+  }, [])
+  const onOpenWorkflowDirectory = useCallback(() => {
+    openWorkflowRun({})
+  }, [])
+
   const canRenderGit = Boolean(model.git)
   const canRenderGoal = model.goal !== null
   const canRenderSessionPlans = model.sessionPlans !== null
   const canRenderPlan = Boolean(model.plan)
   const canRenderTerminals = model.runningJobs.length > 0
+  const canRenderWorkflows =
+    model.runningWorkflows.length > 0 || model.endedWorkflowCount > 0
   const canRenderAgents = model.runningAgents.length > 0 || model.endedAgentCount > 0
 
   // draft（无会话）不挂（上游同款）。
@@ -1569,6 +1826,8 @@ function ConversationStatusPanelImpl() {
         data-goal-status={model.goal?.status}
         data-goal-title={model.goal?.title}
         data-running-terminal-count={model.runningJobs.length}
+        data-running-workflow-count={model.runningWorkflows.length}
+        data-ended-workflow-count={model.endedWorkflowCount}
         data-running-agent-count={model.runningAgents.length}
         data-ended-agent-count={model.endedAgentCount}
         data-session-plan-count={model.sessionPlans?.items.length ?? 0}
@@ -1669,6 +1928,21 @@ function ConversationStatusPanelImpl() {
                 onCancelJob={onCancelJob}
               />
             ) : null}
+            {canRenderWorkflows ? (
+              <WorkflowStatusSection
+                model={model}
+                separated={
+                  canRenderGit ||
+                  canRenderGoal ||
+                  canRenderSessionPlans ||
+                  canRenderPlan ||
+                  canRenderTerminals
+                }
+                key={activeId}
+                onOpenRun={onOpenWorkflowRun}
+                onOpenDirectory={onOpenWorkflowDirectory}
+              />
+            ) : null}
             {canRenderAgents ? (
               <AgentStatusSection
                 model={model}
@@ -1677,7 +1951,8 @@ function ConversationStatusPanelImpl() {
                   canRenderGoal ||
                   canRenderSessionPlans ||
                   canRenderPlan ||
-                  canRenderTerminals
+                  canRenderTerminals ||
+                  canRenderWorkflows
                 }
                 open={agentOpen}
                 onOpenChange={setAgentOpen}

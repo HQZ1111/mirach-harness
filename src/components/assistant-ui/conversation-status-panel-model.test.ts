@@ -11,6 +11,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  buildConversationGoalIterationSummaries,
   buildStatusPanelModel,
   getPlanDirectoryTitle,
   getStatusPanelTodoFocusWindow,
@@ -30,6 +31,8 @@ function baseInput(overrides: Partial<StatusPanelInput> = {}): StatusPanelInput 
     jobs: [],
     runningAgents: [],
     endedAgentCount: 0,
+    runningWorkflows: [],
+    endedWorkflowCount: 0,
     ...overrides,
   }
 }
@@ -59,6 +62,8 @@ describe('parseGoalState（rpi-goal goal-state 条目）', () => {
       turnsUsed: 3,
       maxTurns: 10,
       deadlineMs: 60000,
+      iterations: [],
+      verifications: [],
     })
   })
 
@@ -80,8 +85,20 @@ describe('parseGoalState（rpi-goal goal-state 条目）', () => {
 
   it('未知 status → null + 错误可见（不猜成 active）', () => {
     const spy = silenceErrors()
-    expect(parseGoalState({ active: { title: 'x', status: 'verifying' } })).toBeNull()
+    expect(parseGoalState({ active: { title: 'x', status: 'exploded' } })).toBeNull()
     expect(spy).toHaveBeenCalled()
+  })
+
+  it('complete → verified；ZCode 校验器态原样接受（真到场就真渲染）', () => {
+    expect(
+      parseGoalState({ active: { title: 'x', status: 'complete' } })?.status,
+    ).toBe('verified')
+    expect(
+      parseGoalState({ active: { title: 'x', status: 'verifying' } })?.status,
+    ).toBe('verifying')
+    expect(
+      parseGoalState({ active: { title: 'x', status: 'notSatisfied' } })?.status,
+    ).toBe('notSatisfied')
   })
 
   it('可选字段缺席 → 零值/null（不造假 0 秒起算）', () => {
@@ -95,7 +112,127 @@ describe('parseGoalState（rpi-goal goal-state 条目）', () => {
       turnsUsed: 0,
       maxTurns: null,
       deadlineMs: null,
+      iterations: [],
+      verifications: [],
     })
+  })
+
+  it('iterations：逐行解析 + 单行损坏只丢该行（错误可见）', () => {
+    const spy = silenceErrors()
+    const goal = parseGoalState({
+      active: {
+        title: 'x',
+        status: 'active',
+        iterations: [
+          {
+            iteration: 1,
+            updatedAt: 10,
+            items: [
+              { id: 't1', content: '读仓库', status: 'completed' },
+              { id: 't2', content: '改代码', status: 'inProgress' },
+            ],
+          },
+          { iteration: 'nope', items: [] },
+          { iteration: 3, items: [{ content: '', status: 'pending' }] },
+        ],
+      },
+    })
+    expect(goal?.iterations).toHaveLength(2)
+    expect(goal?.iterations[0]).toMatchObject({
+      iteration: 1,
+      updatedAt: 10,
+      items: [
+        { id: 't1', content: '读仓库', status: 'completed' },
+        { id: 't2', content: '改代码', status: 'inProgress' },
+      ],
+    })
+    expect(goal?.iterations[1]).toMatchObject({ iteration: 3, items: [] })
+    expect(spy).toHaveBeenCalled()
+  })
+})
+
+describe('buildConversationGoalIterationSummaries（上游逐条照抄）', () => {
+  const goal = (over: Partial<Parameters<typeof buildConversationGoalIterationSummaries>[0]> = {}) => ({
+    title: '发布 v1',
+    status: 'active' as const,
+    notes: '',
+    startedAt: null,
+    updatedAt: null,
+    turnsUsed: 2,
+    maxTurns: null,
+    deadlineMs: null,
+    iterations: [],
+    verifications: [],
+    ...over,
+  })
+
+  it('无迭代快照 → 一行（首轮标题 = 目标标题，items 空）', () => {
+    const rows = buildConversationGoalIterationSummaries(goal())
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      iteration: 1,
+      title: '发布 v1',
+      totalCount: 0,
+      completedCount: 0,
+      completed: false,
+      verificationOutcome: null,
+    })
+  })
+
+  it('三轮快照 → 三行；完成轮回标题 = 上轮 nextAction；计数如实', () => {
+    const rows = buildConversationGoalIterationSummaries(
+      goal({
+        iterations: [
+          { iteration: 1, updatedAt: 1, items: [
+            { id: 't1', content: 'a', status: 'completed' },
+            { id: 't2', content: 'b', status: 'completed' },
+          ] },
+          { iteration: 2, updatedAt: 2, items: [
+            { id: 't3', content: 'c', status: 'pending' },
+          ] },
+        ],
+        verifications: [
+          { iteration: 1, outcome: 'pass', at: 1, nextAction: '继续发布 v2' },
+        ],
+      }),
+    )
+    expect(rows).toHaveLength(2)
+    const first = rows.find((row) => row.iteration === 1)!
+    expect(first.completed).toBe(true)
+    expect(first.completedCount).toBe(2)
+    expect(first.verificationOutcome).toBe('pass')
+    const second = rows.find((row) => row.iteration === 2)!
+    expect(second.title).toBe('继续发布 v2')
+    expect(second.completed).toBe(false)
+  })
+
+  it('内部兜底 nextAction 不显示（上游 visibleNextAction 同判）', () => {
+    const rows = buildConversationGoalIterationSummaries(
+      goal({
+        iterations: [{ iteration: 2, updatedAt: 2, items: [] }],
+        verifications: [
+          {
+            iteration: 1,
+            outcome: 'notSatisfied',
+            at: 1,
+            nextAction: 'Continue verifying and completing the goal.',
+          },
+        ],
+      }),
+    )
+    expect(rows.find((row) => row.iteration === 2)!.title).toBeNull()
+  })
+
+  it('完成的行排在前面（上游 sort 同判）', () => {
+    const rows = buildConversationGoalIterationSummaries(
+      goal({
+        iterations: [
+          { iteration: 1, updatedAt: 1, items: [{ id: 'a', content: 'a', status: 'pending' }] },
+          { iteration: 2, updatedAt: 2, items: [{ id: 'b', content: 'b', status: 'completed' }] },
+        ],
+      }),
+    )
+    expect(rows.map((row) => row.iteration)).toEqual([2, 1])
   })
 })
 
@@ -109,6 +246,8 @@ describe('goalElapsedSeconds（目标用时）', () => {
     turnsUsed: 0,
     maxTurns: null,
     deadlineMs: null,
+    iterations: [],
+    verifications: [],
     ...over,
   })
 
@@ -120,8 +259,13 @@ describe('goalElapsedSeconds（目标用时）', () => {
     expect(goalElapsedSeconds(goal({ status: 'paused' }), 999_000)).toBe(4)
   })
 
-  it('complete → 停在 updatedAt', () => {
-    expect(goalElapsedSeconds(goal({ status: 'complete' }), 999_000)).toBe(4)
+  it('verified（插件 complete）→ 停在 updatedAt', () => {
+    expect(goalElapsedSeconds(goal({ status: 'verified' }), 999_000)).toBe(4)
+  })
+
+  it('verifying / notSatisfied 与 active 同走 now（校验器面也计入在跑）', () => {
+    expect(goalElapsedSeconds(goal({ status: 'verifying' }), 10_000)).toBe(9)
+    expect(goalElapsedSeconds(goal({ status: 'notSatisfied' }), 10_000)).toBe(9)
   })
 
   it('paused 无 updatedAt → 落在 startedAt（0 秒，不拿 now 假装在跑）', () => {
@@ -162,6 +306,8 @@ describe('buildStatusPanelModel', () => {
       runningJobs: [],
       runningAgents: [],
       endedAgentCount: 0,
+      runningWorkflows: [],
+      endedWorkflowCount: 0,
       hasContent: false,
     })
   })
@@ -242,6 +388,27 @@ describe('buildStatusPanelModel', () => {
     )
     expect(model.runningAgents).toHaveLength(1)
     expect(model.hasContent).toBe(true)
+  })
+
+  it('工作流：运行中才开门；已结束计数不单独开门（上游同判）', () => {
+    const run = {
+      runId: 'r1',
+      toolCallId: 'c1',
+      title: '读取仓库',
+      status: 'running' as const,
+      nodesSettled: 1,
+      nodesTotal: 2,
+      startedAt: 1000,
+      completedAt: null,
+      nodes: [],
+    }
+    const active = buildStatusPanelModel(baseInput({ runningWorkflows: [run] }))
+    expect(active.runningWorkflows).toHaveLength(1)
+    expect(active.hasContent).toBe(true)
+
+    const endedOnly = buildStatusPanelModel(baseInput({ endedWorkflowCount: 3 }))
+    expect(endedOnly.endedWorkflowCount).toBe(3)
+    expect(endedOnly.hasContent).toBe(false)
   })
 })
 

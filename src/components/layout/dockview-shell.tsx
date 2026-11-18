@@ -50,9 +50,11 @@ import { SubagentDetailPane } from '@/components/panes/subagent-detail-pane'
 import { setSubagentDetailOpener } from '@/components/panes/subagent-detail-opener'
 import { PlanDetailPane } from '@/components/panes/plan-detail-pane'
 import { AgentDirectoryPane } from '@/components/panes/agent-directory-pane'
+import { WorkflowRunDetailPane } from '@/components/panes/workflow-run-detail-pane'
 import {
   setAgentDirectoryOpener,
   setPlanDetailOpener,
+  setWorkflowRunOpener,
 } from '@/components/panes/status-pane-openers'
 import { MainWorkspacePane } from '@/components/panes/main-workspace-pane'
 import { TerminalPane } from '@/components/panes/terminal-pane'
@@ -420,6 +422,36 @@ export function DockviewShell() {
     return () => setAgentDirectoryOpener(null)
   }, [])
 
+  // 工作流实例详情 / 目录：单实例一个标签（runId 入 id），目录单实例。
+  // 数据在页面内自行订阅线程消息（图被替换后如实空态）。
+  useEffect(() => {
+    setWorkflowRunOpener((payload) => {
+      const a = apiRef.current
+      if (!a) {
+        console.error('[dv-shell] 布局 api 不在场——工作流实例放弃')
+        return
+      }
+      const runId = payload.runId
+      const id = runId === undefined ? 'workflow-directory' : `workflow-run:${runId}`
+      const existing = a.getPanel(id)
+      if (existing) {
+        existing.api.setActive()
+        if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+        return
+      }
+      a.addPanel({
+        id,
+        component: 'workflow-run',
+        title: runId === undefined ? '工作流实例' : (payload.title ?? '工作流实例'),
+        minimumWidth: RAIL_MIN_WIDTH,
+        params: { region: 'panels', payload },
+        position: panelsDropPosition(a),
+      })
+      if (columnFlagsOf().panelsHidden) setPanelsHidden(false)
+    })
+    return () => setWorkflowRunOpener(null)
+  }, [])
+
   // ── 打开页动作（open-page-actions.ts 单源；面板栏标签条 + 号同源） ────────
   const onOpen = useCallback((kind: OpenPageKind) => {
     const a = apiRef.current
@@ -545,6 +577,16 @@ export function DockviewShell() {
       <PlanDetailPane payload={props.params.payload ?? { entryId: '', markdown: '' }} />
     ),
     'agent-directory': () => <AgentDirectoryPane />,
+    // 工作流实例详情 / 目录（单实例 = payload.runId；省略 = 目录）。
+    'workflow-run': (props: IDockviewPanelProps<{ payload?: { runId?: string } }>) => (
+      <WorkflowRunDetailPane
+        runId={
+          typeof props.params.payload?.runId === 'string'
+            ? props.params.payload.runId
+            : undefined
+        }
+      />
+    ),
     // 插件工作区（`host.openWorkspace` 的门；hermes-bots 群聊房间走这条）。
     'plugin-workspace': (props: IDockviewPanelProps<{ workspaceId?: string }>) => (
       <PluginWorkspacePane {...props} />

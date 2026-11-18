@@ -6,6 +6,33 @@
 
 ## 当前状态
 
+**✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行（插件补）+ 工作流分区（orchestrator 派生）**
+
+- **目标迭代行（插件侧，真数据）**：新 vendored 插件
+  `G:\mirach-plugins\rpi-goal-iterations`（DLL 装到
+  `~/.rpi/agent/extensions/rpi_goal_iterations.dll`）：监听 `TurnEnd`，
+  goal 为 active 时把当前 `todo-state` 快照写进自己的 `goal-iterations`
+  条目（按 title+startedAt 分代、自数 TurnEnd、上限 50 轮、重启恢复、
+  subagent 跳过）。宿主 `pi_goal_state` 按 goalTitle+goalStartedAt 匹配并入
+  `active.iterations`（`merge_goal_iterations`，4 单测；残留目标不并、坏条目
+  Err）。面板 GoalStatusSection 换成 ZCode 迭代行结构
+  （`buildConversationGoalIterationSummaries` 逐条照抄；插件 complete →
+  `verified`；verifying/notSatisfied/failed 解析与 UI 就绪，但 rpi 没有
+  goal-verifier 子系统——**不造假校验结论**）。实机：6 轮 goal（4 轮带
+  todo 快照）→ `pi_goal_state` 6 行 → 面板 6 行、计数/属性全对。
+- **工作流分区（宿主派生）**：`status-workflow-runs.ts` 从本线程 `plan` /
+  `dispatch` 工具调用派生（`details.nodes` 真形状：id/task/deps/status ∈
+  pending/running/done/failed/skipped）；plan set = 一条 run，dispatch 波更新
+  同图；pending/running 进分区，全 settled 进「已结束的工作流」页脚；图快照
+  缺席不造 0/0；被新 plan 替换且未收敛的旧图 console.warn 后丢弃。
+  UI 照抄上游 `WorkflowStatusSection` / `WorkflowRunRow`（Stop 不渲染——
+  orchestrator 无取消面）；行/页脚开 `workflow-run:<runId>` /
+  `workflow-directory` 面板栏标签（`workflow-run-detail-pane.tsx`）。
+  实机：真模型 plan(set) 两节点 → 面板「工作流 1 个运行中」+ 真行；
+  真 dispatch 结果含 `details.nodes`，与派生规则一致。
+- **门禁**：vitest **1072**（86 文件）/ cargo test **692** / tsc 0 新错
+  （hermes-mirror + sdk-upstream 既有基线不变）。
+
 **✅ 2026-11-18（第四波）：bots 剩余未接面收口——远端 token / image.generate / pet 画廊 + keyring 真后端修复**
 
 - **远端连接 token 管理已接**（`pi_connections.rs` + `pi_gateway.rs` + 连接页）：
