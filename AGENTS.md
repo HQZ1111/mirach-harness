@@ -688,6 +688,33 @@ items-end`，`MessageActions` 作为普通子元素排在气泡**之后**，即
   （跨隐藏思考合族 / 单子项摊平 / 可见思考断组）锁在
   `assistant-work-items.test.ts`（18 条）。
 
+### 执行摘要意图描述 + 查阅/执行分布（2026-11-19 定稿）
+
+1. **执行摘要行显示意图描述（取代 11-15 的中文过滤）**：ZCode
+   `execute.tsx:274-278` 摘要 = `description ?? command`（只对 Bash 读
+   description）。rpi 的 bash（bash.rs:49）/ powershell 参数**都有**
+   `description` 且模型实测在传（一天 35 条，英文为主）——`tool-renderers.aui.tsx`
+   的 `isChineseText` 过滤（11-15 用户"摘要能变中文吗"后加）已**删除**：
+   英文描述原样显示，与 ZCode 完全一致（用户 2026-11-19 拍板"对齐 ZCode：
+   显示意图描述"）。**别再把语言过滤加回来。**
+2. **「怎么没有查阅只有执行」不是显示 bug**：分类链全对（agui 透传 →
+   classifySummaryCategory），实机验证 read 调用时组头出现「已查阅 N 项」。
+   根因 = 模型探查重度走 powershell/bash（max 会话 75 powershell vs 7 read），
+   而现 ZCode 也是 Bash→shell→执行（`tool-identity.ts` + e2e 断言
+   "Explored 2 items, Ran 2 commands"），旧「只读 shell→查阅」口径在现
+   ZCode 已删；用户拍板**保持与现 ZCode 一致不改**。
+3. **ZCode 的工具选择引导 = 工具描述即路由提示词**（`apps/zcode-cli/.../
+   bash-prompt.ts`）：Bash 描述写明 "IMPORTANT: Avoid … cat/head/tail/
+   grep/sed/awk/echo … use the appropriate dedicated tool"，Read 描述自荐
+   （cat -n / 图片 / offset 分页 / 别复读刚编辑的文件）。rpi 的 bash 描述无
+   此设限、powershell 描述反而写 "Prefer bash for file/text work"（把文件
+   工作推向 bash 而非 read）——想让模型多用 read = 改 vendored rpi-tools 的
+   工具描述（vendor 有脱敏补丁先例，同步需重打）或宿主系统提示追加，**均未
+   做**（用户未拍板）。
+4. 次要已知差异（未修）：展开正文卡内距/底色（ZCode `px-4 py-3 bg-panel`
+   vs 宿主 `px-3 py-2.5 bg-muted/20`）、运行态类别词动画（`animated-gradient-text`
+   vs `shimmer`）。
+
 ### 顺带发现的引擎缺陷（未修，非本次范围）
 
 **打开 `2026-10-24T16-09-39.590Z_f0e71fcf.jsonl`（15KB，含 thinking+toolCall）
@@ -2731,24 +2758,37 @@ pt 15px、transform `matrix(1,0,0,1,-157.5,0)`。
 
 ### 第五波：目标迭代行 + 目标完成校验 + 工作流分区（2026-11-18，用户："缺点补啊，不是说了吗，可以从zcode复制"；"Rpi有goal，直接在它上面做行吗"）
 
-**结论先行：目标系统就是 rpi-goal 本身，宿主只在它之上读状态、记轮次、跑
-校验——不 fork 官方 DLL、也不另立 goal 子系统。** 架构是被引擎事实逼出来的
-（三条都实测过）：
+**目标状态机住在 rpi-goal 插件，宿主只做触发 + 模型裁判**（用户定稿
+"Rpi 有 goal，直接在它上面做"）。vendored fork 在
+`G:\mirach-plugins\rpi-goal`（基线 = `pi-rust/rpi-package` main @ `6144715`），
+已编译替换 `~/.rpi/agent/extensions/rpi_goal.dll`（官方原件备份为
+`rpi_goal.dll.official-0.2.5.bak`）；fork 改动已向上游提 PR
+**pi-rust/rpi-package #336**（https://github.com/pi-rust/rpi-package/pull/336，
+6 个新增 SDK slot 在 PR 里没有接——上游 `rpi-plugin-sdk =0.3.20` 没这 6 个
+字段，宿主本地 SDK 0.24 有；两边各自编译过）。
 
-1. **迭代行 + 校验结论由宿主写**（每次 run 收尾 AppendEntry 一条
-   `goal-attempts` / `goal-verification` 会话条目，见下段）——宿主拿得到
-   todo 快照、也拿得到模型调用面；
-2. **校验不可能塞进插件**：rpi 的模型原语（runtime action 24/25
-   ChildAgent / SideQuestion）只挂在工具/命令的 invocation bridge 上，
-   `on_turn_end` 事件处理器里调用得到 `Err(… requires a plugin bridge)`；
-3. **不 fork rpi-goal**：它有官方发行（native-packages.json 记录版本/哈希），
-   整棵替换要长期跟上游合并，而宿主侧记录与 fork 的产出完全等价（证据：
-   `E:\Temp\rpi-pkg\src\rpi-goal-lib.rs` 全文读过，`Goal` 只有
-   title/status/notes/时间戳/turnsUsed/maxTurns/deadline，无迭代/校验概念）。
-   （曾试过旁路监听插件 `G:\mirach-plugins\rpi-goal-iterations`（TurnEnd 记
-   todo 快照、写 `goal-iterations`）——功能可用但多一个 DLL 要装、且轮次边界
-   比上游的"校验边界"更碎；宿主记录落到 **run 收尾**（= ZCode 的校验边界）
-   后该插件退役，源码留存仅作参考，DLL 已卸载。）
+1. **插件新增状态**：`Goal` 加 `iterations[]`（每次 run 收尾的 todo 快照，
+   `{iteration,items[{content,status}],updatedAt}`）/ `verifications[]`
+   （`{iteration,outcome pass|notSatisfied|failed,at,reason?,nextAction?}`）/
+   `verify_iteration`；状态词表扩成 ZCode 六态 `active|paused|verifying|
+   verified|failed`（保留旧 `complete` 读兼容）。**`complete` 语义改为
+   "终态但仍在场"（verified），归档改由 `/goal stop` 承担**——上游是
+   status=complete 仍在场，rpi 旧的 complete=归档会把已完成目标从面板抹掉。
+2. **插件新增内部动词**（宿主面）：`/goal _verify-start {"items":[…]}` →
+   status=verifying + 开下一轮迭代；`/goal _verify-result {"outcome":…,…}` →
+   落裁决：pass→verified；notSatisfied→回 active（上游存储面语义）+ 带
+   nextAction 时**插件自己 SendMessage(display:false) 续跑下一轮**；
+   failed→failed；cancelled→paused。
+3. **模型调用只能在宿主**：rpi 的 action 24/25（ChildAgent / SideQuestion）
+   只挂在工具/命令的 invocation bridge 上，插件的 `on_turn_end` 拿不到——
+   所以宿主 `src-tauri/src/pi_goal_verify.rs` 负责：`AgentEnd` 常驻订阅 →
+   闸门（当前会话 / goal active / 后台作业不在跑 / 单槽在途）→ 读 todo 快照
+   → `_verify-start` → `side_question({"op":"new","question":…})` 无工具单轮
+   裁判（64KB 文本摘录 + 问句里带 todo 快照）→ `_verify-result`。孤儿修复：
+   会话上台（`install_live`）时若 goal 仍 verifying 且本进程无在途校验 →
+   发 `cancelled` 收口回 paused。
+   （旁路监听插件 `G:\mirach-plugins\rpi-goal-iterations` 已退役、DLL 卸载，
+   源码留存仅作参考。）
 
 前端：`StatusPanelGoalModel` 扩成 ZCode 六态（rpi-goal 的 complete →
 `verified`；verifying/notSatisfied/failed 由宿主校验器真实产出，见下段）；
@@ -2765,52 +2805,32 @@ nextAction:"完成未完成待办项「检查状态面板」"}]`（verifier 按�
 todo 清单，拒绝通过——真裁判语义）→ 面板行带 notSatisfied 徽章；历史 6 轮
 goal 的迭代行实机同验。
 
-**目标完成校验（宿主侧，ZCode verifier 对偶）**：`src-tauri/src/pi_goal_verify.rs`。
+**校验裁决语义（照 ZCode 逐条对齐）**
 
-- **为什么在宿主、不在插件**：rpi 的模型调用原语（runtime action 24/25
-  ChildAgent / SideQuestion）**只挂在工具/命令的 invocation bridge 上**，
-  `on_turn_end` 事件处理器里调用会得到 `Err("… requires a plugin bridge")`
-  ——插件在轮结束时拿不到任何模型调用面。宿主直接持有一个克隆的
-  `RuntimeActionHost`（`live.reload.action_bridge.clone_host()`），
-  `side_question` 在宿主侧是完整实现。
-- **触发**：`install_live` 给每个在场会话挂一条常驻事件观察者，收到
-  `AgentEvent::AgentEnd`（一次 run 收尾）就 spawn 一次校验。**不能只挂在
-  `PiEngine::prompt_inner` 尾部**——目标的首个工作轮由 rpi-goal 经
-  `SendUserMessage` 直接驱动引擎，不经过宿主 prompt（实机踩中：goal 首轮
-  结束无任何校验）。
-- **闸门**（照上游 `verifyBeforeFirstContinue`）：会话不是当前会话 /
-  goal 非 active / 后台作业在跑（`background-tasks` 快照有 running）/
-  已有校验在途（单槽）→ 静默跳过，不花模型调用。
-- **每轮两条落盘**（都在闸门后、同一函数内）：
-  1. `goal-attempts` 迭代行 `{goalTitle, goalStartedAt, iteration,
-     items(本轮 todo 快照), updatedAt}`——iteration = 本目标既有行数 + 1
-     （`matching_attempts` 只数本目标；上一个目标的残留不参与）；
-  2. `goal-verification` 校验结论（下述）。
-  `pi_goal_state` 用 `merge_goal_timeline`（`pi_plugin_state.rs`）按
-  goalTitle+goalStartedAt 过滤并并入 `active.iterations` /
-  `active.verifications`（坏条目 Err）；在途态 `active.verifying` 由
-  `GoalVerifier::verifying_wire_for` 挂上（目标身份不匹配不挂）。
-- **问句**：上游 `formatGoalCompletionVerificationPrompt` 逐条照抄（内联
-  `<untrusted_objective>` 转义、todo 自查条款、fail 时 nextAction 变下一轮
-  标题）。token 计数宿主没有 → 换成 Iteration / Turns used / Turn budget；
-  摘录只带 user/assistant 文本（side_question reference 不含工具结果）→
-  问句里补本轮 todo 快照（与迭代行同一份）。
-- **结论**：`side_question({"op":"new","question":…})` = 无工具单轮、
-  独立会话（不改主转录），`{"op":"status"}` 轮询至 done/failed。
-  坏 JSON = fail-open `pass` + 保留 reason（上游原语义）；请求失败/超时 =
-  `failed` 结论（可见，不吞）。
-- **有意不做**：校验通过不自动 `/goal stop`（rpi-goal 的 complete = 归档，
-  会把已验证目标从面板抹掉，与上游"status=complete 仍在场"矛盾），也
-  不自动续跑 nextAction（成本/行为独立一轮）；面板按真实结论渲染徽章，
-  没有就不画。
-- **实机**（两条都过）：①`/goal start 用一句话回答 1+1 等于几` + 用户消息
-  → `verifying:{iteration:2}` → `verifications:[{outcome:"pass", reason:"…
-  助手已回复"1+1 等于 2。"…"}]`；②`/goal start 用一句话回答 2+2 等于几`
-  （**无用户消息**，验证插件驱动首轮也能触发）→ 宿主记 iteration 1 +
-  `outcome:"notSatisfied"`（verifier 发现会话里旧 todo 未完成，按上游
-  规则拒绝通过）+ `nextAction` 真值；面板行带 `data-goal-verification-outcome`
-  徽章。
+- **问句**：上游 `formatGoalCompletionVerificationPrompt` 原文逐条搬进 fork
+  （objective 内联 `<untrusted_objective>` 转义、todo 自查条款、失败时
+  nextAction 成为下一轮标题）；token 计数宿主没有 → 换成 Iteration /
+  Turns used / Turn budget，并附本轮 todo 快照（side_question 的文本摘录
+  不带工具输入/结果，todo 是唯一可复核的「工作状态」）。
+- **裁决**：`{"passed": bool, "reason": string, "nextAction": string}`，
+  解析 = 取最后一个 JSON 对象、`passed === true` 才算过、reason 缺失用兜底
+  文案；**坏 JSON = fail-open 成 pass + 保留 reason**（上游语义，防止裁判
+  链路故障把已交付目标卡死）；请求失败/超时 = `cancelled` → paused。
+- **续跑**：`notSatisfied` + `nextAction` → 插件用 `SendMessage` 发一条
+  `display:false` 的 model-only 消息驱动下一轮（预算耗尽则不续），与上游
+  「validator 拒绝 → 继续迭代」同形；面板的「目标校验中」= status=verifying，
+  结论徽章 = 本轮 verification。
+- **实机**（插件驱动的完整回路）：`/goal start 用一句话回答 1+1 等于几` +
+  用户消息 → status 依次 `verifying` → `verified`，`verifications:[{n:1,
+  outcome:"pass"}]`（面板行带徽章、目标保持可见）；另一条不可达目标
+  （CPU 降到 20°C）→ `notSatisfied` + 真 nextAction → **自动续跑第二轮**
+  （turnsUsed 1→2，用户未输入）→ 第二轮再次 notSatisfied，turns 4/4 预算
+  用尽 → paused。说明闸门、裁决、续跑、预算四条路径都走通。
 
+**门禁（本轮）**：宿主 `cargo test` **702**、前端 `vitest` **1073**（86 文件）、
+`tsc` 0 新错（hermes-mirror + sdk-upstream 既有基线不变）；fork 自身
+`cargo test --release` **31** 条（含状态机/载荷解析/续跑提示词/预算闸 4 组新测），
+在干净上游克隆里同样 31 条通过。
 **工作流分区（宿主派生）**：`status-workflow-runs.ts` 从本线程 `plan` /
 `dispatch` 工具调用派生（成功结果 `details.nodes` = 引擎
 `Graph::to_details` 真形状：id/task/deps/status ∈ pending/running/done/

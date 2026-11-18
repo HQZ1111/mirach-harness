@@ -6,30 +6,50 @@
 
 ## 当前状态
 
-**✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行 + 完成校验（宿主在 rpi-goal 之上）+ 工作流分区（orchestrator 派生）**
+**✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行 + 完成校验（状态机进 rpi-goal 插件）+ 工作流分区（orchestrator 派生）**
 
-- **目标迭代行 + 完成校验（宿主侧，在 rpi-goal 之上；ZCode verifier 对偶）**：
-  `pi_goal_verify.rs`——常驻订阅每个在场会话的 `AgentEnd`（run 收尾）触发；
-  闸门 = 当前会话 / goal active / 后台作业不在跑 / 单槽在途（照上游
-  verifyBeforeFirstContinue）；通过后先 `append_entry` 一条 `goal-attempts`
-  迭代行（本轮 todo 快照，iteration = 本目标既有行数 + 1），再跑校验：
-  问句逐条照抄上游 `formatGoalCompletionVerificationPrompt`（token 计数换成
-  轮次预算，附同一份 todo 快照）；执行 = 宿主克隆的
-  `RuntimeActionHost::side_question`（无工具单轮、独立会话），轮询到
-  done/failed；坏 JSON fail-open 成 `pass` + reason，请求失败 = `failed`
-  结论。结论 `append_entry` 落 `goal-verification` 条目；`pi_goal_state`
-  用 `merge_goal_timeline` 按 goalTitle+goalStartedAt 并入
-  `active.iterations` / `active.verifications`，在途时输出 `active.verifying`。
-  面板 GoalStatusSection 换成 ZCode 迭代行结构
-  （`buildConversationGoalIterationSummaries` 逐条照抄；rpi-goal 的 complete
-  → `verified`）并渲染结论徽章。**架构事实**：rpi 的模型原语（action 24/25）
-  只挂在 invocation bridge 上，`on_turn_end` 里不可用——校验必须在宿主做；
-  迭代行也因此放宿主记录（曾试旁路监听插件，已退役卸载）。**只做校验，
-  不自动 `/goal stop`、不自动续跑 nextAction**（否则会抹掉已验证目标/无限
-  续跑，独立一轮再定）。实机：①`/goal start`+用户消息 → `verifying` →
-  `pass` 徽章；②`/goal start` 无用户消息（插件驱动首轮）→ 宿主记 iteration 1
-  → `notSatisfied`（verifier 查出会话里旧 todo 未完成，按上游规则拒绝）+
-  `nextAction` 真值。
+- **rpi-goal vendored fork（用户定稿"Rpi 有 goal，直接在它上面做"）**：
+  `G:\mirach-plugins\rpi-goal`（基线 = `pi-rust/rpi-package` main @ 6144715，
+  与上游源码逐字一致，仅本地 SDK 0.24 的 6 个新 slot 差异另计），已编译替换
+  `~/.rpi/agent/extensions/rpi_goal.dll`（官方原件备份 `.official-0.2.5.bak`）。
+  fork 新增：`Goal.iterations[]`（每次 run 收尾的 todo 快照）/
+  `verifications[]`（`{iteration,outcome,at,reason?,nextAction?}`）/
+  `verify_iteration`；状态词表扩成 ZCode 六态 `active|paused|verifying|verified|failed`
+  （旧 `complete` 读兼容）。**`complete` 语义改为「终态但仍在场」(verified)，归档改由
+  `/goal stop` 承担**——否则已完成目标会从面板消失（上游是 status=complete 仍在场）。
+  fork 改动已向上游提 PR **pi-rust/rpi-package #336**。
+- **宿主 = 触发 + 模型裁判**（`src-tauri/src/pi_goal_verify.rs`）：常驻订阅每个在场
+  会话的 `AgentEnd`（run 收尾）→ 闸门（当前会话 / goal `active` / 后台作业不在跑 /
+  单槽在途）→ 读 todo 快照 → `/goal _verify-start {"items":[…]}`（插件开下一轮迭代 +
+  `verifying`）→ 宿主克隆的 `RuntimeActionHost::side_question` 跑无工具单轮裁判
+  （64KB 文本摘录；工具输入/结果不进摘录，所以问句里带同一份 todo 快照）→
+  `/goal _verify-result {"outcome":…,"reason":…,"nextAction":…}`。坏 JSON fail-open 成
+  `pass` + reason（上游语义）；请求失败/超时 = `cancelled` → paused；会话上台时若 goal
+  仍 `verifying` 且本进程无在途校验 → 补发 `cancelled` 收口（孤儿修复）。
+  **续跑在插件侧**：`notSatisfied` + `nextAction` → 插件用 `SendMessage(display:false)`
+  （model-only，不进 UI）驱动下一轮，预算耗尽则不续——与上游 validator 回路同形。
+  **架构事实**：rpi 的模型原语（action 24/25）只挂在 invocation bridge 上，插件的
+  `on_turn_end` 拿不到——所以裁判模型调用在宿主、状态机在插件，各归其位。
+  （旁路监听插件 `rpi-goal-iterations` 已退役、DLL 卸载，源码留存仅作参考。）
+  面板 GoalStatusSection = ZCode 迭代行结构（`buildConversationGoalIterationSummaries`
+  逐条照抄）+ 结论徽章；在途行 spinner = status `verifying`。
+  **实机**（插件驱动全回路）：`/goal start 用一句话回答 1+1 等于几` + 用户消息 →
+  `verifying` → `verified`，`verifications:[{n:1,outcome:"pass"}]`；另一条不可达目标
+  （CPU 降到 20°C）→ `notSatisfied` + 真 nextAction → **自动续跑第二轮**（用户未输入，
+  turnsUsed 1→2）→ 再判 notSatisfied，turns 4/4 预算耗尽 → paused。
+- **工作流分区（宿主派生）**：`status-workflow-runs.ts` 从本线程 `plan` /
+  `dispatch` 工具调用派生（`details.nodes` 真形状：id/task/deps/status ∈
+  pending/running/done/failed/skipped）；plan set = 一条 run，dispatch 波更新
+  同图；pending/running 进分区，全 settled 进「已结束的工作流」页脚；图快照
+  缺席不造 0/0；被新 plan 替换且未收敛的旧图 console.warn 后丢弃。
+  UI 照抄上游 `WorkflowStatusSection` / `WorkflowRunRow`（Stop 不渲染——
+  orchestrator 无取消面）；行/页脚开 `workflow-run:<runId>` /
+  `workflow-directory` 面板栏标签（`workflow-run-detail-pane.tsx`）。
+  实机：真模型 plan(set) 两节点 → 面板「工作流 1 个运行中」+ 真行；
+  真 dispatch 结果含 `details.nodes`，与派生规则一致。
+- **门禁**：vitest **1073**（86 文件）/ 宿主 cargo test **702** / tsc 0 新错
+  （hermes-mirror + sdk-upstream 既有基线不变）；fork `cargo test --release` **31**
+  条（干净上游克隆同验）。
 - **工作流分区（宿主派生）**：`status-workflow-runs.ts` 从本线程 `plan` /
   `dispatch` 工具调用派生（`details.nodes` 真形状：id/task/deps/status ∈
   pending/running/done/failed/skipped）；plan set = 一条 run，dispatch 波更新
