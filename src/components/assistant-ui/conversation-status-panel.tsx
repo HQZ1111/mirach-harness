@@ -111,6 +111,10 @@ import { gitBridge, useGitBridge } from '@/components/assistant-ui/git-store'
 import { flatTasks, todoBridge, useTodoBridge } from '@/components/assistant-ui/todo-store'
 import { jobsBridge, useJobsBridge } from '@/components/assistant-ui/jobs-store'
 import {
+  childAgentsBridge,
+  useChildAgentsBridge,
+} from '@/components/assistant-ui/child-agents-store'
+import {
   planEntriesBridge,
   usePlanEntriesBridge,
 } from '@/components/assistant-ui/plan-entries-store'
@@ -159,6 +163,7 @@ const L = {
   goalResume: '恢复目标',
   agentsRunning: (n: number) => `${n} 个运行中`,
   endedAgents: '已结束的智能体',
+  stopAgent: '停止子代理',
   cancel: '停止',
   openPlan: (title: string) => `查看计划：${title}`,
   openAgent: '查看子代理详情',
@@ -1066,6 +1071,7 @@ function AgentStatusSection({
   onOpenChange,
   onOpenAgent,
   onOpenDirectory,
+  onStopAgent,
 }: {
   model: StatusPanelModel
   separated: boolean
@@ -1073,6 +1079,7 @@ function AgentStatusSection({
   onOpenChange?: (open: boolean) => void
   onOpenAgent?: (agent: StatusPanelAgentRow) => void
   onOpenDirectory?: () => void
+  onStopAgent?: (agentId: string) => void
 }) {
   const agents = model.runningAgents
   const endedCount = model.endedAgentCount
@@ -1154,6 +1161,21 @@ function AgentStatusSection({
                 {agent.startedAt === null ? '—' : formatWorkDuration(Math.max(0, now - agent.startedAt))}
               </span>
             </div>
+            {agent.stoppable && onStopAgent ? (
+              <button
+                type="button"
+                aria-label={L.stopAgent}
+                title={L.stopAgent}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onStopAgent(agent.id)
+                }}
+                className="text-foreground hover:bg-foreground/[0.06] relative z-[2] ml-auto flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[13px] transition-colors"
+              >
+                <SquareIcon aria-hidden className="size-3 fill-current" />
+                {L.cancel}
+              </button>
+            ) : null}
           </li>
         ))}
       </ul>
@@ -1297,6 +1319,7 @@ function ConversationStatusPanelImpl() {
   const { todo } = useTodoBridge()
   const { stat: gitStat } = useGitBridge()
   const { jobs } = useJobsBridge()
+  const { agents: childAgents } = useChildAgentsBridge()
   const { entries: planEntries } = usePlanEntriesBridge()
   const isRunning = useAuiState((s) => s.thread.isRunning)
   const threadMessages = useAuiState((s) => s.thread.messages)
@@ -1320,6 +1343,7 @@ function ConversationStatusPanelImpl() {
     void gitBridge.getState().refresh(cwd ?? null)
     void planEntriesBridge.getState().refresh()
     void jobsBridge.getState().refresh()
+    void childAgentsBridge.getState().refresh()
   }, [cwd, isRunning, activeId])
 
   // run 进行中：插件作业/待办/计划条目会在**轮中途**追加会话条目（background
@@ -1331,6 +1355,7 @@ function ConversationStatusPanelImpl() {
       void jobsBridge.getState().refresh()
       void todoBridge.getState().refresh()
       void planEntriesBridge.getState().refresh()
+      void childAgentsBridge.getState().refresh()
     }, 2000)
     return () => window.clearInterval(timer)
   }, [isRunning])
@@ -1341,6 +1366,7 @@ function ConversationStatusPanelImpl() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       void jobsBridge.getState().refresh()
+      void childAgentsBridge.getState().refresh()
     }, 3000)
     return () => window.clearInterval(timer)
   }, [])
@@ -1369,10 +1395,22 @@ function ConversationStatusPanelImpl() {
     }
   }, [activeId, isRunning, refreshGoal])
 
-  // 智能体行：从工具调用派生（运行中 + 已结束目录）。
+  // 智能体行：引擎名册（真值，可 Stop） + 工具调用派生（已结束目录）。
   const agentRows = useMemo(
     () => deriveAgentRows(threadMessages as readonly unknown[]),
     [threadMessages],
+  )
+  const engineRunningAgents = useMemo<StatusPanelAgentRow[]>(
+    () =>
+      childAgents
+        .filter((agent) => agent.status === 'running')
+        .map((agent) => ({
+          id: agent.childId,
+          title: agent.taskPreview !== '' ? agent.taskPreview : agent.role,
+          startedAt: agent.startedMs,
+          stoppable: true,
+        })),
+    [childAgents],
   )
 
   const model = useMemo(
@@ -1389,14 +1427,15 @@ function ConversationStatusPanelImpl() {
             command: job.command ?? '后台作业',
             ...(job.label !== null ? { label: job.label } : {}),
             startedAtMs: job.startedAtMs,
-            // 引擎侧 kill 只在插件进程内（Job Object），宿主无终止面 ——
-            // 不渲染点了必 Err 的 Stop 按钮。
-            cancellable: false,
+            // 插件注册了 `/jobs kill <id>` 命令面（Job Object 在该进程内），
+            // 宿主 pi_job_cancel 转发；新状态由插件快照如实回写。
+            cancellable: true,
           })),
-        runningAgents: agentRows.running,
+        runningAgents:
+          engineRunningAgents.length > 0 ? engineRunningAgents : agentRows.running,
         endedAgentCount: agentRows.ended.length,
       }),
-    [todo, gitStat, goalRaw, planEntries, jobs, agentRows],
+    [todo, gitStat, goalRaw, planEntries, jobs, agentRows, engineRunningAgents],
   )
 
   // 面板在场 → 写共享 store（对话内容列的让位判定；卸载即清除）。
@@ -1495,6 +1534,14 @@ function ConversationStatusPanelImpl() {
     invoke('pi_job_cancel', { jobId })
       .then(() => jobsBridge.getState().refresh())
       .catch((e) => console.error('[status-panel] 后台任务取消失败', jobId, e))
+  }, [])
+
+  // 停止子代理：引擎 host 按 childId 真取消（ChildAgents.stop）；名册随后刷新，
+  // 行状态由 failed 行如实反映（错误可见，不假装成功）。
+  const onStopAgent = useCallback((childId: string) => {
+    invoke('pi_child_agent_stop', { childId })
+      .then(() => childAgentsBridge.getState().refresh())
+      .catch((e) => console.error('[status-panel] 子代理取消失败', childId, e))
   }, [])
 
   const canRenderGit = Boolean(model.git)
@@ -1636,6 +1683,7 @@ function ConversationStatusPanelImpl() {
                 onOpenChange={setAgentOpen}
                 onOpenAgent={openAgentDetail}
                 onOpenDirectory={() => openAgentDirectory()}
+                onStopAgent={onStopAgent}
               />
             ) : null}
           </div>

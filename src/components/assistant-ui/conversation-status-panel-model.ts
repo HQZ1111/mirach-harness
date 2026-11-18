@@ -117,6 +117,8 @@ export interface StatusPanelAgentRow {
   id: string
   title: string
   startedAt: number | null
+  /** 引擎名册行（pi_child_agents）才可停；工具调用派生行没有停面。 */
+  stoppable?: boolean
 }
 
 /** 终端分区一行（上游 BackgroundWorkSummary 的宿主最小投影）。 */

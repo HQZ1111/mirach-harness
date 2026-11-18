@@ -1411,6 +1411,25 @@ fn pi_job_list(
     state.engine.job_list()
 }
 
+/// 子代理名册（活动面板「智能体」分区真值）：引擎 host 的 ChildAgents
+/// registry（delegate_task 的 in-memory 子会话），行 = childId/status/
+/// turns/startedMs/finishedMs/role/taskPreview/error。
+#[tauri::command(async)]
+fn pi_child_agents(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.child_agent_roster()
+}
+
+/// 停止一个运行中的子代理（面板「智能体」行的 Stop）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_child_agent_stop(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    child_id: String,
+) -> Result<serde_json::Value, String> {
+    state.engine.child_agent_stop(&child_id)
+}
+
 /// 待办状态（活动面板 Todo 分区拉取面）：重放会话 Custom `todo_list.v1`
 /// 条目（docs/engine-gaps.md G2 过渡方案——不需要上游暴露 Agent 上的
 /// plan_state）。返回 `{schema, list, summary}`；无 todo = schema null。
@@ -1801,6 +1820,8 @@ fn main() {
             pi_switch_branch,
             pi_hub_roster,
             pi_job_list,
+            pi_child_agents,
+            pi_child_agent_stop,
             pi_todo_state,
             pi_hub_kill,
             pi_job_cancel,

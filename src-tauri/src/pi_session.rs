@@ -1819,12 +1819,54 @@ impl PiEngine {
         crate::pi_plugin_state::background_tasks_wire(data.as_ref())
     }
 
-    /// 取消一个后台作业：**宿主没有进程树句柄**。rpi-background-tasks 只注册
-    /// `background` / `jobs` 两个模型工具（kill 由模型经 `jobs` 工具发出），
-    /// 进程归属（Windows Job Object）只在插件静态表里；宿主按 pid 外部杀会
-    /// 漏掉孙进程（插件注释实测过 `taskkill /T` 断链），故如实 Err。
-    pub fn job_cancel(&self, _job_id: &str) -> Result<serde_json::Value, String> {
-        Err("后台任务取消不可用：作业进程由 rpi-background-tasks 插件持有（Job Object 句柄在插件进程内），宿主无按 id 终止面；请让模型用 `jobs` 工具（action=kill）停止".into())
+    /// 取消一个后台作业：宿主没有进程树句柄，但插件（rpi-background-tasks）注册了
+    /// 斜杠命令 `/jobs kill <id>` —— 走引擎的 command 面转发即可，真正的
+    /// Job Object 终止在插件进程内完成，状态由插件的下次快照如实回写。
+    pub fn job_cancel(&self, job_id: &str) -> Result<serde_json::Value, String> {
+        let trimmed = job_id.trim();
+        if trimmed.is_empty() {
+            return Err("job_cancel 需要 jobId".into());
+        }
+        self.run_command("/jobs", &format!("kill {trimmed}"))
+    }
+
+    /// 子代理名册（活动面板「智能体」分区）：真源 = 引擎 host 持有的
+    /// `ChildAgents` registry（delegate_task 的 in-memory 子会话）。
+    /// 每行 {childId,status,turns,startedMs,finishedMs,role,taskPreview,error}。
+    /// 无活动会话 = 空名册（registry 属于会话的 host）。
+    pub fn child_agent_roster(&self) -> Result<serde_json::Value, String> {
+        let Some(live) = self.live_opt()? else {
+            return Ok(serde_json::Value::Array(Vec::new()));
+        };
+        Ok(serde_json::Value::Array(self.child_host(&live)?.child_agent_roster()))
+    }
+
+    /// 停止一个运行中的子代理（活动面板「智能体」行的 Stop）：引擎 host
+    /// 按 id 找到 ChildAgents 里的 job 并取消（真实终止，不静默成功）。
+    pub fn child_agent_stop(&self, child_id: &str) -> Result<serde_json::Value, String> {
+        let trimmed = child_id.trim();
+        if trimmed.is_empty() {
+            return Err("child_agent_stop 需要 childId".into());
+        }
+        let live = self.live()?;
+        let host = self.child_host(&live)?;
+        host.stop_child_agent(trimmed)
+    }
+
+    /// 当前会话 host 的 RuntimeActionHost 视图（扩展桥 clone_host）。
+    /// 桥尚未建立（无扩展）= 明确 Err，不拿空名册冒充成功。
+    fn child_host(
+        &self,
+        live: &HarnessLive,
+    ) -> Result<Arc<dyn rpi_extensions::RuntimeActionHost>, String> {
+        let bridge = live
+            .reload
+            .action_bridge
+            .lock()
+            .map_err(|_| "扩展桥锁中毒".to_string())?
+            .clone()
+            .ok_or_else(|| "当前会话没有扩展桥（无法查询子代理）".to_string())?;
+        Ok(bridge.clone_host())
     }
 
     /// 手动压缩（`AgentLane::compact(None)`）——rpi 在会话树上追加一条

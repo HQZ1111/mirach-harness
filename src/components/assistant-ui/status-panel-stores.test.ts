@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { agentHubBridge, isSettled, parseChildEntries } from './agent-hub-store'
 import { jobsBridge, parseJobs } from './jobs-store'
+import { parseChildAgents } from './child-agents-store'
 import { planEntriesBridge, parsePlanEntries } from './plan-entries-store'
 import { gitBridge, parseGitDiffStat } from './git-store'
 import { flatTasks, parseTodoList, todoBridge } from './todo-store'
@@ -200,6 +201,42 @@ describe('parseTodoList（pi todo_list.v1 details.list）', () => {
       phases: [{ name: '阶段一', tasks: [{ content: 'a', state: 'open' }] }],
     })
     expect(proj!.phases[0]!.name).toBe('阶段一')
+  })
+})
+
+describe('parseChildAgents（pi_child_agents 名册行）', () => {
+  const good = {
+    childId: 'c-1',
+    status: 'running',
+    turns: 2,
+    startedMs: 1000,
+    finishedMs: null,
+    role: 'scout',
+    taskPreview: '扫描仓库',
+    error: null,
+  }
+
+  it('正常行逐字段解析', () => {
+    expect(parseChildAgents([good])).toEqual([good])
+  })
+
+  it('三态 status 直映；未知 status 跳过', () => {
+    for (const status of ['running', 'done', 'failed']) {
+      expect(parseChildAgents([{ ...good, status }])[0]!.status).toBe(status)
+    }
+    silenceErrors()
+    expect(parseChildAgents([{ ...good, status: 'zombie' }])).toEqual([])
+  })
+
+  it('非数组 → [] + 错误可见', () => {
+    const spy = silenceErrors()
+    expect(parseChildAgents({ nope: true })).toEqual([])
+    expect(spy).toHaveBeenCalled()
+  })
+
+  it('缺 childId/startedMs 行 → 跳过，好行保留', () => {
+    silenceErrors()
+    expect(parseChildAgents([good, { childId: 'x', status: 'running' }])).toHaveLength(1)
   })
 })
 

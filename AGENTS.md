@@ -2696,6 +2696,40 @@ startedAtMs/pid/exitCode 全真）→ 面板「终端」分区运行中在场、
 （容器 660）→ pt 52.5px、transform none；宽容器（zoom 模拟 ≥1280）→
 pt 15px、transform `matrix(1,0,0,1,-157.5,0)`。
 
+### 插件 / 引擎双路径收口（2026-11-18 第三波，用户："能用插件的形式解决就用插件的形式，
+如果必须动引擎侧才能实现，引擎侧的要自己测试完没有问题了再pr给pi rust"）
+
+**① 终端 Stop = 插件侧闭合**：给 vendored `rpi-background-tasks` 补
+`/jobs` 斜杠命令（`list` / `tail <id> [lines]` / `kill <id>`；命令面没有
+`__rpi.sessionId`，kill 按进程内唯一 id 反查 owner）。宿主 `pi_job_cancel`
+改为 `run_command("/jobs", "kill <id>")` 转发；面板终端行重新渲染 Stop。
+实机：运行中 job 点 Stop → 快照 `status=cancelled`、行消失、pid 进程消失。
+
+**② 子代理名册/Stop = 引擎侧补齐（已自测 + PR）**：
+- 引擎（`G:\pi-rust-main` 同源补丁，PR **bigfish1913/pi-rust #355**）：
+  `ChildAgents` 新增 `roster()`（childId/status/turns/startedMs/finishedMs/
+  role/taskPreview/error，按开始时间倒序）与 `stop(child_id)`（按 id 取消，
+  非 owner 过滤——调用者就是宿主；未知 id=Err）；`State` 增 started_ms/
+  finished_ms/role/task_preview（首写胜出）；`RuntimeActionHost` 增默认
+  `child_agent_roster()`（空）/`stop_child_agent()`（拒绝），
+  `HarnessActionHost` 覆写。
+- 宿主：`pi_session.rs` 新增 `child_agent_roster()`/`child_agent_stop()`
+  （经 `live.reload.action_bridge` 的 `clone_host()` 调 trait）；
+  main.rs 新增 `pi_child_agents` / `pi_child_agent_stop`；新 store
+  `child-agents-store.ts`（严格解析）；面板「智能体」分区优先渲染引擎名册
+  （running 行带「停止子代理」钮），工具调用派生仅剩已结束目录用途。
+- 实机：真模型 delegate_task 长任务（child sleep 180）→ `pi_child_agents`
+  返回 running 行（role/taskPreview 真值）→ 面板行点 Stop →
+  `pi_child_agent_stop` → 模型侧收到「child cancelled by user」、名册行消失、
+  子进程终止。
+- 引擎门禁：`cargo test -p rpi-cli` **1197 passed**；`native_durable` 的
+  `resource_fixture` 2 条构建失败在干净 `upstream/main`（v0.25.0）上同样
+  复现（环境性，与补丁无关）。
+
+**仍无数据面（不造假 UI）**：workflow 分区、目标 verifying/迭代徽章——
+rpi 无对应概念/字段，ZCode 的数据来自它自己的后端；若要补齐需再设计引擎
+概念（独立一轮）。
+
 ## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
 
 **引擎侧改动都在 `G:\pi-rust-main` 工作树，PR 已提：pi-rust #348**

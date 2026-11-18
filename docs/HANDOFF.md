@@ -6,6 +6,24 @@
 
 ## 当前状态
 
+**✅ 2026-11-18：状态面板缺口收口——终端 Stop 走插件、子代理名册/Stop 走引擎（PR #355）**
+
+- **终端 Stop（插件侧）**：vendored `rpi-background-tasks` 增 `/jobs` 斜杠命令
+  （list / tail / kill），宿主 `pi_job_cancel` 转发 `run_command("/jobs",
+  "kill <id>")`；面板终端行重新渲染 Stop。实机：运行中 job 点 Stop →
+  快照 `cancelled`、行消失、pid 进程消失。
+- **子代理名册/Stop（引擎侧，已自测 + PR）**：引擎 `ChildAgents` 增
+  `roster()`/`stop(child_id)`（childId/status/turns/startedMs/finishedMs/
+  role/taskPreview/error；按 id 取消，非 owner 过滤）；`RuntimeActionHost`
+  默认方法 + `HarnessActionHost` 实现。宿主新 IPC `pi_child_agents` /
+  `pi_child_agent_stop` + `child-agents-store.ts`，面板「智能体」分区优先
+  渲染引擎名册（running 行带「停止子代理」）。实机：真模型 delegate_task
+  长任务 → 名册 running → 面板 Stop → 模型收到「child cancelled by user」、
+  名册行消失、子进程终止。**PR：bigfish1913/pi-rust #355**。
+- 引擎门禁：`cargo test -p rpi-cli` 1197 passed（native_durable 的 2 条
+  resource_fixture 构建失败在干净 upstream/main 同样复现，环境性）。
+- 仍无数据面（不造假 UI）：workflow 分区、目标 verifying/迭代徽章。
+
 **✅ 2026-11-18：状态面板让位链与 ZCode 源码对账修正（用户："对话区宽度被挤在左边，面板没出现还在左边"）**
 
 - **根因 1**：面板组件总会挂载（无内容时 `return null`），而 `setMounted(true)`
