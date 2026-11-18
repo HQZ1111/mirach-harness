@@ -123,6 +123,135 @@ function paneVisibilityAtom(paneId: string): Atom<boolean> {
   return atomRef
 }
 
+// ── 远程连接名册（跨网关，2026-11-18）───────────────────────────────────────
+//
+// 注册表里 kind=remote/cloud/ssh 且带 url 的连接 = 远端网关。按需建连
+// （pi_gateway_*，JSON-RPC over WS /api/ws），拉 profiles.list 供 roster /
+// profileRoutes 合并。缓存 30s；瞬时失败沿用旧值（hermes relay.ts 的同款
+// 纪律——否则一次 RPC 抖动会把活着的机器报成离线）。
+
+interface RemoteRosterProfile {
+  name: string
+  title: string
+  description: string
+}
+
+interface RemoteRoster {
+  connectionId: string
+  label: string
+  kind: 'remote'
+  profiles: RemoteRosterProfile[]
+  fetchedAt: number
+}
+
+const remoteRosterCache = new Map<string, RemoteRoster>()
+const REMOTE_ROSTER_TTL_MS = 30_000
+
+async function tauriCore() {
+  return import('@tauri-apps/api/core')
+}
+
+async function remoteConnections(): Promise<
+  Array<{ id: string; label?: string; kind?: string; url?: string }>
+> {
+  try {
+    const { invoke } = await tauriCore()
+    const registry = await invoke<{ primary?: string; connections?: unknown }>('pi_connections_list')
+    const rows = Array.isArray(registry?.connections) ? registry.connections : []
+    return rows
+      .map((row) => row as Record<string, unknown>)
+      .filter(
+        (row) =>
+          typeof row.id === 'string' &&
+          row.id !== 'local' &&
+          typeof row.url === 'string' &&
+          String(row.url).trim() !== '' &&
+          (row.kind === 'remote' || row.kind === 'cloud' || row.kind === 'ssh'),
+      )
+      .map((row) => ({
+        id: String(row.id),
+        label: typeof row.label === 'string' ? row.label : undefined,
+        kind: typeof row.kind === 'string' ? row.kind : undefined,
+        url: typeof row.url === 'string' ? row.url : undefined,
+      }))
+  } catch (e) {
+    console.error('[host] 读取远程连接失败', e)
+    return []
+  }
+}
+
+async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
+  const connections = await remoteConnections()
+  const out: RemoteRoster[] = []
+  for (const connection of connections) {
+    const cached = remoteRosterCache.get(connection.id)
+    if (!force && cached && Date.now() - cached.fetchedAt < REMOTE_ROSTER_TTL_MS) {
+      out.push(cached)
+      continue
+    }
+    try {
+      const { invoke } = await tauriCore()
+      let statusMap = await invoke<Record<string, { state?: string }>>('pi_gateway_status')
+      if (statusMap?.[connection.id]?.state !== 'open') {
+        // 远端连接的 token 管理尚未入 UI（见 docs/bots-port-gaps.md）；
+        // 本地回环/--insecure 网关可无 token 连接。
+        await invoke('pi_gateway_connect', {
+          connectionId: connection.id,
+          url: connection.url,
+          token: null,
+        })
+        // gateway.ready 之前 profiles.list 会被拒；等就绪（≤10s）。
+        for (let i = 0; i < 50; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+          statusMap = await invoke<Record<string, { state?: string }>>('pi_gateway_status')
+          if (statusMap?.[connection.id]?.state === 'open') break
+        }
+      }
+      const res = await invoke<{ profiles?: Array<Record<string, unknown>> }>(
+        'pi_gateway_call',
+        {
+          connectionId: connection.id,
+          method: 'profiles.list',
+          params: { include_sessions: false },
+          timeoutMs: 15_000,
+        },
+      )
+      const profiles: RemoteRosterProfile[] = []
+      for (const profile of res?.profiles ?? []) {
+        const name = typeof profile?.name === 'string' ? profile.name : ''
+        if (!name) continue
+        profiles.push({
+          name,
+          title:
+            typeof profile?.display_name === 'string'
+              ? profile.display_name
+              : typeof profile?.title === 'string'
+                ? profile.title
+                : '',
+          description: typeof profile?.description === 'string' ? profile.description : '',
+        })
+      }
+      const roster: RemoteRoster = {
+        connectionId: connection.id,
+        label: connection.label || connection.id,
+        kind: 'remote',
+        profiles,
+        fetchedAt: Date.now(),
+      }
+      remoteRosterCache.set(connection.id, roster)
+      out.push(roster)
+    } catch (e) {
+      console.error(`[host] 远程网关 ${connection.id} 名册拉取失败（沿用上次快照）`, e)
+      if (cached) out.push(cached)
+    }
+  }
+  const live = new Set(connections.map((connection) => connection.id))
+  for (const id of [...remoteRosterCache.keys()]) {
+    if (!live.has(id)) remoteRosterCache.delete(id)
+  }
+  return out
+}
+
 export const host = {
   /** 上行状态面（8 个字段，全部接宿主真实 atom）。 */
   state: {
@@ -142,15 +271,41 @@ export const host = {
   /**
    * 已注册的连接列表。
    *
-   * 宿主对应：`pi_connections_*`（多 provider 连接）。这里返回**宿主真实数据**。
+   * 宿主对应：`pi_connections_*` 注册表（hermes electron connection-registry
+   * v2 同形）。**契约是裸数组**（relay.ts `connectionLabels()` 直接
+   * `Array.isArray(rows)`；create-dialog 也接受注册表包封形状）。此前这里把
+   * Rust 返回的 `{version,primary,connections}` 当数组读 → 恒空表，
+   * relay 的查看/推送全部静默停摆（2026-11-18 审计实锤修）。
    */
-  connections: async (): Promise<{ connections: unknown[] }> => {
+  connections: async (): Promise<
+    Array<{ id: string; label?: string; primary?: boolean; kind?: string; url?: string }>
+  > => {
     try {
       const { invoke } = await import('@tauri-apps/api/core')
-      const list = await invoke<unknown[]>('pi_connections_list')
-      return { connections: Array.isArray(list) ? list : [] }
-    } catch {
-      return { connections: [] }
+      const registry = await invoke<{ primary?: string; connections?: unknown }>(
+        'pi_connections_list',
+      )
+      const rows = Array.isArray(registry?.connections) ? registry.connections : []
+      const out: Array<{ id: string; label?: string; primary?: boolean; kind?: string; url?: string }> = []
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') continue
+        const record = row as Record<string, unknown>
+        const id = String(record.id ?? '').trim()
+        if (!id) continue
+        out.push({
+          id,
+          ...(typeof record.label === 'string' && record.label.trim()
+            ? { label: record.label }
+            : {}),
+          ...(id === (registry?.primary ?? 'local') ? { primary: true } : {}),
+          ...(typeof record.kind === 'string' ? { kind: record.kind } : {}),
+          ...(typeof record.url === 'string' ? { url: record.url } : {}),
+        })
+      }
+      return out
+    } catch (e) {
+      console.error('[host] connections() 读取连接注册表失败', e)
+      return []
     }
   },
 
@@ -169,7 +324,7 @@ export const host = {
     try {
       const { botsStore } = await import('@/components/panes/hub/bots-store')
       if (!botsStore.getState().bots.length) botsStore.getState().load()
-      const agents = botsStore.getState().bots.map((bot) => ({
+      const agents: HostRosterAgent[] = botsStore.getState().bots.map((bot) => ({
         connectionId: 'local',
         connectionKind: 'local' as const,
         connectionLabel: '本机',
@@ -178,13 +333,37 @@ export const host = {
         handle: bot.name,
         title: bot.title,
       }))
+      // 跨网关并集（2026-11-18）：远端网关的 profiles.list 行并入同一张
+      // 名册——上游 buildUnionRoster 的 (connectionId, profile) 并集语义。
+      const remotes = await refreshRemoteRosters()
+      for (const remote of remotes) {
+        for (const profile of remote.profiles) {
+          agents.push({
+            connectionId: remote.connectionId,
+            connectionKind: 'remote' as const,
+            connectionLabel: remote.label,
+            profile: profile.name,
+            targetProfile: profile.name,
+            handle: profile.name,
+            title: profile.title,
+          })
+        }
+      }
       // sources 形状照上游（`{ connectionId, kind, label, reachable }`）——
       // 插件用 `sourceByConnection(sources)` 按 **connectionId** 建索引做
       // 源健康标注（`annotateBotSource`）；写成 `{id}` 会让索引恒空，
       // 所有 sourceScoped 行被标成"网关已移除"（实测：机器人群聊里
       // 2 个中 0 个可用 + 行尾红字）。
       return {
-        sources: [{ connectionId: 'local', kind: 'local' as const, label: '本机', reachable: true }],
+        sources: [
+          { connectionId: 'local', kind: 'local' as const, label: '本机', reachable: true },
+          ...remotes.map((remote) => ({
+            connectionId: remote.connectionId,
+            kind: 'remote' as const,
+            label: remote.label,
+            reachable: true,
+          })),
+        ],
         agents,
       }
     } catch (e) {
@@ -194,12 +373,43 @@ export const host = {
   },
 
   /**
-   * profile 路由表。
+   * profile 路由表（hermes `buildRegistryProfileRoutes` 的宿主对偶：
+   * 每个 (connectionId, profile) 名册行一条路由）。
    *
-   * **宿主没有多网关 profile 路由**，返回空数组：上游 `_roster_siblings()`
-   * 拿到空表会自然走单机分支。
+   * 本地连接 `local` 是注册表 primary，每只机器人一个 profile；relay.ts 用它
+   * 建 peer 集合、drain/投递/推送名册。远程连接的路由在 transport
+   * （`pi_gateway_*`）接通后从这里追加——**跨网关是 bots 的核心**，
+   * 见 docs/bots-port-gaps.md。
    */
-  profileRoutes: async (): Promise<HostProfileRoute[]> => [],
+  profileRoutes: async (): Promise<HostProfileRoute[]> => {
+    try {
+      const { botsStore } = await import('@/components/panes/hub/bots-store')
+      if (!botsStore.getState().bots.length) botsStore.getState().load()
+      const routes: HostProfileRoute[] = botsStore.getState().bots.map((bot) => ({
+        connectionId: 'local',
+        mode: 'local' as const,
+        primary: true as const,
+        profile: bot.name,
+        targetProfile: bot.name,
+      }))
+      // 远端网关的 profile 各一条 remote 路由（跨网关 relay / 会话路由）。
+      const remotes = await refreshRemoteRosters()
+      for (const remote of remotes) {
+        for (const profile of remote.profiles) {
+          routes.push({
+            connectionId: remote.connectionId,
+            mode: 'remote' as const,
+            profile: profile.name,
+            targetProfile: profile.name,
+          })
+        }
+      }
+      return routes
+    } catch (e) {
+      console.error('[host] profileRoutes() 读取 bot 名册失败', e)
+      return []
+    }
+  },
 
   /**
    * 面板可见性。宿主读实际 DOM 存在性（含已关闭的栏）。
@@ -211,13 +421,29 @@ export const host = {
    */
   paneVisibility: (paneId: string) => paneVisibilityAtom(paneId),
 
-  /** 系统通知（原生）。宿主走 Tauri notification 或退化为 in-app toast。 */
-  notify: (input: { kind?: string; message: string }) => {
-    // 宿主暂无统一 toast store，走 console + 原生通知（若可用）
+  /**
+   * 系统通知。宿主面 = **应用内 toast**（ToastHost，2026-11-18）+ console；
+   * 权限允许时再叠一层系统 Notification。此前只落 console（或权限允许的
+   * 浏览器通知）——"点了没反应"的主要来源之一（审计实锤）。
+   */
+  notify: (input: { kind?: string; message: string; title?: string; detail?: string; persistent?: boolean }) => {
     const level = input.kind === 'error' ? 'error' : 'info'
     console[level === 'error' ? 'error' : 'log'](`[bots] ${input.message}`)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('mirach:toast', {
+          detail: {
+            kind: input.kind,
+            title: input.title,
+            message: input.message,
+            detail: input.detail,
+            persistent: input.persistent,
+          },
+        }),
+      )
+    }
     if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification('Mirach', { body: input.message })
+      new Notification(input.title || 'Mirach', { body: input.message })
     }
   },
 
@@ -231,6 +457,11 @@ export const host = {
   notifyError: (error: unknown, message?: string) => {
     const text = message ?? (error instanceof Error ? error.message : String(error))
     console.error(`[bots] ${text}`, error)
+    if (typeof window !== 'undefined' && text) {
+      window.dispatchEvent(
+        new CustomEvent('mirach:toast', { detail: { kind: 'error', message: text } }),
+      )
+    }
   },
 
   /**
@@ -303,15 +534,28 @@ export const host = {
   /**
    * 定向到某 profile 的 RPC。
    *
-   * 宿主单身份（全部 bot 都是本机 profile），落同一个分发表；但 **route 的
+   * 宿主单身份时全部 bot 都是本机 profile，落同一个分发表；但 **route 的
    * profile 必须并进 params**——上游 requestForBot 对 sourceScoped 行只传
-   * route，不带 `profile` 参数（scopedBotParams 仅在 params 已有该键时改写）。
-   * 群聊成员轮次的 prompt.submit / 附件 / 审批都要靠这个 profile 找到 bot
-   * 预设（人格/模型/工具集）。route 缺 profile 时原样透传（不猜）。
+   * route，不带 `profile` 参数。群聊成员轮次的 prompt.submit / 附件 / 审批
+   * 都要靠这个 profile 找到 bot 预设。
+   *
+   * **跨网关（2026-11-18）**：`mode:'remote'` 且 connectionId ≠ local 的
+   * 路由走 `pi_gateway_call`（JSON-RPC over WS `/api/ws`，hermes 桌面端同
+   * 款传输）；本机路由仍落本地分发表。prompt.submit 的超时按上游给足
+   * （30 分钟——目标网关一轮可能很久）。
    */
-  requestProfile: async <T>(route: unknown, method: string, params: Record<string, unknown> = {}): Promise<T> => {
-    const { dispatchHostRequest } = await import('./host-rpc')
-    const r = route as null | { profile?: unknown; targetProfile?: unknown }
+  requestProfile: async <T>(
+    route: unknown,
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs?: number,
+  ): Promise<T> => {
+    const r = route as null | {
+      connectionId?: unknown
+      mode?: unknown
+      profile?: unknown
+      targetProfile?: unknown
+    }
     const profile =
       typeof r?.targetProfile === 'string' && r.targetProfile
         ? r.targetProfile
@@ -319,6 +563,25 @@ export const host = {
           ? r.profile
           : ''
     const merged = profile && params.profile === undefined ? { ...params, profile } : params
+    const connectionId = typeof r?.connectionId === 'string' ? r.connectionId : ''
+    if (r?.mode === 'remote' && connectionId && connectionId !== 'local') {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const budget =
+        typeof timeoutMs === 'number' && timeoutMs > 0
+          ? timeoutMs
+          : method === 'prompt.submit'
+            ? 1_800_000
+            : method === 'bot_relay.deliver'
+              ? 1_500_000
+              : 30_000
+      return invoke<T>('pi_gateway_call', {
+        connectionId,
+        method,
+        params: merged,
+        timeoutMs: budget,
+      })
+    }
+    const { dispatchHostRequest } = await import('./host-rpc')
     return dispatchHostRequest<T>(method, merged)
   },
 
@@ -384,9 +647,36 @@ export const host = {
     window.dispatchEvent(new CustomEvent('mirach:undismiss-pane', { detail: paneId }))
   },
 
-  /** 导航（宿主路由）。 */
+  /**
+   * 导航（宿主路由，2026-11-18 接真面）。
+   *
+   * hermes Desktop 的插件路由是 `/settings?tab=<x>`（bot 打开失败卡片的
+   * "打开网关设置" CTA：`/settings?tab=gateway`）。宿主无路由表，映射 =
+   * 打开设置**窗口**并把 tab 深链成宿主节 id（gateway → core-connection）
+   * ——设置窗已开时 Rust 侧走 `mirach:settings:section` 事件切节。
+   * 其它目标仍走 `mirach:navigate` 事件（保留扩展点）。
+   */
   navigate: (target: string): void => {
-    window.dispatchEvent(new CustomEvent('mirach:navigate', { detail: target }))
+    const raw = String(target ?? '')
+    if (raw.startsWith('/settings')) {
+      let section: string | null = null
+      try {
+        const url = new URL(raw, 'mirach://app')
+        section = url.searchParams.get('tab')
+      } catch (e) {
+        console.error('[host] navigate: 解析设置路由失败', raw, e)
+      }
+      void (async () => {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('pi_open_settings_window', { section: section ?? null })
+        } catch (e) {
+          console.error('[host] navigate: 打开设置窗失败', e)
+        }
+      })()
+      return
+    }
+    window.dispatchEvent(new CustomEvent('mirach:navigate', { detail: raw }))
   },
 
   /**
@@ -487,9 +777,31 @@ export const host = {
   /** 保有 profile socket（宿主无 socket）：仍然返回释放函数，调用方会
    *  `release()`，返回 void 会在运行时炸。 */
   retainProfileSocket: (_connectionId?: unknown, _profile?: unknown): (() => void) => () => {},
-  /** 删除 profile（宿主 profile 由设置页管理）。 */
-  deleteProfile: async (_profile: unknown): Promise<void> => {
-    throw new Error('host.deleteProfile: 宿主 profile 由设置页管理，插件不可删')
+  /**
+   * 删除机器人（profile-ops.deleteBot 的入口；参数是 route 对象或名字）。
+   *
+   * 宿主对偶 = 删掉 bots-store 预设（与 `cli.exec profile delete` 同一底层
+   * 操作）。此前显式抛"插件不可删"——那是初版的错误假设：花名册行删除是
+   * bots 的核心动作，抛出会让插件侧删除恒失败（2026-11-18 审计实锤修）。
+   */
+  deleteProfile: async (profile: unknown): Promise<void> => {
+    const name =
+      typeof profile === 'string'
+        ? profile
+        : profile && typeof profile === 'object'
+          ? String(
+              (profile as { targetProfile?: unknown }).targetProfile ??
+                (profile as { profile?: unknown }).profile ??
+                '',
+            )
+          : ''
+    const trimmed = name.trim()
+    if (!trimmed) throw new Error('host.deleteProfile: 缺少 profile 名')
+    const { botsStore } = await import('@/components/panes/hub/bots-store')
+    if (!botsStore.getState().bots.length) botsStore.getState().load()
+    const bot = botsStore.getState().bots.find((row) => row.name === trimmed)
+    if (!bot) throw new Error(`host.deleteProfile: 找不到机器人「${trimmed}」`)
+    botsStore.getState().remove(trimmed)
   },
   /** 清理遗留 profile 偏好（宿主无跨设备遗留态）。 */
   dropLeftoverProfilePrefs: (_args: unknown): void => {},

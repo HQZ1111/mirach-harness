@@ -109,8 +109,12 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
 - **绑定修复（引擎）**：`durable_binding` 原来只在 `native_durable` 分支
   填充 → 宿主会话里工具恒报 "session binding not ready"；改为无条件 set
   （顺带让审批请求带真 session_id）。**这是本轮 PR 给 pi-rust 必带的修正**。
-- **relay（跨网关）仍不做**：单身份宿主无 relay outbox 概念，
-  `bot_relay.deliver` 保持显式报错（§5 同因）。
+- **relay（跨网关）**：✅ 宿主已全接（2026-11-18 第二波）——`pi_relay.rs` 持久仓
+  （outbox/claimed/replies/receipts，hermes `tools/bot_relay.py` 对偶）+ 四门 +
+  `pi_gateway.rs`（JSON-RPC 2.0 over WS `/api/ws`，hermes 桌面端同款传输）+
+  relay.ts 循环驱动；双向实机 E2E 通过。**仍缺**：远端连接 token 管理
+  （keyring 录入 UI）、跨网关 peer 房间（`groups.peer.*` + RoomLink HTTP，
+  transport 已铺好）。
 
 ## PR 待办（给 `github.com/bigfish1913/pi-rust`）
 

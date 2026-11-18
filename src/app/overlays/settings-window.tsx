@@ -26,6 +26,23 @@ import { ResizeHandles } from '@/components/layout/resize-handles'
 import { appWindow } from '@/lib/tauri-window'
 import { useMaximized } from '@/lib/use-maximized'
 
+/**
+ * URL 深链 → 初始节（2026-11-18）：Rust 开窗时带 `section=` 参数
+ * （`host.navigate('/settings?tab=gateway')` 的落点）。tab 名是 hermes
+ * 路由词（gateway），宿主节 id 是 'core-connection'——别名表在这里。
+ */
+function initialSectionFromUrl(): 'core-connection' | undefined {
+  try {
+    const raw = new URLSearchParams(window.location.search).get('section')?.trim() ?? ''
+    if (!raw) return undefined
+    if (raw === 'gateway' || raw === 'core-connection') return 'core-connection'
+    console.error(`[settings-window] 未知深链节 ${raw}——按默认节打开`)
+    return undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function SettingsWindowRoot() {
   // 最大化态 → `html[data-maximized]`：CSS 靠它把圆角/投影/透明边距清零。
   // 设置窗没有控件圆点，此前没人写这个属性 → 最大化后仍留 40px 边距和
@@ -80,6 +97,7 @@ export function SettingsWindowRoot() {
           })
         }}
         variant="window"
+        initialSection={initialSectionFromUrl()}
       />
     </div>
   )

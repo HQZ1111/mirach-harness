@@ -518,9 +518,16 @@ pub fn pi_display_status(profile: Option<String>) -> Result<Value, String> {
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_display_thumbnail(profile: Option<String>) -> Result<Value, String> {
     let profile = profile.unwrap_or_else(|| "local".into());
+    // 契约（gateway-contract DisplayThumbnailResult）：`{data_url, suppressed}`。
+    // 人持租约时缩略图被抑制（frame 可能拍到正在输入的内容）——data_url 置
+    // null + suppressed 说明原因，与上游 tools/bot_desktop/runtime.py 同判。
+    let (lease, _) = current_lease(&profile);
+    if lease.map(|l| l.holder == "human").unwrap_or(false) {
+        return Ok(json!({ "data_url": Value::Null, "suppressed": "human" }));
+    }
     let (width, height, frame) = capture(Some(480))?;
     let thumbnail = encode_image("image/jpeg", width, height, &frame)?;
-    Ok(json!({ "thumbnail": thumbnail, "status": status_json(&profile) }))
+    Ok(json!({ "data_url": thumbnail, "suppressed": Value::Null }))
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
@@ -549,23 +556,29 @@ pub fn pi_display_observe(
                 expires_at: now_secs() + 30,
             },
         );
-    let (lease, epoch) = current_lease(&profile);
-    Ok(json!({
-        "viewer_id": viewer_id,
-        "ticket": ticket,
-        "lease": lease_json(lease.as_ref(), epoch),
-        "status": status_json(&profile),
-    }))
+    // 契约（DisplayObserveResult）= **展平的状态对象** + ticket/path/viewer_id。
+    // 此前返回 `{viewer_id, ticket, lease, status:{…}}` 的嵌套形状：面板
+    // `setScreenStatus(bot, observe)` 把包封当状态存 → `running` 读不到，
+    // 渲染态会闪"已关闭"（2026-11-18 审计实锤修）。
+    let mut status = status_json(&profile);
+    if let Some(obj) = status.as_object_mut() {
+        obj.insert("viewer_id".into(), json!(viewer_id));
+        obj.insert("ticket".into(), json!(ticket));
+        obj.insert("path".into(), json!("/api/display/ws"));
+    }
+    Ok(status)
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_display_start(profile: Option<String>) -> Result<Value, String> {
     let profile = profile.unwrap_or_else(|| "local".into());
     // "start" 在宿主语义 = 确保屏幕可观察（本机屏幕恒在，无需启动服务）。
+    // 返回**展平状态**（screen-pane 的 `displayRequest<DisplayStatus>` 直接
+    // setScreenStatus——包封形状会同 observe 一样读不到 running）。
     if !screen_geometry().2 {
         return Err("本机屏幕捕获不可用".into());
     }
-    Ok(json!({ "status": status_json(&profile) }))
+    Ok(status_json(&profile))
 }
 
 #[tauri::command(rename_all = "camelCase", async)]

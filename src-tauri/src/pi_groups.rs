@@ -70,7 +70,12 @@ fn local_actor() -> controls::DispatchContext<'static> {
 ///
 /// 前端：`invoke('groups_dispatch', { method, params })`
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn groups_dispatch(method: String, params: Option<Value>) -> Result<Value, String> {
+pub fn groups_dispatch(
+    app: tauri::AppHandle,
+    method: String,
+    params: Option<Value>,
+) -> Result<Value, String> {
+    use tauri::Emitter;
     let params = params.unwrap_or_else(|| json!({}));
     let ctx = local_actor();
 
@@ -79,13 +84,40 @@ pub fn groups_dispatch(method: String, params: Option<Value>) -> Result<Value, S
         .map_err(|refusal| format!("{refusal:?}"))?;
 
     // 2) 分派
-    match controls::dispatch_target(&method) {
+    let result = match controls::dispatch_target(&method) {
         controls::DispatchTarget::Profiles => groups_profiles_list(&supplied),
         controls::DispatchTarget::Peers => Err(format!(
             "{method}: 跨网关 peer 通道未接通（需要真实网络与 TLS；宿主当前不伪造成功）"
         )),
         controls::DispatchTarget::Group => dispatch_group(&method, &supplied),
+    };
+
+    // 3) `groups.changed` 生产者（hermes 网关 change_watcher 的同款推送）：
+    //    变更类方法成功后广播 room_id，workspace 的 push 分支即刷（此前恒
+    //    依赖 2s 轮询）。只对**成功**的变更发；读取类不发。
+    let is_mutation = matches!(
+        method.as_str(),
+        "groups.create"
+            | "groups.rename"
+            | "groups.disband"
+            | "groups.send"
+            | "groups.context"
+            | "groups.stop"
+            | "groups.continue"
+            | "groups.retry"
+            | "groups.discard"
+            | "groups.driver_append"
+    ) || method.starts_with("groups.attachment.");
+    if result.is_ok() && is_mutation {
+        let room_id = params
+            .get("room_id")
+            .or_else(|| params.get("event").and_then(|e| e.get("room_id")))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let _ = app.emit("mirach:plugin:groups:changed", json!({ "room_id": room_id }));
     }
+
+    result
 }
 
 /// `groups.*` 的业务分派。
@@ -169,9 +201,9 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             Ok(json!({
                 "room": room_json(&room),
                 "context": context.to_json(),
-                // 宿主没有 groups.changed 推送通道：false = 前端按 2s 轮询收敛
-                // （workspace 的 push 分支只服务有广播的网关）。
-                "change_events": false,
+                // `groups.changed` 推送已接（groups_dispatch 变更成功后广播）；
+                // workspace 的 push 分支据此即时刷新，2s 轮询退为兜底。
+                "change_events": true,
             }))
         }
 

@@ -574,7 +574,25 @@ async function cliExec(params: Record<string, unknown>): Promise<unknown> {
       botsStore.getState().upsert({ ...bot, name: argv[3] }, name)
       return { code: 0, stdout: `renamed ${name} -> ${argv[3]}` }
     }
+    if (action === 'describe' && name) {
+      // hermes `profile describe <name> --text <desc>`：编辑机器人对话框的
+      // 描述保存路径（此前未接线 → 改描述恒失败，2026-11-18 审计修）。
+      const flag = argv.indexOf('--text')
+      const description = flag >= 0 ? String(argv[flag + 1] ?? '') : ''
+      const bot = findBot(name)
+      if (!bot) throw new Error(`profile 不存在：${name}`)
+      botsStore.getState().upsert({ ...bot, description }, name)
+      return { code: 0, stdout: `described ${name}` }
+    }
     throw new Error(`cli.exec: profile ${action ?? ''} 未接线`)
+  }
+  // profile-config 的"清除模型"：`['--profile', name, 'config', 'unset', 'model']`
+  if (argv[0] === '--profile' && argv[2] === 'config' && argv[3] === 'unset' && argv[4] === 'model') {
+    const name = argv[1]
+    const bot = findBot(name)
+    if (!bot) throw new Error(`profile 不存在：${name}`)
+    botsStore.getState().upsert({ ...bot, model: '' }, name)
+    return { code: 0, stdout: `unset model for ${name}` }
   }
   // 宿主没有 hermes CLI（pi_run_command 是 slash command 执行器，语义不同）
   throw new Error(`cli.exec: 宿主未接线命令 ${argv.join(' ')}`)
@@ -1110,6 +1128,32 @@ export async function dispatchHostRequest<T>(
       })) as T
     }
 
+    case 'display.switchSandboxImage': {
+      // 宿主无沙箱镜像概念（本机桌面镜像，非按 profile 容器）——镜像切换卡
+      // 由 status.image_switch 驱动，恒 null 所以永远不该出现；真被调用时
+      // 返回当前状态（诚实空操作，而不是抛"未接线"）。
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      const status = await invoke<Record<string, unknown>>('pi_display_status', {
+        profile: profile || undefined,
+      })
+      return { ...status, profile_key: profile || null } as T
+    }
+
+    case 'setup.runtime_check': {
+      // create-dialog 的"建完即用"探针：`ok:false` → 红显"需要模型"。
+      // 宿主真相 = 模型目录里有没有可用模型（pi_list_models 返回
+      // `{models:[…]}`——不是裸数组，读错形状会把有模型误报成 no_model）。
+      const profile = typeof params.profile === 'string' ? params.profile : ''
+      try {
+        const res = await invoke<{ models?: unknown[] }>('pi_list_models')
+        const list = Array.isArray(res?.models) ? res.models : []
+        if (list.length > 0) return { ok: true, profile } as T
+        return { ok: false, profile, reason: 'no_model' } as T
+      } catch (e) {
+        return { ok: false, profile, reason: 'model_catalog_unavailable', detail: String(e) } as T
+      }
+    }
+
     case 'mcp.catalog': {
       // hermes `mcp.catalog` 的宿主对偶：内置目录 = `optional-mcps/` 里
       // rpi-mcp-adapter 可执行的子集（no-auth HTTP，2026-11-17 移植 10 条；
@@ -1231,24 +1275,45 @@ export async function dispatchHostRequest<T>(
     }
 
     case 'bot_relay.roster.sync': {
-      // 宿主单身份：没有"其它连接上的 agent 行"可同步。接受并返回 0
-      // （上游语义 = 本连接看到的远端 roster 为空），不伪造 agent 行。
-      return { count: 0 } as T
+      // 远端名册写盘（hermes `write_remote_roster`）：Desktop 的 roster 循环
+      // 把"其它连接上的机器人并集"推给每个网关；本机厂房 = pi_relay 仓。
+      // 空数组是合法输入（对端离去 → 写空表，别留旧行）。
+      const agents = Array.isArray(params.agents) ? params.agents : []
+      return (await invoke('pi_relay_roster_sync', { agents })) as T
     }
 
     case 'bot_relay.outbox.drain': {
-      // 宿主没有跨网关 relay mailbox（bot 互发的 outbox 由发送侧网关落盘；
-      // 单连接没有发送侧）。空认领是真实状态；插件 30s 轮询会稳定空转，
-      // outbox.pending 事件不会有生产者（见 docs/bots-port-gaps.md）。
-      return { envelopes: [] } as T
+      // 领走本机 outbox（含过期写 queued_expired、claimed 未回执重投）。
+      return (await invoke('pi_relay_drain')) as T
     }
 
     case 'bot_relay.reply': {
-      throw new Error('bot_relay.reply: 宿主没有跨网关 relay mailbox，没有可回复的信封')
+      const id = String(params.id ?? '').trim()
+      if (!id) throw new Error('bot_relay.reply 缺少 id')
+      return (await invoke('pi_relay_reply', {
+        id,
+        reply: typeof params.reply === 'string' ? params.reply : undefined,
+        error: typeof params.error === 'string' ? params.error : undefined,
+        reason: typeof params.reason === 'string' ? params.reason : undefined,
+      })) as T
     }
 
     case 'bot_relay.deliver': {
-      throw new Error('bot_relay.deliver: 宿主没有跨网关 relay 通道（单身份），不伪造投递')
+      // 目标在**本机**时的投递门（hermes gateway/session_bot.py::_deliver 的
+      // 宿主对偶）：把 envelope 跑成目标 bot 的一轮，返回幂等终局回执。
+      // 远端目标由 relay.ts 经 transport（pi_gateway_call）送到对端网关，
+      // 不走这里。
+      const id = String(params.id ?? '').trim()
+      if (!id) throw new Error('bot_relay.deliver 缺少 id')
+      const { deliverToLocalBot } = await import('@/lib/bot-delivery')
+      return (await deliverToLocalBot(dispatchHostRequest, {
+        id,
+        profile: String(params.profile ?? ''),
+        message: String(params.message ?? ''),
+        from_profile: typeof params.from_profile === 'string' ? params.from_profile : undefined,
+        from_handle: typeof params.from_handle === 'string' ? params.from_handle : undefined,
+        from_connection: typeof params.from_connection === 'string' ? params.from_connection : undefined,
+      })) as T
     }
 
     case 'display.status': {

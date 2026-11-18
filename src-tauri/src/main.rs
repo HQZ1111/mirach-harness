@@ -57,6 +57,12 @@ mod pi_capabilities;
 mod pi_engine_bridges;
 // 本机屏幕（display.* 的宿主对偶：GDI 截屏 + 最小 RFB WS 服务）。
 mod pi_display;
+// bot 互发 relay 仓（hermes tools/bot_relay.py 的宿主对偶：跨连接/跨网关
+// 投递的持久 envelope 底座，四门 + outbox/claimed/replies 落盘）。
+mod pi_relay;
+// 跨网关传输（hermes Desktop 的 gateway 客户端对偶：JSON-RPC 2.0 over WS
+// /api/ws；remote/cloud/ssh 连接经它拉名册/发 RPC/收事件）。
+mod pi_gateway;
 mod pi_mcp;
 // MCP 预设目录（hermes `optional-mcps/` 的宿主可执行子集；见 pi_mcp_catalog.rs
 // 头注：rpi-mcp-adapter 不支持 OAuth，只收 no-auth HTTP 条目）。
@@ -128,7 +134,7 @@ mod plugin_runtime;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 
 // ── 窗口首屏几何（2026-10-22 照搬 hermes，用户定稿）─────────────────────────
@@ -652,19 +658,39 @@ const SETTINGS_MIN_H: f64 = 520.0;
 /// 已存在则 `show + unminimize + set_focus`（幂等，连点不会开出第二个）——
 /// label 唯一是 tauri 的约束，重复 `build()` 会返回 "window already exists"，
 /// 这里显式走聚焦分支而不是把那个错误抛给用户。
+///
+/// `section`（2026-11-18）：深链节（`host.navigate('/settings?tab=gateway')`
+/// 的落点）。新窗走 URL 参数；已开着的窗经 `mirach:settings:section` 事件切节
+/// （改 URL 会触发整页重载，不可取）。
 #[tauri::command(async)]
-fn pi_open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
+fn pi_open_settings_window(app: tauri::AppHandle, section: Option<String>) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window(SETTINGS_LABEL) {
         existing.show().map_err(|e| format!("设置窗显示失败：{e}"))?;
         let _ = existing.unminimize();
         existing.set_focus().map_err(|e| format!("设置窗聚焦失败：{e}"))?;
+        if let Some(section) = section.as_deref().filter(|s| !s.trim().is_empty()) {
+            use tauri::Emitter;
+            let _ = app.emit_to(
+                SETTINGS_LABEL,
+                "mirach:settings:section",
+                serde_json::json!({ "section": section.trim() }),
+            );
+        }
         return Ok(());
     }
+
+    // 深链参数只放行安全字符（节 id 词汇表），避免把任意串塞进 URL。
+    let url = match section.as_deref().map(str::trim).filter(|s| {
+        !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    }) {
+        Some(section) => format!("index.html?win=settings&section={section}"),
+        None => "index.html?win=settings".to_string(),
+    };
 
     let mut builder = tauri::WebviewWindowBuilder::new(
         &app,
         SETTINGS_LABEL,
-        tauri::WebviewUrl::App("index.html?win=settings".into()),
+        tauri::WebviewUrl::App(url.into()),
     )
     .title("设置")
     .inner_size(SETTINGS_W, SETTINGS_H)
@@ -1519,6 +1545,11 @@ fn main() {
             pi_engine_bridges::install(app.handle());
             // 本机屏幕 RFB 服务（随机端口；前端经 pi_display_ws_port 读）。
             pi_display::start_server();
+            // `gateway.ready` 的生产者（本地网关恒就绪）：canonical workspace 在
+            // 该事件上重拉 rooms 状态（hermes 网关 accept 后必发同款帧）。
+            let _ = app
+                .handle()
+                .emit("mirach:plugin:gateway:ready", serde_json::json!({ "connectionId": "local" }));
             // 宿主侧模型目录：先同步载入磁盘缓存（不阻塞 UI），再后台拉取
             // models.dev（TTL 24h；失败只记日志，沿用缓存/空目录）。
             model_registry::init(app.handle());
@@ -1831,6 +1862,16 @@ fn main() {
             pi_display::pi_display_start,
             pi_display::pi_display_lease_acquire,
             pi_display::pi_display_lease_release,
+            pi_relay::pi_relay_enqueue,
+            pi_relay::pi_relay_roster_sync,
+            pi_relay::pi_relay_drain,
+            pi_relay::pi_relay_reply,
+            pi_relay::pi_relay_record_receipt,
+            pi_relay::pi_relay_get_receipt,
+            pi_gateway::pi_gateway_connect,
+            pi_gateway::pi_gateway_disconnect,
+            pi_gateway::pi_gateway_status,
+            pi_gateway::pi_gateway_call,
             pi_skills_catalog::pi_skills_search,
             pi_skills_catalog::pi_skill_install,
             pi_skills_catalog::pi_skill_remove,
@@ -1867,6 +1908,7 @@ fn main() {
             fs::fs_write_text_file,
             fs::fs_open_url,
             terminal::terminal_spawn,
+            terminal::terminal_reap,
             terminal::terminal_attach,
             terminal::terminal_write,
             terminal::terminal_resize,

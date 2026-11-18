@@ -1099,6 +1099,7 @@ function SetPrefRow({
 export function SettingsOverlay({
   onClose,
   variant = 'overlay',
+  initialSection,
 }: {
   onClose: () => void
   /**
@@ -1110,6 +1111,12 @@ export function SettingsOverlay({
    * 内容（左栏 / 右栏 / 数据面 / 写盘队列）两种形态**完全共用**。
    */
   variant?: 'overlay' | 'window'
+  /**
+   * 深链初始节（2026-11-18）：`host.navigate('/settings?tab=gateway')` 的
+   * 落点（网关 = 'core-connection'）。已开着的设置窗改走
+   * `mirach:settings:section` 事件（不改窗口 URL）。
+   */
+  initialSection?: SectionId
 }) {
   // 退场编排（2026-10-18，见 lib/overlay-exit.ts）：关闭先播退场再卸载。
   const { closing, requestClose } = useOverlayExit(onClose)
@@ -1188,7 +1195,22 @@ export function SettingsOverlay({
   })
   // ── 主从两栏状态 ──
   // 选中节：左导航高亮 + 右栏条件渲染的依据，默认落模型节。
-  const [activeSection, setActiveSection] = useState<SectionId>('model')
+  const [activeSection, setActiveSection] = useState<SectionId>(initialSection ?? 'model')
+  // 深链切节（设置窗常开时 host.navigate 的落点；`mirach:settings:section`）。
+  useEffect(() => {
+    const onSection = (event: Event) => {
+      const raw = String((event as CustomEvent<{ section?: string }>).detail?.section ?? '').trim()
+      if (!raw) return
+      const known = ALL_NAV_ITEMS.some((item) => item.id === raw)
+      if (!known) {
+        console.error(`[settings] 深链节 ${raw} 不在导航表——忽略`)
+        return
+      }
+      setActiveSection(raw as SectionId)
+    }
+    window.addEventListener('mirach:settings:section', onSection)
+    return () => window.removeEventListener('mirach:settings:section', onSection)
+  }, [])
   /** 子视图（hermes 的 pview/kview 等价物）：有 children 的节选中后，
       子项点击切换此值；无 children 的节恒为 null。 */
   const [activeSubView, setActiveSubView] = useState<string | null>(null)

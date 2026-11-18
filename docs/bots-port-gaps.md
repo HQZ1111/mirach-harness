@@ -240,3 +240,22 @@ canonical approvals/retry/discard/router。**仍未做**：lead 路由、权限�
 **engine E2E 残留**：canonical 群聊**含租约**的整房间 UI 流程未再跑一遍
 （建房→多成员→settled）；各原语（快照/fencing/恢复/meta 落盘）已单独实测，
 driver 消费面单测在 vitest 门禁内。
+
+## 9. 2026-11-18 第二波：跨网关全链打通（上表 relay 一行已过时）
+
+（用户："垮网关是bots的核心，看bots的代码有没有漏项"。审计 =
+镜像 121 文件 vs 上游 283，缺的全是测试；真漏项在数据面，逐项修复见
+`docs/HANDOFF.md` 同轮条目。）
+
+| 面 | 现状 |
+|---|---|
+| `host.connections()` | ✅ 裸数组真注册表（此前被当对象读 → 恒空表） |
+| `host.profileRoutes()` | ✅ local 每 bot 一条 + 远端连接每 profile 一条（30s 缓存） |
+| `host.agents()` | ✅ 本地 ∪ 远端并集（sources 带 remote 行） |
+| **relay（跨网关）** | ✅ **四门+B2 仓+transport 全接**：`pi_relay.rs` 持久仓（outbox/claimed/replies/receipts）+ `pi_gateway.rs` JSON-RPC over WS；双向实机 E2E（远端→本机真模型轮次+回信回远端；本机→远端 queued→DELIVER→回执→waiter 唤醒发送者） |
+| `bot_relay.*` 门 | ✅ roster.sync / outbox.drain / deliver（本机目标真跑轮次+回执）/ reply（先写者胜+事件）；drain 未回执重投 + TTL queued_expired |
+| peer 房间（groups.peer.*） | ❌ 仍未实现（transport 已铺好；RoomLink HTTP + 对端网关配合是下一层） |
+| 远端连接 token | ❌ 管理 UI 未接（keyring 录入；当前只能无 token 连回环/--insecure） |
+| `tool.start` / `groups.changed` / `gateway.ready` | ✅ 生产者已接（screen auto-raise / 房间推送 / 深链） |
+| 插件侧删除/编辑 | ✅ `host.deleteProfile` 真删；`cli.exec profile describe --text`、`config unset model` 已接 |
+| display 契约 | ✅ observe/start 展平、thumbnail `{data_url,suppressed}`、switchSandboxImage 有 case |

@@ -554,6 +554,42 @@ fn spawn_turn(
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 });
+                // `tool.start` 生产者（screen-autoraise 的触发面；hermes 网关
+                // change_watcher 推送的同款语义）：bot 泳道此前没有任何事件
+                // drain，屏幕自动抬起永远收不到唤醒（2026-11-18 审计实锤修）。
+                // 只发工具名——插件自己筛 `computer_use` / `browser_*`。
+                let tool_pump = {
+                    let mut rx = {
+                        let guard =
+                            session_for_thread.events.lock().expect("bot events poisoned");
+                        guard.resubscribe()
+                    };
+                    let app_for_events = app.clone();
+                    let tool_session_id = session_for_thread.id.clone();
+                    let tool_profile = session_for_thread.profile.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(rpi_agent::AgentEvent::ToolExecutionStart {
+                                    tool_name, ..
+                                }) => emit(
+                                    &app_for_events,
+                                    "tool.start",
+                                    json!({
+                                        "session_id": tool_session_id,
+                                        "profile": tool_profile,
+                                        "name": tool_name,
+                                    }),
+                                ),
+                                Ok(_) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    })
+                };
                 let result =
                     AgentLane::prompt_text(session_for_thread.harness.as_ref(), &text, images)
                         .await;
@@ -561,6 +597,7 @@ fn spawn_turn(
                 // 本泳道没有事件 drain，仅让 rpi 内部落盘/广播收尾）。
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 pump.abort();
+                tool_pump.abort();
                 collect_dialogs(&session_for_thread);
                 let error = result.as_ref().err().map(|e| e.to_string());
                 // 引擎终局回执：run outcome 映射任务状态（aborted→cancelled）。

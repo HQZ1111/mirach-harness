@@ -2517,14 +2517,47 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
   激活时由 `onDidVisibilityChange`（dockview 自己的 overlay rAF 先于本回调
   的 rAF，尺寸已写好）+ `onDidDimensionsChange` 补启动/fit。实测：隐藏终端
   无 xterm、激活后 69 行与容器 240×1046 一致、来回切标签 scrollback 与
-  可执行性保持。
+  可执行性保持。另：`term.dispose()` 必须**延后一个宏任务**（xterm 5.5
+  Viewport 构造函数里有未追踪的 setTimeout，同步 dispose 会命中已释放的
+  render service → "reading 'dimensions'"，实测已在 StrictMode 双挂载
+  下复现并修掉）。
 - **已删**：panel 内页签条（`.term-strip/.term-tab*/.term-add` CSS、
   `--term-strip-h` 令牌）、`terminal-tabs.ts` 的 `formatTerminalTabTitle` /
   `nextTerminalIndex`（语义上移到面板标题）。改这套前先看
   `terminal-tabs.test.ts`（标题/id 去重与 `isTerminalPanelId` 的守卫）。
-- dev 噪声（非本改动引入，StrictMode 双挂载下）：`[terminal] orphan kill
-  failed … os error 6` 与 xterm `Viewport` 的 defer 定时器命中已 dispose 的
-  render service（"reading 'dimensions'"）——生产构建无 StrictMode 双挂载。
+- **配色 = ZCode 默认浅色主题**（2026-11-18 第二轮，用户："有黑色背景，
+  文字也不对"）：tokens.css 的 `--term-*` 改为 ZCode `@theme` 段的
+  Tailwind v4 默认调色板——底 = `--surface`（ZCode 语义"终端底 = 应用
+  背景"，其 `.theme-zai-*` 变体直接写 `var(--color-background)`）、字 =
+  neutral-950、ANSI = red/green/yellow/sky/fuchsia/cyan-500 + neutral 灰阶
+  （数值 = oklch 经 Chromium 量化：red-500 = `#fb2c36`，不是 v3 的
+  `#ef4444`——别照抄旧调色板）。**此前误取了 ZCode `.dark` 段的值**
+  （#171717 黑底浅字），浅色应用里就是那块黑块。`.xterm-viewport` 原生
+  滚动条按 ZCode 同款隐藏（`.term-host .xterm-viewport`，panes.css）。
+  **字体同理**：`harmonyos-sans-sc-webfont-splitted` 的
+  `:lang(zh) { font-family: HarmonyOS Sans SC, sans-serif }` 会直接命中
+  xterm DOM renderer 的逐字符 span（继承的等宽栈输给直接命中），终端
+  拉丁字被 xterm 用逐 span letter-spacing 硬凑单元格（"Power Shell"
+  怪字距、l 长成 I）。修法 = panes.css 用 `.term-host .xterm *` 更高
+  优先级钉回 `--term-font-family`。宿主暂无深色主题；真做时按 ZCode
+  `.dark` 段（neutral-950 底 + 600 系 ANSI）移植。
+- **会话登记 = 页面归属（label + token）+ 孤儿回收**（2026-11-18 第二轮，
+  用户："显示达到上限 8 无法打开了"）：根因 = **页面 reload（dev HMR /
+  webview 重启）后旧页面的 kill 钩子随页面消失**，遗留 PTY 永远活着、
+  占满旧上限。修法 = `terminal-pty.ts` 的 per-page token（挂 globalThis，
+  HMR 不换、reload 才换）随 spawn 上报；Rust `terminal_reap(owner_label,
+  owner_token)` 回收同 label 下旧 token 的会话，boot（`app/index.tsx`
+  effect）与 spawn 各调一次；**8 条上限撤除**（ZCode 不设上限；见
+  terminal.rs `alloc_id` 注释）。另实锤：portable-pty 0.8.1
+  `WinChildKiller::kill` **成功判定写反**（`if res != 0 { Err }`，而
+  TerminateProcess 非 0 才是成功）——Windows 上每次成功 kill 都返回 Err
+  （带上一次的陈旧 errno，曾日志成"句柄无效 os error 6"），所以
+  `kill_session`/`terminal_kill` **不看返回值**（以 exit 事件 + 登记摘除
+  为真）。实测：10 个终端标签全部可开、10 个 pwsh 各一；reload 后 reap
+  到只剩活动标签 1 个进程；关标签 pwsh 5→4。
+- 会话登记/回收改动后自检：开 2 个终端标签 → 关掉 → `Get-Process pwsh`
+  只应剩活动实例；页面 reload 后由 `terminal_reap` 清掉旧页会话（boot 日志
+  会有 "reaping stale session"）。
 
 ## 活动状态面板 = ZCode ConversationStatusPanel 完整移植（2026-11-18 用户："完整移植"→"有意差异去除，全部对齐"）
 
@@ -2552,8 +2585,10 @@ agent max-h-48；plan max-h-80）；分区头 = 标题 + 悬停箭头 + trailing
   扫当前分支 custom type `plan-mode`，只收有 markdown 的，seq 降序）+ 新
   `plan-entries-store.ts`；标题 = 首个 H1 否则首个非空行（上游
   `getPlanDirectoryTitle` 逐字）；
-- 终端 = jobs-store（`pi_job_list`）；rpi-background-tasks 未装 → 如实 Err
-  → 投影空 → 分区不渲染（有任务时 = 命令行 + 用时 + Stop → `pi_job_cancel`）；
+- 终端 = jobs-store（`pi_job_list` 读 rpi-background-tasks 插件的
+  `background-tasks` 会话快照，只投影真字段）；行 = 标签（或命令行）+ 用时，
+  **无 Stop 钮**——作业进程的 Job Object 句柄在插件进程内，宿主没有按 id
+  终止面（见下节）；
 - 智能体 = 宿主从 delegate_task / subagent / dispatch 工具调用派生
   （`status-agent-rows.ts`：timing.completedAt 有无分运行/已结束两段，结束段
   按完成时间倒序）；rpi 子代理运行态只在插件进程内存，`pi_hub_roster` 如实
@@ -2579,10 +2614,45 @@ Failed to acquire」误导；用同一次求值里 `pi_list_sessions` 返回的 
 
 **实机断言（CDP）**：`/goal start` 起真目标 → aside 出现且 `data-goal-status=
 active`、秒针在走；UI 暂停/恢复点击真翻转；`/goal stop` 归档后 `!hasContent`
-闸门让面板整块消失；plan-detail / agent-directory 标签页开合与单实例语义实测。
+闸门让面板整块消失。**会话计划全链路**（真模型规划运行）：plan 模式下发一条
+规划请求（composer 真发送）→ 模型探索后 `plan_mode_complete` 写入条目 →
+`pi_plan_entries` 返回真 plan markdown → 面板「会话计划」分区出现（H2 回退
+标题 + 计数 1）→ 点行开 `plan-detail:<entryId>` 标签页展示原文。
+`agent-directory` / `plan-detail` 标签页开合与单实例语义实测。
 单测：`conversation-status-panel-model.test.ts`（25）、
 `status-agent-rows.test.ts`（9）、`status-panel-stores.test.ts` 增
 `parsePlanEntries`。
+
+### 缺口用插件补（2026-11-18，用户："能用插件补上的用插件……没有的就完整移植插件解决"）
+
+先摸上游（`pi-rust/rpi-package` main）现成插件面，结论：
+
+| 缺口 | 上游插件面 | 处置 |
+|---|---|---|
+| 终端 / 后台作业 | `rpi-background-tasks` **有源码**（`background` / `jobs` 工具 + `background-tasks` 快照；无 release tag、本机未装） | **就地补齐**：vendored 到 `G:\mirach-plugins\rpi-background-tasks`，`cargo build --release` 后装到 `~/.rpi/agent/extensions/rpi_background_tasks.dll`；宿主 `pi_job_list` 改读最新 `background-tasks` 条目（`data.jobs`），`pi_job_cancel` 仍如实 Err（kill 由模型经 `jobs` 工具发出） |
+| 目标迭代/验证徽章 | 无（`rpi-goal` 只有 active/paused/complete + archived；runtime.rs 全文无 verify/iteration 概念） | 无可移植面，面板不渲染（沿用现行映射） |
+| workflow 分区 | 无（`rpi-orchestrator` 的 DAG 只在本进程内存，且由模型工具驱动，无会话投影面） | 不渲染 |
+| 子代理名册/Stop/子会话 | 无（`delegate_task` 的子运行是 `ChildAgents`，`pub(crate)` 进程内注册表，无 AppendEntry/SetStatus 面） | 沿用「工具调用派生」方案 |
+
+**插件源码的本地适配（必须记住）**：上游 `resolve_shell` 只探
+`%ProgramFiles%\Git` 再 `where bash.exe`，本机 Git 装在 `D:\Git` → 落到
+`System32\bash.exe`（WSL 存根，exit 1 + UTF-16 乱码）。已按宿主
+`rpi-tools::os_env` 的顺序补齐：`RPI_BASH_PATH` → 常见安装根（含
+`LOCALAPPDATA\Programs\Git`）→ `where git.exe` 反推安装根（覆盖自定义盘）
+→ `where bash.exe` **排除 WSL**。实测 `D:\Git\bin\bash.exe` 命中，后台作业
+真跑通。
+
+**前端接线（jobs-store）**：词表改为插件 `STATUS_*`（running / completed /
+failed / interrupted / cancelled）；可选项（kind/label/finishedAtMs/exitCode/
+pid）缺席留 null。发现并修了一个真竞态：**后台作业跨轮存活**（60s 任务在本轮
+回复后才 settle），只在 isRunning 期轮询会让行永远停在「运行中」——现在
+run 期 2s 轮询（jobs+todo+planEntries），挂载期另有一条 3s 慢轮询兜住跨轮
+settle（插件未装时 `pi_job_list` 立即返回 []，开销可忽略）。
+
+**实机 E2E**：真模型经 composer 发出后台请求 → 插件 `background` 工具真跑
+（`sleep 20` exit 0、`sleep 60` exit 0）→ `pi_job_list` 回真行（label/command/
+startedAtMs/pid/exitCode 全真）→ 面板「终端」分区运行中在场、秒针在走、行文
+案 = label + 用时、无 Stop 钮；settle 后慢轮询自动收掉分区。
 
 ## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
 
@@ -2615,6 +2685,28 @@ session.rs +50/-3 + 两个 lib.rs 一行。**镜像里用户自己的本地补�
 5. `pi_bot_prompt` 的 taskMeta = 房间坐标（room_id/thread_id/turn_id/…），
    `recover` 出的 indeterminate 记录由 `session.resume` 的 `recovered_tasks`
    取出（take-once），driver 回写 `turn.failed` + reason_code `indeterminate`。
+
+### 跨网关 relay + transport（2026-11-18 第二波，bots 的"核心"）
+
+- **宿主两模块**：`pi_relay.rs`（hermes `tools/bot_relay.py` 对偶：持久仓
+  `~/.rpi/agent/bot_relay/{outbox,claimed,replies,receipts}` + 四门 + TTL +
+  未回执重投 + 先写者胜 reply + 独立 receipts）+ `pi_gateway.rs`（**JSON-RPC
+  2.0 over WS `/api/ws`**，hermes 桌面端同款：ready/ping/事件推送/服务端请求
+  答 -32601/2^n 重连）。`host.connections()`=裸数组、`profileRoutes`=每
+  （连接×profile）一条、`agents`=远端并集（30s 缓存、瞬时失败沿用旧值）。
+- **relay 总线在 Desktop**（上游事实）：每个网关四个门，Desktop 持有各连接
+  socket 做 drain→deliver→reply 穿梭；本地目标（同网关）走直投（envelope 不经
+  循环）；远端目标才进 envelope。**单连接时 drain 循环整体短路**（peerCount<2）
+  ——测本地链路别拿它验证。
+- **三个实测坑（都吃了亏）**：① Rust 事件名要与 host.onEvent 的点号→冒号映射
+  **逐字**一致（`bot_relay.outbox.pending` → 前端监听 `…bot_relay:outbox:pending`；
+  点没换成冒号的 API 就是死信道）；② `bot_relay.deliver` 回执**必须带
+  `admission_id`**（或 refused:true）——Desktop settle 判定"回执指名准入"，缺了
+  会把整个回执当"身份不可用"保留重投（实测目标 bot 连跑 13 轮）；③ 回执落盘
+  **用独立 `receipts/<id>.json`**，不能吊在 claimed 上——远端来件不在本机
+  claimed，幂等会整块失效。
+- **E2E 方法**：`E:\Temp\mock-gateway.mjs`（无依赖手写 RFC6455 的 hermes 协议
+  子集 mock；MOCK_ENVELOPE=1 开方向 A）。双向链路实测见 HANDOFF 同轮条目。
 
 ## ZCode 逆向对照环境（2026-11-15，继续对齐对话 UI 时必用）
 

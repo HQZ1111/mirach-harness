@@ -463,6 +463,51 @@ export function DockviewShell() {
     }
   }, [])
 
+  // ── 面板深链宿主（2026-11-18）：host.revealPane / host.undismissPane 的
+  //    真监听面。此前这两个事件**全仓无监听者**（审计实锤）——屏幕面板的
+  //    "二次打开重新聚焦"与"关闭后例程面板复活"都是死动作。 ────────────
+  useEffect(() => {
+    const normalize = (raw: string) =>
+      raw.startsWith('plugin-workspace:') ? raw.slice('plugin-workspace:'.length) : raw
+    const reveal = (event: Event) => {
+      const raw = String((event as CustomEvent<unknown>).detail ?? '').trim()
+      if (!raw) return
+      const a = apiRef.current
+      if (!a) {
+        console.error(`[plugins] revealPane(${raw})：dockview api 未就绪`)
+        return
+      }
+      const panel = a.getPanel(raw) ?? a.getPanel(normalize(raw))
+      if (!panel) {
+        console.error(`[plugins] revealPane：面板 ${raw} 不在场`)
+        return
+      }
+      panel.api.setActive()
+    }
+    const undismiss = (event: Event) => {
+      const raw = String((event as CustomEvent<unknown>).detail ?? '').trim()
+      if (!raw) return
+      const a = apiRef.current
+      if (!a) return
+      if (a.getPanel(raw) ?? a.getPanel(normalize(raw))) {
+        reveal(event)
+        return
+      }
+      // `hermes-bots:routines` = 例程贡献面板：贡献仍在时由同步器重建。
+      if (/:routines$/.test(raw)) {
+        routinesPaneSync?.()
+        return
+      }
+      console.error(`[plugins] undismissPane：面板 ${raw} 不在场且无重建路径`)
+    }
+    window.addEventListener('mirach:reveal-pane', reveal)
+    window.addEventListener('mirach:undismiss-pane', undismiss)
+    return () => {
+      window.removeEventListener('mirach:reveal-pane', reveal)
+      window.removeEventListener('mirach:undismiss-pane', undismiss)
+    }
+  }, [])
+
   const components = {
     leftrail: () => <LeftRailPane />,
     // 机器人弹出栏：hermes bots 插件（bundled）的窗格贡献若已注册就用它
