@@ -70,6 +70,8 @@ mod pi_relay;
 mod pi_gateway;
 // 跨网关 hosted-room peer 面（本机 bot 借给对端 canonical 房间；原生 HTTP 面）。
 mod pi_peer;
+// hermes 兼容 peer lending 服务端（grant 签发/验证 + /v1/room-members/* + /v1/runs）。
+mod pi_gateway_peer;
 // SSH 隧道（`ssh -N -L` 端口转发到远端网关；宿主 WS 客户端原样走本地端口）。
 mod pi_ssh;
 // 图像生成（hermes image.generate 的宿主对偶：OpenAI 兼容 images 端点，
