@@ -96,6 +96,15 @@
   settled。**限制（如实）**：hermes 网关 wire 不兼容（`groups.peer.invite`
   WS 方法 + `/v1/room-members/*` HTTP 路由是 hermes 网关 HTTP 服务端，
   宿主没有）；对端必须也是 mirach。
+- **SSH 隧道已接（2026-11-19）**：`pi_ssh.rs` —— 注册表 ssh 条目加
+  `gatewayPort`（缺省 = hermes api_server 默认 8642）；`pi_ssh_tunnel_start`
+  起 `ssh -N -L` 子进程（`BatchMode=yes` + `ExitOnForwardFailure=yes`），
+  等本地端口就绪返回隧道 URL；`pi_gateway_connect` 对 url 为空的 SSH 连接
+  自动起隧道 + WS 走本地端口；`pi_connections_test` 对 ssh 变真（隧道 +
+  gateway.ready 探测）；连接页 ssh 编辑器加网关端口字段；`RunEvent::Exit`
+  时 `stop_all()` kill 全部子进程。**限制（如实）**：密钥需在 agent
+  （`BatchMode=yes` 不弹交互）；hermes SSH 模式是 1197 行完整远端 backend
+  管理，宿主只做了端口转发这一层。
 - **per-bot MCP 已接**：bots 对话框 MCP 页 = 全局 `mcp.json` 服务器多选；
   启动 `pi_bot_mcp_config` 只过滤所选服务器生成
   `~/.rpi/agent/bot-mcp/<bot>.json`，`configPath` 注入 system prompt

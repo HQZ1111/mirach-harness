@@ -199,9 +199,9 @@ async function remoteConnections(): Promise<
         (row) =>
           typeof row.id === 'string' &&
           row.id !== 'local' &&
-          typeof row.url === 'string' &&
-          String(row.url).trim() !== '' &&
-          (row.kind === 'remote' || row.kind === 'cloud' || row.kind === 'ssh'),
+          (row.kind === 'remote' || row.kind === 'cloud' ||
+            // ssh 连接：url 可以为空（pi_gateway_connect 自动起隧道）。
+            row.kind === 'ssh'),
       )
       .map((row) => ({
         id: String(row.id),

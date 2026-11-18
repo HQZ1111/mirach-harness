@@ -69,6 +69,9 @@ pub struct RegistryConnection {
     pub key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_profile: Option<String>,
+    /// SSH 连接的远端网关 HTTP 端口（`ssh -N -L` 的目标；缺省 = hermes 默认 8642）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_port: Option<u16>,
     /// 写入用（只写不读）：`pi_connections_save` 携带时写入 keyring；
     /// 空串 = 清除。永不落进注册表 JSON（`skip_serializing`）。
     #[serde(default, skip_serializing)]
@@ -140,6 +143,7 @@ fn local_only_registry() -> ConnectionRegistry {
             port: None,
             key_path: None,
             remote_profile: None,
+            gateway_port: None,
             token: None,
             token_set: false,
             token_preview: None,
@@ -444,12 +448,36 @@ pub async fn pi_connections_test(
                 })),
             }
         }
-        ConnectionKind::Ssh => Ok(serde_json::json!({
-            "ok": false,
-            "stub": true,
-            "error": "SSH 连接未实现——请用 remote 连接指向已转发的端口",
-        })),
+ConnectionKind::Ssh => {
+            // SSH = 起 `ssh -N -L` 隧道到远端网关，再走真 probe（等 gateway.ready）。
+            let tunnel_url = crate::pi_ssh::ensure_tunnel(&connection.id)?;
+            let token = connection_token(&connection.id)?;
+            match crate::pi_gateway::probe(&tunnel_url, token.as_deref(), 8_000).await {
+                Ok(ready) => Ok(serde_json::json!({
+                    "ok": true,
+                    "stub": false,
+                    "baseUrl": tunnel_url,
+                    "detail": ready,
+                })),
+                Err(error) => Ok(serde_json::json!({
+                    "ok": false,
+                    "stub": false,
+                    "baseUrl": tunnel_url,
+                    "error": error,
+                })),
+            }
+        }
     }
+}
+
+/// 读单条连接（SSH 隧道用）。不存在 → Err。
+pub fn read_registry_for_tunnel(connection_id: &str) -> Result<RegistryConnection, String> {
+    let registry = read_registry();
+    registry
+        .connections
+        .into_iter()
+        .find(|c| c.id == connection_id)
+        .ok_or_else(|| format!("连接 {connection_id} 不存在"))
 }
 
 fn fastrand_hex() -> String {
@@ -487,6 +515,7 @@ mod tests {
             port: None,
             key_path: None,
             remote_profile: None,
+            gateway_port: None,
             token: None,
             token_set: false,
             token_preview: None,
@@ -510,6 +539,7 @@ mod tests {
             port: None,
             key_path: None,
             remote_profile: None,
+            gateway_port: None,
             token: None,
             token_set: false,
             token_preview: None,
@@ -526,6 +556,7 @@ mod tests {
             port: None,
             key_path: None,
             remote_profile: None,
+            gateway_port: None,
             token: None,
             token_set: false,
             token_preview: None,
@@ -554,6 +585,7 @@ mod tests {
                 port: None,
                 key_path: None,
                 remote_profile: None,
+                gateway_port: None,
                 token: None,
                 token_set: false,
                 token_preview: None,

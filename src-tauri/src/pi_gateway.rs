@@ -460,16 +460,21 @@ pub async fn probe(base_url: &str, token: Option<&str>, timeout_ms: u64) -> Resu
 pub fn pi_gateway_connect(
     app: AppHandle,
     connection_id: String,
-    url: String,
+    url: Option<String>,
     token: Option<String>,
 ) -> Result<Value, String> {
     let connection_id = connection_id.trim();
+    // SSH 连接：url 为空/缺失 → 自动起隧道（`ssh -N -L`），用隧道 URL 连 WS。
+    let resolved_url = match url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        Some(url) => url.to_string(),
+        None => crate::pi_ssh::ensure_tunnel(connection_id)?,
+    };
     // token 未显式传入 = 用连接注册表 keyring 里存的那份（UI 从不回显 token）。
     let token = match token {
         Some(token) => Some(token),
         None => crate::pi_connections::connection_token(connection_id)?,
     };
-    connect(app, connection_id, url.trim(), token.as_deref())
+    connect(app, connection_id, &resolved_url, token.as_deref())
 }
 
 #[tauri::command(rename_all = "camelCase", async)]

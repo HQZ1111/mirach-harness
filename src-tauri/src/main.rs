@@ -70,6 +70,8 @@ mod pi_relay;
 mod pi_gateway;
 // 跨网关 hosted-room peer 面（本机 bot 借给对端 canonical 房间；原生 HTTP 面）。
 mod pi_peer;
+// SSH 隧道（`ssh -N -L` 端口转发到远端网关；宿主 WS 客户端原样走本地端口）。
+mod pi_ssh;
 // 图像生成（hermes image.generate 的宿主对偶：OpenAI 兼容 images 端点，
 // provider/baseUrl/key 走 settings.json + models.json + auth.json）。
 mod pi_image;
@@ -1609,6 +1611,7 @@ fn main() {
             if let Err(e) = pi_peer::ensure_server(app.handle().clone()) {
                 eprintln!("[peer] peer 服务启动失败（借出不可用）: {e}");
             }
+// SSH 隧道注册表在 RunEvent::Exit 时 kill 子进程（见 run 闭包）。
             // `gateway.ready` 的生产者（本地网关恒就绪）：canonical workspace 在
             // 该事件上重拉 rooms 状态（hermes 网关 accept 后必发同款帧）。
             let _ = app
@@ -1945,6 +1948,8 @@ fn main() {
             pi_peer::pi_peer_probe,
             pi_peer::pi_peer_connect,
             pi_peer::pi_peer_call,
+            pi_ssh::pi_ssh_tunnel_start,
+            pi_ssh::pi_ssh_tunnel_stop,
             pi_pet::pi_pet_gallery,
             pi_pet::pi_pet_thumb,
             pi_skills_catalog::pi_skills_search,
@@ -2009,6 +2014,7 @@ fn main() {
             // "正在跑的 run 有机会走完当前作业的台账写入"这一步更可预期。
             if let tauri::RunEvent::Exit = event {
                 pi_cron::shutdown_ticker();
+                pi_ssh::stop_all();
             }
         });
 }

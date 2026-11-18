@@ -29,6 +29,7 @@ interface RegistryConnection {
   port?: number
   keyPath?: string
   remoteProfile?: string
+  gatewayPort?: number
   tokenSet?: boolean
   tokenPreview?: null | string
 }
@@ -63,6 +64,7 @@ interface EditorState {
   user: string
   port: string
   remoteProfile: string
+  gatewayPort: string
   /** 只写：非空 = 保存时写入 keyring（永不回显）。 */
   token: string
   /** 显式清除已存 token（保存时写空串）。 */
@@ -78,6 +80,7 @@ const emptyEditor = (): EditorState => ({
   user: '',
   port: '',
   remoteProfile: '',
+  gatewayPort: '',
   token: '',
   clearToken: false,
 })
@@ -211,6 +214,7 @@ export const ConnectionsRegistrySection: FC = () => {
               user: editor.user.trim(),
               port: Number(editor.port) || 22,
               ...(editor.remoteProfile.trim() ? { remoteProfile: editor.remoteProfile.trim() } : {}),
+              ...(editor.gatewayPort.trim() ? { gatewayPort: Number(editor.gatewayPort) } : {}),
             }),
       }
       setRegistry(await invoke<ConnectionRegistry>('pi_connections_save', { connection }))
@@ -346,6 +350,7 @@ export const ConnectionsRegistrySection: FC = () => {
                           user: conn.user ?? '',
                           port: String(conn.port ?? 22),
                           remoteProfile: conn.remoteProfile ?? '',
+                          gatewayPort: conn.gatewayPort ? String(conn.gatewayPort) : '',
                           token: '',
                           clearToken: false,
                         })
@@ -512,12 +517,24 @@ export const ConnectionsRegistrySection: FC = () => {
                   />
                 </div>
               </div>
+              <div className="set-field">
+                <label className="set-field-label" htmlFor="conn-gw-port">网关端口</label>
+                <div className="set-field-control">
+                  <input
+                    className="set-input"
+                    id="conn-gw-port"
+                    onChange={(e) => setEditor({ ...editor, gatewayPort: e.target.value })}
+                    placeholder="8642（hermes 默认）"
+                    value={editor.gatewayPort}
+                  />
+                </div>
+              </div>
             </>
           )}
           {dupe && <div className="set-err">{dupe}</div>}
           {editor.kind === 'ssh' && (
-            <div className="mt-1 text-xs text-rose-600 dark:text-rose-400" data-stub="true">
-              SSH 隧道未实现——保存后「测试」会红显；可改用 remote 连接指向已转发的端口。
+            <div className="text-muted-foreground mt-1 text-xs">
+              保存后「测试」会起 `ssh -N -L` 隧道到远端网关并等 gateway.ready；需要密钥已在 agent 里。
             </div>
           )}
           <div className="set-actions">
@@ -581,7 +598,7 @@ export const ConnectionsRegistrySection: FC = () => {
 
       <div className="text-muted-foreground/80 text-xs">
         「{openBots ? '收起' : '打开'}机器人」弹出栏后，花名册按连接分组。远端连接配好 URL 与 token
-        后点「测试」会真连网关（等 gateway.ready）；SSH 隧道未实现。
+        后点「测试」会真连网关（等 gateway.ready）；SSH 连接会先起 `ssh -N -L` 隧道再探。
         <button className="ml-1 underline" onClick={toggleBotsPanel} type="button">
           {openBots ? '收起机器人栏' : '打开机器人栏'}
         </button>
