@@ -161,6 +161,26 @@ const OpenTabHeader = (props: IDockviewPanelHeaderProps) => (
  */
 let routinesPaneSync: (() => void) | null = null
 
+/**
+ * 主栏标签条可见性（hermes `resolveTabStripVisible` 的 auto 规则宿主版）：
+ * g-chat 组默认 hideHeader 无条（主内容=打开页/会话锚），但**一旦有额外标签**
+ * （插件房间 / 屏幕 / 预览 / 文件…）就必须把条显示出来——否则那些标签既切换
+ * 不到也关不掉（实测：打开机器人屏幕后无法关闭）。
+ * 组构造期的 hideHeader 只写一次性 inline style，这里在布局事件后按当前面板数
+ * 重算，幂等。
+ */
+const CHAT_STRIP_ANCHORS = new Set(['workspace', 'open'])
+
+function syncChatGroupStrip(a: DockviewApi): void {
+  const group = a.getPanel('workspace')?.group ?? a.groups.find((g) => g.id === 'g-chat')
+  if (!group) return
+  const strip = group.element.querySelector<HTMLElement>('.dv-tabs-and-actions-container')
+  if (!strip) return
+  const extras = group.panels.filter((panel) => !CHAT_STRIP_ANCHORS.has(panel.id))
+  const want = extras.length > 0 ? '' : 'none'
+  if (strip.style.display !== want) strip.style.display = want
+}
+
 export function DockviewShell() {
   const apiRef = useRef<DockviewApi | null>(null)
   /** fromJSON 期间抑制持久化（boot/hide-show 动词都会触发布局事件）。 */
@@ -601,6 +621,12 @@ export function DockviewShell() {
       routinesPaneSync?.()
       // 调试句柄（__flModel 同惯例）：E2E/CDP 从 api 驱动，不猜 DOM
       ;(globalThis as { __dvApi?: DockviewApi }).__dvApi = a
+      // 主栏标签条 auto 显隐（见 syncChatGroupStrip）：挂载即算一次，
+      // 之后由布局事件重算——打开/关闭房间、屏幕、预览都要跟着变。
+      syncChatGroupStrip(a)
+      a.onDidAddPanel(() => syncChatGroupStrip(a))
+      a.onDidRemovePanel(() => syncChatGroupStrip(a))
+      a.onDidLayoutChange(() => syncChatGroupStrip(a))
       // 语义归属准入（v8.1 拖拽平移轮，2026-10-14）：M1 的 onWillDragPanel/
       // onWillDragGroup 全禁撤除——面板栏标签拖出分栏/浮动恢复原生（用户
       // 原话："标签和会话条没法拖拽出来分栏了"）。左/主栏组 hideHeader 无

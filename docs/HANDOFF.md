@@ -87,7 +87,13 @@
 - **结构性未做（如实）**：peer 的 **lending 侧**（本机对外 RoomLink HTTP
   服务端 + `groups.peer.invite`——host 无对外监听，invite 明确报错）、
   ssh 隧道（用 remote 指向已转发端口）。
-- **门禁**：cargo check 0 / cargo test **692** / vitest **1055**（85 文件）/
+- **主栏标签条 auto 显隐修复**：g-chat 组构造期 `hideHeader:true` 会让后加入的
+  标签（房间 / 屏幕 / 预览 / 文件）**既切换不到也关不掉**（用户实测：打开机器人
+  屏幕后无法关闭）。`dockview-shell.tsx::syncChatGroupStrip` 在 onReady +
+  add/remove/layout 事件后按面板数重算：仅 `workspace`/`open` 锚 = 无条；
+  有额外标签 = 显示条（含 ✕）。实机：开探针面板 → 条 flex 且签在场；关掉 →
+  条复隐。与 hermes `resolveTabStripVisible` 的 auto 规则同义。
+- **门禁**：cargo check 0 / cargo test **692** / vitest **1072**（86 文件）/
   tsc 1319（= hermes-mirror + sdk-upstream 既有基线，0 新错）。
 
 **✅ 2026-11-18：状态面板缺口收口——终端 Stop 走插件、子代理名册/Stop 走引擎（PR #355）**
