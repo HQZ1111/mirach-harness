@@ -13,17 +13,18 @@
 //! ## 存储
 //!
 //! `~/.pi/agent/connections.json`（pi 的 agent 目录 = 宿主的真实数据目录，
-//! pi_cron 的 cron/ 子目录同 precedent）。token 字段：hermes Electron 加密
-//! 落盘；宿主 **token 暂不入库**（remote/ssh/cloud 三类是假面——Test/拨号
-//! 标红"远端 gateway 未接通"），token 字段序列化时省略，UI 的 tokenSet 恒
-//! false。接入 pi_vault keyring 属后续（连接面真化时一并做）。
+//! pi_cron 的 cron/ 子目录同 precedent）。token 字段：**token 本身进 OS
+//! 凭据管理器**（service `mirach.connections`，entry = connection id），
+//! 注册表 JSON 只存派生状态 `tokenSet/tokenPreview`（每次读取从 keyring
+//! 重算，不信任文件里的旧值）；token 走 host 的 `pi_connections_save` 的
+//! `token` 字段写入（只写不读），删除连接时同步删除 entry。
 //!
 //! ## 真假分界（用户纪律："可以做假ui，但是标红显示"）
 //!
 //! - `local`：**真面**——宿主本机就是 pi 引擎宿主，test = 引擎在场检查；
-//! - `remote/cloud/ssh`：条目/表单完整（注册表、去重、持久化全真），
-//!   **test 返回 `{ok:false, stub:true}`**——UI 据此红显"远端 gateway 未接
-//!   通"。不装作连通（规矩 12）。
+//! - `remote/cloud`：**真面**——test = 用注册表里的 URL + keyring token 真连
+//!   远端网关 WS 并等 `gateway.ready`；`ssh` 没有隧道实现，test 返回
+//!   `{ok:false, stub:true}` 红显（不装作连通，规矩 12）。
 
 use std::path::PathBuf;
 
@@ -34,6 +35,8 @@ use crate::pi_session::on_big_stack;
 pub const CONNECTIONS_VERSION: i64 = 2;
 pub const LOCAL_CONNECTION_ID: &str = "local";
 const CONNECTIONS_FILE: &str = "connections.json";
+/// token 在 OS 凭据管理器里的 service 名（entry = connection id）。
+const TOKEN_SERVICE: &str = "mirach.connections";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,7 +69,11 @@ pub struct RegistryConnection {
     pub key_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_profile: Option<String>,
-    /// 宿主当前无 token 库——恒 false（真接入时走 pi_vault）。
+    /// 写入用（只写不读）：`pi_connections_save` 携带时写入 keyring；
+    /// 空串 = 清除。永不落进注册表 JSON（`skip_serializing`）。
+    #[serde(default, skip_serializing)]
+    pub token: Option<String>,
+    /// 派生状态（每次读取从 keyring 重算）。
     #[serde(default)]
     pub token_set: bool,
     #[serde(default)]
@@ -133,6 +140,7 @@ fn local_only_registry() -> ConnectionRegistry {
             port: None,
             key_path: None,
             remote_profile: None,
+            token: None,
             token_set: false,
             token_preview: None,
         }],
@@ -209,12 +217,64 @@ fn normalize(mut connection: RegistryConnection) -> RegistryConnection {
     connection
 }
 
+fn token_entry(id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(TOKEN_SERVICE, id).map_err(|e| format!("凭据管理器不可用: {e}"))
+}
+
+/// 读连接 token（`None` = 未配置）。keyring 故障按规矩 12 传播。
+pub fn connection_token(id: &str) -> Result<Option<String>, String> {
+    match token_entry(id)?.get_password() {
+        Ok(secret) => Ok(Some(secret)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("token 读取失败: {e}")),
+    }
+}
+
+/// 写/清连接 token（空串 = 清除）。
+fn set_connection_token(id: &str, token: &str) -> Result<(), String> {
+    let entry = token_entry(id)?;
+    if token.trim().is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("token 清除失败: {e}")),
+        }
+    } else {
+        entry
+            .set_password(token.trim())
+            .map_err(|e| format!("token 写入凭据管理器失败: {e}"))
+    }
+}
+
+/// hermes `tokenPreview` 同款：≤8 字符 → `"set"`，否则 `...` + 末 6 位。
+fn token_preview(token: &str) -> Option<String> {
+    if token.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = token.chars().collect();
+    Some(if chars.len() <= 8 {
+        "set".into()
+    } else {
+        format!("...{}", chars[chars.len() - 6..].iter().collect::<String>())
+    })
+}
+
+/// 用 keyring 真值覆盖注册表里的派生 token 状态（不信任 JSON 旧值）。
+fn refresh_token_state(registry: &mut ConnectionRegistry) -> Result<(), String> {
+    for connection in registry.connections.iter_mut() {
+        let token = connection_token(&connection.id)?;
+        connection.token_set = token.is_some();
+        connection.token_preview = token.as_deref().and_then(token_preview);
+    }
+    Ok(())
+}
+
 /// 列出注册表（local 兜底不变量保证恒非空）。
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_connections_list() -> Result<serde_json::Value, String> {
     on_big_stack(move || {
         let mut registry = read_registry();
         ensure_local(&mut registry);
+        refresh_token_state(&mut registry)?;
         let _ = write_registry(&registry);
         serde_json::to_value(&registry).map_err(|e| format!("注册表序列化失败: {e}"))
     })?
@@ -228,6 +288,8 @@ pub fn pi_connections_save(connection: RegistryConnection) -> Result<serde_json:
         let mut registry = read_registry();
         ensure_local(&mut registry);
         let mut connection = normalize(connection);
+        // token 只写不读：从结构里摘出（不落注册表 JSON）。
+        let token_update = connection.token.take();
         if connection.label.trim().is_empty() {
             return Err("label 不能为空".into());
         }
@@ -269,6 +331,10 @@ pub fn pi_connections_save(connection: RegistryConnection) -> Result<serde_json:
         } else {
             registry.connections.push(connection.clone());
         }
+        // token 写入失败 = 本次保存失败（不写半截注册表）。
+        if let Some(token) = token_update.as_deref() {
+            set_connection_token(&connection.id, token)?;
+        }
         ensure_local(&mut registry);
         if !registry
             .connections
@@ -277,6 +343,7 @@ pub fn pi_connections_save(connection: RegistryConnection) -> Result<serde_json:
         {
             registry.primary = LOCAL_CONNECTION_ID.into();
         }
+        refresh_token_state(&mut registry)?;
         write_registry(&registry)?;
         serde_json::to_value(&registry).map_err(|e| format!("注册表序列化失败: {e}"))
     })?
@@ -292,12 +359,15 @@ pub fn pi_connections_remove(id: String) -> Result<serde_json::Value, String> {
             return Err("local 连接不可删除".into());
         }
         registry.connections.retain(|c| c.id != id);
+        // 连接删除 = token 同步删除（keyring 里不留孤儿凭据）。
+        set_connection_token(&id, "")?;
         if registry.primary == id {
             registry.primary = LOCAL_CONNECTION_ID.into();
         }
         if registry.last_used.as_deref() == Some(id.as_str()) {
             registry.last_used = Some(LOCAL_CONNECTION_ID.into());
         }
+        refresh_token_state(&mut registry)?;
         write_registry(&registry)?;
         serde_json::to_value(&registry).map_err(|e| format!("注册表序列化失败: {e}"))
     })?
@@ -318,44 +388,68 @@ pub fn pi_connections_set_primary(id: String) -> Result<serde_json::Value, Strin
     })?
 }
 
-/// 连接测试：local = 引擎在场真测；其余三类为**假面**——返回
-/// `{ok:false, stub:true, error:"远端 gateway 未接通"}`，UI 红显。
+/// 连接测试：local = 引擎在场真测；remote/cloud = 用注册表 URL + keyring
+/// token **真连远端网关**并等 `gateway.ready`；ssh = 无隧道实现，红显 stub。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_connections_test(
+pub async fn pi_connections_test(
     state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
     id: String,
 ) -> Result<serde_json::Value, String> {
     // State<'r, T> 借用编译器局部生命周期——on_big_stack 的闭包要求
     // 'static，先解出 owned Arc 再搬进闭包。
     let engine = state.inner().clone();
-    on_big_stack(move || {
+    let lookup_id = id.clone();
+    let connection = on_big_stack(move || -> Result<RegistryConnection, String> {
         let registry = read_registry();
-        let connection = registry
+        registry
             .connections
-            .iter()
-            .find(|c| c.id == id)
-            .ok_or_else(|| format!("连接 {id} 不存在"))?;
-        match connection.kind {
-            ConnectionKind::Local => {
-                // 引擎在场 = pi_get_state 同款快照读取（真测）
-                let probe = engine.engine.state();
-                Ok(serde_json::json!({
-                    "ok": probe.is_ok(),
-                    "stub": false,
-                    "baseUrl": "pi 本机引擎",
-                    "version": "pi 0.8.0",
-                    "error": probe.err(),
-                }))
-            }
-            ConnectionKind::Remote | ConnectionKind::Cloud | ConnectionKind::Ssh => Ok(
-                serde_json::json!({
+            .into_iter()
+            .find(|c| c.id == lookup_id)
+            .ok_or_else(|| format!("连接 {lookup_id} 不存在"))
+    })??;
+    match connection.kind {
+        ConnectionKind::Local => on_big_stack(move || {
+            // 引擎在场 = pi_get_state 同款快照读取（真测）
+            let probe = engine.engine.state();
+            Ok(serde_json::json!({
+                "ok": probe.is_ok(),
+                "stub": false,
+                "baseUrl": "pi 本机引擎",
+                "version": "pi 0.8.0",
+                "error": probe.err(),
+            }))
+        })?,
+        ConnectionKind::Remote | ConnectionKind::Cloud => {
+            let url = connection.url.clone().unwrap_or_default();
+            if url.trim().is_empty() {
+                return Ok(serde_json::json!({
                     "ok": false,
-                    "stub": true,
-                    "error": "远端 gateway 未接通——本面为占位（标红）",
-                }),
-            ),
+                    "stub": false,
+                    "error": "连接缺少 Gateway URL",
+                }));
+            }
+            let token = connection_token(&connection.id)?;
+            match crate::pi_gateway::probe(&url, token.as_deref(), 8_000).await {
+                Ok(ready) => Ok(serde_json::json!({
+                    "ok": true,
+                    "stub": false,
+                    "baseUrl": url,
+                    "detail": ready,
+                })),
+                Err(error) => Ok(serde_json::json!({
+                    "ok": false,
+                    "stub": false,
+                    "baseUrl": url,
+                    "error": error,
+                })),
+            }
         }
-    })?
+        ConnectionKind::Ssh => Ok(serde_json::json!({
+            "ok": false,
+            "stub": true,
+            "error": "SSH 连接未实现——请用 remote 连接指向已转发的端口",
+        })),
+    }
 }
 
 fn fastrand_hex() -> String {
@@ -393,6 +487,7 @@ mod tests {
             port: None,
             key_path: None,
             remote_profile: None,
+            token: None,
             token_set: false,
             token_preview: None,
         });
@@ -415,6 +510,7 @@ mod tests {
             port: None,
             key_path: None,
             remote_profile: None,
+            token: None,
             token_set: false,
             token_preview: None,
         });
@@ -430,6 +526,7 @@ mod tests {
             port: None,
             key_path: None,
             remote_profile: None,
+            token: None,
             token_set: false,
             token_preview: None,
         };
@@ -457,11 +554,38 @@ mod tests {
                 port: None,
                 key_path: None,
                 remote_profile: None,
+                token: None,
                 token_set: false,
                 token_preview: None,
             }],
         };
         ensure_local(&mut registry);
         assert!(registry.connections.iter().any(|c| c.id == LOCAL_CONNECTION_ID));
+    }
+
+    #[test]
+    fn token_preview_matches_hermes_shape() {
+        assert_eq!(token_preview(""), None);
+        assert_eq!(token_preview("short").as_deref(), Some("set"));
+        assert_eq!(token_preview("12345678").as_deref(), Some("set"));
+        assert_eq!(token_preview("123456789").as_deref(), Some("...456789"));
+    }
+
+    #[test]
+    fn connection_token_roundtrip_uses_keyring() {
+        let id = format!(
+            "test-conn-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default()
+        );
+        set_connection_token(&id, "secret-token-123456789").unwrap();
+        assert_eq!(
+            connection_token(&id).unwrap().as_deref(),
+            Some("secret-token-123456789")
+        );
+        set_connection_token(&id, "").unwrap();
+        assert_eq!(connection_token(&id).unwrap(), None);
     }
 }

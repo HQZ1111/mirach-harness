@@ -259,3 +259,15 @@ driver 消费面单测在 vitest 门禁内。
 | `tool.start` / `groups.changed` / `gateway.ready` | ✅ 生产者已接（screen auto-raise / 房间推送 / 深链） |
 | 插件侧删除/编辑 | ✅ `host.deleteProfile` 真删；`cli.exec profile describe --text`、`config unset model` 已接 |
 | display 契约 | ✅ observe/start 展平、thumbnail `{data_url,suppressed}`、switchSandboxImage 有 case |
+
+## 10. 2026-11-18 第三波：token 管理 / image.generate / pet 画廊（§9 两行 ❌ 的部分收口）
+
+| 面 | 现状 |
+|---|---|
+| **远端连接 token 管理** | ✅ **已接**：token 进 OS 凭据管理器（service `mirach.connections`，entry=连接 id；注册表 JSON 只存派生 `tokenSet/tokenPreview`，每次读取从 keyring 重算）；`pi_connections_save` 的 `token` 字段只写不读（空串=清除，删除连接同步删 entry）；连接页编辑表单有 token 密码输入 + 清除钮 + `token ...abcd` 徽章（preview = hermes `tokenPreview` 同款：≤8 → "set"，否则 `...`+末 6 位）；`pi_gateway_connect` 的 token=null 时**由 Rust 取 keyring**（token 永不过前端）。**`pi_connections_test` 对 remote/cloud 变真**：用注册表 URL + keyring token 开一次性 WS 等 `gateway.ready`（8s），失败红显真错误；ssh 无隧道实现，仍 stub 红显 |
+| **`image.generate`** | ✅ **真后端**（`src-tauri/src/pi_image.rs`）：OpenAI 兼容 `{base}/images/generations`；provider = `settings.image.provider` > `default_provider` > models.json 首个有凭据者；key 走 models.json apiKey（字面量 / `env:VAR` / 裸环境变量）→ auth.json → provider env；probe = GET `{base}/models` 挑图像型模型（image/dall-e/imagen/flux/…，**真网络检查**），无图像模型 → `available:false`（插件隐藏生成入口）；`settings.image.model` 可覆盖；生成 b64 → `image_data` data URL，失败走契约 `error` |
+| **`pet.gallery` / `pet.thumb`** | ✅ **已接**（`src-tauri/src/pi_pet.rs`，hermes `agent/pet/*` 对偶）：gallery = petdex 公共 manifest（UA `hermes-agent-petdex`，300s 进程内缓存；`installed` 读 `~/.rpi/agent/pets/<slug>/pet.json`）；thumb = 已装 spritesheet 优先、否则**仅 petdex.dev 主机** URL（上游 `_is_petdex_host` 同款反 SSRF），裁首帧 192×208 → 96×104 NEAREST → PNG data URI + `pets/.thumbs/<slug>.png` 磁盘缓存。镜像 pet.tsx 的 Pet tab 从此有真数据 |
+| peer 房间（groups.peer.*） | ❌ **结构性未做**（结论更新：不只是"对端配合"——authority 侧要 **RoomLink HTTP 服务端**（register 带 `target_url` 回调）+ grant/epoch/catalog 全套语义；transport（pi_gateway_call）已就绪，属独立项目） |
+| per-bot MCP 勾选 | ❌ **结构性未做**：rpi-mcp-adapter 是**全局** `~/.rpi/agent/mcp.json`（per-session 装载面无接口，extension 侧能力，不在宿主可及面）——bots 对话框 MCP 页维持红显占位 |
+| `session.reclaimed` | ❌ 无生产者（宿主无会话回收/驱逐；重启即全量失效——无事件可发，不造假） |
+

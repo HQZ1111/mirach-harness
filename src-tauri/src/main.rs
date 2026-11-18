@@ -63,6 +63,11 @@ mod pi_relay;
 // 跨网关传输（hermes Desktop 的 gateway 客户端对偶：JSON-RPC 2.0 over WS
 // /api/ws；remote/cloud/ssh 连接经它拉名册/发 RPC/收事件）。
 mod pi_gateway;
+// 图像生成（hermes image.generate 的宿主对偶：OpenAI 兼容 images 端点，
+// provider/baseUrl/key 走 settings.json + models.json + auth.json）。
+mod pi_image;
+// petdex 画廊 + 首帧缩略图（hermes pet.gallery / pet.thumb 的宿主对偶）。
+mod pi_pet;
 mod pi_mcp;
 // MCP 预设目录（hermes `optional-mcps/` 的宿主可执行子集；见 pi_mcp_catalog.rs
 // 头注：rpi-mcp-adapter 不支持 OAuth，只收 no-auth HTTP 条目）。
@@ -1893,6 +1898,9 @@ fn main() {
             pi_gateway::pi_gateway_disconnect,
             pi_gateway::pi_gateway_status,
             pi_gateway::pi_gateway_call,
+            pi_image::pi_image_generate,
+            pi_pet::pi_pet_gallery,
+            pi_pet::pi_pet_thumb,
             pi_skills_catalog::pi_skills_search,
             pi_skills_catalog::pi_skill_install,
             pi_skills_catalog::pi_skill_remove,

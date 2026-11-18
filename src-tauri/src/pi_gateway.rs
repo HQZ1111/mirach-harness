@@ -400,6 +400,50 @@ pub async fn call(
     }
 }
 
+/// 一次性探测远端网关：开 WS → 等首个 `gateway.ready` → 关闭。
+/// 供连接注册表「测试」按钮使用（不注册长连接、不影响后台 supervisor）。
+pub async fn probe(base_url: &str, token: Option<&str>, timeout_ms: u64) -> Result<Value, String> {
+    let ws_url = gateway_ws_url(base_url, token)?;
+    let request = ws_url
+        .as_str()
+        .into_client_request()
+        .map_err(|e| format!("网关 URL 无效: {e}"))?;
+    let timeout = Duration::from_millis(timeout_ms);
+    let (mut socket, _) = tokio::time::timeout(timeout, tokio_tungstenite::connect_async(request))
+        .await
+        .map_err(|_| format!("连接网关超时（{timeout_ms}ms）"))?
+        .map_err(|e| format!("连接网关失败: {e}"))?;
+    let ready = tokio::time::timeout(timeout, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let frame: Value = serde_json::from_str(text.as_str())
+                        .map_err(|e| format!("网关首帧不是 JSON: {e}"))?;
+                    let is_ready = frame.get("method").and_then(Value::as_str) == Some("event")
+                        && frame
+                            .get("params")
+                            .and_then(|params| params.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("gateway.ready");
+                    if is_ready {
+                        return Ok(frame.get("params").cloned().unwrap_or(Value::Null));
+                    }
+                }
+                Some(Ok(Message::Close(_))) => {
+                    return Err("网关在 gateway.ready 前关闭了连接".to_string())
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => return Err(format!("网关读取失败: {e}")),
+                None => return Err("网关在 gateway.ready 前断开".to_string()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| format!("等待 gateway.ready 超时（{timeout_ms}ms）"))??;
+    let _ = socket.close(None).await;
+    Ok(ready)
+}
+
 // ── IPC ─────────────────────────────────────────────────────────────────────
 
 #[tauri::command(rename_all = "camelCase", async)]
@@ -409,7 +453,13 @@ pub fn pi_gateway_connect(
     url: String,
     token: Option<String>,
 ) -> Result<Value, String> {
-    connect(app, connection_id.trim(), url.trim(), token.as_deref())
+    let connection_id = connection_id.trim();
+    // token 未显式传入 = 用连接注册表 keyring 里存的那份（UI 从不回显 token）。
+    let token = match token {
+        Some(token) => Some(token),
+        None => crate::pi_connections::connection_token(connection_id)?,
+    };
+    connect(app, connection_id, url.trim(), token.as_deref())
 }
 
 #[tauri::command(rename_all = "camelCase", async)]

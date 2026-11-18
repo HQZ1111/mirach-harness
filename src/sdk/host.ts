@@ -193,8 +193,8 @@ async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
       const { invoke } = await tauriCore()
       let statusMap = await invoke<Record<string, { state?: string }>>('pi_gateway_status')
       if (statusMap?.[connection.id]?.state !== 'open') {
-        // 远端连接的 token 管理尚未入 UI（见 docs/bots-port-gaps.md）；
-        // 本地回环/--insecure 网关可无 token 连接。
+        // token: null = 由 Rust 侧取该连接在 OS 凭据管理器里存的 token
+        // （连接页可录入/清除；token 永不回显到前端）。
         await invoke('pi_gateway_connect', {
           connectionId: connection.id,
           url: connection.url,

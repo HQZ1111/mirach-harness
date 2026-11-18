@@ -4,9 +4,9 @@
  * primary/Edit/Remove）/ 内联编辑器（kind 四选创建后固定 + label + url/host
  * 复合）/ launchMode 开关。
  *
- * 真假分界：local = 真面（test 走引擎在场检查）；remote/cloud/ssh = 条目与
- * 表单完整、**test 返回 stub:true → 红显"远端 gateway 未接通"**（数据面
- * pi_connections.rs，做假纪律见该文件头）。
+ * 真假分界：local = 真面（test 走引擎在场检查）；remote/cloud = 真面
+ * （test 用注册表 URL + keyring token 真连网关等 gateway.ready）；ssh =
+ * 无隧道实现，test 返回 stub:true 红显（不装作连通）。
  */
 import { useEffect, useMemo, useState, type FC } from 'react'
 import { CloudIcon, MonitorIcon, GlobeIcon, TerminalIcon, PencilIcon, TrashIcon, PlusIcon, PlugZapIcon, CheckIcon, Loader2Icon } from 'lucide-react'
@@ -63,6 +63,10 @@ interface EditorState {
   user: string
   port: string
   remoteProfile: string
+  /** 只写：非空 = 保存时写入 keyring（永不回显）。 */
+  token: string
+  /** 显式清除已存 token（保存时写空串）。 */
+  clearToken: boolean
 }
 
 const emptyEditor = (): EditorState => ({
@@ -74,6 +78,8 @@ const emptyEditor = (): EditorState => ({
   user: '',
   port: '',
   remoteProfile: '',
+  token: '',
+  clearToken: false,
 })
 
 /** ssh 复合键（hermes sshCompositeKey：user@host:port#profile）。 */
@@ -173,10 +179,16 @@ export const ConnectionsRegistrySection: FC = () => {
   const doSave = async () => {
     if (!editor || !valid) return
     try {
+      const tokenField = editor.token.trim()
+        ? { token: editor.token.trim() }
+        : editor.clearToken
+          ? { token: '' }
+          : {}
       const connection = {
         id: editor.id ?? '',
         kind: editor.kind,
         label: editor.label.trim(),
+        ...tokenField,
         ...(editor.kind === 'remote' || editor.kind === 'cloud'
           ? { url: editor.url.trim() }
           : {
@@ -195,6 +207,9 @@ export const ConnectionsRegistrySection: FC = () => {
   }
 
   const dupe = editor ? dupeError(editor, registry) : null
+  const editingConn = editor?.id
+    ? (registry?.connections.find((c) => c.id === editor.id) ?? null)
+    : null
 
   return (
     <div className="flex flex-col gap-2" data-slot="connections-registry">
@@ -235,6 +250,19 @@ export const ConnectionsRegistrySection: FC = () => {
                   {conn.kind === 'local' && (
                     <span className="text-muted-foreground/70 rounded bg-muted px-1 py-0.5 text-[0.625rem]">
                       托管
+                    </span>
+                  )}
+                  {(conn.kind === 'remote' || conn.kind === 'cloud') && (
+                    <span
+                      className={cn(
+                        'rounded px-1 py-0.5 text-[0.625rem]',
+                        conn.tokenSet
+                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                          : 'text-muted-foreground/70 bg-muted',
+                      )}
+                      title={conn.tokenSet ? 'token 存在 OS 凭据管理器' : '该网关需要 token 时请编辑填写'}
+                    >
+                      {conn.tokenSet ? `token ${conn.tokenPreview ?? 'set'}` : '未配置 token'}
                     </span>
                   )}
                 </div>
@@ -303,6 +331,8 @@ export const ConnectionsRegistrySection: FC = () => {
                           user: conn.user ?? '',
                           port: String(conn.port ?? 22),
                           remoteProfile: conn.remoteProfile ?? '',
+                          token: '',
+                          clearToken: false,
                         })
                       }
                       title="编辑"
@@ -375,18 +405,49 @@ export const ConnectionsRegistrySection: FC = () => {
             </div>
           </div>
           {(editor.kind === 'remote' || editor.kind === 'cloud') && (
-            <div className="set-field">
-              <label className="set-field-label" htmlFor="conn-url">Gateway URL</label>
-              <div className="set-field-control">
-                <input
-                  className="set-input"
-                  id="conn-url"
-                  onChange={(e) => setEditor({ ...editor, url: e.target.value })}
-                  placeholder="https://gw.example.com"
-                  value={editor.url}
-                />
+            <>
+              <div className="set-field">
+                <label className="set-field-label" htmlFor="conn-url">Gateway URL</label>
+                <div className="set-field-control">
+                  <input
+                    className="set-input"
+                    id="conn-url"
+                    onChange={(e) => setEditor({ ...editor, url: e.target.value })}
+                    placeholder="https://gw.example.com"
+                    value={editor.url}
+                  />
+                </div>
               </div>
-            </div>
+              <div className="set-field">
+                <label className="set-field-label" htmlFor="conn-token">Gateway token</label>
+                <div className="set-field-control">
+                  <input
+                    className="set-input"
+                    id="conn-token"
+                    onChange={(e) => setEditor({ ...editor, token: e.target.value, clearToken: false })}
+                    placeholder={
+                      editingConn?.tokenSet
+                        ? `已配置（${editingConn.tokenPreview ?? 'set'}）——留空保持不变`
+                        : '可选；写入 OS 凭据管理器'
+                    }
+                    type="password"
+                    value={editor.token}
+                  />
+                </div>
+                {editingConn?.tokenSet && !editor.clearToken && (
+                  <button
+                    className="set-btn mt-1 w-fit"
+                    onClick={() => setEditor({ ...editor, token: '', clearToken: true })}
+                    type="button"
+                  >
+                    清除已存 token
+                  </button>
+                )}
+                {editor.clearToken && (
+                  <div className="text-muted-foreground mt-1 text-xs">保存后将清除该连接的 token。</div>
+                )}
+              </div>
+            </>
           )}
           {editor.kind === 'ssh' && (
             <>
@@ -439,9 +500,9 @@ export const ConnectionsRegistrySection: FC = () => {
             </>
           )}
           {dupe && <div className="set-err">{dupe}</div>}
-          {editor.kind !== 'local' && (
-            <div className="text-rose-600 dark:text-rose-400 mt-1 text-xs" data-stub="true">
-              远端 gateway 未接通——本连接为占位（测试会红显）。
+          {editor.kind === 'ssh' && (
+            <div className="mt-1 text-xs text-rose-600 dark:text-rose-400" data-stub="true">
+              SSH 隧道未实现——保存后「测试」会红显；可改用 remote 连接指向已转发的端口。
             </div>
           )}
           <div className="set-actions">
@@ -461,7 +522,8 @@ export const ConnectionsRegistrySection: FC = () => {
       )}
 
       <div className="text-muted-foreground/80 text-xs">
-        「{openBots ? '收起' : '打开'}机器人」弹出栏后，花名册按连接分组。远端连接当前为占位（标红）。
+        「{openBots ? '收起' : '打开'}机器人」弹出栏后，花名册按连接分组。远端连接配好 URL 与 token
+        后点「测试」会真连网关（等 gateway.ready）；SSH 隧道未实现。
         <button className="ml-1 underline" onClick={toggleBotsPanel} type="button">
           {openBots ? '收起机器人栏' : '打开机器人栏'}
         </button>

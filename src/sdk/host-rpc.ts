@@ -1079,12 +1079,37 @@ export async function dispatchHostRequest<T>(
     }
 
     case 'image.generate': {
-      // hermes 的图像生成后端（avatars / 群聊图片）。宿主没有图片模型接入；
-      // probe 返回 available:false（UI 隐藏生成入口），真生成明确报错。
-      if (params.probe === true) {
-        return { available: false, error: '宿主没有图片生成后端' } as T
-      }
-      throw new Error('image.generate: 宿主没有图片生成后端（机器人头像请用上传图片或图形头像）')
+      // hermes 的图像生成后端（avatars / 群聊图片）。宿主实现 = OpenAI 兼容
+      // images 端点（provider/baseUrl/key 走 settings/models/auth；见
+      // pi_image.rs）。probe 真查模型目录，缺图像模型 → available:false。
+      const probe = params.probe === true
+      const res = await invoke<{
+        available?: boolean
+        success?: boolean | null
+        image?: string | null
+        image_data?: string | null
+        error?: string | null
+        model?: string
+        provider?: string
+      }>('pi_image_generate', {
+        probe,
+        prompt: typeof params.prompt === 'string' ? params.prompt : undefined,
+        aspectRatio: typeof params.aspect_ratio === 'string' ? params.aspect_ratio : undefined,
+      })
+      return res as T
+    }
+
+    case 'pet.gallery': {
+      // petdex 公共 manifest 整册（installed 标记读 ~/.rpi/agent/pets）。
+      return (await invoke<Record<string, unknown>>('pi_pet_gallery')) as T
+    }
+
+    case 'pet.thumb': {
+      // 首帧缩略图（已装 spritesheet 或 petdex 主机 URL）→ data URI。
+      return (await invoke<Record<string, unknown>>('pi_pet_thumb', {
+        slug: typeof params.slug === 'string' ? params.slug : '',
+        url: typeof params.url === 'string' ? params.url : undefined,
+      })) as T
     }
 
     case 'display.install': {

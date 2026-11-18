@@ -112,9 +112,12 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
 - **relay（跨网关）**：✅ 宿主已全接（2026-11-18 第二波）——`pi_relay.rs` 持久仓
   （outbox/claimed/replies/receipts，hermes `tools/bot_relay.py` 对偶）+ 四门 +
   `pi_gateway.rs`（JSON-RPC 2.0 over WS `/api/ws`，hermes 桌面端同款传输）+
-  relay.ts 循环驱动；双向实机 E2E 通过。**仍缺**：远端连接 token 管理
-  （keyring 录入 UI）、跨网关 peer 房间（`groups.peer.*` + RoomLink HTTP，
-  transport 已铺好）。
+  relay.ts 循环驱动；双向实机 E2E 通过。
+  **2026-11-18 第三波**：远端连接 **token 管理已接**（keyring `mirach.connections`
+  只写不读 + `pi_connections_test` 真 probe `gateway.ready` + 连接页录入/清除）。
+  **仍缺**：跨网关 peer 房间（`groups.peer.*` —— 需要 authority 侧 **RoomLink
+  HTTP 服务端** 承载 `groups.peer.register` 的 `target_url` 回调与 grant 语义；
+  transport 已铺好，属独立项目）。
 
 ## PR 待办（给 `github.com/bigfish1913/pi-rust`）
 

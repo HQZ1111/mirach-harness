@@ -6,6 +6,42 @@
 
 ## 当前状态
 
+**✅ 2026-11-18（第四波）：bots 剩余未接面收口——远端 token / image.generate / pet 画廊 + keyring 真后端修复**
+
+- **远端连接 token 管理已接**（`pi_connections.rs` + `pi_gateway.rs` + 连接页）：
+  token 进 OS 凭据管理器（service `mirach.connections`，entry = 连接 id）；
+  注册表 JSON 只存派生 `tokenSet/tokenPreview`（每次读取从 keyring 重算）；
+  `pi_connections_save.token` 只写不读（空串 = 清除；删除连接同步删 entry）；
+  连接页有密码输入/清除钮/`token ...123456` 徽章（preview = hermes
+  `tokenPreview` 同款：≤8 → "set"，否则末 6 位）；`pi_gateway_connect` 的
+  token=null 时 **Rust 侧取 keyring**——token 永不进前端；`pi_connections_test`
+  对 remote/cloud **变真**：一次性 WS 等 `gateway.ready`（8s），失败红显真错误；
+  ssh 无隧道仍 stub 红显。**实机（CDP）**：存 token → tokenSet true /
+  preview `...123456` → 测试真连（连接被拒 = 真网络错误）→ 删除无残留。
+- **修大坑：keyring 3 没有默认特性**——裸 `keyring = "3"` 退化成进程内 mock
+  store（set 静默不落盘、get 恒 NoEntry）→ **pi_vault 此前一直是假成功**。
+  改 `keyring = { version = "3", features = ["windows-native"] }`；实机
+  vault add → reveal（真 secret 回读）→ remove 全通。
+- **image.generate 真后端**（`src-tauri/src/pi_image.rs`）：OpenAI 兼容
+  `{base}/images/generations`；provider = `settings.image.provider` >
+  `default_provider` > models.json 首个有凭据者；key = models.json apiKey
+  （字面量 / `env:` / 裸环境变量）→ auth.json → provider env；probe =
+  GET `{base}/models` 真找图像模型（无 → `available:false`，插件隐藏入口）；
+  `settings.image.model` 可覆盖；失败走契约 `error`。实机 probe：DS provider
+  无图像模型 → `{available:false, error:"provider 的模型目录里没有图像模型"}`。
+- **pet.gallery / pet.thumb**（`src-tauri/src/pi_pet.rs`）：petdex 公共
+  manifest（UA 同上游，300s 缓存；installed 读 `~/.rpi/agent/pets`）；
+  thumb = 已装 sheet 优先、否则仅 petdex.dev 主机 URL（上游 `_is_petdex_host`
+  同款反 SSRF），裁首帧 192×208 → 96×104 NEAREST → PNG data URI +
+  `pets/.thumbs/<slug>.png` 缓存。实机：gallery **5208 只**；thumb
+  `homelander` → 20KB PNG data URI（webp 解码经 image crate `webp` feature）。
+- **结构性未做（如实）**：peer 房间（需 authority 侧 **RoomLink HTTP 服务端**
+  + grant/register 全语义，transport 已就绪）、per-bot MCP（rpi-mcp-adapter
+  是全局 `mcp.json`，extension 侧能力）、`session.reclaimed`（宿主无会话回收）、
+  ssh 隧道（用 remote 指向已转发端口）。
+- **门禁**：cargo check 0 / cargo test **692** / vitest **1055**（85 文件）/
+  tsc 1319（= hermes-mirror + sdk-upstream 既有基线，0 新错）。
+
 **✅ 2026-11-18：状态面板缺口收口——终端 Stop 走插件、子代理名册/Stop 走引擎（PR #355）**
 
 - **终端 Stop（插件侧）**：vendored `rpi-background-tasks` 增 `/jobs` 斜杠命令
@@ -227,10 +263,17 @@
   - xterm 5.5 的 dispose 必须延后一个宏任务（其 Viewport 构造函数有未追踪
     setTimeout，同步 dispose 会报 "reading 'dimensions'"）：开关终端标签
     循环测试 0 异常。
-- 门禁（二轮后）：tsc 0（非镜像树）/ vitest 1044（84 文件）/ cargo test 667
-  / cargo check 0。**未做**：ZCode 标签上的终端图标（宿主面板标签一贯无
-  图标）、右键复制/粘贴菜单（上游 TerminalSession 有；宿主未接）——两者都
-  不影响"打开即同形"。
+  - **三轮（继续）：标签图标 + 右键复制/粘贴**——终端签标题前加
+    SquareTerminal（CSS mask + 令牌 `--term-tab-icon`，判据精确匹配 id
+    `terminal`/前缀 `terminal-`，不加自定义 tabComponent，✕/拖拽零变化）；
+    窗格根 `data-slot="terminal-pane"` 登记进全局右键范围，右键菜单
+    复制/粘贴走 `term.paste`（bracketed-paste），动作后焦点还给终端。
+    **坑**：终端面板是 `renderer:'always'`，内容在 `.dv-render-overlay`
+    （带 transform/contain/will-change = position:fixed 的包含块），motion
+    ContextMenu 内联渲染会被叠加 overlay 偏移（实测点击 (1619,156) 画到
+    x=3030）→ 菜单必须 `createPortal(..., document.body)`。
+- 门禁（三轮后）：tsc 0（非镜像树）/ vitest 1051（85 文件，含
+  context-menu-scope 的终端面用例）/ cargo test 667 / cargo check 0。
 
 **✅ 2026-11-17：bots 插件补齐轮（用户："先补齐bots……百分百对齐hermes的bots"）**。
 

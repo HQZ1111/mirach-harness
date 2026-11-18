@@ -48,8 +48,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ] }
-# 屏幕缩略图/单帧编码（pi_display.rs）；只带 png/jpeg 两个 codec。
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# 屏幕缩略图/单帧编码（pi_display.rs）+ petdex spritesheet 首帧（pi_pet.rs，webp）。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["sync", "time", "net", "macros"] }
@@ -68,8 +68,11 @@ open = "5"
 # 设置页「通知」的 OS 通道（notify_test 命令；Windows = winrt toast）
 notify-rust = "4"
 # 设置页「密码与登录」的本机加密存储（hermes vault local source 同语义：
-# 条目密码进 OS 凭据管理器——Windows = Credential Manager）
-keyring = "3"
+# 条目密码进 OS 凭据管理器——Windows = Credential Manager）。
+# **必须显式启用平台后端**：keyring 3 没有默认特性，裸 `keyring = "3"` 会
+# 退化成进程内 mock store（set 静默不落盘、get 恒 NoEntry）——2026-11-18
+# 实测踩中（vault 与连接 token 曾因此假成功）。
+keyring = { version = "3", features = ["windows-native"] }
 # 定时任务（pi_cron.rs）：调度时刻计算（cron 表达式逐分钟匹配、间隔锚定、
 # 一次性时间戳）。chrono 本来就在依赖树里（via notify-rust/iana-time-zone），
 # 这里显式声明才能直接 use——**不引新 crate**，lock 不变。
