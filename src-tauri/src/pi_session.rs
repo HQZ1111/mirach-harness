@@ -461,9 +461,11 @@ pub(crate) fn build_harness_impl(
         if let Some(p) = session_path {
             args.session = Some(p.to_string());
         }
-        // per-bot 扩展白名单：清空目录扫描，改为逐文件加载白名单内的 DLL。
+        // per-bot 扩展白名单：`dev_local_only=true` 阻止模式分支扫全局目录，
+        // 再逐文件加载白名单内的 DLL（Args.extension = 显式文件路径）。
         // None = 默认行为（扫描全局 extensions/ 目录）。
         if let Some(whitelist) = extension_filter {
+            args.dev_local_only = true;
             args.extensions_dir.clear();
             let ext_dir = crate::pi_paths::agent_dir()
                 .map_err(|e| e)?
