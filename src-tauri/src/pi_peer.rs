@@ -210,6 +210,7 @@ async fn peer_create_session(
         None,
         None,
         Some(profile),
+        None,
     );
     match result {
         Ok(state) => Json(json!({
@@ -382,6 +383,7 @@ async fn peer_prompt(
         None,
         None,
         profile,
+        None,
     ) {
         Ok(_) => Json(json!({"status": "submitted"})).into_response(),
         Err(e) => (

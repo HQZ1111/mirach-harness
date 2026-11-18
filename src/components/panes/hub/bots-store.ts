@@ -71,6 +71,10 @@ export interface BotPreset {
    *  enabled_tools 传给 pi_create_bot_session（宿主 Rust 层透传
    *  SessionOptions.enabled_tools）。 */
   toolsets?: string[]
+  /** 扩展白名单（per-bot extension_filter）：全局 extensions/ 下的 DLL 文件名
+   *  子集（不含扩展名）；空/缺省 = 加载全部（pi 默认行为）。启动时传给
+   *  pi_create_bot_session → build_harness_impl → Args.extension 逐文件加载。 */
+  extensions?: string[]
   /** MCP 服务器白名单（hermes McpSetupButton 对偶）：全局 mcp.json 里的
    *  mcpServers key 子集。启动时生成 **per-bot MCP 配置文件**（只含所选
    *  服务器），路径注入 system prompt——rpi-mcp-adapter 的 mcp_list/mcp_call

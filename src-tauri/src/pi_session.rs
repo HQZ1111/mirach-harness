@@ -444,6 +444,7 @@ pub(crate) fn build_harness_impl(
     session_path: Option<&str>,
     provider: Option<&str>,
     model: Option<&str>,
+    extension_filter: Option<&[String]>,
 ) -> Result<BuiltHarness, String> {
     let (harness, events, reload, resolved_provider, model_id, id) = rt.block_on(async {
         let mut resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
@@ -459,6 +460,23 @@ pub(crate) fn build_harness_impl(
         let mut args = rpi_cli::args::Args::default();
         if let Some(p) = session_path {
             args.session = Some(p.to_string());
+        }
+        // per-bot 扩展白名单：清空目录扫描，改为逐文件加载白名单内的 DLL。
+        // None = 默认行为（扫描全局 extensions/ 目录）。
+        if let Some(whitelist) = extension_filter {
+            args.extensions_dir.clear();
+            let ext_dir = crate::pi_paths::agent_dir()
+                .map_err(|e| e)?
+                .join("extensions");
+            if let Ok(entries) = std::fs::read_dir(&ext_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                    if whitelist.iter().any(|w| w.trim().eq_ignore_ascii_case(name)) {
+                        args.extension.push(path);
+                    }
+                }
+            }
         }
         let (harness, events, reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
             .await
@@ -615,7 +633,7 @@ impl PiEngine {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> Result<HarnessLive, String> {
-        let built = build_harness_impl(&self.shared.rt, cwd, session_path, provider, model)?;
+        let built = build_harness_impl(&self.shared.rt, cwd, session_path, provider, model, None)?;
         Ok(HarnessLive {
             harness: built.harness,
             events: built.events,

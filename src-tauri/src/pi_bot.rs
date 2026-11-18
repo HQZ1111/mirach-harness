@@ -121,6 +121,7 @@ struct BotConfig {
     model_id: Option<String>,
     enabled_tools: Option<Vec<String>>,
     profile: Option<String>,
+    extension_filter: Option<Vec<String>>,
 }
 
 fn apply_config(session: &BotSession, config: &BotConfig) -> Result<(), String> {
@@ -221,6 +222,7 @@ fn ensure_session(
         Some(&path),
         config.provider.as_deref(),
         config.model_id.as_deref(),
+        config.extension_filter.as_deref(),
     )?;
     if built.id != session_id {
         return Err(format!(
@@ -248,6 +250,7 @@ pub fn pi_bot_open(
     model_id: Option<String>,
     enabled_tools: Option<Vec<String>>,
     profile: Option<String>,
+    extension_filter: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let config = BotConfig {
         system_prompt,
@@ -255,6 +258,7 @@ pub fn pi_bot_open(
         model_id,
         enabled_tools,
         profile,
+        extension_filter,
     };
     let session = ensure_session(&session_id, path.as_deref(), &config)?;
     Ok(json!({
@@ -413,6 +417,7 @@ pub fn pi_bot_create_session(
     cwd: Option<String>,
     enabled_tools: Option<Vec<String>>,
     profile: Option<String>,
+    extension_filter: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let cwd = cwd
         .map(PathBuf::from)
@@ -423,6 +428,7 @@ pub fn pi_bot_create_session(
         model_id: model_id.clone(),
         enabled_tools,
         profile,
+        extension_filter,
     };
     // 先建（未命名）→ 设置人格/工具 → 命名（set_name 是 fact 条目）。
     let built = pi_session::build_harness_impl(
@@ -431,6 +437,7 @@ pub fn pi_bot_create_session(
         None,
         provider.as_deref(),
         model_id.as_deref(),
+        config.extension_filter.as_deref(),
     )?;
     let session = make_session(built, &config);
     apply_config(&session, &config)?;
@@ -464,6 +471,7 @@ pub fn pi_bot_prompt(
     model_id: Option<String>,
     enabled_tools: Option<Vec<String>>,
     profile: Option<String>,
+    extension_filter: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let config = BotConfig {
         system_prompt,
@@ -471,6 +479,7 @@ pub fn pi_bot_prompt(
         model_id,
         enabled_tools,
         profile,
+        extension_filter,
     };
     let session = ensure_session(&session_id, path.as_deref(), &config)?;
     if text.trim().is_empty() {

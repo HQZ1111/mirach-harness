@@ -163,6 +163,7 @@ async function openOrCreate(bot: BotPreset): Promise<boolean> {
       ...(provider ? { provider, modelId } : {}),
       ...(bot.cwd ? { cwd: bot.cwd } : {}),
       ...(enabledTools ? { enabledTools } : {}),
+      ...(bot.extensions?.length ? { extensionFilter: bot.extensions } : {}),
     })
     const sid = st?.sessionId ?? null
     if (sid) {
