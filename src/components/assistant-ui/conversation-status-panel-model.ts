@@ -16,8 +16,9 @@
  *   `{active:{title,status,notes,startedAt,updatedAt,turnsUsed,maxTurns,
  *   deadlineMs}, archived}`；未知 status 一律 console.error + 整行丢弃
  *   （不猜成 active——规矩 12）；
- * - 运行项：jobs（终端，数据面 = pi_job_list，rpi 当前如实 Err → 空）与
- *   智能体（宿主从工具调用派生，见面板组件）。
+ * - 运行项：jobs（终端，数据面 = rpi-background-tasks 插件的 `background-tasks`
+ *   会话快照，宿主 `pi_job_list` 只读投影）与智能体（宿主从工具调用派生，
+ *   见面板组件）。
  *
  * 上游字段缺席用"字段不存在"而不是 0/空串的纪律同样保留：渲染层据此决定
  * 一行有没有时长、能不能停。
@@ -53,10 +54,13 @@ export interface StatusPanelInput {
 
 export interface StatusPanelJobInput {
   id: string
-  /** 命令行原文（上游行标题 = 后台任务 title）。 */
+  /** 命令行原文（插件 `background-tasks` 行的 `command`）。 */
   command: string
+  /** 作业标签（插件 `background-tasks` 行的 `label`）；行标题优先用它。 */
+  label?: string
   startedAtMs: number
-  /** 能否取消（pi JobSnapshot 无该字段时缺省 = 可取消，上游 `!== false` 同判）。 */
+  /** 能否取消。rpi-background-tasks 的 kill 面在插件进程内（Job Object），
+   *  宿主无按 id 终止面 → 面板传 false，按钮如实不渲染。 */
   cancellable?: boolean
 }
 
@@ -275,9 +279,10 @@ function buildPlanModel(tasks: StatusPanelInput['todoTasks']): StatusPanelPlanMo
 function buildJobRows(jobs: readonly StatusPanelJobInput[]): StatusPanelJobRow[] {
   return jobs.map((job) => ({
     workId: job.id,
-    title: job.command,
+    title: job.label ?? job.command,
     startedAt: job.startedAtMs,
-    // 上游同判：缺省即可停（能停而不给按钮比反过来更糟）。
+    // rpi-background-tasks 的 kill 面在插件进程内：面板显式传 false，
+    // Stop 按钮如实不渲染（缺省仍按上游 `!== false` 判可停）。
     cancellable: job.cancellable !== false,
   }))
 }

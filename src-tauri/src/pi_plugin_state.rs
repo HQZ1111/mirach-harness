@@ -24,9 +24,12 @@
 //!   运行态只在插件进程内存（`ChildAgent` runtime action 24 / 进程内 DAG），
 //!   两个插件都没有 `SetStatus`，宿主无读取面（故 hub 面保留 Err）。
 //! - `packages/rpi-background-tasks/src/lib.rs`：`SNAPSHOT_ENTRY =
-//!   "background-tasks"`（第 27 行），但快照字段只有
-//!   id/kind/label/command/status/pid/exitCode/startedAt/finishedAt，缺
-//!   Terminal 分区 wire 的 schema/artifactPath/outputTail 等（保留 Err）。
+//!   "background-tasks"`（第 27 行），每次作业状态变化都 AppendEntry 一条自包含
+//!   快照；`data = {"jobs":[{id,kind,label,command,status,pid?,exitCode?,
+//!   startedAt,finishedAt?}]}`（`Job::snapshot`，第 133-151 行），`status`
+//!   ∈ running / completed / failed / interrupted / cancelled。宿主原来以
+//!   "缺 wire 字段"为由 Err；2026-11-18 起改为投影这组真字段（占位字段不再
+//!   要求——面板行只显示命令行/标签 + 用时），插件未安装时条目恒空。
 
 use serde_json::{json, Value};
 
@@ -35,6 +38,10 @@ pub const TODO_ENTRY: &str = "todo-state";
 
 /// rpi-plan-mode 的会话条目 customType。
 pub const PLAN_ENTRY: &str = "plan-mode";
+
+/// rpi-background-tasks 的会话条目 customType（=`SNAPSHOT_ENTRY`，与 crate 名
+/// 有意不同）。
+pub const BACKGROUND_TASKS_ENTRY: &str = "background-tasks";
 
 /// 旧 wire 的 todo schema 名（前端 `tool-sidecar.ts` / `todo-store.ts` 按此
 /// 值分派；与旧 pi `pi::todo::TODO_LIST_SCHEMA` 同值）。
@@ -148,6 +155,57 @@ pub fn mode_wire(data: Option<&Value>) -> Result<Value, String> {
     }))
 }
 
+/// `pi_job_list` 的 wire（2026-11-18 起 = rpi-background-tasks 快照的真字段）。
+///
+/// 条目 `data = {"jobs":[{id:string, kind, label, command, status, pid?,
+/// exitCode?, startedAt(ms), finishedAt?}]}`。宿主只投影存在过的字段：
+/// `startedAtMs` / `finishedAtMs` / `exitCode` / `pid`（缺失留 null），不再
+/// 要求旧 pi JobSnapshot 的 artifact 面（rpi 插件不产出产物文件）。
+/// 未知 status → Err（规矩 12：不猜成 running）。
+pub fn background_tasks_wire(data: Option<&Value>) -> Result<Value, String> {
+    let Some(data) = data else {
+        return Ok(Value::Array(Vec::new()));
+    };
+    let jobs = data
+        .as_object()
+        .and_then(|obj| obj.get("jobs"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "background-tasks 条目缺少 jobs 数组".to_string())?;
+    let mut rows = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let obj = job
+            .as_object()
+            .ok_or_else(|| "background-tasks 作业行不是对象".to_string())?;
+        let id = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "background-tasks 作业行缺少字符串 id".to_string())?;
+        let status = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("background-tasks 作业 {id} 缺少 status"))?;
+        if !matches!(
+            status,
+            "running" | "completed" | "failed" | "interrupted" | "cancelled"
+        ) {
+            return Err(format!("background-tasks 作业 {id} 的 status 非法: {status}"));
+        }
+        rows.push(json!({
+            "schema": "rpi.background-tasks.v1",
+            "id": id,
+            "kind": obj.get("kind").and_then(Value::as_str),
+            "label": obj.get("label").and_then(Value::as_str),
+            "command": obj.get("command").and_then(Value::as_str),
+            "status": status,
+            "startedAtMs": obj.get("startedAt").and_then(Value::as_f64),
+            "finishedAtMs": obj.get("finishedAt").and_then(Value::as_f64),
+            "exitCode": obj.get("exitCode").and_then(Value::as_i64),
+            "pid": obj.get("pid").and_then(Value::as_u64),
+        }));
+    }
+    Ok(Value::Array(rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +311,54 @@ mod tests {
         assert!(mode_wire(Some(&json!({ "plan": "x" }))).is_err());
         assert!(mode_wire(Some(&json!({ "active": false, "plan": 1 }))).is_err());
         assert!(mode_wire(Some(&Value::Null)).is_err());
+    }
+
+    #[test]
+    fn background_tasks_wire_without_entry_is_empty_list() {
+        assert_eq!(
+            background_tasks_wire(None).expect("empty"),
+            json!([]),
+        );
+    }
+
+    #[test]
+    fn background_tasks_wire_projects_real_fields_only() {
+        // 插件 `Job::snapshot` 的真实形状（running 无 exitCode/finishedAt，
+        // 未启用 process feature 时也没有 pid——缺失字段必须留 null，不能补 0）。
+        let wire = background_tasks_wire(Some(&json!({
+            "jobs": [
+                { "id": "7", "kind": "bash", "label": "dev", "command": "npm run dev",
+                  "status": "running", "pid": 1234, "startedAt": 1_700_000_000_000u64 },
+                { "id": "8", "kind": "bash", "label": "build", "command": "cargo build",
+                  "status": "completed", "exitCode": 0,
+                  "startedAt": 1_700_000_000_000u64, "finishedAt": 1_700_000_005_000u64 },
+            ]
+        })))
+        .expect("wire");
+        let rows = wire.as_array().expect("array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["schema"], "rpi.background-tasks.v1");
+        assert_eq!(rows[0]["id"], "7");
+        assert_eq!(rows[0]["status"], "running");
+        assert_eq!(rows[0]["label"], "dev");
+        assert_eq!(rows[0]["command"], "npm run dev");
+        assert_eq!(rows[0]["startedAtMs"], 1_700_000_000_000f64);
+        assert!(rows[0]["finishedAtMs"].is_null());
+        assert!(rows[0]["exitCode"].is_null());
+        assert_eq!(rows[1]["status"], "completed");
+        assert_eq!(rows[1]["exitCode"], 0);
+        assert_eq!(rows[1]["finishedAtMs"], 1_700_000_005_000f64);
+    }
+
+    #[test]
+    fn background_tasks_wire_rejects_corrupt_rows() {
+        assert!(background_tasks_wire(Some(&json!({ "jobs": "nope" }))).is_err());
+        assert!(background_tasks_wire(Some(&json!({ "bogus": [] }))).is_err());
+        assert!(background_tasks_wire(Some(&json!({ "jobs": [{ "id": "1" }] }))).is_err());
+        assert!(background_tasks_wire(Some(&json!({
+            "jobs": [{ "id": "1", "status": "exploded" }]
+        })))
+        .is_err());
+        assert!(background_tasks_wire(Some(&Value::Null)).is_err());
     }
 }

@@ -6,6 +6,20 @@
 
 ## 当前状态
 
+**✅ 2026-11-18：状态面板让位链与 ZCode 源码对账修正（用户："对话区宽度被挤在左边，面板没出现还在左边"）**
+
+- **根因 1**：面板组件总会挂载（无内容时 `return null`），而 `setMounted(true)`
+  写在挂载即执行 → 无面板的会话也把对话列左移。修 = `panelVisible =
+  activeId && hasContent` 与渲染闸门同判。
+- **根因 2**：旧"钉死形态恒让位"与上游不符。核对 `ZCode-main/v4/conversationLayout.ts`：
+  偏移类对 auto/inline **同一条**（`@min-[1280px]:-translate-x-42`，无断点的
+  `INLINE_OFFSET` 是死代码）；内容列宽度带不带面板**同一个类**（不收窄）；e2e
+  断言布局切换**零过渡**。已全部对齐（不再收窄、不再 300ms 过渡、<1280 一律不平移）。
+- 判定收敛成纯函数 `resolveStatusPanelShift`（+5 单测：
+  `status-panel-layout.test.ts`）；实机度量：无内容会话无 shift/无 pt-14/居中；
+  胶囊态 pt 52.5px；宽容器 transform −157.5px。
+- 门禁：tsc 0 新错 / vitest **1050**（85 文件）/ cargo test **678**。
+
 **✅ 2026-11-18（第二波）：bots 完整复刻审计 + 跨网关全链打通**（用户："垮网关是bots的核心，看bots的代码有没有漏项"）
 
 - **审计（对照 `D:\hermes-agent-main\apps\desktop\src\plugins\hermes-bots`）**：镜像 121

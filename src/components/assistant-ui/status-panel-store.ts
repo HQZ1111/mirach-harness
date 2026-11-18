@@ -54,3 +54,34 @@ export const statusPanelStore = createStore<StatusPanelState>((set) => ({
   setMounted: (mounted) =>
     set((s) => (s.mounted === mounted ? s : { mounted })),
 }))
+
+/**
+ * 让位形态（与 ZCode `conversationLayout.ts` 逐条对账）：
+ *
+ * - `offset`：内容列/dock 的横向平移。上游 `getConversationStatusPanelOffsetClassName`
+ *   对 auto 与 inline **返回同一个类**（`@min-[1280px]/conversation:-translate-x-42`）
+ *   —— 平移只在对话列 ≥1280 生效；上游无断点的 INLINE 常量是死代码。
+ * - `topClearance`：胶囊形态下首屏给右上悬浮胶囊留的高度（上游 pt-14 同语义）。
+ *   - `'always'`：mini 钉死收起 —— 任何宽度都是胶囊；
+ *   - `'below-wide'`：auto 在 <1280 收胶囊（≥1280 是展开面板，不需要顶部余隙）。
+ *
+ * 面板**没真的渲染**（draft / 无内容）时两者都为 none —— override 只是偏好，
+ * 不能拿它决定让位（否则"面板没出现还在左边"，2026-11-18 报障）。
+ */
+export function resolveStatusPanelShift(params: {
+  scoped: boolean
+  present: boolean
+  variant: StatusPanelVariant
+}): { offset: boolean; topClearance: 'none' | 'always' | 'below-wide' } {
+  if (params.scoped || !params.present) {
+    return { offset: false, topClearance: 'none' }
+  }
+  if (params.variant === 'mini') {
+    return { offset: false, topClearance: 'always' }
+  }
+  if (params.variant === 'auto') {
+    return { offset: true, topClearance: 'below-wide' }
+  }
+  // 'panel'：钉死展开形态，横向让位即可，不需要顶部余隙。
+  return { offset: true, topClearance: 'none' }
+}

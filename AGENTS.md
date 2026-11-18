@@ -2654,6 +2654,48 @@ settle（插件未装时 `pi_job_list` 立即返回 []，开销可忽略）。
 startedAtMs/pid/exitCode 全真）→ 面板「终端」分区运行中在场、秒针在走、行文
 案 = label + 用时、无 Stop 钮；settle 后慢轮询自动收掉分区。
 
+### 让位链与 ZCode 源码对账修正（2026-11-18，用户："对话区宽度被挤在左边，
+面板没出现还在左边，你到底全部对齐了没"）
+
+**报障根因（两个，都已修）**：
+
+1. **面板没出现仍让位**：面板组件**总会挂载**（可能 `return null`），而
+   `setMounted(true)` 原来写在挂载即执行——`!hasContent → null` 的会话把
+   对话列照样左移收窄（用户看到的"面板没出现还在左边"）。修法 =
+   `panelVisible = activeId !== null && model.hasContent` 与渲染闸门**同判**
+   （`conversation-status-panel.tsx`）。
+2. **旧让位语义本身与上游不符**：2026-11-02 轮把"钉死形态恒让位（无断点）"
+   当真（依据是 `INLINE_OFFSET_CLASS_NAME` 常量存在），但核对
+   `G:\ZCode-main\packages\ui\src\v4\conversationLayout.ts` 后实锤：
+   - `getConversationStatusPanelOffsetClassName(layout)` 对 **auto 与 inline
+     返回同一个类**：`@min-[1280px]/conversation:-translate-x-42` ——
+     **偏移只在容器 ≥1280 生效**；`INLINE_OFFSET` 常量全仓只有定义、无使用，
+     是死代码；
+   - `CONVERSATION_CONTENT_WITH/WITHOUT_STATUS_PANEL_WIDTH_CLASS_NAME` 是
+     **同一个字符串**——面板出现**不收窄**内容列。（旧实现 shift 时
+     `min(宽, 100% - 24rem)` 是多余的，已删。）
+   - `TOP_CLEARANCE = pt-14`（56px@16px）——胶囊形态顶部余隙；e2e 断言
+     `transitionDuration === "0s"`（布局切换零过渡），旧实现的
+     `transition: width/max-width/transform 300ms` 已删。
+
+**现在的形态判定 = 纯函数** `resolveStatusPanelShift`（`status-panel-store.ts`，
+单测 `status-panel-layout.test.ts` 5 条）：
+
+| present | variant | offset（CSS ≥1280 才平移） | topClearance |
+|---|---|---|---|
+| false（draft/无内容） | 任意 | 否 | none |
+| true | mini | 否 | always（pt-14） |
+| true | auto | 是 | below-wide（<1280 才 pt-14） |
+| true | panel | 是 | none |
+
+`thread.aui.tsx` 的 `data-status-panel-shift="wide"` / `data-column-shift="wide"`
+只在 `offset=true` 时写；`panes.css` 单块 `@container thread (min-width:1280px)`
+应用 `--dsh-panel-offset: 10.5rem` 平移。
+
+**实机度量（CDP）**：无内容会话 → 无 shift 属性、无 pt-14、居中；胶囊态
+（容器 660）→ pt 52.5px、transform none；宽容器（zoom 模拟 ≥1280）→
+pt 15px、transform `matrix(1,0,0,1,-157.5,0)`。
+
 ## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
 
 **引擎侧改动都在 `G:\pi-rust-main` 工作树，PR 已提：pi-rust #348**

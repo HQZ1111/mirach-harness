@@ -2,7 +2,10 @@
 
 import { ComposerWired } from '@/components/panes/hermes-sidebar/composer-wired';
 import { WorkspaceComposerMenu } from '@/components/panes/hermes-sidebar/workspace-composer-menu';
-import { statusPanelStore } from '@/components/assistant-ui/status-panel-store';
+import {
+  resolveStatusPanelShift,
+  statusPanelStore,
+} from '@/components/assistant-ui/status-panel-store';
 import { VoiceLivePanel } from '@/components/assistant-ui/voice-live-panel';
 import { VoiceLiveConversationDrive } from '@/components/assistant-ui/voice-live-conversation';
 import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
@@ -992,23 +995,28 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
   // 增删不摇晃阅读位）。
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const restoreRequest = useStore(threadScrollBridge, (s) => s.scrollRestoreRequest);
-  // 活动状态面板让位（见内容列的类注释）：panel 钉死 = 恒让位；auto =
-  // ≥1280 让位（CSS 容器查询）；mini = 不让位（改用顶部余隙）。
-  // statusPanelPresent = 面板组件在场（hasContent 且非 draft，含 mini 胶囊）。
+  // 活动状态面板让位（与 ZCode conversationLayout.ts 逐条对账，2026-11-18）：
+  // - 偏移只由"面板在场且非 mini 胶囊"决定（layout != none）；
+  // - 偏移类本身是 `@min-[1280px]/conversation:-translate-x-42` —— 容器 <1280
+  //   **一律不让位**。ZCode 里无断点的 INLINE_OFFSET 常量是死代码（只有定义，
+  //   全仓无使用点），所以钉死形态也不在窄窗让位；
+  // - 宽度类在 ZCode 里带不带面板是同一个字符串（面板出现**不收窄**内容列）。
+  // 宿主照抄：宽度恒为 --dsh-chat-content-width，只有平移由面板在场决定。
   //
-  // **让位必须以"面板真的在场"为前提**（2026-11-02 修）：override 只记录
-  // 用户的显示模式偏好，面板本身在草稿态/无内容时根本不渲染——只看
-  // override 会让"选了钉死形态但面板没渲染"的会话把整列往左推 157.5px
-  // 且右侧留一片空白（用户："对话区怎么靠左边了，间距也没有了"）。
+  // **让位必须以"面板真的在场"为前提**（2026-11-02 修）：override 只记录显示
+  // 偏好；面板在无内容/draft 时根本不渲染——只看 override 会让"面板没渲染"的
+  // 会话把整列推走（用户："对话区怎么靠左边了，间距也没有了"）。
   const statusPanelVariant = useStore(statusPanelStore, (s) => s.override ?? "auto");
   const statusPanelPresent = useStore(statusPanelStore, (s) => s.mounted);
-  const statusPanelShift: "always" | "wide" | "none" = !statusPanelPresent
-    ? "none"
-    : statusPanelVariant === "panel"
-      ? "always"
-      : statusPanelVariant === "auto"
-        ? "wide"
-        : "none";
+  const statusPanelShift = useMemo(
+    () =>
+      resolveStatusPanelShift({
+        scoped,
+        present: statusPanelPresent,
+        variant: statusPanelVariant,
+      }),
+    [scoped, statusPanelPresent, statusPanelVariant],
+  );
   const sessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!restoreRequest) return;
@@ -1057,14 +1065,8 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
       <div
         ref={widthAxis.rootResizeRef}
         // 让位形态写在这里：panes.css 的 --dsh-column-width / --dsh-panel-offset
-        // 由它选择（panel 恒让位 / auto 仅 ≥1280），内容列与宽度手柄共用。
-        data-status-panel-shift={
-          scoped || statusPanelShift === "none"
-            ? undefined
-            : statusPanelShift === "always"
-              ? "panel"
-              : "auto"
-        }
+        // 由它选择（面板在场且非胶囊 → "wide"，仅 ≥1280 平移；与 ZCode 对账）。
+        data-status-panel-shift={statusPanelShift.offset ? "wide" : undefined}
         className="aui-root aui-thread-root bg-transparent @container relative flex h-full flex-col"
         style={{
           // 可读列宽 = dsh 对话宽度轴（width-handle.tsx：拖拽手柄发布
@@ -1089,41 +1091,22 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             // 基础列：居中 + 行长上限（--dsh-chat-content-width 由宽度手柄
             // 的拖拽偏好/列宽自适应决定，见 panes.css）。
             "mx-auto flex w-full max-w-(--dsh-chat-content-width) flex-1 flex-col px-4 pt-4",
-            // 活动状态面板让位（ZCode conversationLayout 双类，2026-11-01 用户：
-            // "活动状态面板在一定宽度的时候不是能把对话区往左挤吗"）。
-            //
-            // **ZCode 是「收窄 + 左移」两步，不是只左移**（2026-11-02 修，
-            // 用户："对话区怎么靠左边了，间距也没有了"）：
-            // 上游 = `w-[calc(100%-24rem)] max-w-6xl` + `-translate-x-42`。
-            // 宿主原先只做 `-translate-x-42`：852px 的居中块被左推 157.5px
-            // 后右缘到 1148，而面板左缘 1135 —— 内容压在面板上，左边距
-            // 同时被吃成负数（实测列 x=293 < 视口 310）。
-            // 现在收窄与位移都由 panes.css 的 `--dsh-column-width` /
-            // `--dsh-panel-offset` 提供（同一来源也给宽度手柄用）。
-            //
-            // - panel 钉死形态（INLINE_OFFSET）= **无断点**永远让位——窄窗下
-            //   面板照样浮在右上，不让位就盖正文（实测盖住用户气泡）；
-            // - auto 形态（WIDE_OFFSET）= 仅容器 ≥1280 让位（窄屏是胶囊）。
-            // 断点判定在 panes.css 的 @container thread 里。
-            // 顶部余隙（ZCode pt-14 同语义，conversationLayout.ts:14-19）：
-            // 胶囊形态下面板挂在列右上角（mini 底边 ~50px），首条内容的顶部
-            // 要给它留高度——panel 钉死形态靠横向让位，不需要纵向余隙。
-            !scoped &&
-              statusPanelShift === "wide" &&
-              "@max-[1279px]/thread:pt-20",
-            !scoped &&
-              statusPanelShift === "none" &&
-              statusPanelPresent &&
-              "pt-20",
+            // 活动状态面板让位（与 ZCode conversationLayout.ts 对账，2026-11-18）：
+            // - 让位类只有一条 `@min-[1280px]/thread:-translate-x-[10.5rem]`
+            //   （= 上游 `@min-[1280px]/conversation:-translate-x-42`）；容器
+            //   <1280 一律不平移，钉死形态也一样（上游无断点的 INLINE_OFFSET
+            //   常量是死代码）。
+            // - 宽度**不随面板收窄**（上游 WITH/WITHOUT 宽度类内容相同）。
+            // - 平移只在容器 ≥1280 生效（CSS 容器查询）；钉死形态也一样。
+            // - 宽度不随面板收窄；只有平移。
+            // 顶部余隙：胶囊（mini 恒为胶囊；auto 在 <1280 收胶囊）需要，
+            // 展开面板不需要。值 = 上游 `pt-14`（conversationLayout.ts 的
+            // TOP_CLEARANCE，胶囊底边 ~50px 之上）。
+            statusPanelShift.topClearance === "below-wide" && "@max-[1279px]/thread:pt-14",
+            statusPanelShift.topClearance === "always" && "pt-14",
             isEmpty && "justify-center",
           )}
-          data-column-shift={
-            scoped || statusPanelShift === "none"
-              ? undefined
-              : statusPanelShift === "always"
-                ? "panel"
-                : "auto"
-          }
+          data-column-shift={statusPanelShift.offset ? "wide" : undefined}
         >
           <AuiIf condition={isNewChatView}>
             <ChatEmptyBody Welcome={Welcome} />

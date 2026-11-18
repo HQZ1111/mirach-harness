@@ -30,8 +30,9 @@
  * - 目标（rpi-goal goal-state 条目 → pi_goal_state；暂停/恢复走
  *   `/goal pause|resume` 扩展命令）；
  * - 会话计划（rpi-plan-mode plan-mode 条目 → pi_plan_entries → 新 store）；
- * - 终端（pi_job_list → jobs-store；rpi 未装 background-tasks 插件，如实
- *   Err → 空，分区不渲染——上游"无数据不渲染"同判）；
+ * - 终端（pi_job_list → jobs-store；真源 = rpi-background-tasks 插件的
+ *   `background-tasks` 会话快照，插件未安装时为空、分区不渲染——上游
+ *   "无数据不渲染"同判）；
  * - 智能体（宿主从 delegate_task / subagent / dispatch 工具调用派生：未完成
  *   = 运行中，已完成 = 已结束目录；rpi 子代理运行态在插件进程内，没有
  *   roster 面，工具调用是唯一真值）。
@@ -959,9 +960,10 @@ function PlanStatusSection({
 }
 
 // ── 分区：终端（上游 BackgroundWorkStatusSection；数据 = pi_job_list）──
-/** rpi 未装 background-tasks 插件（pi_job_list 如实 Err）→ works 为空 →
- *  整区不渲染（上游"无数据不渲染"同判）。插件装上即亮：行 = 命令 + 用时 +
- *  Stop（pi_job_cancel 真取消）。 */
+/** 真源 = rpi-background-tasks 插件每次作业状态变化追加的 `background-tasks`
+ *  会话快照（宿主 pi_job_list 只读投影）。插件未安装 / 无作业 → works 为空 →
+ *  整区不渲染（上游"无数据不渲染"同判）。行 = 标签（或命令行）+ 用时；
+ *  Stop 不渲染：kill 面在插件进程内（Job Object），宿主没有按 id 终止面。 */
 function TerminalStatusSection({
   model,
   separated,
@@ -1305,8 +1307,6 @@ function ConversationStatusPanelImpl() {
 
   const override = useStore(statusPanelStore, (s) => s.override)
 
-  // 面板在场 → 写共享 store（对话内容列的顶部余隙判定；卸载即清除）。
-  // mini 胶囊也算在场（胶囊同样挂在列右上角，需要余隙）。
   const variant: StatusPanelVariant = override ?? 'auto'
   useEffect(() => {
     statusPanelStore.getState().setMounted(true)
@@ -1321,6 +1321,29 @@ function ConversationStatusPanelImpl() {
     void planEntriesBridge.getState().refresh()
     void jobsBridge.getState().refresh()
   }, [cwd, isRunning, activeId])
+
+  // run 进行中：插件作业/待办/计划条目会在**轮中途**追加会话条目（background
+  // 工具起作业、todo 更新、plan_mode_complete），没有事件面可推，运行期 2s 轮询
+  // 才能让「终端 / 进程」分区在跑的时候就在场（上游面板订阅会话投影，同语义）。
+  useEffect(() => {
+    if (!isRunning) return
+    const timer = window.setInterval(() => {
+      void jobsBridge.getState().refresh()
+      void todoBridge.getState().refresh()
+      void planEntriesBridge.getState().refresh()
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [isRunning])
+
+  // 后台作业会**跨轮存活**：60s 任务在本轮回复结束后才收尾，settle 发生在
+  // run 之外。没有事件面，挂载期常驻一条慢轮询（3s）兜住收尾，否则行会
+  // 永远停在「运行中」。插件未安装时 pi_job_list 返回 []，开销可忽略。
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void jobsBridge.getState().refresh()
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   // 目标态：条目随 goal 工具/命令变化；3s 轮询（宿主没有 goal 事件面）。
   const [goalRaw, setGoalRaw] = useState<unknown>(null)
@@ -1363,14 +1386,28 @@ function ConversationStatusPanelImpl() {
           .filter((job) => job.status === 'running')
           .map((job) => ({
             id: job.id,
-            command: job.command,
+            command: job.command ?? '后台作业',
+            ...(job.label !== null ? { label: job.label } : {}),
             startedAtMs: job.startedAtMs,
+            // 引擎侧 kill 只在插件进程内（Job Object），宿主无终止面 ——
+            // 不渲染点了必 Err 的 Stop 按钮。
+            cancellable: false,
           })),
         runningAgents: agentRows.running,
         endedAgentCount: agentRows.ended.length,
       }),
     [todo, gitStat, goalRaw, planEntries, jobs, agentRows],
   )
+
+  // 面板在场 → 写共享 store（对话内容列的让位判定；卸载即清除）。
+  // **必须与渲染闸门同判**（`activeId !== null && hasContent`）：组件总会
+  // 挂载，早先无条件 setMounted(true) 会让"面板渲染为 null 的会话"也把
+  // 对话列左移收窄 10.5rem / 24rem，右侧留一片空白（用户 11-18 报障）。
+  const panelVisible = activeId !== null && model.hasContent
+  useEffect(() => {
+    statusPanelStore.getState().setMounted(panelVisible)
+    return () => statusPanelStore.getState().setMounted(false)
+  }, [panelVisible])
 
   // 分区开合 = 上游受控 state 语义（SessionPane 同款）：终端/智能体默认
   // 折起、归零折起、换会话复位；展开由用户点击分区头（上游另有 composer

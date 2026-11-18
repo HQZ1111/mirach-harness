@@ -1807,18 +1807,24 @@ impl PiEngine {
         Err("hub 转写不可用：rpi-subagents 的子进程输出直接作为工具结果返回、rpi-orchestrator 的 DAG 只在插件进程内存；插件未暴露按 id 读取转写的宿主面".into())
     }
 
-    /// 后台任务列表：rpi-background-tasks 插件未安装（`~/.rpi/agent/extensions`
-    /// 无该 cdylib）；即便安装，它的 `background-tasks` 快照条目只有
-    /// id/kind/label/command/status/pid/exitCode/startedAt，缺前端 Terminal
-    /// 分区 wire 的 schema/artifactPath/artifactTruncated/outputTail/
-    /// outputComplete 与 startedAtMs——投影只能靠编默认值（规矩 12 禁止），
-    /// 故如实 Err。
+    /// 后台任务列表：真源 = rpi-background-tasks 插件每次作业状态变化追加的
+    /// `background-tasks` 会话条目（`data.jobs` 全表，只含本会话的行）。插件
+    /// 未安装 = 没有条目 = 空列表（诚实空态，不是兜底）。
     pub fn job_list(&self) -> Result<serde_json::Value, String> {
-        Err("后台任务列表不可用：rpi-background-tasks 插件未安装（~/.rpi/agent/extensions 无该 cdylib），且其 background-tasks 快照条目只有 id/kind/label/command/status/pid/exitCode/startedAt，缺 Terminal 分区所需的 schema/artifactPath/outputTail/startedAtMs 字段".into())
+        let Some(live) = self.live_opt()? else {
+            return Ok(serde_json::Value::Array(Vec::new()));
+        };
+        let data =
+            self.latest_plugin_entry(&live, crate::pi_plugin_state::BACKGROUND_TASKS_ENTRY)?;
+        crate::pi_plugin_state::background_tasks_wire(data.as_ref())
     }
 
+    /// 取消一个后台作业：**宿主没有进程树句柄**。rpi-background-tasks 只注册
+    /// `background` / `jobs` 两个模型工具（kill 由模型经 `jobs` 工具发出），
+    /// 进程归属（Windows Job Object）只在插件静态表里；宿主按 pid 外部杀会
+    /// 漏掉孙进程（插件注释实测过 `taskkill /T` 断链），故如实 Err。
     pub fn job_cancel(&self, _job_id: &str) -> Result<serde_json::Value, String> {
-        Err("后台任务取消不可用：宿主未安装 rpi-background-tasks 插件，没有任务表可取消".into())
+        Err("后台任务取消不可用：作业进程由 rpi-background-tasks 插件持有（Job Object 句柄在插件进程内），宿主无按 id 终止面；请让模型用 `jobs` 工具（action=kill）停止".into())
     }
 
     /// 手动压缩（`AgentLane::compact(None)`）——rpi 在会话树上追加一条

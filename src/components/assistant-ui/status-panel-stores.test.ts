@@ -89,26 +89,57 @@ describe('parseChildEntries', () => {
   })
 })
 
-describe('parseJobs', () => {
+describe('parseJobs（rpi-background-tasks 快照行）', () => {
   const good = {
-    schema: 'pi.bash_job.v1',
+    schema: 'rpi.background-tasks.v1',
     id: 'job-1',
+    kind: 'bash',
+    label: 'dev server',
     command: 'npm test',
-    startedAtMs: 1000,
     status: 'running',
+    startedAtMs: 1000,
+    finishedAtMs: null,
     exitCode: null,
     pid: 99,
-    artifactPath: 'G:/j.log',
-    artifactTruncated: false,
-    artifactError: null,
-    outputTail: 'running...',
-    outputComplete: false,
   }
 
-  it('正常行解析', () => {
+  it('正常行解析（含 label/kind）', () => {
     const out = parseJobs([good])
     expect(out).toHaveLength(1)
-    expect(out[0]).toMatchObject({ id: 'job-1', status: 'running' })
+    expect(out[0]).toMatchObject({
+      id: 'job-1',
+      status: 'running',
+      label: 'dev server',
+      kind: 'bash',
+      startedAtMs: 1000,
+    })
+  })
+
+  it('插件词表五态直映，未知 status 跳过', () => {
+    for (const status of ['running', 'completed', 'failed', 'interrupted', 'cancelled']) {
+      expect(parseJobs([{ ...good, status }])[0]!.status).toBe(status)
+    }
+    silenceErrors()
+    expect(parseJobs([{ ...good, status: 'zombie' }])).toEqual([])
+  })
+
+  it('可选项缺席留 null（不补 0）', () => {
+    const out = parseJobs([
+      {
+        schema: 'rpi.background-tasks.v1',
+        id: 'j2',
+        command: 'sleep 60',
+        status: 'running',
+        startedAtMs: 5,
+      },
+    ])
+    expect(out[0]).toMatchObject({
+      kind: null,
+      label: null,
+      finishedAtMs: null,
+      exitCode: null,
+      pid: null,
+    })
   })
 
   it('非数组 → [] + 错误可见', () => {
@@ -117,14 +148,9 @@ describe('parseJobs', () => {
     expect(spy).toHaveBeenCalled()
   })
 
-  it('未知 status → 跳过', () => {
+  it('缺 startedAtMs 行 → 跳过，好行保留', () => {
     silenceErrors()
-    expect(parseJobs([{ ...good, status: 'zombie' }])).toEqual([])
-  })
-
-  it('缺字段行 → 跳过，好行保留', () => {
-    silenceErrors()
-    expect(parseJobs([good, { id: 'broken' }])).toHaveLength(1)
+    expect(parseJobs([good, { schema: 'rpi.background-tasks.v1', id: 'x', status: 'running' }])).toHaveLength(1)
   })
 })
 
@@ -363,9 +389,9 @@ describe('panel-adapters（pi 形状 → 官方 elements 形状）', () => {
 
   it('jobStages：bash job 无阶段 → null（不硬塞阶段进度条）', () => {
     const j = {
-      schema: 'pi.bash_job.v1', id: 'j', command: 'ls', startedAtMs: 1,
-      status: 'running' as const, exitCode: null, pid: 1, artifactPath: 'p',
-      artifactTruncated: false, artifactError: null, outputTail: '', outputComplete: false,
+      schema: 'rpi.background-tasks.v1', id: 'j', kind: 'bash', label: null,
+      command: 'ls', startedAtMs: 1, finishedAtMs: null,
+      status: 'running' as const, exitCode: null, pid: 1,
     }
     expect(jobStages(j)).toBeNull()
   })

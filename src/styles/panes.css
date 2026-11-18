@@ -700,19 +700,20 @@
   );
   --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
 
-  /* ── 活动状态面板让位几何（2026-11-02）──────────────────────────────
-     ZCode 的让位是**两步**：内容列先收窄到 `100% - 24rem`，再左移
-     `-translate-x-42`（conversationLayout.ts 的 WIDTH + INLINE_OFFSET 两个
-     类）。宿主此前只做了左移：852px 的居中块被左推 157.5px 后右缘到
-     1148，而面板左缘在 1135 —— **内容压在面板上**，左边距同时被吃成负数
-     （用户："对话区怎么靠左边了，间距也没有了"）。
+  /* ── 活动状态面板让位几何（2026-11-02 首版；2026-11-18 与 ZCode 源码对账修正）
+     ZCode `conversationLayout.ts` 的权威语义（源码逐条核对）：
+       - `getConversationStatusPanelOffsetClassName(layout)` 对 **auto 与 inline
+         两种形态返回同一个类**：`@min-[1280px]/conversation:-translate-x-42`
+         —— 偏移只在容器 ≥1280 生效；`INLINE_OFFSET_CLASS_NAME`（无断点）在
+         上游是**死代码**（全仓只有定义处，无使用点）。
+       - 内容列的宽度类在"有面板 / 无面板"下是**同一个字符串**
+         （WITH/WITHOUT 常量内容完全相同）——面板出现**不会收窄**内容列。
+     宿主照抄：宽度恒为 --dsh-chat-content-width；只有 translate 由状态面板
+     在场与否决定，且只在 ≥1280 生效。
 
      这几个量提成变量，让内容列与宽度手柄共用同一来源：
-       --dsh-panel-reserve  列宽要扣掉的预留（0 或 24rem）
        --dsh-panel-offset   列的左移量（0 或 10.5rem = -translate-x-42）
-       --dsh-column-width   收窄后的实际列宽
-       --dsh-column-left / --dsh-column-right  内容列的左右缘（手柄锚点） */
-  --dsh-panel-reserve: 0px;
+       --dsh-column-width   内容列宽（不随面板变化） */
   --dsh-panel-offset: 0px;
   /* 面板实际占宽（含 right-4 的 1rem 外边距）。手柄右侧可用空间要扣掉它，
      否则右侧手柄会落进面板占的区间（2026-11-02 实测压在面板上）。 */
@@ -722,32 +723,12 @@
   --dsh-column-right: calc(50% + var(--dsh-column-width) / 2);
 }
 
-/* panel 钉死形态：恒让位（无断点，窄窗也必须让——否则面板盖正文）。 */
-.aui-thread-root[data-status-panel-shift='panel'] {
-  --dsh-panel-reserve: 24rem;
-  /* 面板实体占宽：w-80 = 20rem（320px）+ right-4 的 1rem 外边距。右侧手柄
-     的可用空间要扣掉它，否则手柄会落进面板占的区间。 */
-  --dsh-panel-width: 21rem;
-  /* 10.5rem = Tailwind `-translate-x-42` 的等价值（42 × 0.25rem），必须与
-     上面的 24rem 同基准——写成 168px 是按 16px 根字号算的，而宿主根字号
-     是 15px，两者比例会偏，左边距被压到 12px（2026-11-02 实测）。 */
-  --dsh-panel-offset: 10.5rem;
-  --dsh-column-width: min(var(--dsh-chat-content-width), calc(100% - 24rem));
-  --dsh-column-left: calc(
-    50% - var(--dsh-panel-offset) - var(--dsh-column-width) / 2
-  );
-  --dsh-column-right: calc(
-    50% - var(--dsh-panel-offset) + var(--dsh-column-width) / 2
-  );
-}
-
-/* auto 形态：仅容器 ≥1280 让位（窄屏收胶囊，改用顶部余隙）。 */
+/* 状态面板让位：与 ZCode 一致，只有容器 ≥1280 才平移（<1280 面板/胶囊都
+   不让位，避免窄窗把正文推出可视区）。 */
 @container thread (min-width: 1280px) {
-  .aui-thread-root[data-status-panel-shift='auto'] {
-    --dsh-panel-reserve: 24rem;
+  .aui-thread-root[data-status-panel-shift='wide'] {
     --dsh-panel-width: 21rem;
     --dsh-panel-offset: 10.5rem;
-    --dsh-column-width: min(var(--dsh-chat-content-width), calc(100% - 24rem));
     --dsh-column-left: calc(
       50% - var(--dsh-panel-offset) - var(--dsh-column-width) / 2
     );
@@ -757,24 +738,12 @@
   }
 }
 
-/* ── 内容列的让位实现（收窄 + 左移，ZCode 两步同款）────────────────────
-   只写位移不写收窄 = 内容压到面板上（2026-11-02 的 bug）。两者都从上面的
-   变量取，宽度手柄用同一组值锚定，不会脱节。 */
-[data-column-shift] {
-  transition:
-    width 300ms,
-    max-width 300ms,
-    transform 300ms;
-}
-
-[data-column-shift='panel'] {
-  max-width: var(--dsh-column-width);
-  transform: translateX(calc(-1 * var(--dsh-panel-offset)));
-}
-
+/* ── 内容列的让位实现（只平移，不收窄 —— ZCode 同款）──────────────────
+   宽度恒取 --dsh-chat-content-width；收窄会让"面板不在场"的会话也变窄
+   （2026-11-18 用户报障："面板没出现还在左边"的根因之一）。无动画：
+   上游 e2e 断言布局切换零过渡（transitionDuration = 0s）。 */
 @container thread (min-width: 1280px) {
-  [data-column-shift='auto'] {
-    max-width: var(--dsh-column-width);
+  [data-column-shift='wide'] {
     transform: translateX(calc(-1 * var(--dsh-panel-offset)));
   }
 }

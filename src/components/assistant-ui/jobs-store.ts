@@ -1,43 +1,45 @@
 /**
- * 后台任务桥（活动面板 Terminal 分区数据面）：pi `jobs` 进程级 registry 的
- * 投影（按 owner session 过滤）。
+ * 后台任务桥（活动面板 Terminal 分区数据面）：rpi-background-tasks 插件
+ * 的 `background-tasks` 会话快照投影。
  *
- * - 投影：refresh() 拉 `pi_job_list`（Rust 侧 `jobs::list(ownerSessionId)`
- *   → `JobSnapshot[]`）→ jobs。消费方 = ConversationStatusPanel 的
- *   Terminal 分区（运行中的 bash 任务行 + Stop）。
+ * - 真相 = `~/.rpi/agent/extensions/rpi_background_tasks.dll` 注册的
+ *   `background` / `jobs` 工具：每次作业状态变化都 AppendEntry 一条自包含
+ *   快照（`data.jobs` 全表，只含本会话行）——宿主读最新一条（`pi_job_list`）。
+ * - 字段（插件 `Job::snapshot` 逐字）：id / kind / label / command / status /
+ *   pid? / exitCode? / startedAt(ms) / finishedAt?。宿主只投影真字段：缺失
+ *   的可选项留 null，不补 0；`status` ∈ running/completed/failed/
+ *   interrupted/cancelled，其余视为坏行（console.error 可见 + 跳过，规矩 12）。
+ * - 插件未安装 = 没有条目 = 空列表（诚实空态，分区不渲染）。
  * - 双通道：①拉取面（本 store）；②事件面（`CUSTOM tool_execution`
- *   details.schema = `pi.bash_job.v1` 经 turn-actor 归约）。真相在 pi。
- *   zustand vanilla 模式，照抄 checkpoint-store。
+ *   details.schema = `pi.bash_job.v1` 经 turn-actor 归约）。真相在引擎。
+ * zustand vanilla 模式，照抄 checkpoint-store。
  */
 import { invoke } from '@tauri-apps/api/core'
 import { createStore, useStore } from 'zustand'
 
-/** pi `jobs::JobSnapshot`（serde camelCase）：status = "running" | "exited"
- * | "killed" | "timedOut" | "failed"。 */
-export type JobStatus = 'running' | 'exited' | 'killed' | 'timedOut' | 'failed'
+/** rpi-background-tasks 的作业状态词表（插件 `STATUS_*` 逐字）。 */
+export type JobStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
+
+const JOB_STATUSES = new Set<JobStatus>([
+  'running',
+  'completed',
+  'failed',
+  'interrupted',
+  'cancelled',
+])
 
 export interface JobSnapshot {
   schema: string
   id: string
-  command: string
-  startedAtMs: number
+  kind: string | null
+  label: string | null
+  command: string | null
   status: JobStatus
+  startedAtMs: number
+  finishedAtMs: number | null
   exitCode: number | null
   pid: number | null
-  artifactPath: string
-  artifactTruncated: boolean
-  artifactError: string | null
-  outputTail: string
-  outputComplete: boolean
 }
-
-const JOB_STATUSES = new Set<JobStatus>([
-  'running',
-  'exited',
-  'killed',
-  'timedOut',
-  'failed',
-])
 
 const asString = (v: unknown): string | null =>
   typeof v === 'string' ? v : null
@@ -47,11 +49,9 @@ const asNumberOrNull = (v: unknown): number | null =>
   v === null || v === undefined ? null : asNumber(v)
 const asStringOrNull = (v: unknown): string | null =>
   v === null || v === undefined ? null : asString(v)
-const asBool = (v: unknown): boolean | null =>
-  typeof v === 'boolean' ? v : null
 
-/** 严格解析 pi_job_list 返回（裸数组 JobSnapshot[]）：单行字段缺失/非法 →
- * console.error + 跳过；整体非数组 → console.error + []。不造缺省值。 */
+/** 严格解析 pi_job_list 返回（裸数组）：`startedAtMs` 是插件必填字段，
+ * 缺失/非法 = 坏行 → console.error + 跳过；非数组 → console.error + []。 */
 export function parseJobs(raw: unknown): JobSnapshot[] {
   if (!Array.isArray(raw)) {
     console.error('[jobs] pi_job_list 返回非数组——清单丢弃', raw)
@@ -66,23 +66,14 @@ export function parseJobs(raw: unknown): JobSnapshot[] {
     const r = item as Record<string, unknown>
     const schema = asString(r.schema)
     const id = asString(r.id)
-    const command = asString(r.command)
-    const startedAtMs = asNumber(r.startedAtMs)
     const status = asString(r.status)
-    const artifactPath = asString(r.artifactPath)
-    const outputTail = asString(r.outputTail)
-    const outputComplete = asBool(r.outputComplete)
-    const artifactTruncated = asBool(r.artifactTruncated)
+    const startedAtMs = asNumber(r.startedAtMs)
     if (
       schema === null ||
       id === null ||
-      command === null ||
-      startedAtMs === null ||
+      id === '' ||
       status === null ||
-      artifactPath === null ||
-      outputTail === null ||
-      outputComplete === null ||
-      artifactTruncated === null
+      startedAtMs === null
     ) {
       console.error('[jobs] 任务行字段缺失/非法——跳过', item)
       continue
@@ -94,23 +85,21 @@ export function parseJobs(raw: unknown): JobSnapshot[] {
     out.push({
       schema,
       id,
-      command,
-      startedAtMs,
+      kind: asStringOrNull(r.kind),
+      label: asStringOrNull(r.label),
+      command: asStringOrNull(r.command),
       status: status as JobStatus,
+      startedAtMs,
+      finishedAtMs: asNumberOrNull(r.finishedAtMs),
       exitCode: asNumberOrNull(r.exitCode),
       pid: asNumberOrNull(r.pid),
-      artifactPath,
-      artifactTruncated,
-      artifactError: asStringOrNull(r.artifactError),
-      outputTail,
-      outputComplete,
     })
   }
   return out
 }
 
 interface JobsBridgeState {
-  /** 任务投影；[] = 无任务/拉取失败（分区显示空态） */
+  /** 任务投影；[] = 无任务/插件未安装（分区显示空态） */
   jobs: JobSnapshot[]
   refresh: () => Promise<void>
   /** 事件面即时提交（details.schema = pi.bash_job.v1 的单条快照 upsert） */
