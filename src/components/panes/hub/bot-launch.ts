@@ -63,12 +63,36 @@ async function findPathBySessionId(sessionId: string): Promise<string | null> {
  *  技能注入面（skills_prompt 是进程级宿主渲染），bot 级技能 = 拼进
  *  system prompt 交给 pi（SessionOptions.system_prompt 的追加段，模型
  *  可见、可执行——真效果，不是 UI 装饰）。 */
-function composeSystemPrompt(bot: BotPreset): string {
+function composeSystemPrompt(bot: BotPreset, mcpConfigPath: null | string): string {
   const base = bot.systemPrompt.trim()
+  const blocks: string[] = []
   const skills = (bot.skills ?? []).filter((s) => s.trim() !== '')
-  if (skills.length === 0) return base
-  const block = `# Skills\nThe following skills are attached to this agent. When a task matches, invoke them (slash form in prompts): ${skills.map((s) => `/${s}`).join(', ')}`
-  return base ? `${base}\n\n${block}` : block
+  if (skills.length > 0) {
+    blocks.push(
+      `# Skills\nThe following skills are attached to this agent. When a task matches, invoke them (slash form in prompts): ${skills.map((s) => `/${s}`).join(', ')}`,
+    )
+  }
+  if (mcpConfigPath) {
+    const servers = (bot.mcpServers ?? []).filter((s) => s.trim() !== '')
+    blocks.push(
+      `# MCP\nThis bot may use only the MCP servers in this configuration file: ${mcpConfigPath} (servers: ${servers.join(', ')}). Call mcp_list / mcp_call / mcp_resource with configPath="${mcpConfigPath}". Do not use any other MCP configuration.`,
+    )
+  }
+  return [base, ...blocks].filter(Boolean).join('\n\n')
+}
+
+/** per-bot MCP 配置文件（rpi-mcp-adapter 的 configPath 面，真生效）：
+ *  所选服务器从全局 mcp.json 过滤后写到 ~/.rpi/agent/bot-mcp/<bot>.json；
+ *  未选（undefined/空）= 不生成、不注入（宿主不过滤全局 mcp 工具，故为空时
+ *  模型仍可能自行使用全局配置——UI 文案如实标注）。 */
+async function composeMcpConfigPath(bot: BotPreset): Promise<null | string> {
+  const servers = (bot.mcpServers ?? []).filter((s) => s.trim() !== '')
+  if (servers.length === 0) return null
+  const res = await invoke<{ path: string }>('pi_bot_mcp_config', {
+    botName: bot.name,
+    servers,
+  })
+  return res.path
 }
 
 /** bot 预设的工具集 → enabled_tools 名单（hermes profile toolsets 对偶，
@@ -130,7 +154,8 @@ async function openOrCreate(bot: BotPreset): Promise<boolean> {
   }
   // 首启：创建新会话
   try {
-    const systemPrompt = composeSystemPrompt(bot)
+    const mcpConfigPath = await composeMcpConfigPath(bot)
+    const systemPrompt = composeSystemPrompt(bot, mcpConfigPath)
     const enabledTools = await composeEnabledTools(bot)
     const st = await invoke<PiStateSnapshot>('pi_create_bot_session', {
       name: bot.name,
@@ -180,7 +205,8 @@ export async function launchBotSession(bot: BotPreset): Promise<boolean> {
 export async function newBotChat(bot: BotPreset): Promise<boolean> {
   const { provider, modelId } = splitBotModel(bot.model)
   try {
-    const systemPrompt = composeSystemPrompt(bot)
+    const mcpConfigPath = await composeMcpConfigPath(bot)
+    const systemPrompt = composeSystemPrompt(bot, mcpConfigPath)
     const enabledTools = await composeEnabledTools(bot)
     await invoke('pi_create_bot_session', {
       name: `${bot.name} · ${new Date().toLocaleDateString()}`,

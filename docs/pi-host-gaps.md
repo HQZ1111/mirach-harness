@@ -62,11 +62,14 @@ token 存 OS keyring），可省掉宿主写 headers 这一层；非阻塞。
 ## 4. 会话回收事件 `session.reclaimed`
 
 **事实**：hermes 网关回收 runtime 会话时发 `session.reclaimed`，Desktop
-据此清理订阅。rpi 的会话生命周期由宿主进程管理，没有"回收"事件
+据此清理订阅。rpi 的会话生命周期由宿主进程管理，没有运行期驱逐/回收
 （重启即全量失效）。
 
-**宿主现状**：无生产者（订阅是空操作，轮询兜底）。若引擎将来引入会话
-回收/驱逐（内存上限、空闲回收），应同时发这个事件。
+**✅ 宿主生产者（2026-11-18 第四波）**：`pi_delete_session` 成功后按 path 在
+会话索引里定位 stored id → emit `mirach:plugin:session:reclaimed`
+（`{stored_session_id, path, reason:"deleted"}`）。删除是宿主里"运行时会话
+确实不存在"的唯一真实来源；插件（hermes-bots plugin.tsx）监听后刷新打开的
+bot canonical chat。若引擎将来引入内存上限/空闲驱逐，应复用同一事件。
 
 ## 5. 多连接 / 跨网关 peer（groups.peer.*、profiles 多源）
 
@@ -115,9 +118,12 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
   relay.ts 循环驱动；双向实机 E2E 通过。
   **2026-11-18 第三波**：远端连接 **token 管理已接**（keyring `mirach.connections`
   只写不读 + `pi_connections_test` 真 probe `gateway.ready` + 连接页录入/清除）。
-  **仍缺**：跨网关 peer 房间（`groups.peer.*` —— 需要 authority 侧 **RoomLink
-  HTTP 服务端** 承载 `groups.peer.register` 的 `target_url` 回调与 grant 语义；
-  transport 已铺好，属独立项目）。
+  **2026-11-18 第四波：peer 房间 Desktop 驱动模式全通**——authority 侧
+  `groups.peer.register/revoke`（pinned catalog 校验 + room-links 持久化）、
+  canonical driver 远端成员全 RPC 走对端 WS、roster peer 行形状；实机（插件自身
+  `createGroupAcrossConnections`）1 本机+2 远端建房、全员 seat、双远端回复、
+  settled。**仍缺**：lending 侧（本机对外 **RoomLink HTTP 服务端** +
+  `groups.peer.invite`——本机无对外网关监听，invite 明确报错不伪造）。
 
 ## PR 待办（给 `github.com/bigfish1913/pi-rust`）
 

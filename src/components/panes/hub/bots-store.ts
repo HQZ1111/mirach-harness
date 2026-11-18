@@ -71,11 +71,16 @@ export interface BotPreset {
    *  enabled_tools 传给 pi_create_bot_session（宿主 Rust 层透传
    *  SessionOptions.enabled_tools）。 */
   toolsets?: string[]
+  /** MCP 服务器白名单（hermes McpSetupButton 对偶）：全局 mcp.json 里的
+   *  mcpServers key 子集。启动时生成 **per-bot MCP 配置文件**（只含所选
+   *  服务器），路径注入 system prompt——rpi-mcp-adapter 的 mcp_list/mcp_call
+   *  接受 configPath，per-bot 由此真生效。缺省 = 不生成（沿用全局）。 */
+  mcpServers?: string[]
 }
 
 /** patchMeta 接受的元数据补丁形状（BotPreset 的展示/行为字段子集）。 */
 export type BotPatch = Partial<
-  Pick<BotPreset, 'pinned' | 'hidden' | 'sectionId' | 'sectionName' | 'color' | 'shape' | 'image' | 'custom' | 'title' | 'chatSessionPath' | 'chatSessionId' | 'connectionId' | 'skills' | 'toolsets'>
+  Pick<BotPreset, 'pinned' | 'hidden' | 'sectionId' | 'sectionName' | 'color' | 'shape' | 'image' | 'custom' | 'title' | 'chatSessionPath' | 'chatSessionId' | 'connectionId' | 'skills' | 'toolsets' | 'mcpServers'>
 >
 
 /** 用户自建分区（hermes user-sections：{id, name}，本地存储）。 */

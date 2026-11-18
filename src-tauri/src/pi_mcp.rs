@@ -984,6 +984,71 @@ fn probe_http_mcp(
     Ok((server_info, tools))
 }
 
+/// per-bot MCP 配置文件（2026-11-18）：从全局 `mcp.json` 的 `mcpServers`
+/// 过滤出所选服务器，写到 `~/.rpi/agent/bot-mcp/<bot>.json`，返回绝对路径。
+/// rpi-mcp-adapter 的 `mcp_list/mcp_call/mcp_resource` 接受 `configPath`，
+/// bot-launch 把路径注入 system prompt —— per-bot MCP 由此真生效。
+///
+/// 规矩 12：全局配置读不出 / 所选名字不存在 → Err（不静默写空配置）。
+#[tauri::command(rename_all = "camelCase", async)]
+pub fn pi_bot_mcp_config(bot_name: String, servers: Vec<String>) -> Result<Value, String> {
+    let bot = bot_name.trim();
+    if bot.is_empty() {
+        return Err("pi_bot_mcp_config: bot 名为空".into());
+    }
+    let selected_names: Vec<String> = servers
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if selected_names.is_empty() {
+        return Err("pi_bot_mcp_config: 未选择 MCP 服务器".into());
+    }
+    let doc = read_json_document(&global_config_path()?)?.unwrap_or_else(|| json!({}));
+    let all = doc
+        .get(SERVERS_KEY)
+        .and_then(Value::as_object)
+        .ok_or_else(|| "pi_bot_mcp_config: 全局 mcp.json 缺 mcpServers 表".to_string())?;
+    let mut selected = Map::new();
+    let mut missing: Vec<String> = Vec::new();
+    for name in &selected_names {
+        match all.get(name) {
+            Some(spec) => {
+                selected.insert(name.clone(), spec.clone());
+            }
+            None => missing.push(name.clone()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "pi_bot_mcp_config: 全局 mcp.json 里没有这些服务器: {}",
+            missing.join(", ")
+        ));
+    }
+    let safe_name: String = bot
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = pi_paths::agent_dir()?.join("bot-mcp");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("bot-mcp 目录创建失败: {e}"))?;
+    let path = dir.join(format!("{safe_name}.json"));
+    let text = serde_json::to_string_pretty(&json!({ SERVERS_KEY: selected }))
+        .map_err(|e| format!("per-bot mcp 序列化失败: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("per-bot mcp 写入失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("per-bot mcp 替换失败: {e}"))?;
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "servers": selected_names,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

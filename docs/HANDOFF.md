@@ -62,9 +62,30 @@
   同款反 SSRF），裁首帧 192×208 → 96×104 NEAREST → PNG data URI +
   `pets/.thumbs/<slug>.png` 缓存。实机：gallery **5208 只**；thumb
   `homelander` → 20KB PNG data URI（webp 解码经 image crate `webp` feature）。
-- **结构性未做（如实）**：peer 房间（需 authority 侧 **RoomLink HTTP 服务端**
-  + grant/register 全语义，transport 已就绪）、per-bot MCP（rpi-mcp-adapter
-  是全局 `mcp.json`，extension 侧能力）、`session.reclaimed`（宿主无会话回收）、
+- **peer 房间 Desktop 驱动模式全通（同日续）**：authority 侧
+  `groups.peer.register/revoke` 真落地（pinned catalog 校验 + `room-links.json`
+  持久化；并发 seat 用进程内串行锁 + 唯一 tmp——实测踩中固定 `.tmp` 冲突导致
+  第二个成员 `registration_unconfirmed`）；canonical driver 对 peer 成员按
+  profile 解析 remote 路由，session.create/resume/prompt.submit/interrupt 全走
+  对端 WS（宿主私有字段 `room_plumbing/task_meta` 剥离）；roster 行补
+  `sourceScoped/remoteSource/installId/route`（插件 `usePeerTargets` 才能
+  ready）；peer actor 带 `connection_id`。**实机（mock 网关，走 hermes 插件
+  自身 `createGroupAcrossConnections` + `seatPeer`）**：1 本机 + 2 远端成员
+  建房 → unjoined=[] → 本机真模型回复 + 两名远端成员均回复
+  （actor.connection_id=mock-install-1）→ 4 turn.settled → room.activity
+  settled（silent_round）。
+- **per-bot MCP 已接**：bots 对话框 MCP 页 = 全局 `mcp.json` 服务器多选；
+  启动 `pi_bot_mcp_config` 只过滤所选服务器生成
+  `~/.rpi/agent/bot-mcp/<bot>.json`，`configPath` 注入 system prompt
+  （rpi-mcp-adapter 的 `mcp_list/mcp_call/mcp_resource` 本就按 `configPath`
+  读配置——真生效）。**限制（如实）**：不选 = 不注入；adapter 四个 MCP 工具
+  是进程级注册，无 per-session 遮蔽面（"不选"不能从工具层阻断）。
+- **session.reclaimed 有生产者**：`pi_delete_session` 成功后按 path 在索引
+  定位 stored id → emit `mirach:plugin:session:reclaimed`
+  （`{stored_session_id, path, reason:"deleted"}`）；插件监听器据此刷新打开
+  的 bot canonical chat。
+- **结构性未做（如实）**：peer 的 **lending 侧**（本机对外 RoomLink HTTP
+  服务端 + `groups.peer.invite`——host 无对外监听，invite 明确报错）、
   ssh 隧道（用 remote 指向已转发端口）。
 - **门禁**：cargo check 0 / cargo test **692** / vitest **1055**（85 文件）/
   tsc 1319（= hermes-mirror + sdk-upstream 既有基线，0 新错）。

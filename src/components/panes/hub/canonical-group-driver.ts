@@ -38,6 +38,8 @@ interface RoomMember {
   profile: string
   handle?: string
   display_name?: string
+  /** peer 成员的 pinned 目标（actor 校验要求 connection_id = peer_id）。 */
+  target?: { kind?: string; peer_id?: string; installation_id?: string }
 }
 
 interface RoomState {
@@ -81,6 +83,8 @@ interface RoomRun {
   cancelled: boolean
   sessionId?: string
   memberId?: string
+  /** 当前轮成员的 profile（远端成员按它解析路由——interrupt/审批也走对端）。 */
+  profile?: string
   baseline?: number
   startedAt?: number
   task?: PlannedTask
@@ -175,6 +179,42 @@ async function request<T>(method: string, params: Record<string, unknown>): Prom
   return dispatchHostRequest<T>(method, params)
 }
 
+/** 成员 profile 的路由：远端名册里命中 → remote 路由对象；否则 null（本地）。 */
+async function memberRoute(profile: string): Promise<null | { route: unknown }> {
+  if (!profile) return null
+  try {
+    const { host } = await import('@/sdk/host')
+    const routes = await host.profileRoutes()
+    const route = routes.find((row) => row.profile === profile || row.targetProfile === profile)
+    if (route?.mode === 'remote') return { route }
+  } catch (e) {
+    // 名册不可达时不能静默把远端成员跑成本地同名会话（规矩 12）：报错让
+    // 本轮失败并显示在房间活动行，而不是制造假回复。
+    console.error('[canonical-driver] 解析成员路由失败', e)
+    throw e
+  }
+  return null
+}
+
+/** 成员 RPC：远端成员走 `pi_gateway_call`（Desktop 驱动跨网关模式），本地走分发表。
+ *  远端调用剥离宿主私有参数（`room_plumbing` / `task_meta`——hermes 网关会拒绝未知字段）。 */
+async function memberRequest<T>(
+  profile: string,
+  method: string,
+  params: Record<string, unknown>,
+  timeoutMs?: number,
+): Promise<T> {
+  const remote = await memberRoute(profile)
+  if (remote) {
+    const { host } = await import('@/sdk/host')
+    const sanitized = Object.fromEntries(
+      Object.entries(params).filter(([key]) => key !== 'room_plumbing' && key !== 'task_meta'),
+    )
+    return host.requestProfile<T>(remote.route, method, sanitized, timeoutMs)
+  }
+  return request<T>(method, params)
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: tauriInvoke } = await import('@tauri-apps/api/core')
   return tauriInvoke<T>(cmd, args)
@@ -226,21 +266,28 @@ function sessionTitle(roomId: string, profile: string): string {
   return `Group: ${roomId} · ${profile}`
 }
 
-/** 按标题复用/新建一个 room_plumbing 会话（成员会话与 router 会话共用）。 */
+/** 按标题复用/新建一个 room_plumbing 会话（成员会话与 router 会话共用）。
+ *  远端成员：resume/create 走对端网关（Desktop 驱动跨网关模式）。 */
 async function ensureSessionByTitle(title: string, profile: string): Promise<string> {
   try {
-    const resumed = await request<{ session_id?: string }>('session.resume', {
+    const resumed = await memberRequest<{ session_id?: string }>(profile, 'session.resume', {
       session_id: title,
       profile,
       omit_messages: true,
     })
     if (resumed?.session_id) return resumed.session_id
   } catch (e) {
-    // 4007 = 会话还不存在 → 建；其它错误不吞（继续抛给调用方）。
-    const code = (e as { code?: number; data?: { code?: number } })?.code ?? (e as { data?: { code?: number } })?.data?.code
-    if (code !== 4007) throw e
+    // 会话不存在 → 建。本地是结构化 4007；远端是网关错误文本（含
+    // "session not found"/不存在）——两类都只放行"确实不存在"，其它照抛。
+    const err = e as { code?: number; data?: { code?: number; reason?: string }; message?: string }
+    const missing =
+      err?.code === 4007 ||
+      err?.data?.code === 4007 ||
+      err?.data?.reason === 'not_found' ||
+      /session not found|not found|不存在|\[4007\]/i.test(String(err?.message ?? e))
+    if (!missing) throw e
   }
-  const created = await request<{ session_id?: string }>('session.create', {
+  const created = await memberRequest<{ session_id?: string }>(profile, 'session.create', {
     profile,
     title,
     room_plumbing: true,
@@ -266,7 +313,7 @@ async function resumeSnapshot(sessionId: string, profile: string): Promise<{
     meta?: Record<string, unknown> | null
   }[]
 }> {
-  return request('session.resume', { session_id: sessionId, profile })
+  return memberRequest(profile, 'session.resume', { session_id: sessionId, profile })
 }
 
 // ── 一轮成员轮次 ────────────────────────────────────────────────────────────
@@ -319,14 +366,16 @@ async function runMemberTurn(
   }
   run.baseline = baseline
   run.memberId = task.member_id
+  run.profile = member.profile
   run.startedAt = Date.now()
   notify()
 
-  await request('prompt.submit', {
+  await memberRequest(member.profile, 'prompt.submit', {
     session_id: sessionId,
     text: task.prompt,
     profile: member.profile,
     // 引擎任务租约元数据（room 坐标随任务落盘，重启恢复时用）。
+    // 远端成员：memberRequest 会剥掉 task_meta（hermes 网关不收宿主私有字段）。
     task_meta: {
       room_id: run.roomId,
       discussion_event_id: run.discussionEventId ?? null,
@@ -493,6 +542,12 @@ async function executeMemberTask(
     kind: 'member',
     id: member.member_id,
     profile: member.profile,
+    // peer 成员：Rust `DiscussionMember::actor` 带 connection_id = peer_id，
+    // 缺它 message.member 会在下一次 validate_events 里被拒
+    //（"actor does not match roster"）。
+    ...(member.target?.kind === 'peer' && member.target.peer_id
+      ? { connection_id: member.target.peer_id }
+      : {}),
   }
 
   run.task = task
@@ -663,14 +718,15 @@ export async function stopCanonicalRoom(roomId: string): Promise<void> {
   if (run.sessionId) {
     try {
       if (run.engineTask) {
-        // 引擎租约的带 fencing 中断：只有精确 task/generation 才生效。
+        // 引擎租约的带 fencing 中断：只有精确 task/generation 才生效（本地成员）。
         await request('task.interrupt', {
           session_id: run.sessionId,
           task_id: run.engineTask.task_id,
           execution_generation: run.engineTask.execution_generation,
         })
       } else {
-        await request('session.interrupt', { session_id: run.sessionId })
+        // 远端成员（无宿主租约）走对端网关的 session.interrupt。
+        await memberRequest(run.profile ?? '', 'session.interrupt', { session_id: run.sessionId })
       }
     } catch (e) {
       console.error('[canonical-driver] 中断成员会话失败（驱动仍会退出）', e)
@@ -686,7 +742,7 @@ export async function approveCanonicalAction(
 ): Promise<void> {
   const run = runs.get(roomId)
   if (!run?.sessionId) throw new Error('没有在途成员轮次可审批')
-  await request('approval.respond', {
+  await memberRequest(run.profile ?? '', 'approval.respond', {
     session_id: run.sessionId,
     request_id: requestId,
     choice,

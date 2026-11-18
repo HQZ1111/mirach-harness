@@ -86,9 +86,14 @@ pub fn groups_dispatch(
     // 2) 分派
     let result = match controls::dispatch_target(&method) {
         controls::DispatchTarget::Profiles => groups_profiles_list(&supplied),
-        controls::DispatchTarget::Peers => Err(format!(
-            "{method}: 跨网关 peer 通道未接通（需要真实网络与 TLS；宿主当前不伪造成功）"
-        )),
+        // 2026-11-18：authority 侧的 peer 成员台账真落地（Desktop 驱动模式）；
+        // 本机作为 lending 网关的 invite/RoomLink 仍需对外 HTTP 服务端，不伪造。
+        controls::DispatchTarget::Peers => match method.as_str() {
+            "groups.peer.register" | "groups.peer.revoke" => dispatch_peer(&method, &supplied),
+            _ => Err(format!(
+                "{method}: 跨网关 peer 通道未接通（本机不提供 RoomLink 服务端；authority 侧 register/revoke 已支持）"
+            )),
+        },
         controls::DispatchTarget::Group => dispatch_group(&method, &supplied),
     };
 
@@ -118,6 +123,184 @@ pub fn groups_dispatch(
     }
 
     result
+}
+
+// ── groups.peer.*（2026-11-18：authority 侧真落地，Desktop 驱动模式）─────────
+//
+// 宿主实现的是 **Desktop 驱动** peer 模式：成员轮次由前端 canonical driver 经
+// WS（pi_gateway_call → prompt.submit）送到对端；RoomLink HTTP 的自治通道不做
+// （那需要本机对外 HTTP 服务端）。register = 校验房间成员 pinned 值
+// （installation_id / capability_digest / profile）与对端邀请回来的 catalog 一致，
+// 把 link（target_url/grant）持久化；revoke = 按 grant 删除。invite = 本机作为
+// lending 网关需要 RoomLink 服务端（没有），明确报错。
+
+fn room_links_path() -> Result<std::path::PathBuf, String> {
+    Ok(crate::pi_paths::agent_dir()?.join("room-links.json"))
+}
+
+fn read_room_links() -> Result<Vec<Value>, String> {
+    let path = room_links_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("room-links 读取失败 {}: {e}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&text).map_err(|e| format!("room-links 解析失败: {e}"))
+}
+
+fn write_room_links(links: &[Value]) -> Result<(), String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITE_SEQ: AtomicU64 = AtomicU64::new(1);
+    let path = room_links_path()?;
+    let text = serde_json::to_string_pretty(links).map_err(|e| e.to_string())?;
+    // 并发 seat（多个 peer 成员同时 register）不得共用同一个 .tmp——固定名会
+    // 让后者的 rename 撞上已被前一个 rename 走的源文件（实测：第二个成员
+    // registration_unconfirmed）。
+    let tmp = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, text).map_err(|e| format!("room-links 写入失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("room-links 替换失败: {e}"))
+}
+
+/// 进程内串行化 room-links 的读-改-写（并发 seat 不能丢更新）。
+fn room_links_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("room-links lock poisoned")
+}
+
+fn dispatch_peer(method: &str, params: &serde_json::Map<String, Value>) -> Result<Value, String> {
+    match method {
+        "groups.peer.register" => {
+            let conn = open_store()?;
+            let text_field = |key: &str| -> String {
+                params
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            };
+            let room_id = text_field("room_id");
+            let member_id = text_field("member_id");
+            let target_url = text_field("target_url");
+            let target_profile = text_field("target_profile");
+            let grant = text_field("grant");
+            let catalog = params.get("catalog").cloned().unwrap_or(Value::Null);
+            if room_id.is_empty()
+                || member_id.is_empty()
+                || grant.is_empty()
+                || target_profile.is_empty()
+            {
+                return Err(
+                    "groups.peer.register 缺少 room_id/member_id/grant/target_profile".into(),
+                );
+            }
+            let parsed = reqwest::Url::parse(&target_url)
+                .map_err(|e| format!("groups.peer.register target_url 非法: {e}"))?;
+            let scheme = parsed.scheme();
+            if scheme != "http" && scheme != "https" {
+                return Err("groups.peer.register target_url 必须是 http(s)".into());
+            }
+            let host = parsed.host_str().unwrap_or("");
+            let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+            if scheme == "http" && !loopback {
+                return Err(
+                    "groups.peer.register 拒绝非回环的明文 target_url（须 https）".into(),
+                );
+            }
+
+            let room = store::room_state(&conn, &Value::String(room_id.clone()), false)
+                .map_err(|e| e.to_string())?;
+            let members: Value =
+                serde_json::from_str(&room.members_json).map_err(|e| e.to_string())?;
+            let member = members
+                .as_array()
+                .and_then(|rows| {
+                    rows.iter().find(|row| {
+                        row.get("member_id").and_then(Value::as_str) == Some(member_id.as_str())
+                    })
+                })
+                .cloned()
+                .ok_or_else(|| format!("groups.peer.register: 房间里没有成员 {member_id}"))?;
+            let target = member.get("target").cloned().unwrap_or(Value::Null);
+            if target.get("kind").and_then(Value::as_str) != Some("peer") {
+                return Err("groups.peer.register: 该成员不是 peer 目标".into());
+            }
+            let installation_id = target
+                .get("installation_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let digest = target
+                .get("capability_digest")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if catalog.get("installation_id").and_then(Value::as_str) != Some(installation_id) {
+                return Err(
+                    "groups.peer.register: catalog.installation_id 与成员 pinned 值不一致".into(),
+                );
+            }
+            if catalog.get("catalog_digest").and_then(Value::as_str) != Some(digest) {
+                return Err("groups.peer.register: catalog_digest 与成员 pinned 值不一致".into());
+            }
+            if member.get("profile").and_then(Value::as_str) != Some(target_profile.as_str()) {
+                return Err("groups.peer.register: target_profile 与成员 profile 不一致".into());
+            }
+
+            let _guard = room_links_guard();
+            let mut links = read_room_links()?;
+            links.retain(|row| {
+                !(row.get("room_id").and_then(Value::as_str) == Some(room_id.as_str())
+                    && row.get("member_id").and_then(Value::as_str) == Some(member_id.as_str()))
+            });
+            links.push(json!({
+                "room_id": room_id,
+                "member_id": member_id,
+                "target_url": target_url,
+                "target_profile": target_profile,
+                "grant": grant,
+                "installation_id": installation_id,
+                "capability_digest": digest,
+                "registered_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or_default(),
+                "status": "registered",
+            }));
+            write_room_links(&links)?;
+            Ok(json!({
+                "registered": true,
+                "mode": "desktop",
+                "transport_security": if scheme == "https" { "tls" } else { "loopback" },
+                "target_install_id": installation_id,
+                "target_profile": target_profile,
+            }))
+        }
+        "groups.peer.revoke" => {
+            let grant = params
+                .get("grant")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if grant.is_empty() {
+                return Err("groups.peer.revoke 缺少 grant".into());
+            }
+            let _guard = room_links_guard();
+            let mut links = read_room_links()?;
+            let before = links.len();
+            links.retain(|row| row.get("grant").and_then(Value::as_str) != Some(grant));
+            write_room_links(&links)?;
+            Ok(json!({ "revoked": links.len() != before }))
+        }
+        other => Err(format!("{other}: 未知的 peer 方法")),
+    }
 }
 
 /// `groups.*` 的业务分派。

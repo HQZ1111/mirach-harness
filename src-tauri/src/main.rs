@@ -1293,10 +1293,38 @@ fn pi_rename_session(
 
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_delete_session(
+    app: tauri::AppHandle,
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     path: String,
 ) -> Result<(), String> {
-    state.engine.delete_session(&path)
+    use tauri::Emitter;
+    // `session.reclaimed` 生产者：删除 = 该运行时会话确实不存在了。插件
+    // （hermes-bots plugin.tsx）据此刷新打开的 bot canonical chat。先按
+    // path 在索引里定位 stored id（发的必须是插件认识的 id，不猜）。
+    let stored_id = state.engine.list_sessions().ok().and_then(|value| {
+        value.as_array().and_then(|rows| {
+            rows.iter()
+                .find(|row| row.get("path").and_then(|p| p.as_str()) == Some(path.as_str()))
+                .and_then(|row| row.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        })
+    });
+    state.engine.delete_session(&path)?;
+    match stored_id {
+        Some(stored_session_id) => {
+            let _ = app.emit(
+                "mirach:plugin:session:reclaimed",
+                serde_json::json!({
+                    "stored_session_id": stored_session_id,
+                    "path": path,
+                    "reason": "deleted",
+                }),
+            );
+        }
+        None => eprintln!(
+            "[sessions] delete {path}: 索引里定位不到 stored id——session.reclaimed 未发（如实，不编 id）"
+        ),
+    }
+    Ok(())
 }
 
 // ── checkpoint / rewind / retry（pi::checkpoint pub 面，对话历史编辑）。
@@ -1874,6 +1902,7 @@ fn main() {
             pi_mcp::pi_mcp_remove_server,
             pi_mcp::pi_mcp_test_server,
             pi_mcp::pi_mcp_set_api_key,
+            pi_mcp::pi_bot_mcp_config,
             pi_mcp_catalog::pi_mcp_catalog,
             pi_mcp_catalog::pi_mcp_install_preset,
             pi_mcp_oauth::pi_mcp_oauth_complete,

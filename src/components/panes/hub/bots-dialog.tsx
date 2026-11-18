@@ -84,6 +84,32 @@ export function BotsDialog({
   const [skills, setSkills] = useState<readonly string[]>(editing?.skills ?? [])
   // 工具集白名单（hermes toolsets 页签对偶）：key 集合；启动映射 enabled_tools
   const [toolsets, setToolsets] = useState<readonly string[]>(editing?.toolsets ?? [])
+  // MCP 服务器白名单（hermes McpSetupButton 对偶）：全局 mcp.json 的 key 子集；
+  // 启动生成 per-bot 配置文件并把 configPath 注入 system prompt。
+  const [mcpServers, setMcpServers] = useState<readonly string[]>(editing?.mcpServers ?? [])
+  const [mcpAvailable, setMcpAvailable] = useState<
+    readonly { name: string; transport: string; provenance: string }[]
+  >([])
+  const [mcpLoadError, setMcpLoadError] = useState<null | string>(null)
+  useEffect(() => {
+    void invoke<{ servers: { name: string; transport: string; provenance: string }[] }>(
+      'pi_mcp_servers',
+      { cwd: editing?.cwd || null, projectTrusted: false },
+    )
+      .then((r) =>
+        setMcpAvailable(
+          (r.servers ?? []).map((s) => ({
+            name: s.name,
+            transport: s.transport,
+            provenance: s.provenance,
+          })),
+        ),
+      )
+      .catch((e) => {
+        setMcpLoadError(String(e).slice(0, 200))
+        console.error('[bots] MCP 清单读取失败', e)
+      })
+  }, [editing?.cwd])
   const [caps, setCaps] = useState<{
     skills: { name: string; description: string }[]
     toolsets: { key: string; label?: string; description?: string; tools: string[]; needsSetup?: boolean }[]
@@ -183,6 +209,8 @@ export function BotsDialog({
       skills: [...skills],
       // 工具集白名单（hermes toolsets——启动映射 enabled_tools）
       toolsets: [...toolsets],
+      // MCP 服务器白名单（启动生成 per-bot 配置 + configPath 注入 prompt）
+      mcpServers: [...mcpServers],
       // 头像（hermes BotMeta 的 avatar 字段——custom 置位后默认外观停止套用）
       color: color ?? undefined,
       shape: shape ?? undefined,
@@ -563,13 +591,57 @@ export function BotsDialog({
                   </div>
                 )}
                 {advTab === 'mcp' && (
-                  /* MCP 页（hermes McpSetupButton 对偶）：pi 无 per-bot MCP
-                      装载面——红显占位，不造假配置项 */
-                  <div className="grid gap-1.5" data-stub="true">
+                  /* MCP 页（hermes McpSetupButton 对偶）：全局 mcp.json 服务器多选。
+                      启动生成只含所选服务器的 per-bot 配置文件（rpi-mcp-adapter 的
+                      mcp_list/mcp_call 接受 configPath），路径写进 system prompt。 */
+                  <div className="grid gap-1.5">
                     <label className="text-xs font-medium text-muted-foreground">MCP 服务器</label>
-                    <div className="text-rose-600 dark:text-rose-400 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs dark:border-rose-800 dark:bg-rose-950/30">
-                      per-bot MCP 配置未接通（占位）——pi 无 per-session MCP 装载面。
-                    </div>
+                    {mcpLoadError ? (
+                      <div className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-600 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-400">
+                        MCP 清单读取失败：{mcpLoadError}
+                      </div>
+                    ) : mcpAvailable.length === 0 ? (
+                      <p className="text-muted-foreground/80 text-xs">
+                        还没有已配置的 MCP 服务器（设置 → 连接器 / 编辑 ~/.rpi/agent/mcp.json）。
+                      </p>
+                    ) : (
+                      <div className="flex max-h-64 flex-col gap-0.5 overflow-y-auto rounded-md border border-border/60 p-1">
+                        {mcpAvailable.map((server) => {
+                          const isChecked = mcpServers.includes(server.name)
+                          return (
+                            <label
+                              className={cn(
+                                'hover:bg-accent/60 flex min-w-0 cursor-pointer items-center gap-2 rounded px-1.5 py-1 transition-colors',
+                                isChecked && 'bg-accent/80',
+                              )}
+                              key={server.name}
+                            >
+                              <input
+                                checked={isChecked}
+                                className="accent-(--color-brand)"
+                                onChange={(e) =>
+                                  setMcpServers((prev) =>
+                                    e.target.checked
+                                      ? [...prev, server.name]
+                                      : prev.filter((x) => x !== server.name),
+                                  )
+                                }
+                                type="checkbox"
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="text-foreground block truncate text-xs">{server.name}</span>
+                                <span className="text-muted-foreground block truncate text-[0.625rem]">
+                                  {server.transport} · {server.provenance}
+                                </span>
+                              </span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    )}
+                    <p className="text-muted-foreground/80 text-xs">
+                      所选服务器生成该机器人专属的 MCP 配置文件；不选 = 不注入 MCP 配置。
+                    </p>
                   </div>
                 )}
               </div>

@@ -141,6 +141,8 @@ interface RemoteRoster {
   label: string
   kind: 'remote'
   profiles: RemoteRosterProfile[]
+  /** 对端网关的 `/api/status` install_id（peer 成员的 pinned 身份）。 */
+  installId?: string
   fetchedAt: number
 }
 
@@ -207,7 +209,7 @@ async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
           if (statusMap?.[connection.id]?.state === 'open') break
         }
       }
-      const res = await invoke<{ profiles?: Array<Record<string, unknown>> }>(
+      const res = await invoke<{ profiles?: Array<Record<string, unknown>>; install_id?: unknown }>(
         'pi_gateway_call',
         {
           connectionId: connection.id,
@@ -236,6 +238,7 @@ async function refreshRemoteRosters(force = false): Promise<RemoteRoster[]> {
         label: connection.label || connection.id,
         kind: 'remote',
         profiles,
+        ...(typeof res?.install_id === 'string' && res.install_id ? { installId: res.install_id } : {}),
         fetchedAt: Date.now(),
       }
       remoteRosterCache.set(connection.id, roster)
@@ -332,6 +335,12 @@ export const host = {
         targetProfile: bot.name,
         handle: bot.name,
         title: bot.title,
+        // 上游 buildUnionRoster 的行形状：没有 sourceScoped/route 的行在插件里
+        // 恒 not_scoped（peer 成员/群聊成员身份都依赖它）。
+        sourceScoped: true,
+        sourceReachable: true,
+        remoteSource: false,
+        route: { connectionId: 'local', mode: 'local' as const, profile: bot.name, targetProfile: bot.name },
       }))
       // 跨网关并集（2026-11-18）：远端网关的 profiles.list 行并入同一张
       // 名册——上游 buildUnionRoster 的 (connectionId, profile) 并集语义。
@@ -346,6 +355,16 @@ export const host = {
             targetProfile: profile.name,
             handle: profile.name,
             title: profile.title,
+            sourceScoped: true,
+            sourceReachable: true,
+            remoteSource: true,
+            ...(remote.installId ? { installId: remote.installId } : {}),
+            route: {
+              connectionId: remote.connectionId,
+              mode: 'remote' as const,
+              profile: profile.name,
+              targetProfile: profile.name,
+            },
           })
         }
       }
