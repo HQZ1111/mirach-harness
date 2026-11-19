@@ -72,6 +72,7 @@ import {
   type SessionPathResolution,
 } from '@/components/panes/session-manage/workspace-session-registry'
 import { sidebarViewStore } from '@/components/panes/session-manage/sidebar-view'
+import { mainViewStore } from '@/components/panes/main-view-store'
 import { fsList } from '@/lib/fs'
 import {
   activeSessionCwd,
@@ -1324,6 +1325,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
 
   const switchToThreadPath = useCallback(
     async (id: string, path: string) => {
+      // 已是当前会话 = 无操作（hermes openSession 的 focusOpenSession 命中
+      // main 分支对偶）。不回家重建 harness，也不重扫目录——这是点击已在
+      // 看的那一行时唯一正确的响应，也避免了无意义的全量水合。
+      if (id === currentThreadIdRef.current) {
+        mainViewStore.getState().showChat()
+        return
+      }
       // 流式中切换（§4.5）：prompt 持锁跨整个 run（RUN_FINISHED/ERROR 才
       // 释放），不先中断 open_session 会撞锁失败——先 pi_interrupt 再切；
       // 中断失败保持当前会话（不更新本地态，禁止假装切换成功）。
@@ -1336,6 +1344,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           return
         }
       }
+      // 乐观高亮（hermes focusOpenSession 先前端面后等 RPC 的对偶）：点行
+      // 立即把选中态切过去，侧栏/页签不用干等 open_session + 全量水合。
+      // 打开失败时下面 catch 会拉一次真值把选中态纠正回来。
+      sessionCatalog.getState().setActive(id)
+      setCurrentThreadId(id)
+      mainViewStore.getState().showChat()
       try {
         await invoke('pi_open_session', { path })
         // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
@@ -1343,13 +1357,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         errorBridge.getState().setError(null)
         const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
         actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
-        setCurrentThreadId(id)
         // 宿主状态面（插件 host.state）：活动/聚焦会话 = 当前线程；机器人
         // 花名册的"这行是否正在看"与"是否在跑"读这两个 atom。owner/profile
         // 由 [currentThreadId] 的效果统一算（bot 双锚命中才是 owner）。
         $hostActiveSessionId.set(id)
         $hostFocusedStoredSessionId.set(id)
-        await refreshThreads()
+        // 目录刷新不阻塞切换感知：行高亮已乐观落，title/统计拉到再覆盖。
+        void refreshThreads().catch((e) =>
+          console.error('[pi] 切换后会话目录刷新失败（侧栏行统计可能偏高）', e),
+        )
         resetSessionScopedBridges(id)
         // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
         // 位置恢复阅读位
@@ -1357,9 +1373,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         // 活动会话已换——分支条/fork 点随新会话刷新（防上一会话的投影残留）
         branchBridge.getState().requestRefresh()
       } catch (e) {
-        console.error(`[pi] 会话 ${id} 打开失败（保持当前会话）`, e)
-        // 不是所有失败都该静默：文件损坏 / 跨工作区打不开时，聊天区红条
-        // 给出引擎原文（例：会话文件缺 header 被 rpi 报成 No session found）。
+        console.error(`[pi] 会话 ${id} 打开失败（已回滚选中态）`, e)
+        // 乐观高亮已把选中态切过去，失败必须纠正回引擎真值，否则侧栏
+        // 高亮一行、聊天区却是上一个会话——比不亮更误导。
+        sessionCatalog.getState().setActive(currentThreadIdRef.current)
+        setCurrentThreadId(currentThreadIdRef.current)
         errorBridge.getState().setError(
           `无法打开会话：${e instanceof Error ? e.message : String(e)}`,
           false,
@@ -1489,8 +1507,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       const path = row?.custom?.path
       if (typeof path !== 'string') {
         console.error(`[pi] 会话 ${id} 缺少 path，无法删除`)
+        errorBridge.getState().setError(`无法删除会话：缺少会话文件路径`, false)
         return
       }
+      // 乐观剔除（hermes dropListedSession + tombstoneSessions 对偶）：先把
+      // 这行从侧栏目录摘掉，用户立刻看到结果；RPC 失败时按快照整行复原
+      // 并给可见红条——不留幽灵行，也不把失败伪装成成功。
+      const snapshot = threadsRef.current.slice()
+      const evicted = snapshot.filter((t) => t.id !== id)
+      setThreads(evicted)
       try {
         if (id === currentThreadId) {
           // 当前活跃会话：pi 持有该会话 handle（jsonl 打开中），直接
@@ -1512,7 +1537,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         clearThreadScroll(id)
         await refreshThreads()
       } catch (e) {
-        console.error(`[pi] 会话 ${id} 删除失败（保持当前状态）`, e)
+        console.error(`[pi] 会话 ${id} 删除失败（已回滚侧栏行）`, e)
+        // 回滚：按删除前快照复原整表（乐观剔除已改过 setThreads）；再拉
+        // 一次真值以免快照之外的状态漂移。
+        setThreads(snapshot)
+        await refreshThreads().catch(() => undefined)
+        errorBridge.getState().setError(
+          `删除会话失败：${e instanceof Error ? e.message : String(e)}`,
+          false,
+        )
       }
     },
     onArchive: async () => {

@@ -261,8 +261,9 @@ export const buildShellMenuSections = (_ctx: AppMenuContext = {}): readonly AppM
 
 /** 新建会话：走既有新建通道——段头「新建会话」钮（thread-list.aui.tsx
  *  ThreadListNewAria → ThreadListPrimitive.New → runtime threadListAdapter
- *  onSwitchToNewThread → pi_discard_session）。 */
-const triggerNewChat = (): void => {
+ *  onSwitchToNewThread → pi_discard_session）。托盘「新建任务」经
+ *  `mirach:tray:new-task` 事件复用同一入口（tray-bridge.tsx）。 */
+export const triggerNewChat = (): void => {
   const trigger = document.querySelector<HTMLButtonElement>('button[aria-label="新建会话"]')
   if (!trigger) {
     console.error('[app-context-menu] 新建会话通道不在场（段头新建钮未挂载）')

@@ -3194,3 +3194,45 @@ grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest�
 - 门禁：`cargo check` / `cargo test`（724 条，含新增 7 条 grant/dispatch 单测与
   5 条台账单测）/ `vitest 1073` 全绿；实机 mock 对端全链 E2E 通过（WS invite/revoke、
   HTTP invitations/capabilities/runs/stop/close，真模型回复）。
+
+## 侧栏切换性能 + 系统托盘（2026-11-19，两边都照上游对偶）
+
+### 侧栏会话切换（内置 agent 完成，本仓核验后提交）
+
+**hermes 对偶**（`open-session.ts` 的 `openSession → focusOpenSession` 先前端短路、
+再 resume RPC）。三处改动：
+
+1. **同会话短路**（`runtime.tsx::switchToThreadPath`）：`id === currentThreadIdRef.current`
+   时只 `showChat()` 返回——点已在看的行不再重建 harness/全量水合；
+2. **乐观高亮**：点行立即 `setActive(id)` + `setCurrentThreadId(id)`，不等
+   `pi_open_session` 往返；失败时 catch 里**回滚选中态**（否则侧栏高亮一行、聊天区
+   却是旧会话——比不亮更误导）；`refreshThreads()` 从 await 改为 `void + catch`
+   （目录统计不阻塞切换感知，失败 console.error 可见）；
+3. **`rowMetaCache`**（`thread-list.aui.tsx::useSessionRowMetas`）：WeakMap 按 item
+   引用缓存行投影——`threadItems` 每次刷新是新数组，全量重建会让每行都换新对象、
+   下游 memo 全失效（会话越多越卡）；附带删掉三连 `prune` 的复制粘贴冗余（留 1 次）。
+
+### 系统托盘（ZCode `desktopTray.ts` 完整对齐）
+
+Rust 侧在 setup 里建（`main.rs`），**核心语义早就在**（左键/双击=显示主窗、✕=
+隐藏到托盘、右键菜单），本轮把菜单补到 ZCode 对齐：
+
+| ZCode 菜单 | 宿主 | 实现 |
+|---|---|---|
+| 打开 ZCode | 打开 Mirach Harness | `show_main` |
+| 新建任务 | 新建任务 | `show_main` + emit `mirach:tray:new-task` → 前端桥 → `triggerNewChat`（段头新建钮既有通道，app-context-menu 导出） |
+| 打开工作区 | 打开工作区 | emit `mirach:tray:open-workspace` → 前端桥 → 文件夹对话框 → `sessionWorkspaceStore.requestCreate`（composer 工作区行同一请求桥） |
+| 关于 ZCode | 关于 Mirach Harness | `pi_open_settings_window(Some("updates"))`（设置窗「版本与更新」节） |
+| 检查更新（prod）/ 导出日志 | **不渲染** | 宿主无对等面（更新面在设置里，导出无入口）——不放假入口 |
+| 退出 | 退出 | `app.exit(0)` |
+
+- 前端桥 = `components/layout/tray-bridge.tsx`（挂 `app/index.tsx` 的 App 根，与
+  EngineBridges 并列）；事件名 `mirach:tray:new-task` / `mirach:tray:open-workspace`。
+- ZCode `executeTrayCommand` 的**顺序契约**：先 `showCurrentWindow()` 再执行命令——
+  Rust 侧 `show_main` 之后才 emit，前端不做聚焦。
+- **closeToTray 陷阱已消解**：此前 ✕ 隐藏后没有任何入口把窗口调回来（"打不开"事故
+  的根因之一）；托盘菜单「打开」与左键即恢复入口。close 偏好关（`closeToTray=false`）
+  时 ✕ 仍走 `app.exit(0)` 真退出（`wire_window` CloseAction::HideToTray 运行时读偏好）。
+- 托盘图标 = `app.default_window_icon()`（bundle icon.ico）；tooltip = "Mirach Harness"。
+- 门禁：`cargo check` 0 错 / `cargo test` 724 过 / `vitest` 1073 过（86 文件）/
+  tsc 非镜像区 0 错；实机 exe 启动 10s 存活（托盘创建无 panic，已杀干净）。

@@ -296,35 +296,49 @@ export const ThreadListItems: FC<
 
 // ── 展示行投影（纯函数消费：已置顶/会话 两组 + 搜索段）───────────────────
 
+/** 行投影的按行缓存：`threadItems` 每次刷新都是新数组，但未变的行仍是
+ *  同一对象引用。全量重建会让每条 row 都产生新对象 → 下游 memo（行组件、
+ *  groupEntriesBy*）全部失效，会话越多越卡。这里按 item 引用缓存投影结果，
+ *  只有真的变了的行才重算。 */
+const rowMetaCache = new WeakMap<object, SessionRowMeta>();
+
+const projectRowMeta = (id: string, item: unknown): SessionRowMeta => {
+  if (item !== null && typeof item === "object") {
+    const cached = rowMetaCache.get(item);
+    if (cached !== undefined && cached.id === id) return cached;
+  }
+  const it = item as { title?: unknown; custom?: Record<string, unknown> } | undefined;
+  const custom = it?.custom;
+  const ms = custom?.lastModifiedMs;
+  const createdRaw = custom?.timestamp;
+  const countRaw = custom?.messageCount;
+  const createdMs =
+    typeof createdRaw === "string" ? parseTimestampMs(createdRaw) : undefined;
+  const meta: SessionRowMeta = {
+    id,
+    lastActiveMs: typeof ms === "number" && Number.isFinite(ms) ? ms : 0,
+    title: typeof it?.title === "string" ? it.title : undefined,
+    // pi SessionMeta 直投影（runtime.tsx refreshThreads 写进 custom）：
+    // 工作区分组（cwd）/created 排序（timestamp）/未读水位与用量过期键
+    // （messageCount）/导出（path）。
+    path: typeof custom?.path === "string" ? custom.path : undefined,
+    cwd: typeof custom?.cwd === "string" ? custom.cwd : undefined,
+    createdMs,
+    messageCount:
+      typeof countRaw === "number" && Number.isFinite(countRaw) ? countRaw : undefined,
+    // 项目归属（pi_sessions_index.projectId；null = 明确无归属）。
+    projectId: typeof custom?.projectId === "string" ? custom.projectId : undefined,
+  };
+  if (item !== null && typeof item === "object") rowMetaCache.set(item, meta);
+  return meta;
+};
+
 const useSessionRowMetas = (): SessionRowMeta[] => {
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const threadItems = useAuiState((s) => s.threads.threadItems);
   return useMemo(() => {
     const byId = new Map(threadItems.map((item) => [item.id, item] as const));
-    return threadIds.map((id) => {
-      const item = byId.get(id);
-      const custom = item?.custom;
-      const ms = custom?.lastModifiedMs;
-      const createdRaw = custom?.timestamp;
-      const countRaw = custom?.messageCount;
-      const createdMs =
-        typeof createdRaw === "string" ? parseTimestampMs(createdRaw) : undefined;
-      return {
-        id,
-        lastActiveMs: typeof ms === "number" && Number.isFinite(ms) ? ms : 0,
-        title: typeof item?.title === "string" ? item.title : undefined,
-        // pi SessionMeta 直投影（runtime.tsx refreshThreads 写进 custom）：
-        // 工作区分组（cwd）/created 排序（timestamp）/未读水位与用量过期键
-        // （messageCount）/导出（path）。
-        path: typeof custom?.path === "string" ? custom.path : undefined,
-        cwd: typeof custom?.cwd === "string" ? custom.cwd : undefined,
-        createdMs,
-        messageCount:
-          typeof countRaw === "number" && Number.isFinite(countRaw) ? countRaw : undefined,
-        // 项目归属（pi_sessions_index.projectId；null = 明确无归属）。
-        projectId: typeof custom?.projectId === "string" ? custom.projectId : undefined,
-      };
-    });
+    return threadIds.map((id) => projectRowMeta(id, byId.get(id)));
   }, [threadIds, threadItems]);
 };
 const useThreadDisplay = (searchQuery: string) => {
@@ -1120,8 +1134,6 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
   // 归档表/未读水位同纪律（归档会话被 pi_delete_session 后不留死键）。
   useEffect(() => {
-    sessionCatalog.getState().prune(threadIds);
-    sessionCatalog.getState().prune(threadIds);
     sessionCatalog.getState().prune(threadIds);
   }, [threadIds]);
 

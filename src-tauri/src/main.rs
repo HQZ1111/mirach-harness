@@ -150,7 +150,7 @@ mod pi_groups;
 mod plugin_runtime;
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, WindowEvent,
 };
@@ -1731,9 +1731,36 @@ fn main() {
             window.show().map_err(|e| format!("主窗显示失败：{e}"))?;
 
             // 系统托盘（hermes 无此物；ZCode desktopTray.ts 语义的 Tauri 版）
-            let show_item = MenuItem::with_id(app, "tray-open", "显示主窗口", true, None::<&str>)?;
+            //
+            // ZCode 托盘菜单 = 打开 ZCode / --- / 新建任务 / 打开工作区 / --- /
+            // [检查更新（仅 production）] / 关于 ZCode / 导出日志 / --- / 退出。
+            // 宿主对等面：显示主窗 / 新建会话（段头新建通道）/ 打开文件夹新建
+            // 会话（composer 工作区请求桥）/ 关于（设置窗「版本与更新」节）。
+            // 「检查更新」「导出日志」宿主没有对等面，不渲染假入口
+            // （mirach 的更新面在设置「关于 → 版本与更新」里，导出无入口）。
+            let open_item = MenuItem::with_id(app, "tray-open", "打开 Mirach Harness", true, None::<&str>)?;
+            let new_task_item = MenuItem::with_id(app, "tray-new-task", "新建任务", true, None::<&str>)?;
+            let open_workspace_item =
+                MenuItem::with_id(app, "tray-open-workspace", "打开工作区", true, None::<&str>)?;
+            let about_item =
+                MenuItem::with_id(app, "tray-about", "关于 Mirach Harness", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "tray-quit", "退出", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let sep_one = PredefinedMenuItem::separator(app)?;
+            let sep_two = PredefinedMenuItem::separator(app)?;
+            let sep_three = PredefinedMenuItem::separator(app)?;
+            let tray_menu = Menu::with_items(
+                app,
+                &[
+                    &open_item,
+                    &sep_one,
+                    &new_task_item,
+                    &open_workspace_item,
+                    &sep_two,
+                    &about_item,
+                    &sep_three,
+                    &quit_item,
+                ],
+            )?;
             TrayIconBuilder::with_id("mirach-tray")
                 .icon(app.default_window_icon().expect("bundle icon").clone())
                 .tooltip("Mirach Harness")
@@ -1741,19 +1768,34 @@ fn main() {
                 // 左键不弹菜单（ZCode：左键=显示主窗），菜单走右键
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    // ZCode executeTrayCommand：先显示主窗，再执行命令
                     "tray-open" => show_main(app),
+                    "tray-new-task" => {
+                        show_main(app);
+                        let _ = app.emit("mirach:tray:new-task", ());
+                    }
+                    "tray-open-workspace" => {
+                        show_main(app);
+                        let _ = app.emit("mirach:tray:open-workspace", ());
+                    }
+                    "tray-about" => {
+                        show_main(app);
+                        let _ = pi_open_settings_window(app.clone(), Some("updates".to_string()));
+                    }
                     "tray-quit" => app.exit(0),
                     _ => {}
                 })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
+                .on_tray_icon_event(|tray, event| match event {
+                    TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
-                    } = event
-                    {
-                        show_main(tray.app_handle());
                     }
+                    | TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } => show_main(tray.app_handle()),
+                    _ => {}
                 })
                 .build(app)?;
 

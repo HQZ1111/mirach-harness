@@ -6,6 +6,24 @@
 
 ## 当前状态
 
+**✅ 2026-11-19（下午）：侧栏会话切换性能（hermes 对偶）+ 系统托盘 ZCode 对齐**
+
+- **侧栏切换**（内置 agent 完成，本仓核验提交）：`runtime.tsx` 三处——同会话短路
+  （点已在看的行不再重建 harness/全量水合）、乐观高亮（点行立即切选中态，不等
+  `pi_open_session` 往返；失败回滚选中态 + 红条）、`refreshThreads` 不再阻塞切换。
+  `thread-list.aui.tsx`——`rowMetaCache`（WeakMap 按 item 引用缓存行投影，未变行
+  保持同引用让下游 memo 命中）+ 删重复的 `prune` 三连调用。
+- **系统托盘**（照 ZCode `desktopTray.ts` 完整对齐）：左键/双击 = 显示主窗；✕ =
+  隐藏到托盘（`closeToTray` 偏好，关 = 真退出）；右键菜单 = 打开 / 新建任务 /
+  打开工作区 / 关于 / 退出。新建任务经 `mirach:tray:new-task` → 段头「新建会话」
+  通道；打开工作区经 `mirach:tray:open-workspace` → 文件夹对话框 →
+  `requestCreate`（composer 工作区同一请求桥）；关于 → 设置窗「版本与更新」节。
+  ZCode 的「检查更新/导出日志」宿主无对等面，不渲染。前端桥 =
+  `components/layout/tray-bridge.tsx`。**此前的"✕ 藏起来回不来"陷阱就此消解**
+  （托盘左键/菜单即恢复入口）。
+- 门禁：cargo test 724 / vitest 1073（86 文件）/ tsc 非镜像区 0 错；实机 exe
+  启动 10s 存活（托盘创建无 panic）。
+
 **✅ 2026-11-19：hermes peer lending wire 路由层（WS 方法分派 + `/v1/runs`）**
 
 - grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest）已在前一轮落地；本轮在其上补齐对端可调用面，让 hermes Desktop/网关能把 mirach 当 peer lender。

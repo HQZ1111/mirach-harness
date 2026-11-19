@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import { AppPrefsBoot } from '@/app/app-prefs-boot'
 import { EngineBridges } from '@/components/engine-bridges'
 import { DockviewShell } from '@/components/layout/dockview-shell'
+import { TrayBridge } from '@/components/layout/tray-bridge'
 import { ToastHost } from '@/components/motion/toast-host'
 import { reapStaleTerminals } from '@/components/panes/terminal/terminal-pty'
 import { inTauri } from '@/lib/tauri-window'
@@ -29,6 +30,8 @@ export function App() {
       <AppPrefsBoot />
       {/* 引擎侧宿主桥（message_agent 投递 / 审批卡） */}
       <EngineBridges />
+      {/* 系统托盘动作桥（托盘菜单「新建任务 / 打开工作区」→ 会话面） */}
+      <TrayBridge />
       {/* 全局 toast（host.notify / notifyError 的可见面，2026-11-18） */}
       <ToastHost />
       <DockviewShell />
