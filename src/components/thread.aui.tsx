@@ -83,6 +83,10 @@ import { TurnFileSummary } from "@/components/assistant-ui/elements/turn-file-su
 import { TimelineMarkerRow, MarkerDivider, bucketMarkers, compactionRowView } from "@/components/assistant-ui/elements/timeline-marker";
 import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-store";
 import {
+  loadOlderTranscript,
+  transcriptTailStore,
+} from "@/components/assistant-ui/transcript-paging";
+import {
   groupMessagesIntoTurns,
   isLastContentAssistantOfTurn,
 } from "@/components/assistant-ui/turn-units";
@@ -848,7 +852,16 @@ const MessageTurnList: FC = () => {
   }, [turns, renderBudget, aui, roleSig]);
   const windowStartRef = useRef(window_.startTurn);
   windowStartRef.current = window_.startTurn;
-  const showEarlier = useCallback(() => setRenderBudget(expandBudget), []);
+  // 已加载历史后面还有更老的一页（tail 水合），「显示更早」走后端补页，
+  // 而不是只展开渲染预算。
+  const hasOlderHistory = useStore(transcriptTailStore, (s) => s.hasMore);
+  const showEarlier = useCallback(() => {
+    if (transcriptTailStore.getState().hasMore) {
+      void loadOlderTranscript();
+      return;
+    }
+    setRenderBudget(expandBudget);
+  }, []);
   // 滚到顶再往上滚 = 用户要看更早（hermes shouldAutoShowEarlier 的宿主版：
   // 轮仍在 / 尚未补齐时不触发）。监听挂在本列表的布局透明包装上，用
   // closest 找自己的视口——分栏里每个 Thread 各管各的窗口。
@@ -860,6 +873,10 @@ const MessageTurnList: FC = () => {
       if (event.deltaY >= 0) return;
       const viewport = node.closest('[data-slot="aui_thread-viewport"]');
       if (!viewport || viewport.scrollTop > TOP_EDGE_PX) return;
+      if (transcriptTailStore.getState().hasMore) {
+        void loadOlderTranscript();
+        return;
+      }
       if (windowStartRef.current <= 0) return;
       setRenderBudget(expandBudget);
     };
@@ -867,9 +884,13 @@ const MessageTurnList: FC = () => {
     return () => node.removeEventListener('wheel', onWheel);
   }, []);
   // 时间线标记按「第几条消息之前」分桶（ZCode `lightBoundary` 语义：模型
-  // 切换落在轮顶，渲染在该轮 user 气泡之前）。
+  // 切换落在轮顶，渲染在该轮 user 气泡之前）。尾部水合时下标按
+  // `loadedCount - fromEnd` 换算——见 bucketMarkers 注释。
   const markers = useTimelineMarkers();
-  const buckets = useMemo(() => bucketMarkers(markers), [markers]);
+  const buckets = useMemo(
+    () => bucketMarkers(markers, ids.length),
+    [markers, ids.length],
+  );
 
   // 消息 id → thread 全局下标。`beforeMessageIndex` 与 `pi_get_messages`
   // 的顺序对齐，而 `ids` 就是同一序列（水合 + 流式追加都按序），所以
@@ -884,7 +905,7 @@ const MessageTurnList: FC = () => {
     tailMarkers?.some((m) => m.marker.kind === "compact") === true;
   return (
     <div ref={listRef} className="contents">
-      {window_.windowed && (
+      {(window_.windowed || hasOlderHistory) && (
         <div className="flex justify-center py-1">
           <Button onClick={showEarlier} size="sm" type="button" variant="ghost">
             显示更早的消息

@@ -30,10 +30,19 @@
   修复后空转 6s **longtask 归零**。
 - **端到端复测**：巨会话切换首轮 DOM 2.9s、总阻塞 1.9s（改前 3.6s+）、
   只渲染尾部 18 轮；普通会话回到引擎地板（热 40-600ms）。
-- **遗留（有意不移植）**：hermes 的后端 tail 分页 + store retention——宿主仍是
-  全量水合架构；巨会话首次打开仍付一次全量 IPC（热 0.6s）。若后续要再压，
-  方向 = `Session::transcript_page`（引擎已有 API）做真正的增量水合。
+- **遗留（已在本轮补齐）**：hermes 的后端 tail 分页——见下条「尾页水合完全对齐」。
 - 门禁：vitest 1084（87 文件）/ cargo test 724 / tsc 非镜像区 0 错。
+
+**✅ 2026-11-19（晚续）：尾页水合完全对齐 hermes（后端分页 IPC 落地）**
+
+- `pi_get_messages_page(before?, limit=256)` → 引擎 `SessionTree::transcript_page`
+  有界读；前端 `transcript-paging.ts` 统一水合入口（7 处调用点）+ `PREPEND_HISTORY`
+  补页；行 key = 原始条目 id；时间线标记带 `beforeMessageIndexFromEnd` 做尾部
+  相对落桶；自动命名在历史截断时跳过（不造假标题）。
+- 实测（巨会话 11MB/2041 条）：切页首条新轮 **808ms**（此前 2.9s）；分页
+  99ms/256 条（全量 1445ms）；补页 411ms/页；「显示更早」DOM 6→13 轮。
+  冷开 = 引擎 replay 地板（0.5MB 362ms / 11MB ~4.5s，热开 3~6ms）。
+- 仍有意不做：hermes store retention（老行内存释放）——宿主全量留在 actor store。
 
 **✅ 2026-11-19（下午）：侧栏会话切换性能（hermes 对偶）+ 系统托盘 ZCode 对齐**
 
@@ -62,6 +71,12 @@
 - **成员轮次**：`/v1/runs` 的 prompt 进 bot 泳道（`Group: <room_id>`）；`pi_bot_state` 新增 `last_status` / `last_output`，monitor 写回 durable 状态；stop → `pi_bot_interrupt`，steer → `harness.steer`，approval → `pi_bot_approval_respond`，clarify → `pi_bot_answer_clarify`。
 - **实测（实机 app）**：WS ready/capabilities/invite/revoke/session.create/prompt.submit/session.resume/session.list(33)/groups.list(3) 全通；HTTP invitations 201、revoke 后 403、`/v1/runs` 202 → steer accepted → `completed`；API-key runs 202 → SSE `run.status`→`run.completed` → 真模型 `二加二等于四。`；WS session 真模型 `三加三等于六。`；未知方法 `-32601`。门禁：cargo check / cargo test 724 / vitest 1082 全绿。
 - **与上游的差异（有因，非裁剪）**：`driver:false` + `persistent_process:false`（桌面进程 + 驱动在本仓前端）；`profiles.list` 单行；SSE 事件按 durable 状态迁移生成；`resolve-unknown` 用本宿主 run_id 作 admission_id。
+- **全链对账轮（同日续）**：E2E 按 hermes 客户端语义逐条走——`peerTargetState` 准入检查 → WS `groups.peer.invite`（ttl=86400 + status_ttl=30d 的 seatPeer 边界值）→ `groups.peer.register` live probe 回执 → `/v1/runs` {input,hosted_room_dispatch} + `Idempotency-Key: room:{task}:{gen}` 重放/换体 409 → 轮询终局读 `output`（真模型 3+4=7、5+6=11）→ `grants/refresh` 替换 grant 探活 → `stop`（空体）stopping→cancelled → lender `groups.peer.revoke` → 再派发 403 `room_reauthorization_required`。实机全绿（脚本在仓库外：`E:\Temp\peer-hermes-wire-e2e.mjs`）。当场抓到的三个真缺陷（已修）：
+  1. `pi_gateway_peer.rs` 的 `MAX_STATUS_GRANT_TTL_SECONDS` **少乘一个 60**（12h vs 上游 30d）→ 带 horizon 的 invite 直接 `room grant lifetime is invalid`；补单测 `invitation_honors_full_status_horizon` 锁 30d 边界。
+  2. `groups.peer.register` 回执 `mode` 由 "desktop" 改回上游 link mode **"direct"**；probe 的 `home_install_id` 校验按上游口径对齐**本机 authority id**。
+  3. **冷启动假 `interrupted`**：monitor / `resolve_run_status` 曾以「bot 泳道此刻非 running」当终局/重启证据——首条 dispatch 现建会话的窗口里 running=false，轮次被误收口。修 = `pi_bot.rs` 增 `last_turn_seq` 终局计数（与 running/last_status 同临界区）、`pi_peer.rs` monitor 只在 seq 前进时收口（30 分钟上限如实 failed）+ 进程内活跃 run 注册表（只有不在表内才判真重启残留），`stop` 同样按此收口。
+  - 如实口径：lender catalog 的 `persistent_process:false` 与上游「Desktop 管理的网关」一致（`catalog_mapping` 在 `HERMES_DESKTOP=1` 时恒 false，即 hermes 要求 lender 是 `hermes serve` 常驻进程）→ 真 hermes Desktop 会以 `persistent_process_required` 拒 seat；wire 面本身已证全通，mirach↔mirach 原生面不受此限。
+  - 门禁：cargo test **725** / vitest 1084（87 文件）/ tsc 非镜像区 0 新错。
 
 **✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行 + 完成校验（状态机进 rpi-goal 插件）+ 工作流分区（orchestrator 派生）**
 
@@ -75,6 +90,13 @@
   （旧 `complete` 读兼容）。**`complete` 语义改为「终态但仍在场」(verified)，归档改由
   `/goal stop` 承担**——否则已完成目标会从面板消失（上游是 status=complete 仍在场）。
   fork 改动已向上游提 PR **pi-rust/rpi-package #336**。
+  **上游裁定（2026-11-19）**：#336 关闭为 superseded——布局基于 0.2.5 单体、
+  大部分面 #343/#346 已有、状态词表改动过大；维护者给窄版规格（七态不动 /
+  verdict 只记录 / 既有 worker 派发 nextAction）。已按规格新开
+  **#362**（feat(goal): host-recorded completion verdicts，本地克隆
+  `E:\Temp\rpi-package-pr`）。**宿主 vendored fork 不跟随窄版**：宽版
+  （verifying/verified 词表 + 宿主裁判驱动）E2E 已验、继续在用；若上游收
+  窄版，同步策略再定。
 - **宿主 = 触发 + 模型裁判**（`src-tauri/src/pi_goal_verify.rs`）：常驻订阅每个在场
   会话的 `AgentEnd`（run 收尾）→ 闸门（当前会话 / goal `active` / 后台作业不在跑 /
   单槽在途）→ 读 todo 快照 → `/goal _verify-start {"items":[…]}`（插件开下一轮迭代 +
@@ -343,6 +365,10 @@
   after_tool_call 改动**没有**带进 PR）；克隆在本机
   `E:\Temp\pi-rust-pr333`。余下：等上游 review；canonical 群聊**含租约**的
   整房间 UI E2E（各原语已单独实测）。
+  **上游结论（2026-11-19）：#348 已合并**。评审两轮 6 blocker 全修复
+  （过期围栏/跨进程 fs2 锁/扩展结果保留/取消 fail-closed/message_agent
+  send-cancel 分型/文档对齐）；遗留 nit（acquire 文档与实现矛盾）由维护者
+  以 **#376** 落地并致谢（我们的 #374 因此关闭，无需动作）。
 - **有意不做**：屏幕的 display.stop/install 面无（宿主无停止语义）；
   relay 跨网关（单身份宿主无 relay 概念，显式报错）。
 

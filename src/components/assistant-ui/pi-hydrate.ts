@@ -211,7 +211,11 @@ export function usageFromPiMessages(
  *  投影面板复用，见 session-thread-pane）。
  *
  *  合并规则见模块头；toolResult 的孤儿结果（无宿主部件）跳过并可见报错。 */
-export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessage[] {
+export function hydratePiMessages(
+  history: Record<string, unknown>[],
+  /** 稳定行身份（尾页水合的原始条目 id）：跨页 prepend 时 React key / 树节点身份不漂移。 */
+  entryIds?: readonly (string | undefined)[],
+): TurnMessage[] {
   const out: TurnMessage[] = []
   /** 当前 turn 的合并目标（assistant 消息）；遇到 user 清空。 */
   let pendingAssistant: {
@@ -242,7 +246,9 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
             ? cleanLegacyVoiceUserText(parts[0]!.text)
             : parts
       out.push({
-        id: `hydrate-${i}-user`,
+        id: entryIds?.[i]
+          ? `msg-${entryIds[i]}-user`
+          : `hydrate-${i}-user`,
         role: 'user',
         content,
         ...(timestamp !== undefined ? { createdAt: new Date(timestamp) } : {}),
@@ -273,7 +279,9 @@ export function hydratePiMessages(history: Record<string, unknown>[]): TurnMessa
         }
       }
       const message: TurnMessage = {
-        id: `hydrate-${i}-assistant`,
+        id: entryIds?.[i]
+          ? `msg-${entryIds[i]}-assistant`
+          : `hydrate-${i}-assistant`,
         role: 'assistant',
         content: parts,
         ...(createdAt !== undefined ? { createdAt: new Date(createdAt) } : {}),

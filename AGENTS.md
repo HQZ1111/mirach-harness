@@ -2862,12 +2862,47 @@ failed/skipped）。一次成功 `plan(action=set)` = 一条 run；dispatch 波�
 结果含 `details.nodes`（failed+skipped）——与派生规则一致（errored → 目录）。
 单测：`status-workflow-runs.test.ts` 9 条 + 面板模型/goal 迭代 33 条。
 
+### 上游 PR 裁定与窄版重提（2026-11-19）
+
+- **bigfish1913/pi-rust #348（四件套引擎半）已合并**：两轮评审 6 个 blocker
+  全修复后 APPROVED（过期围栏 / 跨进程 fs2 锁 + 唯一 tmp / 扩展 hook 结果
+  保留 + 审批按改写后 args / 审批取消 fail-closed / message_agent
+  send-cancel 分型 + delivery_id 校验 / 模块文档对齐）；遗留 nit（acquire
+  文档声称的 Indeterminate 与实现的 Expired 矛盾）由维护者以 **#376** 落地
+  并致谢——我们顺手开的 **#374** 因此关闭，无需动作。
+- **pi-rust/rpi-package #336（完成校验宽版）关闭为 superseded**：评审两轮
+  6 blocker 都已处理（fmt / forbid(unsafe) / CI workflow / 假宿主契约测试 /
+  边界超时+行数上限 / complete-stop 语义迁移），但维护者裁定不落：
+  布局基于 0.2.5 单体（#343 已模块化）、per-goal iteration 与
+  complete/blocked/wait 语义上游已有、verifying/verified/failed 状态词表
+  会重写七态模型（只为 UI 差异）、todo 快照与 rpi-todo 重复、unsafe 来自
+  宿主 SDK 钉版（上游 0.3.20 仍 safe）。
+- **按维护者窄版规格新开 #362**（feat(goal): host-recorded completion
+  verdicts with verifier-directed continuations；branch
+  `feat/goal-verify-verdicts` 基于 upstream/main c6f4877；本地克隆
+  `E:\Temp\rpi-package-pr`）：七态不动，`/goal _verify-result` 隐藏宿主
+  动词只**记录**裁决（有界 `verifications[]` 50 行/2k 字段 +
+  `pendingNextAction`）；notSatisfied 必带 nextAction → 活跃目标保持活跃
+  （waiting 被唤醒）、已归档目标复活回 active 槽（fresh id，stale 终端
+  工具/旧裁决全被拒）；派发走**既有 worker**（同 revision 守卫 + 绝不
+  注入 live run），verdict 以不可信任务数据转义引用进续跑提示词，
+  pending 在 dispatch fold-back 消费（暂停插进来不丢）；pass 只记录并清
+  pending、不启动 run；stopped 目标记录后等 `/goal resume`。
+  测试 56 lib + 6 集成全绿（验收测试 = `goal_complete` 后宿主拒绝 → 复活
+  → 恰好一条带 reason/nextAction/新 id 的续跑）；fmt / clippy -D warnings
+  干净；`forbid(unsafe_code)` 未动。#336 已留言指向 #362。
+- **宿主 vendored fork（`G:\mirach-plugins\rpi-goal`）不跟随窄版**：宽版
+  （verifying/verified 词表 + 宿主裁判驱动 + AgentEnd 闸门）E2E 已验、
+  继续在用；#362 是上游可接受的独立贡献，两边语义**有意分叉**——上游若
+  收窄版，同步策略到时候再定。
+
 ## 引擎侧四件套 + 宿主桥（2026-11-18 夜，用户"全部做……pr给pi rust"）
 
 **引擎侧改动都在 `G:\pi-rust-main` 工作树，PR 已提：pi-rust #348**
 （https://github.com/bigfish1913/pi-rust/pull/348，基于上游 main 干净重建；
 diff = task_lease.rs / approval_gate.rs / message_agent.rs 三个新文件 +
 session.rs +50/-3 + 两个 lib.rs 一行。**镜像里用户自己的本地补丁不在 PR 内**）。
+**已合并（2026-11-19）**，评审 nit 由上游 #376 落地。
 
 | 件 | 引擎文件 | 宿主对偶 |
 |---|---|---|
@@ -3209,6 +3244,56 @@ grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest�
   groups.list、HTTP invitations/capabilities/runs/stop/steer/SSE/API-key runs、
   runs/close，真模型回复）。
 
+### 全链对账轮（2026-11-19 续）：hermes 客户端语义 E2E + 三个实机缺陷
+
+E2E 脚本 = `E:\Temp\peer-hermes-wire-e2e.mjs`（仓库外临时产物）：**完整按 hermes
+客户端语义**逐条走（`canonical-group-peers.ts` 的 `peerTargetState`/`seatPeer`、
+`hosted-room-peer-http.ts` 的 `_admit_dispatch`/`refresh_grant`/`stop_receipt`），
+对运行中的实机 app 跑：capabilities 准入检查 → WS `groups.peer.invite`
+（ttl=86400 + status_ttl=30d 的 seatPeer 边界值）→ `groups.peer.register`
+（live probe）→ `/v1/runs` {input,hosted_room_dispatch} + `Idempotency-Key:
+room:{task}:{gen}` → 重放 `replayed:true` / 换体 409 → 轮询终局读 `output`
+（真模型 3+4=7、5+6=11）→ grants/refresh + 替换 grant 探活 → gen2 派发 →
+`stop`（空体）→ `stopping`→`cancelled` → lender `groups.peer.revoke` →
+再派发 403 `room_reauthorization_required` → 全绿（`HERMES_WIRE_OK`）。
+
+**E2E 当场抓到的三个真缺陷（都已修）**：
+
+1. **`MAX_STATUS_GRANT_TTL_SECONDS` 少乘一个 60**（`pi_gateway_peer.rs`）：
+   写成 `30*24*60` = 12h，上游是 30 天 → seatPeer 传 `status_ttl_seconds=30d`
+   时 WS invite 直接 `room grant lifetime is invalid`（旧 E2E 只传 ttl，没测
+   horizon 边界，漏了）。修 = `30*24*60*60` + 新单测
+   `invitation_honors_full_status_horizon`（30d 边界过 / 30d+1 拒）。
+2. **`groups.peer.register` 回执 `mode` 写的是 "desktop"**：上游回 link mode
+   **`"direct"`**（`hosted-room-wiring.ts` register 回执）。同时 probe 的
+   `home_install_id` 校验按上游对齐**本机 authority id**（原写成房间 authority
+   id，单机同值时无差，但口径要正）。修 + E2E 断言 `mode === "direct"`。
+3. **冷启动假 `interrupted`（真 bug，E2E 首发轮次必现）**：monitor 与
+   `resolve_run_status` 都用「bot 泳道此刻不在 running」当终局/重启信号——
+   第一条 dispatch 要现建会话，提交后到轮次真正开跑之间有窗口，running 仍为
+   false → 轮次被误写成 `interrupted`（"gateway restarted"）。修法 =
+   **真终局信号**：
+   - `pi_bot.rs`：`BotRunState.last_turn_seq` 终局计数器（与 running=false /
+     last_status 同一临界区 +1），`pi_bot_state` 透出；
+   - `pi_peer.rs`：admit 在提交前记 `pre_seq` 传 monitor；monitor **只在
+     `last_turn_seq > pre_seq` 时收口**（30 分钟上限，超时如实 failed 不空转）；
+   - `pi_peer.rs`：进程内活跃 run 注册表（`active_peer_runs`），
+     `resolve_run_status` 只有**不在注册表**时才判 interrupted（真重启残留），
+     在表内 cold 窗口保持原态；`stop` 对不在表的活态记录同样按重启收口。
+
+**如实记录（非缺陷）**：lender catalog `persistent_process:false` —— hermes
+Desktop 的 `peerCatalogProblem` 要求 true 才肯把 bot 借进别人的房间；上游对
+**Desktop 管理的网关**同样报 false（`catalog_mapping`：`HERMES_DESKTOP=1` 时
+恒 false），即 hermes 自己要求 lender 是 `hermes serve` 常驻进程。宿主是桌面
+应用，报 false 是与上游同款的老实话——真 hermes Desktop 会因此拒 seat
+（`persistent_process_required`），wire 本身全通（E2E 已证）。mirach↔mirach
+走原生 peer 面，无此约束。
+
+**仍存的已声明间隙**（未动）：`driver_status` 只有 `peer_routes`（无
+`working`/`counts`/`member_activity`/`routing_modes`，插件 UI 优雅降级）；
+room-link 状态只在 register 写 `registered`（无 `needs_reauthorization`/
+`unavailable` 的写入者）。
+
 ## 侧栏切换性能 + 系统托盘（2026-11-19，两边都照上游对偶）
 
 ### 侧栏会话切换（内置 agent 完成，本仓核验后提交）
@@ -3322,4 +3407,33 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
 0.6s）；`thread-list.aui.tsx` 的 memo 家族已在，但行订阅表若再出现
 「每秒全树重渲染」症状，先查两类模式：**轮询桥无条件 setState** 与
 **内联对象/数组订阅**。
+
+### ⑤ hermes 尾页水合完全对齐（同日续，替换上段「遗留」）
+
+上段遗留的「后端 tail 分页」已按 hermes `store/transcript-tail` +
+`app/chat/transcript-backfill` 模型落地：
+
+- 新 IPC `pi_get_messages_page(before?, limit=256)` → 引擎
+  `SessionTree::transcript_page`（**bounded read**，不整树 payload 重放）→
+  wire `{messages, entryIds, hasMore, leafId}`。
+- 前端 `assistant-ui/transcript-paging.ts`：`hydrateTranscriptTail(actor,
+  sessionId)` 取代 7 处 `invoke('pi_get_messages')`（runtime 挂载/切叶/fork/
+  回父/branch 切换等全部走它）；`loadOlderTranscript()` 用 `entryIds[0]`
+  作 `before` 游标补页，经 actor 新事件 **`PREPEND_HISTORY`** 前插（保留
+  已加载行与在途 run 段，不触碰 currentRunId/usage）。
+- 行 key = 原始条目 id（`msg-<entryId>-<role>`），跨页 prepend 时 React
+  key / 树节点身份不漂移。
+- 时间线标记新增 `beforeMessageIndexFromEnd`（后端沿分支单遍统计）：前端
+  落桶 = `已加载条数 − fromEnd`——头部未加载时标记不会错位（负值不画），
+  补页后自动出现。
+- 「显示更早的消息」按钮 / 滚顶：`hasMore` 时走后端补页，后端耗尽才退回
+  纯前端渲染预算展开。
+- **自动命名守卫**：`hasMore` 时 store 首条 user 不是会话开头 → 跳过自动
+  命名（不造假标题），可手动重命名。
+- 实测（巨会话 11MB / 2041 条）：切页首条新轮 **808ms**（改前 2.9s）；
+  每页 256 条 99ms（全量 1445ms）；补页 411ms/页；点「显示更早」DOM
+  6→13 轮。**冷开仍由引擎 replay 决定**（0.5MB 362ms、0.8MB 791ms、
+  11MB ~4.5s；热开 3~6ms）——未做 lazy-open，属引擎地板。
+- **仍有意不做**：hermes `boundRetainedTranscript` 的 store retention（老行
+  从内存释放）——宿主全量留在 actor store，只截留渲染窗；后续压内存再补。
 

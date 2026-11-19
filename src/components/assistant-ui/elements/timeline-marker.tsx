@@ -78,6 +78,9 @@ export function markerLabel(marker: TimelineMarker): string {
  */
 export function bucketMarkers(
   markers: readonly TimelineMarker[],
+  /** 已加载消息条数（user|assistant）。尾部水合时 store 只含分支尾部，
+   *  标记按「之后还剩几条」换算成本地下标；落在未加载头部（<0）的不画。 */
+  loadedMessageCount?: number,
 ): Map<number, { marker: TimelineMarker; prevModel?: string }[]> {
   const out = new Map<number, { marker: TimelineMarker; prevModel?: string }[]>();
   let prevModel: string | undefined;
@@ -85,14 +88,20 @@ export function bucketMarkers(
   // 仍要得到正确的前值链）
   const ordered = [...markers].sort((a, b) => a.beforeMessageIndex - b.beforeMessageIndex);
   for (const marker of ordered) {
+    const bucket =
+      loadedMessageCount !== undefined && marker.beforeMessageIndexFromEnd !== undefined
+        ? loadedMessageCount - marker.beforeMessageIndexFromEnd
+        : marker.beforeMessageIndex;
+    // 标记位于尚未加载的头部消息之前 -> 当前窗口无落点，跳过
+    if (bucket < 0) continue;
     const entry: { marker: TimelineMarker; prevModel?: string } = { marker };
     if (marker.kind === 'modelChange') {
       if (prevModel !== undefined) entry.prevModel = prevModel;
       prevModel = modelLabel(marker.provider, marker.modelId);
     }
-    const bucket = out.get(marker.beforeMessageIndex);
-    if (bucket) bucket.push(entry);
-    else out.set(marker.beforeMessageIndex, [entry]);
+    const list = out.get(bucket);
+    if (list) list.push(entry);
+    else out.set(bucket, [entry]);
   }
   return out;
 }

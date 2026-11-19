@@ -850,6 +850,17 @@ fn pi_get_messages(
     state.engine.messages()
 }
 
+/// 分页消息面（首屏尾页水合）：`before` = 上一页最老条目 id，`limit` 缺省 256。
+/// 返回 `{messages, entryIds, hasMore, leafId}`，见 `PiEngine::messages_page`。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_get_messages_page(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    before: Option<String>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    state.engine.messages_page(before, limit.unwrap_or(256))
+}
+
 /// 会话时间线标记（模型切换 / 压缩点）：`[{kind, beforeMessageIndex, …}]`，
 /// 索引与 `pi_get_messages` 的消息下标对齐。渲染层据此插分隔线
 /// （ZCode `timelineMarkerRow` 的宿主投影，见 `PiEngine::timeline_markers`）。
@@ -983,19 +994,21 @@ fn pi_interrupt(
     }
 }
 
-/// main lane 是否仍有活动 run（含 RUN_FINISHED 后的收尾窗口）。前端提交
+/// 该线程的 lane 是否仍有活动 run（含 RUN_FINISHED 后的收尾窗口）。前端提交
 /// 与队列 drain 前先查，busy 就留在本地队列，避免撞
 /// "Lane main already has an active run operation"。
+///
+/// v7.4 多柄：thread = 并列窗格的线程键时查该窗格自己的句柄（窗格之间互不
+/// 阻塞）；缺省 "main" = 工作区前台 run。
 #[tauri::command(async)]
 fn pi_lane_busy(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     thread: Option<String>,
 ) -> Result<bool, String> {
-    // rpi 非 main lane 只读（side_* 全部 unavailable），不作 run 判断。
-    if thread.as_deref().is_some_and(|t| t != "main") {
-        return Ok(false);
+    match thread.as_deref().unwrap_or("main") {
+        "main" => state.engine.lane_busy(),
+        side => state.engine.side_lane_busy(side),
     }
-    state.engine.lane_busy()
 }
 
 #[tauri::command(async)]
@@ -1838,6 +1851,7 @@ fn main() {
             pi_close_settings_window,
             pi_get_state,
             pi_get_messages,
+            pi_get_messages_page,
             pi_get_timeline_markers,
             pi_get_session_messages,
             pi_connections::pi_connections_list,
@@ -1936,6 +1950,7 @@ fn main() {
             pi_keys::pi_delete_provider_key,
             pi_keys::pi_engine_version,
             pi_keys::pi_notify_test,
+            pi_keys::pi_notify,
             pi_vault::pi_vault_list,
             pi_vault::pi_vault_add,
             pi_vault::pi_vault_remove,
