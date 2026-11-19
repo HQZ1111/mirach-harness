@@ -1731,7 +1731,13 @@ export const ThreadListItem: FC = () => {
         align="end"
         anchor={menuAnchor}
         onOpenChange={(next) => {
-          if (!next) setMenuOpen(false);
+          // 受控开合必须**双向镜像**：⋯ 左键开合走 ContextMenuAnchor 的
+          // onClick → setOpen(true) → 这里；只处理关闭会把打开请求吞掉，
+          // ⋯ 永久点不开（2026-11-19 CDP 实测：右键可开、⋯ 不可开）。
+          setMenuOpen(next);
+          // 关闭后锚态复位："⋯ 左键"依赖 anchor==="trigger" 分支，右键把它
+          // 置成 "point" 后不复位 → 该行的 ⋯ 从此失效。
+          if (!next) setMenuAnchor("trigger");
         }}
         open={menuOpen}
         point={menuPoint}

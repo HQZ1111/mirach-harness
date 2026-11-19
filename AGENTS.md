@@ -3211,6 +3211,14 @@ grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest�
 3. **`rowMetaCache`**（`thread-list.aui.tsx::useSessionRowMetas`）：WeakMap 按 item
    引用缓存行投影——`threadItems` 每次刷新是新数组，全量重建会让每行都换新对象、
    下游 memo 全失效（会话越多越卡）；附带删掉三连 `prune` 的复制粘贴冗余（留 1 次）。
+4. **⋯ 左键开菜单修复（2026-11-19 冒烟实测发现）**：会话行菜单是受控
+   ContextMenu（`open={menuOpen}`），但 `onOpenChange` 只处理关闭——⋯ 点击
+   （ContextMenuAnchor.onClick → `setOpen(true)`）的打开请求被吞，**该行 ⋯
+   永久点不开**（右键路径直写 `setMenuOpen(true)` 所以正常）。修复 = 双向镜像
+   `setMenuOpen(next)` + 关闭时 `setMenuAnchor("trigger")` 复位（右键把锚态置
+   "point" 后不复位，会让该行 ⋯ 从此失效——`ContextMenuAnchor.onClick` 里有
+   `anchor !== "trigger"` 早退）。**受控动效菜单的 onOpenChange 必须镜像双向**；
+   其它 ContextMenu 调用点均为「右键-only、point 受控」，单向无此问题。
 
 ### 系统托盘（ZCode `desktopTray.ts` 完整对齐）
 
