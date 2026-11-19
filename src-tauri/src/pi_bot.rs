@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
-use rpi_ai::types::ImageContent;
+use rpi_ai::types::{Content, ImageContent};
 use rpi_harness::agent_harness::{AgentHarness, AgentLane};
 
 use crate::pi_session::{
@@ -53,6 +53,11 @@ struct BotRunState {
     started_at: Option<f64>,
     last_error: Option<String>,
     last_finished_at: Option<f64>,
+    /// 最近一轮的终局分类（completed / failed / cancelled）——peer lender 面
+    /// 的 `/v1/runs` 轮询需要可持久化的终局状态。
+    last_status: Option<String>,
+    /// 最近一轮的最终 assistant 文本（peer `/v1/runs` 的 `output`）。
+    last_output: Option<String>,
     /// 引擎任务租约（rpi-harness task_lease）：轮次身份 + fencing token。
     current_task: Option<CurrentTask>,
     /// 任务身份代际（每次提交 +1；fencing/重试都用它）。
@@ -608,6 +613,26 @@ fn spawn_turn(
                 pump.abort();
                 tool_pump.abort();
                 collect_dialogs(&session_for_thread);
+                let (terminal_status, terminal_output) = match &result {
+                    Ok(run) => match &run.outcome {
+                        rpi_harness::agent_harness::HarnessRunOutcome::Completed {
+                            final_message, ..
+                        } => ("completed".to_owned(), assistant_text(final_message)),
+                        rpi_harness::agent_harness::HarnessRunOutcome::Aborted {
+                            final_message, ..
+                        } => ("cancelled".to_owned(), assistant_text(final_message)),
+                        rpi_harness::agent_harness::HarnessRunOutcome::Failed {
+                            final_message, ..
+                        } => (
+                            "failed".to_owned(),
+                            final_message.as_ref().map(assistant_text).unwrap_or_default(),
+                        ),
+                        rpi_harness::agent_harness::HarnessRunOutcome::Suspended { .. } => {
+                            ("failed".to_owned(), String::new())
+                        }
+                    },
+                    Err(_) => ("failed".to_owned(), String::new()),
+                };
                 let error = result.as_ref().err().map(|e| e.to_string());
                 // 引擎终局回执：run outcome 映射任务状态（aborted→cancelled）。
                 let (status, receipt) = match &result {
@@ -658,6 +683,12 @@ fn spawn_turn(
                     state.running = false;
                     state.last_finished_at = Some(now_secs());
                     state.last_error = error.clone();
+                    state.last_status = Some(terminal_status);
+                    state.last_output = if terminal_output.is_empty() {
+                        None
+                    } else {
+                        Some(terminal_output)
+                    };
                     state.current_task = None;
                 }
                 let payload = json!({
@@ -699,6 +730,19 @@ fn emit(app: &AppHandle, name: &str, payload: Value) {
     }
 }
 
+/// assistant 消息中的文本块拼接（peer `/v1/runs` 的 `output`）。
+fn assistant_text(message: &rpi_ai::types::AssistantMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            Content::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// `session.resume` 需要的运行态快照（消息面由前端按会话文件读）。
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_bot_state(session_id: String) -> Result<Value, String> {
@@ -726,6 +770,8 @@ pub fn pi_bot_state(session_id: String) -> Result<Value, String> {
         "path": session.path.to_string_lossy(),
         "open_requests": open_requests(&session),
         "pending_approval": pending_approval(&session),
+        "last_status": state.last_status.clone(),
+        "last_output": state.last_output.clone(),
         // 引擎任务租约快照（canonical driver 用 task 身份做 fencing/重试）。
         "task": state.current_task.as_ref().map(|task| json!({
             "task_id": task.task_id,
@@ -784,6 +830,29 @@ pub fn pi_bot_interrupt_task(
     )
     .map_err(|e| format!("task.interrupt 终局落盘失败: {e}"))?;
     Ok(json!({ "status": "interrupted", "session_id": session_id, "task_id": task_id }))
+}
+
+/// peer steer：向运行中的泳道注入用户指导（上游 `AgentHarness::steer` 的对偶）。
+pub(crate) fn pi_bot_steer(session_id: &str, text: &str) -> Result<bool, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("steer text 为空".into());
+    }
+    let Some(session) = find_session(session_id) else {
+        return Err(format!("bot 会话 {session_id} 不在泳道注册表"));
+    };
+    let message = rpi_agent::message::AgentMessage::User(rpi_ai::types::UserMessage::new(
+        rpi_ai::types::UserContent::Text(text.to_owned()),
+        now_secs() as i64 * 1000,
+    ));
+    lane().rt.block_on(async {
+        session
+            .harness
+            .steer(message)
+            .await
+            .map(|_| true)
+            .map_err(|e| format!("bot 会话 steer 失败: {e}"))
+    })
 }
 
 #[tauri::command(rename_all = "camelCase", async)]

@@ -6,6 +6,16 @@
 
 ## 当前状态
 
+**✅ 2026-11-19：hermes peer lending wire 路由层（WS 方法分派 + `/v1/runs`）**
+
+- grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest）已在前一轮落地；本轮在其上补齐对端可调用面，让 hermes Desktop/网关能把 mirach 当 peer lender。
+- **WS `/api/ws?token=`**（axum）：accept 首帧 `gateway.ready`（含 `room_link.catalog`）；方法表 = `gateway.ping` / `profiles.list` / `groups.capabilities` / `groups.peer.invite` / `groups.peer.revoke`，未知方法答 `-32601`。
+- **HTTP（peer 服务同端口）**：`GET /v1/room-members/capabilities`、`POST /v1/room-members/invitations`（201）、`POST /v1/room-members/grants/refresh`、`POST /v1/room-members/grants/revoke`（空体幂等）、`POST /v1/room-members/runs/close`；以及 `POST /v1/runs`（幂等 admission，202）、`GET /v1/runs/{id}`（含 `waiting_for_approval`）、`POST /v1/runs/{id}/stop`、`POST /v1/runs/{id}/approval`（仅 `once`/`deny`）、`POST /v1/runs/{id}/steer`（运行中注入指导）、`POST /v1/runs/{id}/resolve-unknown`。
+- **台账**：`src-tauri/src/hosted_rooms/grants.rs`（撤销围栏 + target reservation 判定，复用 P1 已建的第 4 层表）＋ `src-tauri/src/pi_peer_runs.rs`（运行记录 / 房间↔隐藏泳道映射，独立 `peer-runs.db`）。
+- **成员轮次**：`/v1/runs` 的 prompt 进 bot 泳道（`Group: <room_id>`）；`pi_bot_state` 新增 `last_status` / `last_output`，monitor 写回 durable 状态；stop 走 `pi_bot_interrupt`，steer 走 `harness.steer`（`pi_bot_steer`），approval 走 `pi_bot_approval_respond`。
+- **实测（实机 app + mock 对端）**：WS ready/capabilities/invite/revoke 全通；HTTP invitations 201、capabilities 200、revoke 后 403 `room_reauthorization_required`；`POST /v1/runs` 202 → poll running → steer 200 accepted → 模型最终 `OK`；stop `stopping` → `cancelled`；runs/close `{closed:true}`。门禁：cargo check / cargo test 724 / vitest 1073 全绿。
+- **如实裁剪**：WS 上 `driver:false`（群聊驱动仍在本仓 canonical-group-driver）；clarify 回执未做；未实现 hermes API-key 普通 runs 面（peer 面只服务 grant 路径）；resolve-unknown 以本宿主 run_id 作 admission_id 匹配。
+
 **✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行 + 完成校验（状态机进 rpi-goal 插件）+ 工作流分区（orchestrator 派生）**
 
 - **rpi-goal vendored fork（用户定稿"Rpi 有 goal，直接在它上面做"）**：

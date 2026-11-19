@@ -3159,3 +3159,38 @@ L5 Tauri v2 Mobile（未做）
 **唯一真相源**：UI 态 = Zustand；run 生命周期 = XState；会话消息/分支 = pi；
 业务数据 = SQLx；审批态 = Rust ApprovalRegistry；事件传输序 = AG-UI seq。
 任何字段出现两个写入者 = 设计错误。
+
+## hermes peer lending wire（2026-11-19）：WS 方法分派 + `/v1/runs` 路由
+
+grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest）之上，本轮补齐
+对端可调用的**路由层**，让 hermes Desktop/网关能把 mirach 当作 peer lender：
+
+- **WS `/api/ws?token=`**（axum WebSocket，挂在 peer 服务上）：
+  accept 后首帧 `gateway.ready`（含 `room_link.catalog`）；方法表只暴露 lender 面：
+  `gateway.ping`、`profiles.list`、`groups.capabilities`、`groups.peer.invite`、
+  `groups.peer.revoke`。未知方法答 `-32601`。
+- **HTTP（同一 peer 服务）**：
+  `GET /v1/room-members/capabilities`；`POST /v1/room-members/invitations`（201）；
+  `POST /v1/room-members/grants/refresh`（403 `room_reauthorization_required` /
+  `room_execution_policy_changed`）；`POST /v1/room-members/grants/revoke`（空体幂等）；
+  `POST /v1/room-members/runs/close`；以及 `POST /v1/runs`（幂等 admission，202）、
+  `GET /v1/runs/{id}`（可轮询状态，含 `waiting_for_approval`）、
+  `POST /v1/runs/{id}/stop`（fenced，`stopping`）、
+  `POST /v1/runs/{id}/approval`（仅 `once`/`deny`）、
+  `POST /v1/runs/{id}/steer`（运行中注入指导，`accepted:true`）、
+  `POST /v1/runs/{id}/resolve-unknown`。
+- **台账**：`src-tauri/src/hosted_rooms/grants.rs`——撤销围栏
+  `hosted_room_peer_reservations` / `room_grant_is_revoked` /
+  `peer_room_grant_is_current`（三张第 4 层表 P1 已建，未改 schema）；
+  `src-tauri/src/pi_peer_runs.rs`——运行记录 + 房间↔隐藏泳道会话映射（`peer-runs.db`，
+  与 state.db 分库）。
+- **成员轮次落地**：`/v1/runs` 的 prompt 转进 bot 泳道（`Group: <room_id>` 会话），
+  `pi_bot_state` 增 `last_status` / `last_output` 供轮询终局；monitor 线程在轮次结束后
+  写回 durable 状态，`stop` 走 `pi_bot_interrupt`，`approval` 走 `pi_bot_approval_respond`。
+- **有意裁剪（如实）**：WS 上不声称 canonical room driver（`driver:false`；群聊驱动仍在
+  mirach 自己的 canonical-group-driver）；clarify 回执未做；未实现 hermes API-key 的普通
+  runs 面（peer 面只服务 grant 路径）；resolve-unknown 以本宿主 run_id 作 admission_id
+  匹配，语义按「网关重启丢进程内状态」收口。
+- 门禁：`cargo check` / `cargo test`（724 条，含新增 7 条 grant/dispatch 单测与
+  5 条台账单测）/ `vitest 1073` 全绿；实机 mock 对端全链 E2E 通过（WS invite/revoke、
+  HTTP invitations/capabilities/runs/stop/close，真模型回复）。

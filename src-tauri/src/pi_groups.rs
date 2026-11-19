@@ -34,7 +34,8 @@ fn state_db_path() -> Result<std::path::PathBuf, String> {
 }
 
 /// 打开群聊库（建表幂等）。
-fn open_store() -> Result<rusqlite::Connection, String> {
+/// 打开群聊库（建表幂等）。peer lending 面与本模块共享同一个 state.db。
+pub(crate) fn open_store() -> Result<rusqlite::Connection, String> {
     let path = state_db_path()?;
     let path_str = path.to_string_lossy().to_string();
     let conn = store::open(&path_str).map_err(|e| e.to_string())?;
@@ -827,6 +828,11 @@ fn local_gateway_id() -> Result<String, String> {
     // 上游用 install id；宿主用固定前缀 + 机器名（稳定且可读）
     let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "local".to_owned());
     Ok(format!("install:{host}"))
+}
+
+/// 本网关的安装身份（peer 目录里 `installation_id` 的同源值）。
+pub(crate) fn installation_id() -> String {
+    local_gateway_id().unwrap_or_else(|_| "install:local".to_owned())
 }
 
 fn now() -> f64 {
