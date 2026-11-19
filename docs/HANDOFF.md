@@ -6,6 +6,22 @@
 
 ## 当前状态
 
+**引擎同步候选（2026-11-19 量化，未执行——专项一轮再做）**：`G:\pi-rust-main`
+（引擎真源，非 git 树）落后 bigfish1913/pi-rust main `b0ac963 → 3e48b03`
+**21 个提交**：0.26.0 release prep(#373)、SDK 安全化 **#375**（ABI 字符串
+移出插件 unsafe 块）与 **#378**（`take_step!` 免调用方 unsafe）、goal parity
+#367、session-tree 生命周期事件、编辑器草稿/completion parity(#366/#338)、
+LaTeX 渲染(#362)、transcript replay 性能(#368) + 我们已合并的 #348/#355/#376。
+树差 = **78 个文件**，仅 `rpi-cli/src/session.rs` 就 **+743/-151**。
+**为什么不能热替换**：① 镜像带着用户本地补丁（execution_env /
+after_tool_call，未上游化）——同步必须重放；② vendored
+`G:\mirach-plugins\rpi-goal` 按 SDK 0.24 编译（unsafe wrapper 是为 0.24 的
+StbString），0.26 后编译面要重对（机会：#375/#378 落地后 unsafe wrapper 可
+整体删掉）；③ 全量 cargo 重编译 + DLL 重装 + 宿主门禁 + E2E；④ 工作树多会话
+共享。**建议步骤**：干净 clone 上上游 main → 重放本地补丁 → 换路径依赖 →
+vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1（16GB
+机器，规矩 12）→ 三面门禁 → goal/审批/租约 E2E 复测。
+
 **✅ 2026-11-19（晚）：打开/切换会话性能第二轮（hermes 视图窗 + 引擎缓存 + 轮询去重）**
 
 - **用户症状**：打开会话慢、切换长会话更慢、bot 切换也慢（"切换会话不卡顿"）。
@@ -36,13 +52,38 @@
 **✅ 2026-11-19（晚续）：尾页水合完全对齐 hermes（后端分页 IPC 落地）**
 
 - `pi_get_messages_page(before?, limit=256)` → 引擎 `SessionTree::transcript_page`
-  有界读；前端 `transcript-paging.ts` 统一水合入口（7 处调用点）+ `PREPEND_HISTORY`
-  补页；行 key = 原始条目 id；时间线标记带 `beforeMessageIndexFromEnd` 做尾部
-  相对落桶；自动命名在历史截断时跳过（不造假标题）。
-- 实测（巨会话 11MB/2041 条）：切页首条新轮 **808ms**（此前 2.9s）；分页
-  99ms/256 条（全量 1445ms）；补页 411ms/页；「显示更早」DOM 6→13 轮。
-  冷开 = 引擎 replay 地板（0.5MB 362ms / 11MB ~4.5s，热开 3~6ms）。
+  有界读；**轮边界回退**：页首非 user 时回看最多 2 页并把「最后一条 user 起」的
+  后缀并入，防止一页切在轮中间（孤儿 toolResult = 丢工具卡）。
+- 前端 `transcript-paging.ts`：`hydrateTranscriptTail(actor, sessionId)` 统一
+  水合入口（7 处调用点）+ `PREPEND_HISTORY` 补页 + `ensureFullTranscript()`
+  给导出 Markdown 等显式全量面；行 key = 原始条目 id；时间线标记带
+  `beforeMessageIndexFromEnd` 做尾部相对落桶；自动命名在历史截断时跳过。
+- 实测（巨会话 11MB / 2041 条）：首屏尾页实取 303 条 **333ms**（改前全量
+  1445ms）；再补页 606ms（283 条）；UI 全链 DOM 6→17→18 轮、console 零错误。
+  `pi_sessions_index` 共用事实缓存 **7.7s → 71ms**；bot 行打开 69ms。
+  冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
 - 仍有意不做：hermes store retention（老行内存释放）——宿主全量留在 actor store。
+
+**✅ 2026-11-20：多会话并列窗格真实现（hermes `_sessions` 模型）+ 语音 402 诊断**
+
+- **并列窗格能并行收发了**（此前 `side_*` 是恒 Err 占位，非活动窗格一发送
+  就报 "rpi 非 main lane 只读"）。根因澄清：rpi 引擎允许多会话（每次 build
+  独立 HarnessLive），限制在宿主单柄假设。落地（全 Rust，前端协议零改动）：
+  `EngineShared.side` 窗格表（thread key → 独立句柄）+ `side_open/prompt/
+  interrupt/lane_busy/close` 全真 + `live/side/retired` 三表兜住单写者
+  （同会话不双开；切前台从 side 表上台复用；窗格在场会话拒删）。
+  `prompt_inner` 抽 `run_prompt_on` 前台/窗格共用。实机 E2E：主柄 B 与
+  窗格 A 同时 POST 各自收全回复、`pi_interrupt(thread=A)` 只停窗格、
+  上台复用历史连续。**已知边界**：窗格 ask/审批卡不渲染（后端注册表只扫
+  前台邮箱）——对齐 hermes tile 需按 thread 分桶，单独一轮。
+- **语音 402 = MOSS 账户余额不足，非宿主 bug**：raw 握手对比，真 key →
+  402 `insufficient_credits`，伪 key/无 key → 403 permission_error——端点/
+  协议/key 全正常，积分用完（11-15 时还有免费额度）。处置 = 平台充值/换
+  key（设置 → 语音）。顺带修：`pi_voice_moss.rs` 握手错误附 vendor body
+  （`describe_handshake_error`），红显变为 `…402（insufficient_credits:
+  billing error）`；单测锁体。
+- 门禁：cargo test **726** / vitest **1090**（88 文件）；E2E 脚本
+  `E:\Temp\peer-tabs-e2e.mjs`（TABS_OK）。
 
 **✅ 2026-11-19（下午）：侧栏会话切换性能（hermes 对偶）+ 系统托盘 ZCode 对齐**
 

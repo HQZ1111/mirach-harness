@@ -348,11 +348,14 @@ struct DerivedCache {
     value: Arc<serde_json::Value>,
 }
 
-/// `pi_list_sessions` 的单文件事实（header id/cwd + name + messageCount），
-/// stat 不变即整行复用。会话文件 append-only，rename 也会追加条目 → mtime 变。
+/// `pi_list_sessions` / `pi_sessions_index` 的单文件事实（header id/cwd 之外的
+/// name / messageCount），stat 不变即整行复用。会话文件 append-only，rename 也会
+/// 追加条目 → mtime 变。
 struct SessionFactsCache {
     len: u64,
     mtime_ms: u64,
+    name: Option<String>,
+    message_count: u64,
     row: serde_json::Value,
 }
 
@@ -381,6 +384,25 @@ fn read_first_line(path: &Path) -> Option<String> {
     } else {
         Some(line)
     }
+}
+
+/// 把引擎 transcript 条目里的 message 值序列化成 wire 数组（entryIds 与
+/// messages 逐条对应，非 message 条目跳过——与旧 messages() 口径一致）。
+fn push_message_entries(
+    entries: Vec<Entry>,
+    messages: &mut Vec<serde_json::Value>,
+    entry_ids: &mut Vec<String>,
+) -> Result<(), String> {
+    for entry in entries {
+        let Entry::Message(message) = entry else {
+            continue;
+        };
+        entry_ids.push(message.base.id.clone());
+        messages.push(
+            serde_json::to_value(&message.message).map_err(|e| format!("消息序列化失败: {e}"))?,
+        );
+    }
+    Ok(())
 }
 
 pub(crate) struct EngineShared {
@@ -1439,7 +1461,9 @@ fn prompt_inner(
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
                 match cache.get(path) {
-                    Some(c) if c.len == meta.len() && c.mtime_ms == mtime_ms => {
+                    // row 只有 list_sessions 自己填；index_sessions 写入的缓存行
+                    // row=Null，list 面遇到要按 miss 重新投影（不吐空行）。
+                    Some(c) if c.len == meta.len() && c.mtime_ms == mtime_ms && c.row.is_object() => {
                         rows.push(c.row.clone());
                     }
                     _ => pending.push((path.clone(), meta.len(), mtime_ms)),
@@ -1495,6 +1519,7 @@ fn prompt_inner(
                     ),
                     None => (String::new(), String::new()),
                 };
+                let message_count = stats.as_ref().map(|s| s.message_count).unwrap_or(0);
                 let row = serde_json::json!({
                     "path": path.to_string_lossy(),
                     "id": id,
@@ -1503,10 +1528,19 @@ fn prompt_inner(
                     "messageCount": stats.as_ref().map(|s| s.message_count),
                     "lastModifiedMs": mtime_ms,
                     "sizeBytes": len,
-                    "name": name,
+                    "name": name.clone(),
                 });
                 rows.push(row.clone());
-                cache.insert(path, SessionFactsCache { len, mtime_ms, row });
+                cache.insert(
+                    path,
+                    SessionFactsCache {
+                        len,
+                        mtime_ms,
+                        name: name.clone().flatten(),
+                        message_count,
+                        row,
+                    },
+                );
             }
         }
         rows.sort_by(|a, b| {
@@ -1575,6 +1609,7 @@ fn prompt_inner(
             source: si::RootKind,
             header: si::SessionHeader,
             modified: u64,
+            size: u64,
         }
 
         let mut skipped: Vec<si::SkippedSession> = Vec::new();
@@ -1639,49 +1674,96 @@ fn prompt_inner(
                     source: root.kind,
                     header,
                     modified,
+                    size: metadata.len(),
                 });
             }
         }
 
         // 快照读取（name / messageCount）走引擎运行时；逐项结果带出来，
         // 错误在 await 之外落 skipped（避免跨 await 的 &mut 借用）。
+        // **stat 未变（append-only）→ 复用 list_sessions 填过的事实缓存**，
+        // 不再对每个会话整树重放——40+ 会话（含 11MB 巨文件）实测 ~8s → ms。
         let fs: Arc<dyn rpi_tools::FileSystem> = Arc::new(
             rpi_tools::os_env::OsExecutionEnv::with_cwd(cwd.clone()),
         );
-        let enriched = self.shared.rt.block_on(async {
-            let mut out = Vec::with_capacity(candidates.len());
-            for candidate in candidates {
-                let storage = JsonlSessionStorage::read_snapshot(
-                    fs.clone(),
-                    &candidate.path.to_string_lossy(),
-                    Arc::new(SystemClock),
-                    Arc::new(DefaultIdGenerator::new()),
-                )
-                .await;
-                let result = match storage {
-                    Ok(storage) => {
-                        let session = Session::new(
-                            Arc::new(storage)
-                                as Arc<dyn rpi_harness::session::types::SessionStorage>,
-                            None,
-                        );
-                        let name = session.get_name().await.ok().flatten();
-                        match session.get_stats().await {
-                            Ok(stats) => Ok((name, stats.message_count)),
-                            Err(e) => Err(format!("会话统计读取失败: {e}")),
-                        }
+        let mut facts: Vec<Option<Result<(Option<String>, u64), String>>> =
+            vec![None; candidates.len()];
+        let mut misses: Vec<usize> = Vec::new();
+        {
+            let cache = self
+                .shared
+                .session_facts_cache
+                .lock()
+                .map_err(|_| "会话事实缓存锁中毒".to_string())?;
+            for (index, candidate) in candidates.iter().enumerate() {
+                match cache.get(&candidate.path) {
+                    Some(cached)
+                        if cached.len == candidate.size && cached.mtime_ms == candidate.modified =>
+                    {
+                        facts[index] = Some(Ok((cached.name.clone(), cached.message_count)));
                     }
-                    Err(e) => Err(format!("会话快照读取失败: {e}")),
-                };
-                out.push((candidate, result));
+                    _ => misses.push(index),
+                }
             }
-            out
-        });
+        }
+        if !misses.is_empty() {
+            let fetched = self.shared.rt.block_on(async {
+                let mut out = Vec::with_capacity(misses.len());
+                for index in misses {
+                    let candidate = &candidates[index];
+                    let storage = JsonlSessionStorage::read_snapshot(
+                        fs.clone(),
+                        &candidate.path.to_string_lossy(),
+                        Arc::new(SystemClock),
+                        Arc::new(DefaultIdGenerator::new()),
+                    )
+                    .await;
+                    let result = match storage {
+                        Ok(storage) => {
+                            let session = Session::new(
+                                Arc::new(storage)
+                                    as Arc<dyn rpi_harness::session::types::SessionStorage>,
+                                None,
+                            );
+                            let name = session.get_name().await.ok().flatten();
+                            match session.get_stats().await {
+                                Ok(stats) => Ok((name, stats.message_count)),
+                                Err(e) => Err(format!("会话统计读取失败: {e}")),
+                            }
+                        }
+                        Err(e) => Err(format!("会话快照读取失败: {e}")),
+                    };
+                    out.push((index, result));
+                }
+                out
+            });
+            let mut cache = self
+                .shared
+                .session_facts_cache
+                .lock()
+                .map_err(|_| "会话事实缓存锁中毒".to_string())?;
+            for (index, result) in fetched {
+                if let Ok((name, message_count)) = &result {
+                    let candidate = &candidates[index];
+                    cache.insert(
+                        candidate.path.clone(),
+                        SessionFactsCache {
+                            len: candidate.size,
+                            mtime_ms: candidate.modified,
+                            name: name.clone(),
+                            message_count: *message_count,
+                            row: serde_json::Value::Null,
+                        },
+                    );
+                }
+                facts[index] = Some(result);
+            }
+        }
 
-        let mut records: Vec<si::SessionRecord> = Vec::with_capacity(enriched.len());
-        for (candidate, result) in enriched {
-            match result {
-                Ok((name, message_count)) => records.push(si::SessionRecord {
+        let mut records: Vec<si::SessionRecord> = Vec::with_capacity(candidates.len());
+        for (candidate, fact) in candidates.into_iter().zip(facts) {
+            match fact {
+                Some(Ok((name, message_count))) => records.push(si::SessionRecord {
                     id: candidate.header.id,
                     path: candidate.path.to_string_lossy().into_owned(),
                     cwd: candidate.header.cwd,
@@ -1693,10 +1775,15 @@ fn prompt_inner(
                     source_root: candidate.source_root,
                     source: candidate.source,
                 }),
-                Err(reason) => skipped.push(si::SkippedSession {
+                Some(Err(reason)) => skipped.push(si::SkippedSession {
                     path: candidate.path.to_string_lossy().into_owned(),
                     root: candidate.source_root,
                     reason,
+                }),
+                None => skipped.push(si::SkippedSession {
+                    path: candidate.path.to_string_lossy().into_owned(),
+                    root: candidate.source_root,
+                    reason: "会话事实缺失（未扫到统计）".into(),
                 }),
             }
         }
@@ -2829,22 +2916,29 @@ fn prompt_inner(
     /// - `messages` 与 `pi_get_messages` 同形（可直接喂 hydratePiMessages）；
     /// - `entryIds` 逐条对应，前端拿最后一页的 `entryIds[0]` 作为下一页
     ///   `before`，并可作为稳定行 id（跨页 prepend 不换 key）。
+    ///
+    /// **轮边界回退**：一页 256 条会在轮中间切断（页首是 assistant/toolResult，
+    /// 水合后 toolResult 找不到宿主部件 = 丢工具卡）。因此页首不是 user 消息
+    /// 时，向后回看最多 2 页，把上一页「最后一条 user 起」的后缀并进来，
+    /// 保证每个返回页都从轮首开始；`hasMore` 相应扣减被并入的部分。
     pub fn messages_page(
         &self,
         before: Option<String>,
         limit: usize,
     ) -> Result<serde_json::Value, String> {
         let live = self.live()?;
-        let query = TranscriptPageQuery {
-            limit: limit.max(1),
-            before_id: before,
+        let page_size = limit.max(1);
+        let fetch = |before_id: Option<String>| {
+            let session = live.harness.session();
+            self.shared
+                .rt
+                .block_on(session.transcript_page(&TranscriptPageQuery {
+                    limit: page_size,
+                    before_id,
+                }))
+                .map_err(|e| format!("会话消息分页读取失败: {e}"))
         };
-        let Some(page) = self
-            .shared
-            .rt
-            .block_on(live.harness.session().transcript_page(&query))
-            .map_err(|e| format!("会话消息分页读取失败: {e}"))?
-        else {
+        let Some(page) = fetch(before)? else {
             return Ok(serde_json::json!({
                 "messages": [],
                 "entryIds": [],
@@ -2852,23 +2946,61 @@ fn prompt_inner(
                 "leafId": serde_json::Value::Null,
             }));
         };
-        let mut messages = Vec::with_capacity(page.entries.len());
-        let mut entry_ids = Vec::with_capacity(page.entries.len());
-        for entry in page.entries {
-            let Entry::Message(message) = entry else {
-                continue;
-            };
-            entry_ids.push(message.base.id.clone());
-            messages.push(
-                serde_json::to_value(&message.message)
-                    .map_err(|e| format!("消息序列化失败: {e}"))?,
-            );
+        let leaf_id = page.leaf_id.clone();
+        let mut has_more = page.has_more;
+        let mut messages: Vec<serde_json::Value> = Vec::with_capacity(page.entries.len());
+        let mut entry_ids: Vec<String> = Vec::with_capacity(page.entries.len());
+        push_message_entries(page.entries, &mut messages, &mut entry_ids)?;
+        let is_user = |m: &serde_json::Value| {
+            m.get("role").and_then(|r| r.as_str()) == Some("user")
+        };
+        let mut boundary = entry_ids.first().cloned();
+        let mut lookback = 0;
+        while lookback < 2
+            && has_more
+            && messages.first().is_some_and(|m| !is_user(m))
+        {
+            let Some(cursor) = boundary.clone() else { break };
+            let Some(older) = fetch(Some(cursor))? else { break };
+            has_more = older.has_more;
+            let mut older_messages = Vec::with_capacity(older.entries.len());
+            let mut older_ids = Vec::with_capacity(older.entries.len());
+            push_message_entries(older.entries, &mut older_messages, &mut older_ids)?;
+            // 上一页最后一条 user 消息之后的部分属于同一轮：整段并入。
+            let last_user = older_messages
+                .iter()
+                .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+            match last_user {
+                Some(idx) => {
+                    has_more = has_more || idx > 0;
+                    boundary = older_ids.first().cloned();
+                    let mut head_messages = older_messages.split_off(idx);
+                    let mut head_ids = older_ids.split_off(idx);
+                    head_messages.append(&mut messages);
+                    head_ids.append(&mut entry_ids);
+                    messages = head_messages;
+                    entry_ids = head_ids;
+                    // 并进来的后缀已让页首落在轮首，停止回看。
+                    break;
+                }
+                None => {
+                    // 整页都没有 user（巨轮内部）：整页并入继续回看。
+                    boundary = older_ids.first().cloned();
+                    let mut head_messages = older_messages;
+                    let mut head_ids = older_ids;
+                    head_messages.append(&mut messages);
+                    head_ids.append(&mut entry_ids);
+                    messages = head_messages;
+                    entry_ids = head_ids;
+                }
+            }
+            lookback += 1;
         }
         Ok(serde_json::json!({
             "messages": messages,
             "entryIds": entry_ids,
-            "hasMore": page.has_more,
-            "leafId": page.leaf_id,
+            "hasMore": has_more,
+            "leafId": leaf_id,
         }))
     }
 

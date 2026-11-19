@@ -83,6 +83,7 @@ import { TurnFileSummary } from "@/components/assistant-ui/elements/turn-file-su
 import { TimelineMarkerRow, MarkerDivider, bucketMarkers, compactionRowView } from "@/components/assistant-ui/elements/timeline-marker";
 import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-store";
 import {
+  ensureFullTranscript,
   loadOlderTranscript,
   transcriptTailStore,
 } from "@/components/assistant-ui/transcript-paging";
@@ -1822,6 +1823,8 @@ const AssistantActionBar: FC<{
     undefined,
   );
   const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  /** 隐藏的官方 ExportMarkdown 触发器：菜单项先补全历史，再程序化点击它。 */
+  const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
   useEffect(
     () => () => {
       if (copiedTimerRef.current !== undefined)
@@ -1915,14 +1918,28 @@ const AssistantActionBar: FC<{
           sideOffset={6}
           className="aui-action-bar-more-content bg-popover text-popover-foreground data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 data-[state=open]:animate-in data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=closed]:animate-out data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-xl p-1.5 shadow-(--shadow-pop)"
         >
-          <ActionBarPrimitive.ExportMarkdown asChild>
-            <ActionBarMorePrimitive.Item className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none">
-              <DownloadIcon className="size-[var(--size-icon-lg)]" />
-              Export as Markdown
-            </ActionBarMorePrimitive.Item>
-          </ActionBarPrimitive.ExportMarkdown>
+          {/* 导出：Tail 水合后 store 只有尾部一页——先补全历史再触发官方导出
+              （导出是显式全量消费面，不允许无声截断）。 */}
+          <ActionBarMorePrimitive.Item
+            className="aui-action-bar-more-item hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm outline-none select-none"
+            onClick={() => {
+              void ensureFullTranscript()
+                .catch((e) => console.error('[export] 全量历史加载失败——按已加载内容导出', e))
+                .finally(() => exportTriggerRef.current?.click())
+            }}
+          >
+            <DownloadIcon className="size-[var(--size-icon-lg)]" />
+            Export as Markdown
+          </ActionBarMorePrimitive.Item>
         </ActionBarMorePrimitive.Content>
       </ActionBarMorePrimitive.Root>
+      {/* 官方导出按钮藏在 DOM 里，由「Export as Markdown」菜单项在补全历史后
+          程序化触发（Tail 水合后 store 只有尾部一页，不能让导出静默截断）。 */}
+      <span aria-hidden="true" className="hidden">
+        <ActionBarPrimitive.ExportMarkdown asChild>
+          <button ref={exportTriggerRef} tabIndex={-1} type="button" />
+        </ActionBarPrimitive.ExportMarkdown>
+      </span>
       {/* 时间放**整条末尾**（ZCode 口径：只读元数据，跟在所有操作之后；
           原先夹在操作钮中间，用户实报"时间位置不对/像在上面"2026-11-15）。 */}
       <MessageTimeLabel />

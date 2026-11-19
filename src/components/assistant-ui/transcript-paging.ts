@@ -149,6 +149,24 @@ export async function loadOlderTranscript(): Promise<boolean> {
   return true
 }
 
+/**
+ * 把当前会话的完整历史补进 store（Tail 水合后只有尾部一页）。
+ *
+ * 仅用于显式全量消费面（导出 Markdown 等）：逐页 loadOlderTranscript 直到
+ * `hasMore=false`；页数上限 64（≈1.6 万条消息）防死循环，超限如实报错。
+ * 失败向上传播（调用方决定是否按已加载内容继续）。
+ */
+export async function ensureFullTranscript(): Promise<void> {
+  let guard = 0
+  while (transcriptTailStore.getState().hasMore) {
+    if (guard >= 64) {
+      throw new Error('历史超过 64 页仍未读完——放弃全量加载')
+    }
+    if (!(await loadOlderTranscript())) return
+    guard += 1
+  }
+}
+
 /** 会话域重置（New Chat / 打开新会话前调用）：清空游标与在途态。 */
 export function resetTranscriptTail(): void {
   transcriptTailStore.setState(emptyTail)

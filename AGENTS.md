@@ -3294,6 +3294,74 @@ Desktop 的 `peerCatalogProblem` 要求 true 才肯把 bot 借进别人的房间
 room-link 状态只在 register 写 `registered`（无 `needs_reauthorization`/
 `unavailable` 的写入者）。
 
+## 多会话并列窗格（2026-11-19/20，hermes `_sessions` 模型落地）
+
+**结论先行**：`session-N` dockview 窗格从"只能看"变成**真正能并行收发**。
+此前 `side_open/side_prompt/side_interrupt` 是恒 `Err` 的占位（rpi 竖链时
+误判"非 main lane 只读"挡住了整条路），agui 对 `thread != "main"` 走
+`side_*` → 非活动窗格一发送就 `200 {"runId":null,"error":"…分栏（rpi 非
+main lane 只读）…"}`（实机复现）。
+
+**根因澄清**：rpi 引擎根本不禁止多会话——`session::build` 每次返回独立
+`HarnessLive`（各自 harness/lane/writer lease/broadcast），"非 main lane
+只读"说的是**同一会话内的 side lane**。限制是宿主 `EngineShared.live:
+Option<…>` 这个单柄假设。hermes 对偶 = `tui_gateway/server.py` 的
+`_sessions` 注册表（每个会话一条活记录）+ `prompt-submit-<sid>` 每轮一线程
++ Desktop 的 session tile（`session-states.ts`：中央缓存摄取**所有**会话事件
+，tile 只是投影）。
+
+**落地（全部在 Rust，前端协议零改动）**：
+
+- `EngineShared` 增 `side: Mutex<HashMap<thread_key, Arc<HarnessLive>>>`；
+  `live`（前台）+ `side`（窗格）+ `retired`（退役保租约）**三张归属表**
+  兜住单写者约束：同一会话文件不允许主柄与窗格、或两个窗格同时在场
+  （重建必撞 "writer lease is already held"）。
+- `side_open(thread, path)`：幂等复用（同键同路径直接 Ok）；`retired`
+  命中 → 迁出复活（不重 acquire lease）；否则按会话文件反推工作区
+  `build_harness`（复用 `workspace_from_session_path`），attach 该桥的
+  `ui_dialog` 邮箱；`watch_runs`（goal 校验）只对新建挂。
+- `prompt_inner` 抽出 `run_prompt_on(live, …)`（前台与窗格共用排水逻辑）；
+  `side_prompt` / `side_interrupt` / `side_lane_busy` / `side_close` 全真。
+  `pi_lane_busy(thread)` 按 thread 路由（main → 前台，窗格键 → 该窗格句柄）。
+- 切前台协调：`open_session` 先查 side 表——同路径句柄直接**上台复用**
+  （不重建，lease 不冲突）；`delete_session` 对窗格在场会话拒绝
+  （"该会话正在窗格中打开"）。窗格未 mount 的句柄暂留 side 表（应用级
+  生命周期；`side_close` 退役入口已备，未接前端）。
+- **已知边界（如实）**：窗格里的 ask/审批卡不渲染（`Thread scoped` 跳过
+  主会话单例的 ApprovalCards/AskCards，后端注册表也只扫前台邮箱）——
+  窗格里触发交互工具会等超时；要对齐 hermes tile 需把 ask/approval 按
+  thread 分桶（后端注册表加 `thread` 维度 + 前端 tile 内渲染），单独一轮。
+  排队/steer 在窗格内是 fail-loud（与主会话同语义）。
+
+**实机 E2E**（`E:\Temp\peer-tabs-e2e.mjs`，仓库外）：新建 A/B 两会话 →
+A 主柄预热落盘 → B 上台（A 退役）→ **主柄 B 与并列窗格 A 同时 POST**，
+两条 SSE 各自收到完整回复（11 / 7），无串扰 → side 上起长 run，
+`pi_lane_busy(side)=true && main=false` → `pi_interrupt(thread=A)` 只停
+窗格 → `pi_open_session(A)` 从 side 表上台复用（`messageCount` 连续）。
+TABS_OK。门禁：cargo test **726** / vitest **1090**（88 文件）。
+
+## 语音 402 诊断（2026-11-19，用户报"语音会话已断开：WSS 连接失败"）
+
+**根因 = MOSS 账户余额不足，不是宿主 bug**。原始握手探针对比（raw
+Upgrade，同端点 `api.mosi.cn/v1/realtime?model=moss-live-1.0`）：
+
+| 请求 | 响应 |
+|---|---|
+| 用户真 key | **402 Payment Required**，body `{"error":{"code":"insufficient_credits","message":"billing error"}}` |
+| 伪 key | 403 `iam api key auth failed` |
+| 无 key | 403 `missing bearer api key` |
+
+即：端点/协议/模型/鉴权通道全部正常，**这个 key 的账户积分用完了**
+（11-15 配 key 实测全链时还有免费额度）。处置 = 平台充值/换 key
+（设置 → 语音 → MOSS API key 只写不读）。
+
+**顺带修**：`pi_voice_moss.rs` 握手错误原本只透传 tungstenite 的
+`HTTP error: 402 Payment Required`，**不含 vendor body**——用户看不出是
+计费问题。新增 `describe_handshake_error`：`Error::Http` 时解 OpenAI 风格
+错误体，附成 `HTTP error: 402 Payment Required（insufficient_credits:
+billing error）`（解不出 body 原样返回）。单测
+`handshake_error_includes_vendor_body` 锁 402 体 + 非 HTTP 错误透传。
+
 ## 侧栏切换性能 + 系统托盘（2026-11-19，两边都照上游对偶）
 
 ### 侧栏会话切换（内置 agent 完成，本仓核验后提交）
@@ -3416,11 +3484,17 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
 - 新 IPC `pi_get_messages_page(before?, limit=256)` → 引擎
   `SessionTree::transcript_page`（**bounded read**，不整树 payload 重放）→
   wire `{messages, entryIds, hasMore, leafId}`。
+- **轮边界回退**：整页会在轮中间切断（页首 assistant/toolResult →
+  水合后 toolResult 找不到宿主部件 = 丢卡）。页首不是 user 消息时回看最多
+  2 页，把上一页「最后一条 user 起」的后缀并入，保证每页从轮首开始；
+  hasMore 相应扣减。
 - 前端 `assistant-ui/transcript-paging.ts`：`hydrateTranscriptTail(actor,
   sessionId)` 取代 7 处 `invoke('pi_get_messages')`（runtime 挂载/切叶/fork/
   回父/branch 切换等全部走它）；`loadOlderTranscript()` 用 `entryIds[0]`
   作 `before` 游标补页，经 actor 新事件 **`PREPEND_HISTORY`** 前插（保留
-  已加载行与在途 run 段，不触碰 currentRunId/usage）。
+  已加载行与在途 run 段，不触碰 currentRunId/usage）；
+  `ensureFullTranscript()` 供导出 Markdown 等显式全量面（先补全再触发官方
+  导出，避免静默截断）。
 - 行 key = 原始条目 id（`msg-<entryId>-<role>`），跨页 prepend 时 React
   key / 树节点身份不漂移。
 - 时间线标记新增 `beforeMessageIndexFromEnd`（后端沿分支单遍统计）：前端
@@ -3430,10 +3504,12 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   纯前端渲染预算展开。
 - **自动命名守卫**：`hasMore` 时 store 首条 user 不是会话开头 → 跳过自动
   命名（不造假标题），可手动重命名。
-- 实测（巨会话 11MB / 2041 条）：切页首条新轮 **808ms**（改前 2.9s）；
-  每页 256 条 99ms（全量 1445ms）；补页 411ms/页；点「显示更早」DOM
-  6→13 轮。**冷开仍由引擎 replay 决定**（0.5MB 362ms、0.8MB 791ms、
-  11MB ~4.5s；热开 3~6ms）——未做 lazy-open，属引擎地板。
+- 实测（巨会话 11MB / 2041 条）：首屏尾页（256 条扩展至轮首，实取
+  303 条）**333ms**（改前全量水合 1445ms）；再补页 606ms（283 条）；UI 全链
+  （点行切换 → 连点两次「显示更早」）DOM 6→17→18 轮、console 零错误（无
+  孤儿 toolResult 告警）。`pi_sessions_index` 共用事实缓存后 **7.7s → 71ms**；
+  bot 行打开 69ms。**冷开仍由引擎 replay 决定**（0.5MB 362ms、0.8MB 791ms、
+  11MB ~4.9s；热开 3~6ms）——未做 lazy-open，属引擎地板。
 - **仍有意不做**：hermes `boundRetainedTranscript` 的 store retention（老行
   从内存释放）——宿主全量留在 actor store，只截留渲染窗；后续压内存再补。
 
