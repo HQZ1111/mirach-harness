@@ -110,15 +110,21 @@ export function parsePendingAsks(raw: unknown): PendingAsk[] {
 export const askBridge = createStore<AskBridgeState>((set) => ({
   pending: [],
   refresh: async () => {
+    let next: PendingAsk[]
     try {
       const raw = await invoke<unknown>('pi_ask_pending')
-      set({ pending: parsePendingAsks(raw) })
+      next = parsePendingAsks(raw)
     } catch (e) {
       if (!String(e).includes('no active session')) {
         console.error('[ask] 挂起问题拉取失败', e)
       }
-      set({ pending: [] })
+      next = []
     }
+    // 结构不变不落 state（每秒轮询 × IPC 新数组 = 订阅者每秒重渲染；
+    // 与 approval-bridge 同款 dedupe，2026-11-19 性能轮）。
+    const prev = askBridge.getState().pending
+    if (JSON.stringify(prev) === JSON.stringify(next)) return
+    set({ pending: next })
   },
   respond: async (id, answers, dismissed) => {
     try {

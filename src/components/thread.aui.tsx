@@ -86,6 +86,15 @@ import {
   groupMessagesIntoTurns,
   isLastContentAssistantOfTurn,
 } from "@/components/assistant-ui/turn-units";
+import {
+  FIRST_PAINT_BUDGET,
+  FULL_TRANSCRIPT_BUDGET,
+  TOP_EDGE_PX,
+  expandBudget,
+  nextBackfillBudget,
+  selectTranscriptWindow,
+  type WindowMessageLike,
+} from "@/components/assistant-ui/transcript-window";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -801,6 +810,7 @@ const MessageTurnList: FC = () => {
   const roleSig = useAuiState((s) =>
     s.thread.messages.map((m) => (m.role === "user" ? "u" : "a")).join(""),
   );
+  const aui = useAui();
   const turns = useMemo(
     () =>
       groupMessagesIntoTurns(
@@ -811,6 +821,51 @@ const MessageTurnList: FC = () => {
       ),
     [ids, roleSig],
   );
+  // ── 转录渲染窗口（hermes transcript-window 移植，2026-11-19）───────────
+  // 切会话先挂尾部小预算，rAF 分步补齐到整页预算；窗口边界落在轮上。
+  // 只裁剪**渲染**，不动 store 与 scrollTop（滚动记忆单一所有者不受扰）。
+  const threadKey = ids[0] ?? "empty";
+  const [renderBudget, setRenderBudget] = useState(FIRST_PAINT_BUDGET);
+  const prevThreadKeyRef = useRef(threadKey);
+  if (prevThreadKeyRef.current !== threadKey) {
+    prevThreadKeyRef.current = threadKey;
+    setRenderBudget(FIRST_PAINT_BUDGET);
+  }
+  useEffect(() => {
+    if (renderBudget >= FULL_TRANSCRIPT_BUDGET) return;
+    const frame = requestAnimationFrame(() =>
+      setRenderBudget((current) => nextBackfillBudget(current)),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [renderBudget]);
+  const window_ = useMemo(() => {
+    const byId = new Map<string, WindowMessageLike>(
+      (aui.thread.getState().messages as readonly (WindowMessageLike & { id: string })[]).map(
+        (m) => [m.id, m],
+      ),
+    );
+    return selectTranscriptWindow(turns, byId, renderBudget);
+  }, [turns, renderBudget, aui, roleSig]);
+  const windowStartRef = useRef(window_.startTurn);
+  windowStartRef.current = window_.startTurn;
+  const showEarlier = useCallback(() => setRenderBudget(expandBudget), []);
+  // 滚到顶再往上滚 = 用户要看更早（hermes shouldAutoShowEarlier 的宿主版：
+  // 轮仍在 / 尚未补齐时不触发）。监听挂在本列表的布局透明包装上，用
+  // closest 找自己的视口——分栏里每个 Thread 各管各的窗口。
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = listRef.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY >= 0) return;
+      const viewport = node.closest('[data-slot="aui_thread-viewport"]');
+      if (!viewport || viewport.scrollTop > TOP_EDGE_PX) return;
+      if (windowStartRef.current <= 0) return;
+      setRenderBudget(expandBudget);
+    };
+    node.addEventListener('wheel', onWheel, { passive: true });
+    return () => node.removeEventListener('wheel', onWheel);
+  }, []);
   // 时间线标记按「第几条消息之前」分桶（ZCode `lightBoundary` 语义：模型
   // 切换落在轮顶，渲染在该轮 user 气泡之前）。
   const markers = useTimelineMarkers();
@@ -828,10 +883,18 @@ const MessageTurnList: FC = () => {
   const hasTailCompactMarker =
     tailMarkers?.some((m) => m.marker.kind === "compact") === true;
   return (
-    <>
-      {turns.map((turn, turnIndex) => {
+    <div ref={listRef} className="contents">
+      {window_.windowed && (
+        <div className="flex justify-center py-1">
+          <Button onClick={showEarlier} size="sm" type="button" variant="ghost">
+            显示更早的消息
+          </Button>
+        </div>
+      )}
+      {turns.slice(window_.startTurn).map((turn, i) => {
         // 该轮首条消息的全局下标
         const firstIdx = ids.indexOf(turn.messageIds[0] ?? "");
+        const turnIndex = window_.startTurn + i;
         const turnMarkers = firstIdx >= 0 ? buckets.get(firstIdx) : undefined;
         return (
           <div
@@ -872,7 +935,7 @@ const MessageTurnList: FC = () => {
           落在列表末尾（= 最新事件的位置），与历史 compact marker 同一壳体。
           end 相在有 tail marker 时由组件自己让位（避免末尾重复）。 */}
       <LiveCompactionRow hasTailCompactMarker={hasTailCompactMarker} />
-    </>
+    </div>
   );
 };
 

@@ -6,6 +6,35 @@
 
 ## 当前状态
 
+**✅ 2026-11-19（晚）：打开/切换会话性能第二轮（hermes 视图窗 + 引擎缓存 + 轮询去重）**
+
+- **用户症状**：打开会话慢、切换长会话更慢、bot 切换也慢（"切换会话不卡顿"）。
+- **分层实测（改前，11MB/2036 条巨会话 01a1df20）**：`pi_get_messages` 冷
+  3.9s/热 1.4s（7.8MB 载荷）；`pi_get_timeline_markers` 0.9s；`pi_get_state`
+  0.35s；`pi_list_sessions` **4.1s（每次 run 收尾都全量重放 39 个会话文件）**。
+  前端 hydrate 转换仅 2ms——瓶颈全在引擎重复重放与 IPC 载荷。
+- **修复一（前端渲染窗，hermes render-weight 移植）**：
+  `render-weight.ts` + `transcript-window.ts`（纯函数 + 9 单测）——
+  FIRST_PAINT=20 → FULL=600 分步、按轮累计不切开、`显示更早`/滚顶展开；
+  接线 `thread.aui.tsx::MessageTurnList`（切会话复位预算）。巨会话 DOM 只挂
+  尾部 18 轮（原来 200+ 全挂）。
+- **修复二（Rust 派生面缓存，`pi_session.rs`）**：messages / markers 按
+  `(path,len,mtime,leaf)` 缓存（leaf 入键防分支切换串数据）；`list_sessions`
+  逐文件事实缓存 + header 改只读首行；`snapshot_stats` stat 缓存。
+  实测热路径：list_sessions 4137→**4ms**、state 352→**4ms**、
+  markers 955→**5ms**、get_messages 1661→**601ms**（余量是 7.8MB IPC 本身）。
+- **修复三（每秒 ~100ms 主线程尖峰，空转也有）**：审批/提问桥每秒轮询**无条件
+  setState 新数组** → 侧栏会话树每秒整棵同步重渲染（侧栏 rows/对话框/选项
+  菜单全在，DOM 零变更）。修复 = 两桥结构相等去重 + 侧栏布尔订阅
+  (`pending.length > 0`) + `ITEM_COMPONENTS` 常量提升 + 行 memo/计数订阅。
+  修复后空转 6s **longtask 归零**。
+- **端到端复测**：巨会话切换首轮 DOM 2.9s、总阻塞 1.9s（改前 3.6s+）、
+  只渲染尾部 18 轮；普通会话回到引擎地板（热 40-600ms）。
+- **遗留（有意不移植）**：hermes 的后端 tail 分页 + store retention——宿主仍是
+  全量水合架构；巨会话首次打开仍付一次全量 IPC（热 0.6s）。若后续要再压，
+  方向 = `Session::transcript_page`（引擎已有 API）做真正的增量水合。
+- 门禁：vitest 1084（87 文件）/ cargo test 724 / tsc 非镜像区 0 错。
+
 **✅ 2026-11-19（下午）：侧栏会话切换性能（hermes 对偶）+ 系统托盘 ZCode 对齐**
 
 - **侧栏切换**（内置 agent 完成，本仓核验提交）：`runtime.tsx` 三处——同会话短路
@@ -27,12 +56,12 @@
 **✅ 2026-11-19：hermes peer lending wire 路由层（WS 方法分派 + `/v1/runs`）**
 
 - grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest）已在前一轮落地；本轮在其上补齐对端可调用面，让 hermes Desktop/网关能把 mirach 当 peer lender。
-- **WS `/api/ws?token=`**（axum）：accept 首帧 `gateway.ready`（含 `room_link.catalog`）；方法表 = `gateway.ping` / `profiles.list` / `groups.capabilities` / `groups.peer.invite` / `groups.peer.revoke`，未知方法答 `-32601`。
-- **HTTP（peer 服务同端口）**：`GET /v1/room-members/capabilities`、`POST /v1/room-members/invitations`（201）、`POST /v1/room-members/grants/refresh`、`POST /v1/room-members/grants/revoke`（空体幂等）、`POST /v1/room-members/runs/close`；以及 `POST /v1/runs`（幂等 admission，202）、`GET /v1/runs/{id}`（含 `waiting_for_approval`）、`POST /v1/runs/{id}/stop`、`POST /v1/runs/{id}/approval`（仅 `once`/`deny`）、`POST /v1/runs/{id}/steer`（运行中注入指导）、`POST /v1/runs/{id}/resolve-unknown`。
+- **WS `/api/ws?token=`**（axum）：accept 首帧 `gateway.ready`（含 `room_link.catalog`，`change_events:true`）。方法面 = lender（`gateway.ping` / `profiles.list` / `groups.capabilities` / `groups.peer.invite` / `groups.peer.revoke`）+ home（`groups.peer.register` 带 live probe、`groups.list/state/log/create/send/stop/continue/retry/discard/driver_append` 走 `pi_groups::rpc_dispatch`；`groups.state` 带 `driver_status.peer_routes`）+ 会话（`session.create/resume/list/interrupt/compress`、`prompt.submit` → bot 泳道）；未知方法 `-32601`。`groups.*` 变更成功后向所有 peer WS 扇出 `groups.changed`（`broadcast_id` = 进程代际 + 计数器）。
+- **HTTP（peer 服务同端口，全量）**：`GET /v1/room-members/capabilities`、`POST /v1/room-members/invitations`（201）、`POST /v1/room-members/grants/refresh`、`POST /v1/room-members/grants/revoke`（空体幂等）、`POST /v1/room-members/runs/close`；`POST /v1/runs`（grant 幂等 admission 202；无 grant 走 Bearer 宿主令牌的 API-key 普通 runs，房间字段缺 grant → 403 `room_grant_required`）、`GET /v1/runs/{id}`（含 `waiting_for_approval`）、`GET /v1/runs/{id}/events`（SSE，`id:` 序号 + `run.status`/终局 `run.<status>`）、`POST /v1/runs/{id}/stop`、`/approval`（仅 `once`/`deny`）、`/clarify`、`/steer`、`/resolve-unknown`。
 - **台账**：`src-tauri/src/hosted_rooms/grants.rs`（撤销围栏 + target reservation 判定，复用 P1 已建的第 4 层表）＋ `src-tauri/src/pi_peer_runs.rs`（运行记录 / 房间↔隐藏泳道映射，独立 `peer-runs.db`）。
-- **成员轮次**：`/v1/runs` 的 prompt 进 bot 泳道（`Group: <room_id>`）；`pi_bot_state` 新增 `last_status` / `last_output`，monitor 写回 durable 状态；stop 走 `pi_bot_interrupt`，steer 走 `harness.steer`（`pi_bot_steer`），approval 走 `pi_bot_approval_respond`。
-- **实测（实机 app + mock 对端）**：WS ready/capabilities/invite/revoke 全通；HTTP invitations 201、capabilities 200、revoke 后 403 `room_reauthorization_required`；`POST /v1/runs` 202 → poll running → steer 200 accepted → 模型最终 `OK`；stop `stopping` → `cancelled`；runs/close `{closed:true}`。门禁：cargo check / cargo test 724 / vitest 1073 全绿。
-- **如实裁剪**：WS 上 `driver:false`（群聊驱动仍在本仓 canonical-group-driver）；clarify 回执未做；未实现 hermes API-key 普通 runs 面（peer 面只服务 grant 路径）；resolve-unknown 以本宿主 run_id 作 admission_id 匹配。
+- **成员轮次**：`/v1/runs` 的 prompt 进 bot 泳道（`Group: <room_id>`）；`pi_bot_state` 新增 `last_status` / `last_output`，monitor 写回 durable 状态；stop → `pi_bot_interrupt`，steer → `harness.steer`，approval → `pi_bot_approval_respond`，clarify → `pi_bot_answer_clarify`。
+- **实测（实机 app）**：WS ready/capabilities/invite/revoke/session.create/prompt.submit/session.resume/session.list(33)/groups.list(3) 全通；HTTP invitations 201、revoke 后 403、`/v1/runs` 202 → steer accepted → `completed`；API-key runs 202 → SSE `run.status`→`run.completed` → 真模型 `二加二等于四。`；WS session 真模型 `三加三等于六。`；未知方法 `-32601`。门禁：cargo check / cargo test 724 / vitest 1082 全绿。
+- **与上游的差异（有因，非裁剪）**：`driver:false` + `persistent_process:false`（桌面进程 + 驱动在本仓前端）；`profiles.list` 单行；SSE 事件按 durable 状态迁移生成；`resolve-unknown` 用本宿主 run_id 作 admission_id。
 
 **✅ 2026-11-18（第五波）：状态面板剩余缺口——目标迭代行 + 完成校验（状态机进 rpi-goal 插件）+ 工作流分区（orchestrator 派生）**
 

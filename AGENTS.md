@@ -3166,17 +3166,27 @@ grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest�
 对端可调用的**路由层**，让 hermes Desktop/网关能把 mirach 当作 peer lender：
 
 - **WS `/api/ws?token=`**（axum WebSocket，挂在 peer 服务上）：
-  accept 后首帧 `gateway.ready`（含 `room_link.catalog`）；方法表只暴露 lender 面：
-  `gateway.ping`、`profiles.list`、`groups.capabilities`、`groups.peer.invite`、
-  `groups.peer.revoke`。未知方法答 `-32601`。
+  accept 后首帧 `gateway.ready`（含 `room_link.catalog`）。方法面 = lender 面
+  （`gateway.ping` / `profiles.list` / `groups.capabilities` / `groups.peer.invite` /
+  `groups.peer.revoke`）+ **home 面**（`groups.peer.register` 经 `pi_groups::rpc_dispatch`
+  并带 live `_probe` 探测；`groups.list/state/log/create/send/stop/continue/retry/discard/
+  driver_append` 同一校验链）+ **会话面**（`session.create/resume/list/interrupt/compress`、
+  `prompt.submit` → bot 泳道）。未知方法答 `-32601`；`groups.state` 带
+  `driver_status.peer_routes`（Desktop `peerMemberStates` 读它）。
+- **`groups.changed` 真实扇出**：`groups.*` 变更成功后（IPC 与 peer WS 共用
+  `pi_groups::rpc_dispatch` 入口）向所有 peer WS 广播 `{room_ids, broadcast_id}`；
+  `gateway.ready` 的 `change_events` 为 `true`，`replay_epoch` = 进程代际（毫秒）。
 - **HTTP（同一 peer 服务）**：
   `GET /v1/room-members/capabilities`；`POST /v1/room-members/invitations`（201）；
   `POST /v1/room-members/grants/refresh`（403 `room_reauthorization_required` /
   `room_execution_policy_changed`）；`POST /v1/room-members/grants/revoke`（空体幂等）；
-  `POST /v1/room-members/runs/close`；以及 `POST /v1/runs`（幂等 admission，202）、
-  `GET /v1/runs/{id}`（可轮询状态，含 `waiting_for_approval`）、
+  `POST /v1/room-members/runs/close`；以及 `POST /v1/runs`（幂等 admission，202；
+  无 grant 时走 Bearer 宿主令牌的 API-key 普通 runs 面，房间字段无 grant 一律
+  `room_grant_required`）、`GET /v1/runs/{id}`（可轮询状态，含 `waiting_for_approval`）、
+  `GET /v1/runs/{id}/events`（SSE，`id:` 序号 + `run.status` / 终局 `run.<status>`）、
   `POST /v1/runs/{id}/stop`（fenced，`stopping`）、
   `POST /v1/runs/{id}/approval`（仅 `once`/`deny`）、
+  `POST /v1/runs/{id}/clarify`（回灌 todo ask 邮箱）、
   `POST /v1/runs/{id}/steer`（运行中注入指导，`accepted:true`）、
   `POST /v1/runs/{id}/resolve-unknown`。
 - **台账**：`src-tauri/src/hosted_rooms/grants.rs`——撤销围栏
@@ -3186,14 +3196,18 @@ grant 基础层（HMAC 签发/校验/scope/fingerprint/execution policy digest�
   与 state.db 分库）。
 - **成员轮次落地**：`/v1/runs` 的 prompt 转进 bot 泳道（`Group: <room_id>` 会话），
   `pi_bot_state` 增 `last_status` / `last_output` 供轮询终局；monitor 线程在轮次结束后
-  写回 durable 状态，`stop` 走 `pi_bot_interrupt`，`approval` 走 `pi_bot_approval_respond`。
-- **有意裁剪（如实）**：WS 上不声称 canonical room driver（`driver:false`；群聊驱动仍在
-  mirach 自己的 canonical-group-driver）；clarify 回执未做；未实现 hermes API-key 的普通
-  runs 面（peer 面只服务 grant 路径）；resolve-unknown 以本宿主 run_id 作 admission_id
-  匹配，语义按「网关重启丢进程内状态」收口。
+  写回 durable 状态，`stop` 走 `pi_bot_interrupt`，`steer` 走 `harness.steer`
+  （`pi_bot_steer`），`approval` 走 `pi_bot_approval_respond`，`clarify` 走
+  `pi_bot_answer_clarify`。
+- **与上游的已知差异（非裁剪借口，均有因）**：`driver:false` + `persistent_process:false`
+  （宿主是桌面进程，群聊驱动在 mirach 自己的 canonical-group-driver；不假称常驻网关）；
+  `profiles.list` 单行（mirach 无 profile 系统，bot 是插件概念）；
+  SSE 事件按 durable 状态迁移生成（宿主没有 hermes 的 token 级 agent 回调流）；
+  `resolve-unknown` 以本宿主 run_id 作 admission_id 匹配。
 - 门禁：`cargo check` / `cargo test`（724 条，含新增 7 条 grant/dispatch 单测与
-  5 条台账单测）/ `vitest 1073` 全绿；实机 mock 对端全链 E2E 通过（WS invite/revoke、
-  HTTP invitations/capabilities/runs/stop/close，真模型回复）。
+  5 条台账单测）/ `vitest 1082` 全绿；实机 E2E 全链通过（WS invite/revoke/session.*/
+  groups.list、HTTP invitations/capabilities/runs/stop/steer/SSE/API-key runs、
+  runs/close，真模型回复）。
 
 ## 侧栏切换性能 + 系统托盘（2026-11-19，两边都照上游对偶）
 
@@ -3244,3 +3258,68 @@ Rust 侧在 setup 里建（`main.rs`），**核心语义早就在**（左键/双
 - 托盘图标 = `app.default_window_icon()`（bundle icon.ico）；tooltip = "Mirach Harness"。
 - 门禁：`cargo check` 0 错 / `cargo test` 724 过 / `vitest` 1073 过（86 文件）/
   tsc 非镜像区 0 错；实机 exe 启动 10s 存活（托盘创建无 panic，已杀干净）。
+
+## 会话打开/切换性能第二轮（2026-11-19，用户："切换会话不卡顿……切换长会话
+## 更慢，bot 切换也很慢"；"参考 hermes 是怎么管理的"）
+
+**分层实测（先测再改，11MB / 2036 条消息的巨会话 01a1df20 为基准）**：
+引擎侧 `pi_get_messages` 冷 3.9s / 热 1.4s（7.8MB 载荷）、
+`pi_get_timeline_markers` 0.9s、`pi_get_state` 0.35s（内部 `snapshot_stats`
+全文件重扫）、`pi_list_sessions` **4.1s**（每次 run 收尾的 refreshThreads 都
+付一遍：read_snapshot 重放全部 39 个会话 + 又一次 `read_to_string` 整文件
+只为读 header 首行）。前端 hydrate 转换本身只要 2ms（7.8MB → 140 条
+TurnMessage）——**地板全在引擎重复重放 + IPC 载荷**。
+
+### ① hermes 视图窗移植（`render-weight.ts` + `transcript-window.ts`）
+
+hermes 的 render-weight + transcript window 逐条移植（纯函数 + 9 条单测）：
+`partPaintWeight`（text/reasoning=ceil(chars/512)；todo 族=0；卡类工具 6；
+其余 1）、`selectTranscriptWindow`（**从最新往回按轮累计**，够预算且 ≥
+MIN_VISIBLE_TURNS=8 才停；轮永不切开）、FIRST_PAINT=20 → FULL=600 分步
+（rAF `nextBackfillBudget` +290/帧）→ `expandBudget`（"显示更早"按钮 /
+滚到顶继续上滚）。接线在 `thread.aui.tsx::MessageTurnList`：**切会话按
+`ids[0]` 复位预算**（render 期 reset，不靠 effect）、只裁**渲染**不动
+store 与 scrollTop。**与 hermes 的差异**：后端分页（tail 120 行
+`getOlderSessionMessages`）**未移植**——宿主 store 仍是全量水合，此窗只管
+DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到 0.6s）。
+
+### ② 引擎派生面缓存（`pi_session.rs`，宿主侧零引擎改动）
+
+- **`messages` / `timeline_markers`**：`DerivedCache` 键 = **path + len +
+  mtime + leaf**。leaf 必须入键——切分支只改会话叶不改文件 stat，只按 stat
+  会把旧分支消息面发出去。文件未落盘（新会话）不进缓存。
+- **`list_sessions`**：`session_facts_cache`（path → stat + 整行）逐文件
+  复用；header 改 `read_first_line`（BufReader 只读一行，原来整文件
+  `read_to_string`）；坏文件仍每次重试（失败不缓存）。
+- **`snapshot_stats`**：`stats_cache` stat 校验（`state()` 高频调用）。
+- 实测：`list_sessions` 4137→**4ms**（热）、`state` 352→**4ms**、
+  `markers` 955→**5ms**、`get_messages` 1661→**601ms**（余下是 7.8MB IPC
+  管道本身，冷路径仍 1.4s 一次）。全部按 append-only 语义失效（文件一写
+  stat 即变），不引入 TTL / 猜测失效。
+
+### ③ 每秒 ~100ms 主线程尖峰（空转也有）——根因与修复
+
+空转 profile 每秒一个 101~152ms 长任务、同步 flush 贯穿侧栏整棵子树
+（rows / 两行对话框 / 侧栏选项菜单），但**零 DOM 变更**。根因链：
+`approval-cards` 每秒轮询 → `approvalBridge.setState({pending: 新数组})`
+**无条件** → `useThreadDisplay` 直接订阅 `s.pending` 数组 → 会话树每秒
+重渲染；`components={{ ThreadListItem }}` 内联对象再把行的 memo 打穿。
+三处修复：① 两个 bridge（approval/ask）refresh 做**结构相等去重**（真变化
+才 setState，错误路径语义不变）；② 侧栏改布尔订阅
+`s.pending.length > 0`（第二道闸）；③ `ITEM_COMPONENTS` 提升为模块级常量
++ `SessionRowScope`/`ThreadListItem` memo 化 + `forkPointCount` 改订阅计数
+（数组引用不再击穿整列表）。修复后空转 6s **longtask = 0**。
+
+### ④ 端到端复测（巨会话 11MB/2036 条，dev 模式）
+
+点击切到巨会话：首条新轮 DOM **2.9s**（窗口按钮同帧出现）；DOM 只挂
+**尾部 18 轮**（不再全量 200+ 轮）；总阻塞 1.9s（此前 3.6s，最大单次
+0.96s = 18 轮 dev 版提交）。小/中会话切换回到引擎地板（热 ~40-600ms）。
+`vitest 1084`（87 文件）/ `cargo test 724` / tsc 非镜像区 0 错。
+
+**遗留（有意不移植）**：hermes 的后端 tail 分页 + store retention——宿主
+全量水合架构不动（改动量/回归面大），巨会话首开仍付一次全量 IPC（热
+0.6s）；`thread-list.aui.tsx` 的 memo 家族已在，但行订阅表若再出现
+「每秒全树重渲染」症状，先查两类模式：**轮询桥无条件 setState** 与
+**内联对象/数组订阅**。
+

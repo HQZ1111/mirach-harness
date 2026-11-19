@@ -43,6 +43,7 @@ import {
 import {
   createContext,
   forwardRef,
+  memo,
   useContext,
   useEffect,
   useMemo,
@@ -165,6 +166,29 @@ interface SessionListCtxValue {
 }
 
 const SessionListContext = createContext<SessionListCtxValue | null>(null);
+
+/**
+ * 逐行的 SessionListContext 作用域（2026-11-19 性能轮）。
+ *
+ * 原先行工厂里内联 `value={{ ...ctxValue, group, meta }}` 每次列表重渲染都
+ * 换引用 → **每一行**的 context 消费者全部重渲染（切会话实测：30 行 ×
+ * Radix tooltip/Presence ref 链 + 每行的重命名/删除对话框骨架 ≈ 静默
+ * 150-250ms，且 Radix 的 `getAnimationName` 被放大到 75ms）。把合并值挪进
+ * 带 useMemo 的组件后，值只在 group/meta（rowMetaCache 缓存，未变行同引用）
+ * 变化时才换——未变的行不再跟着列表重渲染。
+ */
+const SessionRowScope: FC<{
+  group: SessionListCtxValue["group"];
+  meta?: SessionRowMeta;
+  children: ReactNode;
+}> = ({ group, meta, children }) => {
+  const parent = useContext(SessionListContext);
+  const value = useMemo<SessionListCtxValue>(
+    () => ({ ...(parent ?? ({} as SessionListCtxValue)), group, meta }),
+    [parent, group, meta],
+  );
+  return <SessionListContext.Provider value={value}>{children}</SessionListContext.Provider>;
+};
 
 // ── 顶部壳：搜索行（hermes SearchField 形制）───────────────────────────────
 
@@ -391,11 +415,14 @@ const useThreadDisplay = (searchQuery: string) => {
   // 会话 → 挂在 mainThreadId）；working = runtime isRunning + mainThreadId。
   const isRunning = useAuiState((s) => s.thread.isRunning);
   const mainThreadId = useAuiState((s) => s.threads.mainThreadId);
-  const pendingApprovals = useStore(approvalBridge, (s) => s.pending);
+  // 审批挂起面只取「有无」布尔（needsInput 判定就是非空）——直接订阅
+  // pending 数组会让本组件对数组引用敏感（轮询每秒新数组 = 整棵会话树
+  // 每秒重渲染；引用去重已在 approval-bridge，这里是第二道闸）。
+  const hasPendingApprovals = useStore(approvalBridge, (s) => s.pending.length > 0);
   const seen = useSessionUnread((s) => s.seen);
   const markers = useSessionUnread((s) => s.markers);
   const runningThreadId = isRunning ? mainThreadId : null;
-  const needsInputThreadId = pendingApprovals.length > 0 ? mainThreadId : null;
+  const needsInputThreadId = hasPendingApprovals ? mainThreadId : null;
 
   const statusBuckets = useMemo(() => {
     const map = new Map<string, SessionStatusBucket>();
@@ -1218,7 +1245,10 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     disclosure?: { enter?: number; exit?: number },
   ) => {
     const row = (
-      <ThreadListPrimitive.ItemByIndex index={indexOfId.get(id) ?? 0} components={{ ThreadListItem }} />
+      <ThreadListPrimitive.ItemByIndex
+        components={ITEM_COMPONENTS}
+        index={indexOfId.get(id) ?? 0}
+      />
     );
     // 搜索段不挂 sortable（hermes 搜索结果段不接 ReorderableList）——
     // 无 SortableRowBridge ⇒ ThreadListItem 无 bindings ⇒ 跨面拖照常、
@@ -1242,14 +1272,14 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     if (disclosure?.enter !== undefined) vars["--disclose-index"] = disclosure.enter;
     if (disclosure?.exit !== undefined) vars["--disclose-out-index"] = disclosure.exit;
     return (
-      <SessionListContext.Provider key={key} value={{ ...ctxValue, group, meta: metasById.get(id) }}>
+      <SessionRowScope key={key} group={group} meta={metasById.get(id)}>
         <div
           className={cls === "" ? undefined : cls}
           style={Object.keys(vars).length === 0 ? undefined : (vars as React.CSSProperties)}
         >
           {body}
         </div>
-      </SessionListContext.Provider>
+      </SessionRowScope>
     );
   };
 
@@ -1578,7 +1608,7 @@ const ACTION_ICONS: Record<SessionActionId, FC<{ className?: string }>> = {
   delete: TrashIcon,
 };
 
-export const ThreadListItem: FC = () => {
+const ThreadListItemInner: FC = () => {
   const isRunning = useAuiState((s) => s.threadListItem.isRunning);
   const threadId = useAuiState((s) => s.threadListItem.id);
   const title = useAuiState((s) => s.threadListItem.title);
@@ -1588,7 +1618,10 @@ export const ThreadListItem: FC = () => {
   const isPinned = useSessionManage((s) => s.pinned.includes(threadId));
   // fork 点清单（活动会话才谈得上「分支」——pi fork 作用于当前打开的会话
   // 文件；非活动行/无落盘 user 消息 → 该项禁用）。
-  const forkPoints = useStore(branchBridge, (s) => s.forkPoints);
+  // 订阅只取**计数**（原始值）：数组成交引用会在切会话的 requestRefresh 里
+  // 整体更换，按数组订阅会让每一行都跟着重渲染；完整清单在动作触发时从
+  // getState() 现取（2026-11-19 性能轮）。
+  const forkPointCount = useStore(branchBridge, (s) => s.forkPoints.length);
   const ctx = useContext(SessionListContext);
   // dnd-kit 行绑定（SortableRowBridge 提供；搜索段 = null ⇒ 不可排、跨面照拖）。
   const sortable = useContext(SortableRowContext);
@@ -1640,9 +1673,10 @@ export const ThreadListItem: FC = () => {
       });
     },
     branch: () => {
-      const last = forkPoints[forkPoints.length - 1];
+      const points = branchBridge.getState().forkPoints;
+      const last = points[points.length - 1];
       if (!last) return;
-      branchBridge.getState().requestFork(forkPoints.length - 1, last.text);
+      branchBridge.getState().requestFork(points.length - 1, last.text);
     },
     export: () => {
       if (typeof path !== "string") {
@@ -1663,11 +1697,11 @@ export const ThreadListItem: FC = () => {
     () =>
       projectSessionActions({
         pinned: isPinned,
-        branchDisabled: !isActive || forkPoints.length === 0,
+        branchDisabled: !isActive || forkPointCount === 0,
         unread: isUnread,
         archived: isArchived,
       }),
-    [isPinned, isActive, forkPoints, isUnread, isArchived],
+    [isPinned, isActive, forkPointCount, isUnread, isArchived],
   );
 
   // ── 行尾标注（hermes session-row figures 段照抄）：
@@ -1976,3 +2010,14 @@ export const ThreadListItem: FC = () => {
     </>
   );
 };
+
+/** 会话行（memo 化，2026-11-19 性能轮）：组件无 props，自身订阅（useAuiState /
+ *  useStore / context）照常触发重渲染；父列表的重渲染不再波及未变的行——
+ *  切会话实测整侧栏 30 行的重渲染风暴（含每行 Radix 包装的 ref/Presence 与
+ *  对话框骨架）由此消掉。 */
+export const ThreadListItem = memo(ThreadListItemInner);
+
+/** `ItemByIndex` 的组件表——**模块级常量**：内联对象字面量每次渲染都是新
+ *  引用，若被当作 props 透传会把行的 memo 比对打穿（2026-11-19 性能轮，
+ *  与 memo 化配套）。 */
+const ITEM_COMPONENTS = { ThreadListItem } as const;

@@ -324,7 +324,61 @@ pub(crate) fn list_runtime() -> &'static PiRuntime {
 
 // ── 引擎 ────────────────────────────────────────────────────────────────────
 
-struct EngineShared {
+/// 会话派生面缓存条目：`messages()` / `timeline_markers()` 的序列化结果。
+///
+/// 为什么要缓存（2026-11-19 性能轮实测）：冷 replay 一个 11MB/2036 条条目的
+/// 会话文件，`pi_get_messages` ≈ 3.9s（热 1.4~2.1s）、
+/// `pi_get_timeline_markers` ≈ 0.9s、`pi_get_state`（内部走
+/// `snapshot_stats` 全文件重扫）≈ 0.3s。切换页签 / 轮询会反复付这笔账，
+/// 而文件是 append-only：只要 stat 没变结果就不变。
+///
+/// **键必须含 leaf**：切分支（rewind / fork 回到兄弟叶）只改会话叶，不改
+/// 文件 stat——只按 stat 缓存会把旧分支的消息面发出去（错误数据，不是
+/// 性能问题）。`path` 一并入键，活动会话切换即自然失效。
+struct DerivedCache {
+    path: PathBuf,
+    len: u64,
+    mtime_ms: u64,
+    leaf: Option<String>,
+    value: Arc<serde_json::Value>,
+}
+
+/// `pi_list_sessions` 的单文件事实（header id/cwd + name + messageCount），
+/// stat 不变即整行复用。会话文件 append-only，rename 也会追加条目 → mtime 变。
+struct SessionFactsCache {
+    len: u64,
+    mtime_ms: u64,
+    row: serde_json::Value,
+}
+
+/// 文件 stat 指纹（len + mtime 毫秒）。读元数据失败传播（规矩 12）。
+fn file_stamp(path: &Path) -> Result<(u64, u64), String> {
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("会话文件状态读取失败 {}: {e}", path.display()))?;
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Ok((meta.len(), mtime_ms))
+}
+
+/// 只读首行（header），不整文件 read_to_string——巨文件上一条 header 读取
+/// 曾把整个 11MB 读进内存。
+fn read_first_line(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(file).read_line(&mut line).ok()?;
+    if line.is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+pub(crate) struct EngineShared {
     rt: PiRuntime,
     cwd: PathBuf,
     /// 会话在场态（None = 未创建/已 discard）
@@ -339,6 +393,14 @@ struct EngineShared {
     /// 句柄一起释放。
     retired: Mutex<HashMap<PathBuf, Arc<HarnessLive>>>,
     model_line: Mutex<String>,
+    /// 活动会话消息历史缓存（键 = path + stat + leaf，见 `DerivedCache`）。
+    messages_cache: Mutex<Option<DerivedCache>>,
+    /// 活动会话时间线标记缓存（同上键）。
+    markers_cache: Mutex<Option<DerivedCache>>,
+    /// `pi_list_sessions` 每文件事实缓存（键 = path，stat 校验）。
+    session_facts_cache: Mutex<HashMap<PathBuf, SessionFactsCache>>,
+    /// 活动会话 stat → SessionStats 缓存（`state()` 高频调用；文件不变即复用）。
+    stats_cache: Mutex<Option<(PathBuf, u64, u64, SessionStats)>>,
 }
 
 struct HarnessLive {
@@ -595,6 +657,10 @@ impl PiEngine {
                 live: Mutex::new(None),
                 retired: Mutex::new(HashMap::new()),
                 model_line: Mutex::new("引擎待启动".into()),
+                messages_cache: Mutex::new(None),
+                markers_cache: Mutex::new(None),
+                session_facts_cache: Mutex::new(HashMap::new()),
+                stats_cache: Mutex::new(None),
             }),
             approvals,
             asks,
@@ -702,6 +768,11 @@ impl PiEngine {
             .map_err(|_| "锁中毒".to_string())?
             .replace(installed);
         self.retire_previous(previous)?;
+        // Arm the plugin-side completion bridge for this session: while armed,
+        // the goal worker withholds its settled-boundary continuation until the
+        // host reports a verdict (`_verify-start`/`_verify-result`). Idempotent;
+        // a session without rpi-goal just logs and moves on.
+        crate::pi_goal_verify::arm_goal_verification(&self.shared);
         self.approvals.cleanup();
         self.asks.cleanup();
         Ok(())
@@ -1256,7 +1327,6 @@ impl PiEngine {
     ///   不在 header 里，重启后自定义名/消息数全丢。
     pub fn list_sessions(&self) -> Result<serde_json::Value, String> {
         let base = self.session_root(&self.shared.cwd);
-        let mut rows: Vec<serde_json::Value> = Vec::new();
         // 会话目录还不存在 = 从没跑过会话（正常态：空列表，不是错误——
         // 与 cron jobs "文件不存在 = 空表" 同语义）。其它 IO 错误传播。
         let dirs = match std::fs::read_dir(&base) {
@@ -1303,66 +1373,94 @@ impl PiEngine {
         if files_to_scan.is_empty() {
             return Ok(serde_json::Value::Array(Vec::new()));
         }
-        // 只读快照：不抢 writer lease（活动会话也能列出），reducer 与引擎同源。
-        let fs: Arc<dyn rpi_tools::FileSystem> = Arc::new(
-            rpi_tools::os_env::OsExecutionEnv::with_cwd(self.shared.cwd.clone()),
-        );
-        let facts = self.shared.rt.block_on(async {
-            let mut out = Vec::with_capacity(files_to_scan.len());
+        // 事实缓存（2026-11-19 性能轮）：会话文件 append-only，stat 不变 →
+        // header/name/messageCount 整行复用。巨会话（11MB/2036 条）每次
+        // read_snapshot 重放约数秒，侧栏刷新 / run 收尾都会反复触发。
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        let mut pending: Vec<(PathBuf, u64, u64)> = Vec::new();
+        {
+            let cache = self
+                .shared
+                .session_facts_cache
+                .lock()
+                .map_err(|_| "会话事实缓存锁中毒".to_string())?;
             for (path, meta) in &files_to_scan {
-                let storage = match JsonlSessionStorage::read_snapshot(
-                    fs.clone(),
-                    &path.to_string_lossy(),
-                    Arc::new(SystemClock),
-                    Arc::new(DefaultIdGenerator::new()),
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    // 坏文件/半写：跳过该行但必须可见（不静默丢弃整表）
-                    Err(e) => {
-                        eprintln!("[pi] 会话快照读取失败 {}: {e}", path.display());
-                        continue;
-                    }
-                };
-                let session = Session::new(
-                    Arc::new(storage) as Arc<dyn rpi_harness::session::types::SessionStorage>,
-                    None,
-                );
-                let name = session.get_name().await.ok();
-                let stats = session.get_stats().await.ok();
-                out.push((path.clone(), meta.clone(), name, stats));
-            }
-            out
-        });
-        for (path, meta, name, stats) in facts {
-            // 头信息（id/cwd）从首行取：只读一次小文件，不重放整棵树。
-            let first = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|t| t.lines().next().map(String::from))
-                .and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
-            let (id, cwd) = match &first {
-                Some(h) => (
-                    h.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    h.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                ),
-                None => (String::new(), String::new()),
-            };
-            rows.push(serde_json::json!({
-                "path": path.to_string_lossy(),
-                "id": id,
-                "cwd": cwd,
-                "timestamp": "",
-                "messageCount": stats.as_ref().map(|s| s.message_count),
-                "lastModifiedMs": meta
+                let mtime_ms = meta
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0),
-                "sizeBytes": meta.len(),
-                "name": name,
-            }));
+                    .unwrap_or(0);
+                match cache.get(path) {
+                    Some(c) if c.len == meta.len() && c.mtime_ms == mtime_ms => {
+                        rows.push(c.row.clone());
+                    }
+                    _ => pending.push((path.clone(), meta.len(), mtime_ms)),
+                }
+            }
+        }
+        if !pending.is_empty() {
+            // 只读快照：不抢 writer lease（活动会话也能列出），reducer 与引擎同源。
+            let fs: Arc<dyn rpi_tools::FileSystem> = Arc::new(
+                rpi_tools::os_env::OsExecutionEnv::with_cwd(self.shared.cwd.clone()),
+            );
+            let facts = self.shared.rt.block_on(async {
+                let mut out = Vec::with_capacity(pending.len());
+                for (path, len, mtime_ms) in &pending {
+                    let storage = match JsonlSessionStorage::read_snapshot(
+                        fs.clone(),
+                        &path.to_string_lossy(),
+                        Arc::new(SystemClock),
+                        Arc::new(DefaultIdGenerator::new()),
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        // 坏文件/半写：跳过该行但必须可见（不静默丢弃整表）
+                        Err(e) => {
+                            eprintln!("[pi] 会话快照读取失败 {}: {e}", path.display());
+                            continue;
+                        }
+                    };
+                    let session = Session::new(
+                        Arc::new(storage) as Arc<dyn rpi_harness::session::types::SessionStorage>,
+                        None,
+                    );
+                    let name = session.get_name().await.ok();
+                    let stats = session.get_stats().await.ok();
+                    out.push((path.clone(), *len, *mtime_ms, name, stats));
+                }
+                out
+            });
+            let mut cache = self
+                .shared
+                .session_facts_cache
+                .lock()
+                .map_err(|_| "会话事实缓存锁中毒".to_string())?;
+            for (path, len, mtime_ms, name, stats) in facts {
+                // 头信息（id/cwd）从首行取：只读首行，不整文件读、不重放整棵树。
+                let first = read_first_line(&path)
+                    .and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok());
+                let (id, cwd) = match &first {
+                    Some(h) => (
+                        h.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        h.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    ),
+                    None => (String::new(), String::new()),
+                };
+                let row = serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "id": id,
+                    "cwd": cwd,
+                    "timestamp": "",
+                    "messageCount": stats.as_ref().map(|s| s.message_count),
+                    "lastModifiedMs": mtime_ms,
+                    "sizeBytes": len,
+                    "name": name,
+                });
+                rows.push(row.clone());
+                cache.insert(path, SessionFactsCache { len, mtime_ms, row });
+            }
         }
         rows.sort_by(|a, b| {
             let av = a["lastModifiedMs"].as_u64().unwrap_or(0);
@@ -1637,8 +1735,10 @@ impl PiEngine {
         // messageCount 走会话文件的真值（与 pi_list_sessions 同源）。
         // harness.get_stats() 在**恢复出来的**会话上实测恒 0（usage/count
         // 聚合只覆盖运行态），不能拿来回报。
+        // `snapshot_stats` 会整文件重扫（巨文件 ~0.3s）；文件 stat 不变即复用
+        // 上次结果（append-only，2026-11-19 性能轮）。
         let message_count = match live.session_path.as_deref() {
-            Some(p) => self.snapshot_stats(&p.to_string_lossy())?.message_count,
+            Some(p) => self.snapshot_stats_cached(&p.to_string_lossy())?.message_count,
             None => 0,
         };
         // ThinkingLevel 的 serde 拼法 = 上游 wire 拼法（off/minimal/…/xhigh/
@@ -2359,6 +2459,35 @@ impl PiEngine {
         Ok(serde_json::Value::Object(out))
     }
 
+    /// `snapshot_stats` 的 stat 校验缓存版（活动会话文件 append-only）。
+    ///
+    /// IO 失败照常传播；只有「读到 stats」才落缓存。文件被替换/追加 →
+    /// len/mtime 变 → 重扫。缓存只放最近一份（当前会话），不会随会话数增长。
+    fn snapshot_stats_cached(&self, path: &str) -> Result<SessionStats, String> {
+        let p = PathBuf::from(path);
+        let (len, mtime_ms) = file_stamp(&p)?;
+        {
+            let cache = self
+                .shared
+                .stats_cache
+                .lock()
+                .map_err(|_| "会话统计缓存锁中毒".to_string())?;
+            if let Some((cached_path, cached_len, cached_mtime, stats)) = cache.as_ref() {
+                if *cached_path == p && *cached_len == len && *cached_mtime == mtime_ms {
+                    return Ok(stats.clone());
+                }
+            }
+        }
+        let stats = self.snapshot_stats(path)?;
+        *self
+            .shared
+            .stats_cache
+            .lock()
+            .map_err(|_| "会话统计缓存锁中毒".to_string())? =
+            Some((p, len, mtime_ms, stats.clone()));
+        Ok(stats)
+    }
+
     /// 非活动会话文件的只读用量（不抢写者租约、不修文件）。
     ///
     /// **实测（2026-11-14）**：`read_snapshot` 出来的只读快照上
@@ -2451,14 +2580,51 @@ impl PiEngine {
         Ok(html)
     }
 
+    /// 派生面缓存键：活动会话文件的 stat 指纹 + 当前叶 id。
+    ///
+    /// **leaf 必须入键**：切分支（rewind / 回到兄弟叶）只改会话叶、不改文件
+    /// stat——只按 stat 缓存会把旧分支的消息面发出去。文件未落盘（全新会话）
+    /// 返回 None：此时结果只取决于内存 runtime，缓存无意义。
+    fn derived_cache_key(
+        &self,
+        live: &HarnessLive,
+    ) -> Result<Option<(PathBuf, u64, u64, Option<String>)>, String> {
+        let Some(path) = live.session_path.clone() else {
+            return Ok(None);
+        };
+        let (len, mtime_ms) = file_stamp(&path)?;
+        let leaf = self
+            .shared
+            .rt
+            .block_on(live.harness.session().get_leaf_id())
+            .map_err(|e| format!("会话叶读取失败: {e}"))?;
+        Ok(Some((path, len, mtime_ms, leaf)))
+    }
+
     /// 会话时间线标记（旧 wire `[{kind:'modelChange'|'compact',
     /// beforeMessageIndex, provider?, modelId?}]`，索引与 pi_get_messages 的
     /// 消息下标对齐）。真源 = rpi 会话条目 `Entry::ModelChange` /
     /// `Entry::Compaction`（types.rs:249/274），沿当前分支扫描；计数口径与
     /// 水合同口径——只数 user/assistant（toolResult 并进 assistant 部件，
     /// 计进去索引会系统性偏大）。
+    ///
+    /// 结果按文件 stat + 当前叶缓存（见 `derived_cache_key`）。
     pub fn timeline_markers(&self) -> Result<serde_json::Value, String> {
         let live = self.live()?;
+        let key = self.derived_cache_key(&live)?;
+        if let Some((path, len, mtime_ms, leaf)) = key.as_ref() {
+            let cache = self
+                .shared
+                .markers_cache
+                .lock()
+                .map_err(|_| "时间线缓存锁中毒".to_string())?;
+            if let Some(c) = cache.as_ref() {
+                if c.path == *path && c.len == *len && c.mtime_ms == *mtime_ms && c.leaf == *leaf
+                {
+                    return Ok((*c.value).clone());
+                }
+            }
+        }
         let entries = self.shared.rt.block_on(async {
             live.harness
                 .session()
@@ -2498,7 +2664,21 @@ impl PiEngine {
                 _ => {}
             }
         }
-        Ok(serde_json::Value::Array(markers))
+        let value = Arc::new(serde_json::Value::Array(markers));
+        if let Some((path, len, mtime_ms, leaf)) = key {
+            *self
+                .shared
+                .markers_cache
+                .lock()
+                .map_err(|_| "时间线缓存锁中毒".to_string())? = Some(DerivedCache {
+                path,
+                len,
+                mtime_ms,
+                leaf,
+                value: Arc::clone(&value),
+            });
+        }
+        Ok((*value).clone())
     }
 
     /// 会话消息历史（水合面）：旧 wire = pi `Message` 序列化数组
@@ -2514,6 +2694,22 @@ impl PiEngine {
     /// 的条目口径一致），压缩摘要消息不是用户可见回合。
     pub fn messages(&self) -> Result<serde_json::Value, String> {
         let live = self.live()?;
+        // 巨会话（11MB/2036 条）水合一次 ~1.4s；文件不变 + 叶不变即复用
+        // 上次序列化结果（append-only；切分支只改 leaf，已入键）。
+        let key = self.derived_cache_key(&live)?;
+        if let Some((path, len, mtime_ms, leaf)) = key.as_ref() {
+            let cache = self
+                .shared
+                .messages_cache
+                .lock()
+                .map_err(|_| "消息缓存锁中毒".to_string())?;
+            if let Some(c) = cache.as_ref() {
+                if c.path == *path && c.len == *len && c.mtime_ms == *mtime_ms && c.leaf == *leaf
+                {
+                    return Ok((*c.value).clone());
+                }
+            }
+        }
         let entries = self.branch_message_entries(&live)?;
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -2525,7 +2721,21 @@ impl PiEngine {
                     .map_err(|e| format!("消息序列化失败: {e}"))?,
             );
         }
-        Ok(serde_json::Value::Array(out))
+        let value = Arc::new(serde_json::Value::Array(out));
+        if let Some((path, len, mtime_ms, leaf)) = key {
+            *self
+                .shared
+                .messages_cache
+                .lock()
+                .map_err(|_| "消息缓存锁中毒".to_string())? = Some(DerivedCache {
+                path,
+                len,
+                mtime_ms,
+                leaf,
+                value: Arc::clone(&value),
+            });
+        }
+        Ok((*value).clone())
     }
 
     pub fn create_bot_session(
