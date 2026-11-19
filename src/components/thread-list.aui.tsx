@@ -352,6 +352,9 @@ const projectRowMeta = (id: string, item: unknown): SessionRowMeta => {
       typeof countRaw === "number" && Number.isFinite(countRaw) ? countRaw : undefined,
     // 项目归属（pi_sessions_index.projectId；null = 明确无归属）。
     projectId: typeof custom?.projectId === "string" ? custom.projectId : undefined,
+    // fork 谱系（pi_sessions_index.parentSessionId）：侧栏分支缩进。
+    parentSessionId:
+      typeof custom?.parentSessionId === "string" ? custom.parentSessionId : undefined,
   };
   if (item !== null && typeof item === "object") rowMetaCache.set(item, meta);
   return meta;
@@ -1238,6 +1241,16 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     ctxValue.commitListMove(moved.movedId, group, moved.beforeId);
   };
 
+  // fork 谱系缩进（branchDepths 产出；搜索面恒顶层）。
+  const rowDepthById = useMemo(() => {
+    if (mode !== "groups") return new Map<string, number>();
+    return new Map(
+      display.rows
+        .filter((r): r is Extract<SessionListRow, { kind: "session" }> => r.kind === "session")
+        .map((r) => [r.id, r.depth ?? 0] as const),
+    );
+  }, [mode, display]);
+
   const renderRow = (
     id: string,
     group: SessionRowGroup | "search",
@@ -1268,9 +1281,12 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     ]
       .filter(Boolean)
       .join(" ");
-    const vars: Record<string, number> = {};
+    const vars: Record<string, number | string> = {};
     if (disclosure?.enter !== undefined) vars["--disclose-index"] = disclosure.enter;
     if (disclosure?.exit !== undefined) vars["--disclose-out-index"] = disclosure.exit;
+    // fork 谱系缩进（branchDepths 产出；0/缺省不改变既有行距）。
+    const depth = rowDepthById.get(id) ?? 0;
+    if (depth > 0) vars["--session-row-depth"] = `${depth * 12}px`;
     return (
       <SessionRowScope key={key} group={group} meta={metasById.get(id)}>
         <div
@@ -1865,7 +1881,8 @@ const ThreadListItemInner: FC = () => {
             // 于是 圆点 30 / 文字 30+16+8 = 54 与其余两列一致。
             className="pressable-row flex h-full min-w-0 items-center self-stretch rounded-md py-0.5 pr-2 text-start outline-none"
             style={{
-              paddingLeft: "calc(var(--rail-gutter) - var(--rail-list-inset))",
+              paddingLeft:
+                "calc(var(--rail-gutter) - var(--rail-list-inset) + var(--session-row-depth, 0px))",
               gap: "var(--rail-icon-gap)",
             }}
             data-slot="aui_thread-list-item-trigger"          >

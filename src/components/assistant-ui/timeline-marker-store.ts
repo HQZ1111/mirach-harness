@@ -28,10 +28,17 @@ export type TimelineMarker =
       kind: 'modelChange';
       /** 该标记出现在第几条消息之前（0 = 首条消息之前） */
       beforeMessageIndex: number;
+      /** 该标记之后还剩几条 user/assistant 消息（尾部相对下标，来自后端）。
+       * 尾页水合时 store 里只有尾部消息，本地落点 = 已加载条数 − 该值。 */
+      beforeMessageIndexFromEnd?: number;
       provider: string;
       modelId: string;
     }
-  | { kind: 'compact'; beforeMessageIndex: number };
+  | {
+      kind: 'compact';
+      beforeMessageIndex: number;
+      beforeMessageIndexFromEnd?: number;
+    };
 
 interface TimelineMarkerState {
   markers: readonly TimelineMarker[];
@@ -58,6 +65,12 @@ export function parseTimelineMarkers(raw: unknown): TimelineMarker[] {
       console.error('[timeline] 标记 beforeMessageIndex 非法——跳过', v);
       continue;
     }
+    // 尾部相对下标（后端新字段；旧夹具没有 = undefined，退回绝对下标）
+    const fromEndRaw = v.beforeMessageIndexFromEnd;
+    const fromEnd =
+      typeof fromEndRaw === 'number' && Number.isInteger(fromEndRaw) && fromEndRaw >= 0
+        ? fromEndRaw
+        : undefined;
     if (v.kind === 'modelChange') {
       if (typeof v.provider !== 'string' || typeof v.modelId !== 'string') {
         console.error('[timeline] modelChange 缺 provider/modelId——跳过', v);
@@ -66,11 +79,16 @@ export function parseTimelineMarkers(raw: unknown): TimelineMarker[] {
       out.push({
         kind: 'modelChange',
         beforeMessageIndex: idx,
+        ...(fromEnd !== undefined ? { beforeMessageIndexFromEnd: fromEnd } : {}),
         provider: v.provider,
         modelId: v.modelId,
       });
     } else if (v.kind === 'compact') {
-      out.push({ kind: 'compact', beforeMessageIndex: idx });
+      out.push({
+        kind: 'compact',
+        beforeMessageIndex: idx,
+        ...(fromEnd !== undefined ? { beforeMessageIndexFromEnd: fromEnd } : {}),
+      });
     } else {
       console.error(`[timeline] 未知标记 kind=${String(v.kind)}——跳过`, v);
     }

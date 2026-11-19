@@ -34,7 +34,13 @@ import {
   piAttachmentAdapter,
   type PiImagePayload,
 } from './attachments'
-import { convertTurnMessage, hydratePiMessages, usageFromPiMessages } from './pi-hydrate'
+import { convertTurnMessage } from './pi-hydrate'
+import {
+  hydrateTranscriptTail,
+  registerTranscriptActor,
+  resetTranscriptTail,
+  transcriptTailStore,
+} from './transcript-paging'
 import { approvalBridge } from './approval-bridge'
 import {
   branchBridge,
@@ -65,6 +71,7 @@ import {
   type SessionsIndexResult,
 } from '@/components/panes/session-manage/session-catalog'
 import { cachedAppPrefs, loadAppPrefs, setRunActive, updateAppPrefs } from '@/lib/app-prefs'
+import { dispatchNativeNotification, markNativeNotifyBaseline } from '@/lib/native-notify'
 import {
   mergeWorkspaceSessionRows,
   resolveSessionPath,
@@ -229,12 +236,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
   const usage = useSelector(actorRef, (s) => s.context.usage)
+  // 转录补页通道（thread.aui 的「显示更早」→ PREPEND_HISTORY）：模块级注册，
+  // actor 随 runtime 生命周期更替。
+  useEffect(() => {
+    registerTranscriptActor(actorRef as unknown as Parameters<typeof registerTranscriptActor>[0])
+  }, [actorRef])
   // 会话管理元数据水合（Rust session-meta.json → catalog 管理维度；旧
   // localStorage 键一次性迁移）。挂载即拉一次——早于任何管理动作。
   useEffect(() => {
     void hydrateSessionMeta().catch((e) =>
       console.error('[session-catalog] 元数据水合失败——管理维度空态', e),
     )
+    // 启动静默窗：重连回放不弹通知（hermes markNativeNotifyBaseline 同语义）。
+    markNativeNotifyBaseline()
   }, [])
   useEffect(() => {
     usageBridge.getState().setUsage(usage as UsageState | null)
@@ -246,6 +260,22 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   useEffect(() => {
     errorBridge.getState().setError(runError)
   }, [runError])
+  // OS 通知：回合收尾（成功/失败）各派发一条，窗口失焦才亮。
+  const notifyWasRunningRef = useRef(false)
+  useEffect(() => {
+    const wasRunning = notifyWasRunningRef.current
+    notifyWasRunningRef.current = isRunning
+    if (!wasRunning || isRunning) return
+    const threadId = sessionCatalog.getState().activeId
+    const entry = threadId ? sessionCatalog.getState().entries[threadId] : undefined
+    dispatchNativeNotification({
+      kind: runError === null ? 'turnDone' : 'turnError',
+      title: (entry && sessionDisplayName(entry)) || 'Mirach',
+      body: runError === null ? '本轮已完成' : '本轮执行失败',
+      sessionId: threadId,
+      activeSessionId: sessionCatalog.getState().activeId,
+    })
+  }, [isRunning, runError])
   // thread.state 透传（s.thread.state）：压缩横幅 / 中断态的机器投影——
   // 与 usageBridge/errorBridge 不同，这两个只在 thread.aui 消费，直接走
   // adapter 的 state 通道，不再加桥（真相仍在轮次机 context）
@@ -565,13 +595,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           if (cancelled) return
           setCurrentThreadId(st?.sessionId ?? null)
           if (st?.sessionId) {
-            const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-            if (cancelled) return
-            actorRef.send({
-              type: 'HYDRATE',
-              messages: hydratePiMessages(history ?? []),
-              usage: usageFromPiMessages(history ?? []),
-            })
+            // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
+            await hydrateTranscriptTail(actorRef, st.sessionId)
             // 滚动位置恢复请求（挂载水合成功路径）：视口（thread.aui 侧）
             // 消费后按持久化位置恢复阅读位
             threadScrollBridge.getState().requestRestore(st.sessionId)
@@ -597,7 +622,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       cancelled = true
       es?.close()
     }
-  }, [actorRef, refreshThreads, hydratePiMessages, reconnectSeq])
+  }, [actorRef, refreshThreads, hydrateTranscriptTail, reconnectSeq])
 
   /** 自动会话命名（规则段，hermes title_generator 两段式的即时段）：
    * POST 成功后对「默认态名」（pi SessionIndex 的 name 为 null/空 = 用户
@@ -641,6 +666,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       // 默认态判定：已有自定义名（用户命名/历史命名）→ 不动
       if (self.name) return
+      // 历史被尾页截断时 store 里只有尾部消息——从尾部首条 user 派生标题
+      // 会给出错误标题（不是会话开头那句话）。宁可留默认名，不造假。
+      if (transcriptTailStore.getState().hasMore && transcriptTailStore.getState().sessionId === sessionId) {
+        console.info('[pi] 自动命名：历史未全量水合（尾页模式）——跳过，可手动重命名')
+        return
+      }
       const firstUser = firstUserMessageText(actorRef.getSnapshot().context.messages)
       if (!firstUser) {
         console.error('[pi] 自动命名：没有可派生文本的首条 user 消息——跳过', sessionId)
@@ -811,8 +842,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       // 采纳新会话：重水合 + currentThreadId 切换 + 线程列表刷新
       try {
-        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        await hydrateTranscriptTail(actorRef, forked.sessionId)
         setCurrentThreadId(forked.sessionId)
         await refreshThreads()
         resetSessionScopedBridges(forked.sessionId)
@@ -827,7 +857,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 分支条刷新（新会话的分支态）
       branchBridge.getState().requestRefresh()
     },
-      [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
+      [actorRef, hydrateTranscriptTail, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
   )
 
   /** 分支切换执行：守卫 → pi_switch_branch（服务端切叶）→ 重拉
@@ -843,15 +873,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         return
       }
       try {
-        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        await hydrateTranscriptTail(actorRef, currentThreadIdRef.current)
       } catch (e) {
         console.error('[pi] 分支切换后重水合失败（服务端已切叶，可重试切换恢复）', e)
         return
       }
       branchBridge.getState().requestRefresh()
     },
-    [actorRef, hydratePiMessages, interruptIfRunning],
+    [actorRef, interruptIfRunning],
   )
 
   /** 会话线「回到父会话」执行：守卫 → pi_open_session(路径)（**返回的是
@@ -880,8 +909,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         return
       }
       try {
-        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        await hydrateTranscriptTail(actorRef, sessionId)
         setCurrentThreadId(sessionId)
         await refreshThreads()
         resetSessionScopedBridges(sessionId)
@@ -895,7 +923,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       branchBridge.getState().requestRefresh()
     },
-    [actorRef, hydratePiMessages, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
+    [actorRef, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
   )
 
   const forkRequest = useStore(branchBridge, (s) => s.forkRequest)
@@ -973,8 +1001,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         return
       }
       try {
-        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        await hydrateTranscriptTail(actorRef, currentThreadIdRef.current)
       } catch (e) {
         console.error('[pi] 回退后重水合失败（服务端已截断，可重开检查点面板查看）', e)
         return
@@ -983,7 +1010,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       void checkpointBridge.getState().refresh()
       branchBridge.getState().requestRefresh()
     },
-    [actorRef, hydratePiMessages, interruptIfRunning],
+    [actorRef, hydrateTranscriptTail, interruptIfRunning],
   )
 
   const rewindRequest = useStore(checkpointBridge, (s) => s.rewindRequest)
@@ -1088,6 +1115,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           lastModifiedMs: now,
         })
         actorRef.send({ type: 'RESET' })
+        resetTranscriptTail()
         setCurrentThreadId(st.sessionId)
         // ZCode 侧栏按项目分组；mirach 默认"更新时间"分组下新工作区没有
         // 可见的组头。仅在默认分组时切到"项目"（用户显式选过 status
@@ -1355,8 +1383,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
         // 下一次 RUN_STARTED 的归约自然覆盖）。
         errorBridge.getState().setError(null)
-        const history = await invoke<Record<string, unknown>[]>('pi_get_messages')
-        actorRef.send({ type: 'HYDRATE', messages: hydratePiMessages(history ?? []) })
+        // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
+        await hydrateTranscriptTail(actorRef, id)
         // 宿主状态面（插件 host.state）：活动/聚焦会话 = 当前线程；机器人
         // 花名册的"这行是否正在看"与"是否在跑"读这两个 atom。owner/profile
         // 由 [currentThreadId] 的效果统一算（bot 双锚命中才是 owner）。
@@ -1384,7 +1412,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         )
       }
     },
-    [actorRef, hydratePiMessages, refreshThreads, resetSessionScopedBridges],
+    [actorRef, hydrateTranscriptTail, refreshThreads, resetSessionScopedBridges],
   )
 
   const switchToThread = useCallback(
@@ -1465,6 +1493,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       try {
         await invoke('pi_discard_session')
         actorRef.send({ type: 'RESET' })
+        resetTranscriptTail()
         setCurrentThreadId(null)
         // 新会话不继承上一个文件夹（"新建会话"按钮语义不变）；否则
         // chip/tab 会显示一个下一次懒创建根本不会落到的目录。
@@ -1524,6 +1553,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           // New Chat），再删文件。非当前会话行为不变。
           await invoke('pi_discard_session')
           actorRef.send({ type: 'RESET' })
+          resetTranscriptTail()
           setCurrentThreadId(null)
           sessionCatalog.getState().setPendingCwd(null)
           resetSessionScopedBridges(null)

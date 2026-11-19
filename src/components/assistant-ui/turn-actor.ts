@@ -188,6 +188,9 @@ export type TurnEvent =
   | { type: 'RESET' }
   /** 打开历史会话：注入 pi 会话历史（真相在 pi，机器只收投影快照） */
   | { type: 'HYDRATE'; messages: TurnMessage[]; usage?: TurnUsage | null }
+  /** 上滚补页（hermes tail-hydration）：把更老的一页消息插到现有 store 头部。
+   *  与 HYDRATE 不同——保留已加载行与在途 run 段，仅前插。 */
+  | { type: 'PREPEND_HISTORY'; messages: TurnMessage[] }
   /** 用户中断已成功（pi_interrupt IPC 返回后）——置 interrupted 标记，
    * run 结束后 StoppedRun 据此展示中断态 */
   | { type: 'CANCEL_MARK' }
@@ -514,6 +517,11 @@ export const turnMachine = setup({
         interrupted: false,
       }
     }),
+    prependOlder: assign(({ context, event }) => {
+      if (event.type !== 'PREPEND_HISTORY' || event.messages.length === 0) return {}
+      // 补页只在已有 store 上操作（空 store 说明会话已切走，丢弃由调用方守卫）
+      return { messages: [...event.messages, ...context.messages] }
+    }),
   },
   guards: {
     isRunStart: ({ event }) =>
@@ -537,6 +545,7 @@ export const turnMachine = setup({
         USER_SUBMIT: { actions: 'appendUser' },
         RESET: { actions: 'reset' },
         HYDRATE: { actions: 'hydrate' },
+        PREPEND_HISTORY: { actions: 'prependOlder' },
         CANCEL_MARK: { actions: 'markCancelled' },
         INTERRUPT_CLEAR: { actions: 'clearInterrupt' },
         AGUI_EVENT: [
@@ -550,6 +559,7 @@ export const turnMachine = setup({
         USER_SUBMIT: { actions: 'appendUser' },
         RESET: { actions: 'reset' },
         HYDRATE: { actions: 'hydrate' },
+        PREPEND_HISTORY: { actions: 'prependOlder' },
         CANCEL_MARK: { actions: 'markCancelled' },
         INTERRUPT_CLEAR: { actions: 'clearInterrupt' },
         AGUI_EVENT: [
