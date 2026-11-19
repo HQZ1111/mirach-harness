@@ -6,6 +6,27 @@
 
 ## 当前状态
 
+**✅ 2026-11-20：状态面板功能全对齐轮（终端分区验证 + 引擎 PR #363 + workflow Stop + composer 徽标）**
+
+- **终端分区实机全链 ✓**：真后台作业（模型调 background 工具）→ 分区渲染
+  （折叠头/展开行/停止钮，与上游同构）→ 停止真取消。抓到真缺陷：**停止后
+  快照不落盘**（pi_job_list 永报 running）→ 引擎修 = rpi-background-tasks 加
+  `/jobs` 命令面（守卫 = 当前会话最新快照成员资格，零引擎改动），已提
+  **pi-rust/rpi-package #363**；新 DLL 已装机（改名替换法；备份
+  `.official.bak`），实机守卫探针确认生效。
+- **workflow Stop**：宿主 WorkflowRunRow 加悬停显形停止钮（上游
+  WorkflowRunStopButton 形态）→ `pi_interrupt`（引擎 per-call 取消链可达：
+  abort → `(cancel_fn)` → Control → 杀进程组 + pending 恢复）。无引擎 PR——
+  orchestrator 会话级 stop 需要命令信封 host context，待引擎同步后评估。
+- **composer 徽标**：`conversation-background-work-trigger.tsx` +
+  `composer-status-badge.tsx`（计数与面板同一份真值；点击 = 唯一 run 直达
+  详情 / 展开非空分区 + panel 形态）；面板工作流分区改受控
+  （hasLiveWorkflowRun 翻转写入），expandRequest 走 status-panel-store。
+- **GitActionRow 无需动**：2026-11-17 已实现（此前记录过时）。
+- 门禁：tsc 1319（非镜像区 0）/ vitest **1093** / cargo **726**。
+- 待实机：徽标与 workflow Stop 渲染（需真实 workflow/后台作业会话）；
+  终端 UI 停止在新 DLL 下的快照落盘（链路已被单测钉死）。
+
 **引擎同步候选（2026-11-19 量化，未执行——专项一轮再做）**：`G:\pi-rust-main`
 （引擎真源，非 git 树）落后 bigfish1913/pi-rust main `b0ac963 → 3e48b03`
 **21 个提交**：0.26.0 release prep(#373)、SDK 安全化 **#375**（ABI 字符串
@@ -61,7 +82,11 @@ vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1�
 - 实测（巨会话 11MB / 2041 条）：首屏尾页实取 303 条 **333ms**（改前全量
   1445ms）；再补页 606ms（283 条）；UI 全链 DOM 6→17→18 轮、console 零错误。
   `pi_sessions_index` 共用事实缓存 **7.7s → 71ms**；bot 行打开 69ms。
-  冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
+  - `pi_peek_session_tail(path, limit)`：**不打开引擎**的尾部预览（JSONL 尾读 +
+  父链回溯 + 轮首裁剪），与 `pi_open_session` 并行；peek 先回就先画尾部，引擎
+  就绪后再走 `hydrateTranscriptTail` 对齐。巨会话点行首屏 **557ms**（原 ~5s），
+  peek 64ms；`activeId` 守卫防连点串会话。
+冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
 - 仍有意不做：hermes store retention（老行内存释放）——宿主全量留在 actor store。
 
 **✅ 2026-11-20：多会话并列窗格真实现（hermes `_sessions` 模型）+ 语音 402 诊断**

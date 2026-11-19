@@ -405,6 +405,161 @@ fn push_message_entries(
     Ok(())
 }
 
+/// **不打开引擎**的会话尾部预览（大会话秒开的第二步）：
+/// 直接从 JSONL 文件尾回扫 `limit` 条 message 条目（块读 + 只解析命中的
+/// 尾部行），沿 `parentId` 回溯出当前叶分支，末尾裁到最近一条 user 消息
+/// 起的轮。返回 wire `{sessionId, messages, entryIds, hasMore, leafId}`。
+///
+/// 存在的意义：引擎 `pi_open_session` 对 11MB 会话要整树 replay ~5s；
+/// 用户点开行时先用本函数 <~0.2s 把尾部画出来，再后台等引擎打开做对齐
+/// （见前端 `peekTranscriptTail` 流程）。`hasMore` 为保守值：只要尾部窗口
+/// 没覆盖到文件头就为 true（引擎对齐后会纠正）。
+pub(crate) fn peek_session_tail(path: &str, limit: usize) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const CHUNK_START: u64 = 256 * 1024;
+    let limit = limit.max(1);
+    let p = Path::new(path);
+    let len = std::fs::metadata(p)
+        .map_err(|e| format!("会话文件状态读取失败 {path}: {e}"))?
+        .len();
+    let session_id = read_first_line(p)
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+        .and_then(|h| {
+            h.get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+    if len == 0 {
+        return Ok(serde_json::json!({
+            "sessionId": session_id,
+            "messages": [],
+            "entryIds": [],
+            "hasMore": false,
+            "leafId": serde_json::Value::Null,
+        }));
+    }
+
+    // 从尾部按块回扫，凑够 limit 条 message 行（content 里的引号都是转义过的，
+    // 裸 "type":"message" 不会误命中正文）。
+    let want = limit.saturating_add(32);
+    let mut window = CHUNK_START.min(len);
+    let (entries, reached_start): (Vec<serde_json::Value>, bool) = loop {
+        let start = len - window;
+        let mut f = std::fs::File::open(p)
+            .map_err(|e| format!("会话文件读取失败 {path}: {e}"))?;
+        f.seek(SeekFrom::Start(start))
+            .map_err(|e| format!("会话文件定位失败 {path}: {e}"))?;
+        let mut buf = vec![0u8; window as usize];
+        f.read_exact(&mut buf)
+            .map_err(|e| format!("会话文件读取失败 {path}: {e}"))?;
+        let text = String::from_utf8_lossy(&buf);
+        let mut lines: Vec<&str> = text
+            .split('\n')
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+        // 块首行可能被截断（start>0 时），丢弃
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        let msg_count = lines
+            .iter()
+            .filter(|l| l.contains("\"type\":\"message\""))
+            .count();
+        if msg_count >= want || start == 0 {
+            // 只解析尾部需要的那一段
+            let mut keep_from = 0usize;
+            let mut seen = 0usize;
+            for (idx, line) in lines.iter().enumerate().rev() {
+                if line.contains("\"type\":\"message\"") {
+                    seen += 1;
+                    if seen >= want {
+                        keep_from = idx;
+                        break;
+                    }
+                }
+            }
+            let entries: Vec<serde_json::Value> = lines[keep_from..]
+                .iter()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            break (entries, start == 0);
+        }
+        // 尾部窗口不够：指数扩大（下一轮 start 更小）
+        window = window.saturating_mul(8).max(window + CHUNK_START).min(len);
+    };
+
+    // 叶子 = 最后一条 message 条目（record 条目不带 message 链，见
+    // pi_get_session_messages 注释）
+    let leaf_id = entries
+        .iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("message"))
+        .and_then(|e| e.get("id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(id) = e.get("id").and_then(|v| v.as_str()) {
+            by_id.insert(id, i);
+        }
+    }
+    let mut chain: Vec<&serde_json::Value> = Vec::new();
+    let mut cur = leaf_id.clone();
+    let mut chain_broken = false;
+    while let Some(id) = cur {
+        match by_id.get(id.as_str()) {
+            Some(&i) => {
+                let e = &entries[i];
+                chain.push(e);
+                cur = e.get("parentId").and_then(|v| v.as_str()).map(String::from);
+            }
+            None => {
+                // 父条目落在窗口之外（文件还有更早内容）= 链被窗口截断
+                chain_broken = true;
+                break;
+            }
+        }
+    }
+    chain.reverse();
+    // 只保留 message 条目并裁到最近一条 user 消息起的轮
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut entry_ids: Vec<String> = Vec::new();
+    for e in &chain {
+        if e.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        if let Some(msg) = e.get("message").cloned() {
+            messages.push(msg);
+            if let Some(id) = e.get("id").and_then(|v| v.as_str()) {
+                entry_ids.push(id.to_string());
+            }
+        }
+    }
+    let first_user = messages
+        .iter()
+        .position(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+    if let Some(idx) = first_user {
+        if idx > 0 {
+            messages.drain(0..idx);
+            entry_ids.drain(0..idx);
+        }
+    } else if messages.len() > limit {
+        let keep = messages.len() - limit;
+        messages.drain(0..keep);
+        entry_ids.drain(0..keep);
+    }
+    let has_more = chain_broken || !reached_start;
+    Ok(serde_json::json!({
+        "sessionId": session_id,
+        "messages": messages,
+        "entryIds": entry_ids,
+        "hasMore": has_more,
+        "leafId": leaf_id,
+    }))
+}
+
 pub(crate) struct EngineShared {
     rt: PiRuntime,
     cwd: PathBuf,
@@ -3998,6 +4153,59 @@ mod tests {
         let err = preflight_session_file(&empty.to_string_lossy()).unwrap_err();
         assert!(err.contains("缺少 header"), "{err}");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod peek_session_tail_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn peek_tail_reads_chronological_chain_and_trims_to_user_turn() {
+        let dir = std::env::temp_dir().join(format!("mirach-peek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s1.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, r#"{{"kind":"header","version":4,"id":"sess-1","createdAt":1}}"#).unwrap();
+        let mut parent: Option<String> = None;
+        let mut seq = 0i32;
+        for i in 0..60 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            let id = format!("e{i}");
+            let parent_json = match &parent {
+                Some(p) => format!(r#""{p}""#),
+                None => "null".to_string(),
+            };
+            writeln!(
+                f,
+                r#"{{"kind":"entry","id":"{id}","parentId":{parent_json},"seq":{seq},"type":"message","message":{{"role":"{role}","content":"m{i}"}}}}"#
+            )
+            .unwrap();
+            parent = Some(id);
+            seq += 1;
+            if i == 10 {
+                writeln!(
+                    f,
+                    r#"{{"kind":"entry","lane":"main","seq":{seq},"type":"record","id":"rec"}}"#
+                )
+                .unwrap();
+                seq += 1;
+            }
+        }
+        drop(f);
+        let page = peek_session_tail(path.to_str().unwrap(), 5).unwrap();
+        assert_eq!(page["sessionId"], serde_json::json!("sess-1"));
+        let msgs = page["messages"].as_array().unwrap();
+        assert!(!msgs.is_empty());
+        assert_eq!(msgs.first().unwrap()["role"], serde_json::json!("user"));
+        assert_eq!(msgs.last().unwrap()["role"], serde_json::json!("assistant"));
+        assert_eq!(msgs.last().unwrap()["content"], serde_json::json!("m59"));
+        let ids = page["entryIds"].as_array().unwrap();
+        assert_eq!(ids.len(), msgs.len());
+        assert_eq!(page["hasMore"], serde_json::json!(true));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

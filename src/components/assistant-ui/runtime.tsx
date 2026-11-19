@@ -36,7 +36,9 @@ import {
 } from './attachments'
 import { convertTurnMessage } from './pi-hydrate'
 import {
+  applyTranscriptPeek,
   hydrateTranscriptTail,
+  peekTranscriptTail,
   registerTranscriptActor,
   resetTranscriptTail,
   transcriptTailStore,
@@ -581,6 +583,15 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
               const prefs = await loadAppPrefs()
               if (cancelled) return
               if (prefs.restoreLastSession && prefs.lastSessionPath) {
+                // 大会话秒开：先读文件尾把尾部画出来（不依赖引擎），
+                // 引擎 open 在后台继续；下方统一的水合会在引擎就绪后对齐。
+                const peek = await peekTranscriptTail(prefs.lastSessionPath)
+                if (cancelled) return
+                if (peek) {
+                  applyTranscriptPeek(actorRef, peek, peek.sessionId)
+                  setCurrentThreadId(peek.sessionId)
+                  mainViewStore.getState().showChat()
+                }
                 await invoke('pi_open_session', { path: prefs.lastSessionPath })
                 if (cancelled) return
                 st = await invoke<{ sessionId: string | null }>('pi_get_state')
@@ -1379,7 +1390,28 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       setCurrentThreadId(id)
       mainViewStore.getState().showChat()
       try {
-        await invoke('pi_open_session', { path })
+        // **大会话秒开**：引擎 pi_open_session 对巨文件要整树 replay（实测
+        // 11MB ≈ 5s）。尾部预览（文件尾读，不依赖引擎）与打开并行：预览
+        // 先回来且引擎还没就绪 → 先把尾部画出来；打开就绪后统一走引擎页
+        // 对齐（同条目 id 重水合，无 key 变化、无闪烁）。
+        let openError: unknown = null
+        let openSettled = false
+        const openPromise = invoke('pi_open_session', { path })
+          .catch((e) => {
+            openError = e
+          })
+          .finally(() => {
+            openSettled = true
+          })
+        const peek = await peekTranscriptTail(path)
+        // 预览等待期间用户可能已切走：只在仍是当前选中时才挂（以
+        // catalog.activeId 为准——setActive 是同步 Zustand 写）
+        if (peek && !openSettled && sessionCatalog.getState().activeId === id) {
+          applyTranscriptPeek(actorRef, peek, id)
+          threadScrollBridge.getState().requestRestore(id)
+        }
+        await openPromise
+        if (openError) throw openError
         // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
         // 下一次 RUN_STARTED 的归约自然覆盖）。
         errorBridge.getState().setError(null)

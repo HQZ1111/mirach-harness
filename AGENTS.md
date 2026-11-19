@@ -3510,6 +3510,80 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   孤儿 toolResult 告警）。`pi_sessions_index` 共用事实缓存后 **7.7s → 71ms**；
   bot 行打开 69ms。**冷开仍由引擎 replay 决定**（0.5MB 362ms、0.8MB 791ms、
   11MB ~4.9s；热开 3~6ms）——未做 lazy-open，属引擎地板。
+- **打开前先画（peek-first）**：引擎 `pi_open_session` 对巨会话要整树 replay
+  （实测 11MB ≈ 4.9s，热开 3~6ms）。新增 `pi_peek_session_tail(path, limit)`
+  **不打开引擎**，直接从 JSONL 尾部回扫一页（父链回溯 + 轮首裁剪），与
+  `pi_open_session` **并行**：peek 先回且引擎未就绪 → 先画尾部；引擎就绪后
+  统一走 `hydrateTranscriptTail` 对齐（同条目 id 重水合，无 key 变化/闪烁）。
+  实测巨会话点行 **首屏 557ms**（原 ~5s），peek 本身 64~68ms。守卫：
+  `sessionCatalog.activeId` 仍是目标会话才挂预览（连点切换不串）。
 - **仍有意不做**：hermes `boundRetainedTranscript` 的 store retention（老行
   从内存释放）——宿主全量留在 actor store，只截留渲染窗；后续压内存再补。
+
+## 状态面板功能全对齐轮（2026-11-20，用户："做，缺pi 引擎面的复制zcode的然后提pr，全部对齐功能"）
+
+盘点结论先行：**GitActionRow（"提交或推送"第三行）2026-11-17 已实现**（此前
+记录过时——GitActionMenu 不再是缺口）。本轮真正落地的四件：
+
+### 1. 终端分区实机验证 + 真缺陷修复（引擎 PR #363）
+
+- **分区渲染 ✓**：真后台作业（模型调 background 工具跑 ping）→ pi_job_list
+  真数据 → 分区出现（折叠头「终端 · N 秒 · 1 个运行中」，与上游同构）；
+  展开 = 行（label + 时长 + 停止钮）；停止真取消（插件进程树死）。
+- **缺陷（引擎，已提 rpi-package #363）**：UI 停止后 pi_job_list 仍报
+  running——kill 只结算内存行、cancelled 快照不落盘（旧装 DLL 的命令面无
+  persist）。修法 = **给 rpi-background-tasks 加 /jobs 命令面**（list/tail/
+  kill，镜像工具动作），会话守卫走「当前会话最新快照成员资格」（命令信封
+  无 `__rpi.sessionId`——每次 spawn 都落快照，故 job id 不在本会话最新快照
+  = 别的会话的/未提交，拒绝）；kill 走与工具同一条 settle+persist 路径。
+  单测 4 条（kill 落盘 / 跨会话拒绝 / list / 畸形入参）；本机 5 个真 shell
+  失败在干净 main 同样复现（bash=WSL 启动器，环境性，CI ubuntu 过）。
+  **新 DLL 已编译装进 `~/.rpi/agent/extensions`（官方原件备份 `.official.bak`；
+  被运行进程锁定时用改名替换法）**，实机守卫探针返回新文案确认生效。
+- **诊断教训**：旧装 DLL 与上游 main 有版本漂移（它有命令面，main 是
+  tool-only）——别按装的二进制 strings 猜源码行为，以仓库源码 + 重编译为准。
+- **快照时序（非缺陷）**：run 期间 append 被引擎排队、turn 边界才提交——
+  run 中停止作业守卫会拒（快照未提交），turn 结束后重试即成；应用关闭时
+  SessionShutdown 对受影响会话补写终局快照（昨日卡 running 的旧作业今日
+  读回即 cancelled，shutdown 补的）。
+
+### 2. 工作流 Stop（宿主接通，无需引擎 PR）
+
+ZCode 的 workflow Stop = `onCancelBackgroundWork(workId)`（后台任务取消通道）；
+rpi 的 dispatch 是**轮内工具调用**，引擎 per-call 取消链（run abort →
+rpi-extensions `tool.rs` 调 `(cancel_fn)` → 插件 kit cancel → Control → 杀
+进程组 + 未启动节点回 pending）经 **pi_interrupt** 可达——Stop 按钮
+（WorkflowRunRow，悬停显形盖在时长上的幽灵钮，上游 WorkflowRunStopButton
+逐类抄）wire 到 pi_interrupt。**无 orchestrator 命令面 PR**：会话级
+`/orchestrator stop` 需要命令信封带 host context（TUI/RPC/宿主三处调用点
+各自拼信封，引擎无统一注入点）——待引擎同步 0.26 后评估。
+
+### 3. composer 徽标（上游 ConversationBackgroundWorkTrigger 完整移植）
+
+`conversation-background-work-trigger.tsx`（typed 三类计数 + <480px 紧凑
+Activity 总数；Bot 图标替代上游 SubagentCollectionIcon——宿主无该资源）+
+`composer-status-badge.tsx` 接线（计数 = 面板同一份真值：jobs-store running /
+`deriveWorkflowRuns.running` / 引擎名册优先的 runningAgents）；点击落点照上游：
+唯一在跑的工作流直达详情页，否则 `requestExpandSections` +
+`setOverride('panel')`。**面板侧配套**：工作流分区改受控（hasLiveWorkflowRun
+翻转写入——2026-11-18 的坑是"受控且无翻转写入"，不是受控本身）；
+`expandRequest` 进 status-panel-store（nonce 一次消费）。徽标挂 composer-wired
+工具行左组（模式芯片右侧）。
+
+### 4. 门禁与实机
+
+tsc 1319（非镜像区 0）/ vitest **1093** / cargo **726**；实机：终端分区
+渲染/展开/停止全链 ✓（旧 DLL 下），新 DLL 守卫探针 ✓；徽标与工作流 Stop
+的实机渲染待一个真实 workflow/后台作业会话（接线已 tsc 闭环；Stop 的
+pi_interrupt 与 composer 停止钮同 IPC）。
+
+### 5. 顺带实锤加固：武装回执核验（假目标同类问题第二例）
+
+实机发现一个 archived 假目标 `_verify-enable on`（某次会话装的是无
+`_verify-enable` 动词的 goal 插件 → `/goal` 的速记 start 兜底把武装命令
+吃成了目标）。与"CPU 温度降到 20 度"残留目标同类——**宿主向插件发的隐藏
+动词被速记兜底吞掉会造出真目标并烧轮次**。修法 = `arm_goal_verification`
+核验回执：含「Goal started」= 假目标已造出，立刻 `/goal stop` 归档止损 +
+红印日志；回执不含 `verification`/`_verify` 字样也红印（插件不支持校验）。
+v2 fork 的成功回执 =「🔒 Completion verification armed」两种核验都过。
 

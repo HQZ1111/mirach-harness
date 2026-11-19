@@ -931,6 +931,17 @@ fn pi_get_session_messages(path: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Array(msgs))
 }
 
+/// 会话尾部预览（**不打开引擎**）：大会话点开行时先画尾部（<~0.2s），
+/// 引擎 `pi_open_session` 在后台继续打开、完成后前端再对齐。见
+/// `pi_session::peek_session_tail`。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_peek_session_tail(
+    path: String,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    pi_session::peek_session_tail(&path, limit.unwrap_or(256))
+}
+
 /// 机器人预设会话（左栏「机器人」窗格启动钮）：system_prompt + model +
 /// working_directory + enabled_tools 一次性透传 SessionOptions
 /// （pi_session.rs create_bot_session；enabledTools = per-bot 工具集选择
@@ -1852,6 +1863,7 @@ fn main() {
             pi_get_state,
             pi_get_messages,
             pi_get_messages_page,
+            pi_peek_session_tail,
             pi_get_timeline_markers,
             pi_get_session_messages,
             pi_connections::pi_connections_list,
