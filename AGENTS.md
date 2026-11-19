@@ -706,11 +706,25 @@ items-end`，`MessageActions` 作为普通子元素排在气泡**之后**，即
 3. **ZCode 的工具选择引导 = 工具描述即路由提示词**（`apps/zcode-cli/.../
    bash-prompt.ts`）：Bash 描述写明 "IMPORTANT: Avoid … cat/head/tail/
    grep/sed/awk/echo … use the appropriate dedicated tool"，Read 描述自荐
-   （cat -n / 图片 / offset 分页 / 别复读刚编辑的文件）。rpi 的 bash 描述无
-   此设限、powershell 描述反而写 "Prefer bash for file/text work"（把文件
-   工作推向 bash 而非 read）——想让模型多用 read = 改 vendored rpi-tools 的
-   工具描述（vendor 有脱敏补丁先例，同步需重打）或宿主系统提示追加，**均未
-   做**（用户未拍板）。
+   （cat -n / 图片 / offset 分页 / 别复读刚编辑的文件）。**2026-11-19 已完整
+   复制到引擎（用户拍板"这个能完整复制吗"→ 实施）**，两层：
+   ① **注册层（真正的根因）**：`rpi-cli/src/session.rs` 内建表原本只有
+   read/bash/edit/write/docs（+Windows powershell）——**grep/find/ls 根本没
+   注册给模型**，模型想搜文件只能 shell，"查阅"无从谈起。已注册三工具
+   （`with_replay(ToolReplay::Safe)`，只读）+ `BUILTIN_TOOL_NAMES` 扩为
+   8 项（`builtin_tool_snippet` 里上游早已备好三工具的提示词条目）+
+   两个断言旧集合的测试改为新集合（`default_prompt_mentions_cwd_and_tools` /
+   `default_tools_include_docs_lookup`）。宿主 capabilities 页
+   （pi_capabilities.rs 用 BUILTIN_TOOL_NAMES）自动变真。
+   ② **描述层**：bash 加 ZCode 同款 IMPORTANT avoid 行（read/grep/find/ls/
+   edit/write 为专用工具）；powershell 纠偏——原 "Prefer bash for file/text
+   work"（把文件工作推向 bash）改为指向专用工具；read 加自荐（prefer over
+   cat/Get-Content、按需 offset、别复读刚编辑的文件——**没有 cat -n 行号线，
+   不照抄 ZCode 那句**）；grep/find/ls 各加一句 prefer-over-shell。
+   **补丁位置 = G:\pi-rust-main（引擎真源，路径依赖、非 git）**——上游同步
+   新版时这两个补丁层要重打（session.rs 注册块 + BUILTIN_TOOL_NAMES + 两测、
+   rpi-tools 六个描述）。验证：cargo check 0 错 / 引擎 system_prompt_compat
+   7 过 + session::tests 61 过 / 宿主 cargo test 708 过。
 4. 次要已知差异（未修）：展开正文卡内距/底色（ZCode `px-4 py-3 bg-panel`
    vs 宿主 `px-3 py-2.5 bg-muted/20`）、运行态类别词动画（`animated-gradient-text`
    vs `shimmer`）。

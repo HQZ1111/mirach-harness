@@ -125,13 +125,6 @@ const stringArg = (args: unknown, ...keys: string[]): string | undefined => {
   return undefined;
 };
 
-/** 中文正文判定（CJK 统一表意文字 + 扩展 A）。执行摘要优先显示中文
- *  description（模型用中文描述时），英文 description 退回 command——
- * pi 的模型常写英文 description，直接显示会让「已执行 Run radio tests」
- * 这类英文夹在中文界面里（用户 2026-11-15："执行摘要能变成中文吗"）。 */
-const CJK_PATTERN = /[\u3400-\u9FFF\uF900-\uFAFF]/;
-const isChineseText = (value: string): boolean => CJK_PATTERN.test(value);
-
 // ── 正文块 ──────────────────────────────────────────────────────────
 
 const CommandLine: React.FC<{ command: string }> = ({ command }) => (
@@ -367,21 +360,19 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
   );
 
   // 5a. bash / powershell → 终端行（ZCode ExecuteToolCallBlock）
-  // 摘要 = `已执行 <description ?? command>`：ZCode 只对 **Bash** 读
-  // `input.description`（调用意图），其余命令工具直接显示命令行；
-  // **数据面实测**：rpi 的 bash（bash.rs）/ powershell（powershell.rs）参数
-  // 只有 `command`，没有 description —— 故这里恒走 description ?? command 的
-  // 回退分支（不编造意图文案）。展开后仍保留描述；没有描述时命令行在展开态
-  // 隐藏（正文里有完整命令，避免与摘要重复）。
+  // 摘要 = `已执行 <description ?? command>`：ZCode execute.tsx:274-278 只对
+  // **Bash** 读 `input.description`（调用意图），其余命令工具直接显示命令行。
+  // rpi 的 bash（bash.rs:49）同样有 `description` 参数（"shown to the user
+  // in the collapsed tool row"），模型实测在传（2026-11-19 会话 35 条）——
+  // 原样显示，语言不过滤（用户 2026-11-19 定稿：与 ZCode 完全对齐，取代
+  // 11-15 的中文偏好过滤）。展开后仍保留描述（ZCode
+  // hideSecondaryTextWhenOpen={!description}）；没有描述时命令行在展开态
+  // 隐藏（正文里有完整命令，避免与摘要重复）。powershell 摘要按 ZCode 口径
+  // 恒用原始 command。
   if (toolName === "bash" || toolName === "powershell") {
     const description = stringArg(args, "description");
     const command = stringArg(args, "command", "cmd", "script");
-    // ZCode execute.tsx:275 只对 Bash 取 description；powershell 摘要恒用
-    // 原始 command。宿主再加一道语言偏好：英文 description 不显示，退回
-    // command（命令本身语言中立），中文 description 保留。
-    const chineseDescription =
-      description !== undefined && isChineseText(description) ? description : undefined;
-    const summaryText = (toolName === "bash" ? chineseDescription : undefined) ?? command;
+    const summaryText = (toolName === "bash" ? description : undefined) ?? command;
     if (summaryText !== undefined) {
       const text = toolResultText(result);
       return summary({
@@ -389,7 +380,7 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
         secondaryText: (
           <code className="truncate font-sans text-muted-foreground/70">{summaryText}</code>
         ),
-        hideSecondaryWhenOpen: toolName !== "bash" || chineseDescription === undefined,
+        hideSecondaryWhenOpen: toolName !== "bash" || description === undefined,
         canToggle: true,
         content: (
           <ToolBody>
