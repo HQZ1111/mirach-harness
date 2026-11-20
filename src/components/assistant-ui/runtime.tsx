@@ -35,6 +35,7 @@ import {
   type PiImagePayload,
 } from './attachments'
 import { convertTurnMessage } from './pi-hydrate'
+import { sessionPreviewBridge } from './session-preview-bridge'
 import {
   applyTranscriptPeek,
   hydrateTranscriptTail,
@@ -238,6 +239,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
   const usage = useSelector(actorRef, (s) => s.context.usage)
+  /** 在途的引擎打开（peek-first 会先画，但发送必须等引擎真就绪——
+   *  prompt 持锁，打在旧会话上/撞 no active session 都是错误投递）。 */
+  const pendingOpenRef = useRef<Promise<void> | null>(null)
   // 转录补页通道（thread.aui 的「显示更早」→ PREPEND_HISTORY）：模块级注册，
   // actor 随 runtime 生命周期更替。
   useEffect(() => {
@@ -592,7 +596,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
                   setCurrentThreadId(peek.sessionId)
                   mainViewStore.getState().showChat()
                 }
-                await invoke('pi_open_session', { path: prefs.lastSessionPath })
+                const restoreOpen = invoke('pi_open_session', {
+                  path: prefs.lastSessionPath,
+                }).then(() => undefined)
+                pendingOpenRef.current = restoreOpen
+                await restoreOpen
                 if (cancelled) return
                 st = await invoke<{ sessionId: string | null }>('pi_get_state')
               }
@@ -708,50 +716,59 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const postRun = useCallback((message: string, images?: PiImagePayload[]) => {
     const ep = endpointRef.current
     if (!ep) return
-    void fetch(`http://127.0.0.1:${ep.port}/ag-ui?token=${encodeURIComponent(ep.token)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      // 契约：{threadId, message, images?: [{data: 纯base64, mimeType}]}；
-      // 无图片不带 images 键
-      body: JSON.stringify({
-        threadId: THREAD,
-        message,
-        // v7.4 双对话分栏：会话分栏发送会把引擎切到它自己的会话——工作区
-        // 的每次发送都带上自己会话的 path，引擎切回工作区会话再跑（缺
-        // path = 尚未落盘的新会话，ensure 按需创建不变）
-        ...(sessionCatalog.getState().entries[currentThreadIdRef.current ?? '']?.path
-          ? { sessionPath: sessionCatalog.getState().entries[currentThreadIdRef.current ?? '']!.path }
-          : {}),
-        ...(images && images.length > 0 ? { images } : {}),
-      }),
-    })
-      .then((res) => {
-        // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出。
-        // 413 是图片链路的典型失败（请求体超过 axum 上限），文案写明。
-        if (!res.ok) {
-          const msg =
-            res.status === 413
-              ? '消息发送失败：请求体过大（HTTP 413）——图片/附件总大小超过服务端上限'
-              : `消息发送失败：POST /ag-ui 返回 ${res.status}`
-          errorBridge.getState().setError(msg, false)
-          throw new Error(msg)
+    void (async () => {
+      // peek-first 打开期间发送：先等引擎打开完成（打开失败在切换路径
+      // 已可见；这里照常走 POST，让错误收敛到同一条可见路径）。
+      if (pendingOpenRef.current) {
+        try {
+          await pendingOpenRef.current
+        } catch {
+          /* 已由切换路径报错 */
         }
-      })
+      }
+      const res = await fetch(
+        `http://127.0.0.1:${ep.port}/ag-ui?token=${encodeURIComponent(ep.token)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          // 契约：{threadId, message, images?: [{data: 纯base64, mimeType}]}；
+          // 无图片不带 images 键
+          body: JSON.stringify({
+            threadId: THREAD,
+            message,
+            // v7.4 双对话分栏：会话分栏发送会把引擎切到它自己的会话——工作区
+            // 的每次发送都带上自己会话的 path，引擎切回工作区会话再跑（缺
+            // path = 尚未落盘的新会话，ensure 按需创建不变）
+            ...(sessionCatalog.getState().entries[currentThreadIdRef.current ?? '']?.path
+              ? { sessionPath: sessionCatalog.getState().entries[currentThreadIdRef.current ?? '']!.path }
+              : {}),
+            ...(images && images.length > 0 ? { images } : {}),
+          }),
+        },
+      )
+      // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出。
+      // 413 是图片链路的典型失败（请求体超过 axum 上限），文案写明。
+      if (!res.ok) {
+        const msg =
+          res.status === 413
+            ? '消息发送失败：请求体过大（HTTP 413）——图片/附件总大小超过服务端上限'
+            : `消息发送失败：POST /ag-ui 返回 ${res.status}`
+        errorBridge.getState().setError(msg, false)
+        throw new Error(msg)
+      }
       // POST 成功即触发自动命名（maybeAutoNameSession 内部全 try/catch，
       // 不向外抛——外层 catch 仍只服务 POST 本身的失败）。同时清掉上一次
       // 发送失败的本地错误（新 run 已上路，旧错误条不该继续挂着）。
-      .then(() => {
-        errorBridge.getState().setError(null)
-        return maybeAutoNameSession()
-      })
-      .catch((e) => {
-        console.error('[agui] POST 失败', e)
-        // 网络层失败（fetch 直接 reject）也要可见——错误条是用户唯一的
-        // 反馈面（乐观消息已经进投影，不能让用户以为消息在跑）。
-        if (!errorBridge.getState().error) {
-          errorBridge.getState().setError(
-            `消息发送失败：${e instanceof Error ? e.message : String(e)}`,
-            false,
+      errorBridge.getState().setError(null)
+      await maybeAutoNameSession()
+    })().catch((e) => {
+      console.error('[agui] POST 失败', e)
+      // 网络层失败（fetch 直接 reject）也要可见——错误条是用户唯一的
+      // 反馈面（乐观消息已经进投影，不能让用户以为消息在跑）。
+      if (!errorBridge.getState().error) {
+        errorBridge.getState().setError(
+          `消息发送失败：${e instanceof Error ? e.message : String(e)}`,
+          false,
           )
         }
       })
@@ -765,6 +782,39 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     }
     return null
   }, [actorRef])
+
+  // ── 会话预览请求桥（peek-first 通用入口）─────────────────────────────
+  // runtime 之外的调用方（bots-pane 打开既有 bot 会话）投递请求：先尾读
+  // 预览把会话画出来，真正的 pi_open_session 由调用方继续（完成后
+  // reconnect 效果统一走 hydrateTranscriptTail 对齐）。
+  const sessionPreviewRequest = useStore(sessionPreviewBridge, (s) => s.request)
+  useEffect(() => {
+    if (!sessionPreviewRequest) return
+    const { seq, path, sessionId } = sessionPreviewRequest
+    sessionPreviewBridge.getState().clear(seq)
+    // 已是当前会话 / 引擎已完成该会话水合 → 无需预览
+    if (currentThreadIdRef.current === sessionId) return
+    if (
+      transcriptTailStore.getState().sessionId === sessionId &&
+      transcriptTailStore.getState().oldestEntryId !== null
+    ) {
+      return
+    }
+    const priorActive = sessionCatalog.getState().activeId
+    void (async () => {
+      const peek = await peekTranscriptTail(path)
+      if (!peek) return
+      // 身份守卫：header id 与双锚不符（文件被换）→ 不预览
+      if (peek.sessionId && peek.sessionId !== sessionId) return
+      // 等待期间用户已切走（activeId 被别的流程改写）→ 不抢
+      if (sessionCatalog.getState().activeId !== priorActive) return
+      sessionCatalog.getState().setActive(sessionId)
+      setCurrentThreadId(sessionId)
+      mainViewStore.getState().showChat()
+      applyTranscriptPeek(actorRef, peek, sessionId)
+      threadScrollBridge.getState().requestRestore(sessionId)
+    })()
+  }, [sessionPreviewRequest, actorRef])
 
   /** run 进行中先中断（照抄 switchToThread 守卫）：prompt 持锁跨整个 run，
    * 不先 pi_interrupt 重发会撞锁失败；中断失败返回 false，调用方不动状态 */
@@ -1403,6 +1453,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           .finally(() => {
             openSettled = true
           })
+        pendingOpenRef.current = openPromise.then(() => undefined)
         const peek = await peekTranscriptTail(path)
         // 预览等待期间用户可能已切走：只在仍是当前选中时才挂（以
         // catalog.activeId 为准——setActive 是同步 Zustand 写）

@@ -31,6 +31,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import { connectionBridge } from '@/components/assistant-ui/connection-store'
+import { sessionPreviewBridge } from '@/components/assistant-ui/session-preview-bridge'
 
 import type { BotPreset } from './bots-store'
 import { botsStore, splitBotModel } from './bots-store'
@@ -121,6 +122,14 @@ async function composeEnabledTools(bot: BotPreset): Promise<string[] | null> {
 async function openOrCreate(bot: BotPreset): Promise<boolean> {
   const { provider, modelId } = splitBotModel(bot.model)
   if (bot.chatSessionPath) {
+    // 秒开：先投递「不打开引擎的尾部预览」，runtime 立即把该 bot 会话画
+    // 出来；下面的 pi_open_session（巨会话数秒）在后台继续，完成后
+    // reconnect 效果统一对齐。身份双锚不全时只按路径预览（防旧记录误挂）。
+    if (bot.chatSessionId) {
+      sessionPreviewBridge
+        .getState()
+        .requestPreview(bot.chatSessionPath, bot.chatSessionId)
+    }
     try {
       await invoke('pi_open_session', { path: bot.chatSessionPath })
       // pi_open_session 返回 "provider/model"（仅供日志）——身份走

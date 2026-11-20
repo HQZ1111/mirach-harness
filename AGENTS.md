@@ -3517,6 +3517,12 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   统一走 `hydrateTranscriptTail` 对齐（同条目 id 重水合，无 key 变化/闪烁）。
   实测巨会话点行 **首屏 557ms**（原 ~5s），peek 本身 64~68ms。守卫：
   `sessionCatalog.activeId` 仍是目标会话才挂预览（连点切换不串）。
+- **发送等待打开**：peek 先画后，发送（postRun）会先 `await pendingOpenRef`
+  （切换路径设置的在途 open Promise）——prompt 持锁，不能打在旧会话上/落空。
+- **bot 切换同享预览**：`session-preview-bridge.ts`（请求桥）——bots-pane
+  打开既有 bot 会话时先投递预览，runtime 执行器做身份双锚守卫（header id 不符
+  不预览）+ activeId 未变守卫（连点不抢）+ 引擎已水合守卫（不 shrink），然后
+  乐观选中并挂尾部；`pi_open_session` 完成后 reconnect 效果统一对齐。
 - **仍有意不做**：hermes `boundRetainedTranscript` 的 store retention（老行
   从内存释放）——宿主全量留在 actor store，只截留渲染窗；后续压内存再补。
 

@@ -87,6 +87,10 @@ vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1�
   就绪后再走 `hydrateTranscriptTail` 对齐。巨会话点行首屏 **557ms**（原 ~5s），
   peek 64ms；`activeId` 守卫防连点串会话。
 冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
+- 发送等待：postRun 先 await 在途 `pi_open_session`（peek 先画但 prompt 必须
+  打在对的会话上）；bot 切换经 `session-preview-bridge` 同享预览（双锚/activeId/
+  已水合三重守卫）。实测：巨会话点行首屏 **259ms**；bot「风格和」797ms 出 7 轮，零错误。
+- 仍有意不做：hermes store retention（老行内存释放）——宿主全量留在 actor store。
 - 仍有意不做：hermes store retention（老行内存释放）——宿主全量留在 actor store。
 
 **✅ 2026-11-20：多会话并列窗格真实现（hermes `_sessions` 模型）+ 语音 402 诊断**
