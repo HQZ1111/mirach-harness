@@ -117,4 +117,30 @@ describe('bucketMarkers', () => {  const mc = (idx: number, provider: string, mo
   it('空输入 → 空 Map', () => {
     expect(bucketMarkers([]).size).toBe(0);
   });
+
+  it('尾部相对下标（tail hydration）：本地落点 = loadedCount − fromEnd', () => {
+    // 全量 20 条消息，只加载了尾部 6 条；标记在整体第 17 条之前
+    // -> fromEnd = 3 -> 本地 bucket = 6 − 3 = 3 ✓
+    const out = bucketMarkers(
+      [
+        { kind: 'modelChange', beforeMessageIndex: 17, beforeMessageIndexFromEnd: 3, provider: 'a', modelId: 'm1' },
+        { kind: 'compact', beforeMessageIndex: 20, beforeMessageIndexFromEnd: 0 },
+      ],
+      6,
+    );
+    expect([...out.keys()].sort((a, b) => a - b)).toEqual([3, 6]);
+  });
+
+  it('尾部相对下标：落在未加载头部（fromEnd > loadedCount）→ 不画', () => {
+    const out = bucketMarkers(
+      [{ kind: 'modelChange', beforeMessageIndex: 1, beforeMessageIndexFromEnd: 10, provider: 'a', modelId: 'm1' }],
+      6,
+    );
+    expect(out.size).toBe(0);
+  });
+
+  it('无 fromEnd 的旧夹具仍按绝对下标分桶', () => {
+    const out = bucketMarkers([mc(2, 'a', 'm1')], 6);
+    expect([...out.keys()]).toEqual([2]);
+  });
 });
