@@ -697,6 +697,18 @@ fn pi_open_settings_window(app: tauri::AppHandle, section: Option<String>) -> Re
         return Ok(());
     }
 
+    let window = build_settings_window(&app, section.as_deref())?;
+    window.show().map_err(|e| format!("设置窗显示失败：{e}"))?;
+    Ok(())
+}
+
+/// 组装（**不显示**）设置窗：`pi_open_settings_window` 与启动预热共用同一份
+/// 外观/几何逻辑（builder 以 `.visible(false)` 构建，几何定好后由调用方 show）。
+#[allow(dead_code)]
+fn build_settings_window(
+    app: &tauri::AppHandle,
+    section: Option<&str>,
+) -> Result<tauri::WebviewWindow, String> {
     // 深链参数只放行安全字符（节 id 词汇表），避免把任意串塞进 URL。
     let url = match section.as_deref().map(str::trim).filter(|s| {
         !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -706,7 +718,7 @@ fn pi_open_settings_window(app: tauri::AppHandle, section: Option<String>) -> Re
     };
 
     let mut builder = tauri::WebviewWindowBuilder::new(
-        &app,
+        app,
         SETTINGS_LABEL,
         tauri::WebviewUrl::App(url.into()),
     )
@@ -776,7 +788,7 @@ fn pi_open_settings_window(app: tauri::AppHandle, section: Option<String>) -> Re
         .flatten()
         .or_else(|| window.primary_monitor().ok().flatten());
     let work = monitor.as_ref().map(monitor_work_area).unwrap_or((0.0, 0.0));
-    let saved = window_state::read_state(&app, SETTINGS_LABEL);
+    let saved = window_state::read_state(app, SETTINGS_LABEL);
     match &saved {
         Some(state) => {
             let monitors: Vec<(f64, f64, f64, f64)> = window
@@ -815,20 +827,34 @@ fn pi_open_settings_window(app: tauri::AppHandle, section: Option<String>) -> Re
     }
 
     // 事件订阅 + 自检 + 首屏落盘（与主窗同一套，见 wire_window 注释）
-    wire_window(&app, &window, CloseAction::Destroy);
-    // 几何定好后才显示（见 builder 的 `.visible(false)` 注释）
-    window.show().map_err(|e| format!("设置窗显示失败：{e}"))?;
-    Ok(())
+    wire_window(app, &window, CloseAction::Destroy);
+    // 几何定好；由调用方决定 show（pi_open）或保持隐藏（预热）。
+    Ok(window)
 }
 
-/// 关闭设置窗（前端 ✕ 按钮用）。**真关**，不是隐藏——见 `CloseAction`。
+/// 关闭设置窗（前端 ✕ 按钮用）。**隐藏**而非销毁（2026-11-20）：WebView2
+/// 二次建窗 ~1s，保实例后再次打开瞬开；进程退出随主进程销毁。
 #[tauri::command(async)]
 fn pi_close_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     match app.get_webview_window(SETTINGS_LABEL) {
-        Some(w) => w.close().map_err(|e| format!("设置窗关闭失败：{e}")),
+        Some(w) => w.hide().map_err(|e| format!("设置窗隐藏失败：{e}")),
         // 已关 = 目标态已达成，不是错误
         None => Ok(()),
     }
+}
+
+/// 设置窗预热：应用启动后延迟构建隐藏实例（不抢焦点、不占首帧）。
+/// 失败只写日志——预热失败不影响正常打开路径。
+fn prewarm_settings_window(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        if app.get_webview_window(SETTINGS_LABEL).is_none() {
+            if let Err(e) = build_settings_window(&app, None) {
+                eprintln!("[settings-window] 预热失败：{e}");
+            }
+        }
+    });
 }
 
 // ── pi 控制面 IPC（docs/pi-integration.md §4.5：HTTP 只管事件流，
@@ -1753,6 +1779,10 @@ fn main() {
             // 的第一帧就是最终几何。不设 visible:false 时会先闪一个 1280×820
             // 的小窗再跳到目标尺寸（用户报的"跳跃"）。
             window.show().map_err(|e| format!("主窗显示失败：{e}"))?;
+
+            // 设置窗预热（2026-11-20）：WebView2 二次建窗 ~1s，预热后首次点开
+            // 设置也瞬开。只 build 不 show；关闭走 hide 保实例。
+            prewarm_settings_window(app.handle());
 
             // 系统托盘（hermes 无此物；ZCode desktopTray.ts 语义的 Tauri 版）
             //

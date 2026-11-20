@@ -191,6 +191,9 @@ export type TurnEvent =
   /** 上滚补页（hermes tail-hydration）：把更老的一页消息插到现有 store 头部。
    *  与 HYDRATE 不同——保留已加载行与在途 run 段，仅前插。 */
   | { type: 'PREPEND_HISTORY'; messages: TurnMessage[] }
+  /** 视图窗 retention：滚离顶部后释放最老的行（hermes boundRetainedTranscript
+   *  的宿主对偶；actor 只保最新 keep 条）。 */
+  | { type: 'TRIM_HISTORY'; keep: number }
   /** 用户中断已成功（pi_interrupt IPC 返回后）——置 interrupted 标记，
    * run 结束后 StoppedRun 据此展示中断态 */
   | { type: 'CANCEL_MARK' }
@@ -522,6 +525,12 @@ export const turnMachine = setup({
       // 补页只在已有 store 上操作（空 store 说明会话已切走，丢弃由调用方守卫）
       return { messages: [...event.messages, ...context.messages] }
     }),
+    trimHistory: assign(({ context, event }) => {
+      if (event.type !== 'TRIM_HISTORY') return {}
+      const keep = Math.max(0, Math.trunc(event.keep))
+      if (keep === 0 || context.messages.length <= keep) return {}
+      return { messages: context.messages.slice(context.messages.length - keep) }
+    }),
   },
   guards: {
     isRunStart: ({ event }) =>
@@ -546,6 +555,7 @@ export const turnMachine = setup({
         RESET: { actions: 'reset' },
         HYDRATE: { actions: 'hydrate' },
         PREPEND_HISTORY: { actions: 'prependOlder' },
+        TRIM_HISTORY: { actions: 'trimHistory' },
         CANCEL_MARK: { actions: 'markCancelled' },
         INTERRUPT_CLEAR: { actions: 'clearInterrupt' },
         AGUI_EVENT: [
@@ -560,6 +570,7 @@ export const turnMachine = setup({
         RESET: { actions: 'reset' },
         HYDRATE: { actions: 'hydrate' },
         PREPEND_HISTORY: { actions: 'prependOlder' },
+        TRIM_HISTORY: { actions: 'trimHistory' },
         CANCEL_MARK: { actions: 'markCancelled' },
         INTERRUPT_CLEAR: { actions: 'clearInterrupt' },
         AGUI_EVENT: [

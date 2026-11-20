@@ -85,6 +85,7 @@ import { useTimelineMarkers } from "@/components/assistant-ui/timeline-marker-st
 import {
   ensureFullTranscript,
   loadOlderTranscript,
+  releaseTranscriptHistory,
   transcriptTailStore,
 } from "@/components/assistant-ui/transcript-paging";
 import {
@@ -156,7 +157,9 @@ import { useStore } from "zustand";
 
 import { ContribBoundary } from "@/hermes-shim/contrib/react/contrib-boundary";
 import { useContributions } from "@/hermes-shim/contrib/react/use-contributions";
+import { I18nProvider } from "@/hermes-mirror/i18n";
 import { sessionCatalog } from "@/components/panes/session-manage/session-catalog";
+import { readLocale } from "@/lib/ui-prefs";
 
 export type ThreadGroupPart = WorkGroupPart;
 
@@ -871,6 +874,11 @@ const MessageTurnList: FC = () => {
     const node = listRef.current;
     if (!node) return;
     const onWheel = (event: WheelEvent) => {
+      // 向下滚 = 离开顶部：按保留窗口释放最老的历史页（内存封顶）
+      if (event.deltaY > 0) {
+        releaseTranscriptHistory();
+        return;
+      }
       if (event.deltaY >= 0) return;
       const viewport = node.closest('[data-slot="aui_thread-viewport"]');
       if (!viewport || viewport.scrollTop > TOP_EDGE_PX) return;
@@ -1022,7 +1030,15 @@ function ChatEmptyEntry({
   const Render = useMemo(() => render, [render]);
   return (
     <ContribBoundary id={id} key={id}>
-      <Render sessionId={sessionId} />
+      {/* 插件贡献的宿主树没有 I18nProvider（dockview 的 PluginPane 各自挂）；
+          不挂时 `usePluginI18n(id)` 的 locale 恒 DEFAULT_LOCALE('en')——
+          BotChatEmpty 的中文文案会显示成英文（2026-11-20 实点发现）。 */}
+      <I18nProvider
+        configClient={null}
+        initialLocale={readLocale() === "zh-CN" ? "zh" : "en"}
+      >
+        <Render sessionId={sessionId} />
+      </I18nProvider>
     </ContribBoundary>
   );
 }

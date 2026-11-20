@@ -3523,8 +3523,12 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   打开既有 bot 会话时先投递预览，runtime 执行器做身份双锚守卫（header id 不符
   不预览）+ activeId 未变守卫（连点不抢）+ 引擎已水合守卫（不 shrink），然后
   乐观选中并挂尾部；`pi_open_session` 完成后 reconnect 效果统一对齐。
-- **仍有意不做**：hermes `boundRetainedTranscript` 的 store retention（老行
-  从内存释放）——宿主全量留在 actor store，只截留渲染窗；后续压内存再补。
+- **store retention（同日补齐）**：`releaseTranscriptHistory()` 在向下滚离
+    顶部时把最老历史页从 actor store 释放（只留最近 3 页，游标随保留窗首条
+    推进）；再上滚由 `loadOlderTranscript()` 按游标重读，内容不丢。
+  - **设置窗预热 + hide 复用**：`setup` 里延迟 1.5s 构建**隐藏**设置窗（只
+    build 不 show，不抢焦点）；前端 ✕ 改为 `hide()` 保实例。首次打开实测
+    **1178ms → 21ms**（WebView2 二次建窗成本消失）。
 
 ## 状态面板功能全对齐轮（2026-11-20，用户："做，缺pi 引擎面的复制zcode的然后提pr，全部对齐功能"）
 
@@ -3593,3 +3597,61 @@ pi_interrupt 与 composer 停止钮同 IPC）。
 红印日志；回执不含 `verification`/`_verify` 字样也红印（插件不支持校验）。
 v2 fork 的成功回执 =「🔒 Completion verification armed」两种核验都过。
 
+
+
+## bots 实点对账（2026-11-20，hermes Desktop 逐键 vs mirach）
+
+用户："打开d盘的hermes实际点击一遍bots有关的所有按钮，再点击一遍mirach的，
+找问题，缺口"。方法 = CDP 真鼠标（hermes 9222 `D:\hermes-agent-main\apps\desktop`
++ mirach 9223），两侧逐面点、逐面对话框/菜单/尺寸取证。镜像源 =
+`src/hermes-mirror/plugins/hermes-bots/**`（真正在屏的 bot 面；旧
+`components/panes/bots-pane.tsx` 只是 PluginPane 未注册时的 fallback）。
+
+### 逐面核对结果（一致项，不再复述实现）
+
+行/群行左键打开、行右键 12+1 项菜单（含上游英文缺口 "Open recent session"）、
+筛选菜单（kind 3 项 + activity 4 项；单连接无 gateway 组）、+ 菜单三项、
+新建机器人（头像页签/名称/显示名/描述/高级 → [常规|能力]，能力页含
+技能/插件/连接器/工具集）、编辑机器人（382x687，高级全屏面板）、管理群组
+对话框（仅"创建并加入"输入，两侧同）、群聊设置（用途/共享笔记/路由下拉/
+deliver 目标）、群行右键（打开群聊/解散——mirach 修复后与 hermes 同）、
+群房间头（返回/群组详情/重命名/解散 + 详情抽屉成员行）、隐藏/取消隐藏、
+置顶/取消置顶、复制、删除确认、屏幕窗格（noVNC 真帧 + 接管）、例程/电台
+窗格 —— 全部实点通过。上游英文硬串（删除对话框 "This will permanently
+delete…"、Open recent session）逐字保留（照抄规矩，不是 bug）。
+
+### 本轮修掉的真 bug（3 个，都有实机证据）
+
+1. **分组行右键被全局窗口菜单抢走**（`canonical-group-row.tsx` /
+   `bot-row.tsx` 的传统 GroupRow 均无登记标记；`context-menu-scope.ts` 的
+   owner 选择器只认 `data-roster-key`，且旧 `[data-slot="bots-pane"]` 前缀
+   对镜像面不存在）。修 = 两处行根加 `data-bots-menu-row=""` + 选择器登记
+   `[data-bots-menu-row]`（删掉死掉的旧选择器）；单测补一条。实机：右键群行
+   = 打开群聊/解散（与 hermes 一致），不再弹「新建会话/设置…」。
+2. **机器人空聊天显示「Mirach / Say something to get started.」**（hermes
+   显示「HERMES / 说点什么开始吧。」）。两个成因：
+   - `src/sdk/wordmark.tsx` 的宿主 shim **吞掉 `text` prop**（恒渲染品牌名）；
+     上游 `components/chat/wordmark.tsx` 必需 `text`，BotChatEmpty 传机器人名。
+     修 = 接受 `text/fitMin/width`，有 text 渲染 text。
+   - `thread.aui.tsx` 的 `chat.empty` 贡献槽**没挂 I18nProvider**（dockview
+     各 PluginPane 都挂了）→ `usePluginI18n` locale 恒 'en'，中文文案变英文。
+     修 = ChatEmptyEntry 包 `I18nProvider initialLocale={readLocale()}`。
+   实机：空聊天现在显示「二万人 (copy) / 说点什么开始吧。」。
+3. （连带实测确认，非代码改动）"与此机器人开新聊天" 能真建新会话（pi_get_state
+   新 sessionId）、"复制"出的 bot 点开是真空态（此前一轮疑似失败是探针时序）。
+
+### 留下的缺口（如实，未修）
+
+| 缺口 | 事实 |
+|---|---|
+| 「在新标签页中打开机器人聊天」无标签页 | `host.openSession`（`src/sdk/host.ts`）签名收 `_options` 但**忽略 intent/workspaceMode**——只切主工作区。hermes 是主区 tab 模型；宿主主区是单 workspace 面板，bot 会话 tab 化要另做（会话分栏 bridge 只服务侧栏拖拽，隐藏 bot 会话不在 catalog，无法直接复用）。「与此机器人开新聊天」同理：会话建了但不开新面 |
+| "Open recent session" 恒灰 | `src/sdk/host-rpc.ts::botToRosterRow` 把 `last_session` **写死 null**；连带花名册行年龄永远显示 createdAt（hermes 是"刚刚"式最后活动）、活动铃（`trackInboundActivity`）永不触发。要真做需要 profile→session 归属数据面（pi 会话索引没有 profile 字段），独立一轮 |
+| 连接器页「无法访问托管应用。…重试」 | 上游 Connectors 页在宿主没有云后端时如实报错（`zh_connectors_page.ts` 文案；本机 MCP 管理在设置页「连接器」）——已知、不改 |
+| 技能 0 / 工具集 17 vs hermes 38/23 | 数据面差异：`~/.pi/skills` 本机为空；工具集来自 pi_capabilities 的 17 组（hermes 有自己的 23）。同一 UI 同一行为，数字随环境 |
+| 活动筛选无数据 | activity 三档筛选器真实接线，但 roster 无 `last_active`（同 last_session 缺口），选了只会空列表 |
+
+### 探针与清理
+
+CDP 辅助 = `E:\Temp\cdp.mjs`（shot/eval/click/type/key）、`mirach-menu-click.mjs`
+（单连接：右键行 → 点指定菜单项）、`mirach-click-row.mjs`。测试产物（临时分区、
+复制 bot、群聊用途、新建 bot）全部已清理；群聊用途已清空回 ""。

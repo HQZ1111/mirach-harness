@@ -41,6 +41,8 @@ interface MessagesPageWire {
   entryIds?: string[]
   hasMore?: boolean
   leafId?: unknown
+  /** 仅预览面（pi_peek_session_tail）带出：会话 header id */
+  sessionId?: unknown
 }
 
 interface TranscriptTailState {
@@ -52,6 +54,9 @@ interface TranscriptTailState {
   hasMore: boolean
   /** 补页请求在途（按钮 / 滚顶节流） */
   loading: boolean
+  /** 已加载页的账本（oldest→newest），retention 用：每页投影后的消息条数
+   *  与页首条目 id。 */
+  pages: readonly { messages: number; firstEntryId: string | null }[]
 }
 
 const emptyTail: TranscriptTailState = {
@@ -59,7 +64,14 @@ const emptyTail: TranscriptTailState = {
   oldestEntryId: null,
   hasMore: false,
   loading: false,
+  pages: [],
 }
+
+/** 保留窗口：滚离顶部（往下滚）后只留最近 N 页历史，其余从 actor store
+ *  释放（hermes boundRetainedTranscript 的宿主对偶）。再上滚时按游标重新
+ *  补页，内容不丢。 */
+const RETAINED_PAGES = 3
+let lastTrimAt = 0
 
 export const transcriptTailStore = createStore<TranscriptTailState>(() => emptyTail)
 
@@ -92,9 +104,10 @@ export async function hydrateTranscriptTail(
     limit: TRANSCRIPT_PAGE_SIZE,
   })
   const wire = Array.isArray(page?.messages) ? page.messages : []
+  const messages = hydratePiMessages(wire, page?.entryIds)
   actor.send({
     type: 'HYDRATE',
-    messages: hydratePiMessages(wire, page?.entryIds),
+    messages,
     usage: usageFromPiMessages(wire),
   })
   transcriptTailStore.setState({
@@ -102,6 +115,7 @@ export async function hydrateTranscriptTail(
     oldestEntryId: page?.entryIds?.[0] ?? null,
     hasMore: page?.hasMore === true && wire.length > 0,
     loading: false,
+    pages: [{ messages: messages.length, firstEntryId: page?.entryIds?.[0] ?? null }],
   })
 }
 
@@ -145,8 +159,38 @@ export async function loadOlderTranscript(): Promise<boolean> {
     oldestEntryId: page?.entryIds?.[0] ?? tail.oldestEntryId,
     hasMore: page?.hasMore === true,
     loading: false,
+    pages: [
+      {
+        messages: hydratePiMessages(wire, page?.entryIds).length,
+        firstEntryId: page?.entryIds?.[0] ?? null,
+      },
+      ...tail.pages,
+    ],
   })
   return true
+}
+
+/**
+ * 保留窗口回收（滚离顶部后调用）：把最老的历史页从 actor store 释放，
+ * 只留最近 `RETAINED_PAGES` 页；光标随保留窗首条推进。用户再上滚时
+ * `loadOlderTranscript` 会按游标重新补回，内容不丢（只重读磁盘）。
+ */
+export function releaseTranscriptHistory(): void {
+  const tail = transcriptTailStore.getState()
+  if (!tail.hasMore || tail.loading) return
+  if (tail.pages.length <= RETAINED_PAGES) return
+  const now = Date.now()
+  if (now - lastTrimAt < 1200) return
+  const pages = tail.pages.slice(-RETAINED_PAGES)
+  const keep = pages.reduce((n, p) => n + p.messages, 0)
+  const actor = registeredActor
+  if (!actor || keep <= 0) return
+  lastTrimAt = now
+  actor.send({ type: 'TRIM_HISTORY', keep })
+  transcriptTailStore.setState({
+    pages,
+    oldestEntryId: pages[0]?.firstEntryId ?? tail.oldestEntryId,
+  })
 }
 
 /**
@@ -165,6 +209,52 @@ export async function ensureFullTranscript(): Promise<void> {
     if (!(await loadOlderTranscript())) return
     guard += 1
   }
+}
+
+/**
+ * 文件尾预览（**不依赖引擎打开**，大会话秒开第二步）：
+ * 读 JSONL 尾部一页，沿 parentId 回溯当前叶分支并裁到轮首。
+ * 失败返回 null（等引擎打开后的正式水合兜底，错误已 console 可见）。
+ */
+export async function peekTranscriptTail(path: string): Promise<{
+  messages: TurnMessage[]
+  entryIds: string[]
+  hasMore: boolean
+  sessionId: string | null
+} | null> {
+  let page: MessagesPageWire
+  try {
+    page = await invoke<MessagesPageWire>('pi_peek_session_tail', {
+      path,
+      limit: TRANSCRIPT_PAGE_SIZE,
+    })
+  } catch (e) {
+    console.error('[transcript] 会话尾部预览失败（等引擎打开后水合）', e)
+    return null
+  }
+  const wire = Array.isArray(page?.messages) ? page.messages : []
+  if (wire.length === 0) return null
+  return {
+    messages: hydratePiMessages(wire, page?.entryIds),
+    entryIds: Array.isArray(page?.entryIds) ? page.entryIds : [],
+    hasMore: page?.hasMore === true,
+    sessionId: typeof page?.sessionId === 'string' ? page.sessionId : null,
+  }
+}
+
+/** 把预览结果挂进 actor（引擎页到达前的快速首屏）。 */
+export function applyTranscriptPeek(
+  actor: TranscriptHydrator,
+  peek: NonNullable<Awaited<ReturnType<typeof peekTranscriptTail>>>,
+  sessionId: string | null,
+): void {
+  actor.send({ type: 'HYDRATE', messages: peek.messages, usage: null })
+  transcriptTailStore.setState({
+    sessionId,
+    oldestEntryId: peek.entryIds[0] ?? null,
+    hasMore: peek.hasMore,
+    loading: false,
+  })
 }
 
 /** 会话域重置（New Chat / 打开新会话前调用）：清空游标与在途态。 */

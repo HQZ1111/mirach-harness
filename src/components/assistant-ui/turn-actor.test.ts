@@ -609,3 +609,43 @@ describe('machine-level reference stability (增量同步门)', () => {
     expect(c.messages[0].content).toEqual([{ type: 'thinking', text: '' }])
   })
 })
+
+
+describe('tail hydration events', () => {
+  const msg = (id: string): TurnMessage => ({ id, role: 'user', content: id })
+
+  it('PREPEND_HISTORY inserts older messages in front', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'HYDRATE', messages: [msg('t2'), msg('t3')] })
+    actor.send({ type: 'PREPEND_HISTORY', messages: [msg('t0'), msg('t1')] })
+    expect(actor.getSnapshot().context.messages.map((m) => m.id)).toEqual([
+      't0',
+      't1',
+      't2',
+      't3',
+    ])
+  })
+
+  it('TRIM_HISTORY keeps only the newest keep messages', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({
+      type: 'HYDRATE',
+      messages: [msg('a'), msg('b'), msg('c'), msg('d')],
+    })
+    actor.send({ type: 'TRIM_HISTORY', keep: 2 })
+    expect(actor.getSnapshot().context.messages.map((m) => m.id)).toEqual([
+      'c',
+      'd',
+    ])
+  })
+
+  it('TRIM_HISTORY with keep 0 is a no-op', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'HYDRATE', messages: [msg('a')] })
+    actor.send({ type: 'TRIM_HISTORY', keep: 0 })
+    expect(actor.getSnapshot().context.messages).toHaveLength(1)
+  })
+})
