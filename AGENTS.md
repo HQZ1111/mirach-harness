@@ -3517,6 +3517,13 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   统一走 `hydrateTranscriptTail` 对齐（同条目 id 重水合，无 key 变化/闪烁）。
   实测巨会话点行 **首屏 557ms**（原 ~5s），peek 本身 64~68ms。守卫：
   `sessionCatalog.activeId` 仍是目标会话才挂预览（连点切换不串）。
+- **引擎 replay 根因拆分（load_streaming 内分段计时，MIRACH_OPEN_TIMING）**：
+  11MB/6134 行 loop=1.86s = sha256 506ms + reducer apply 628ms + 行内未解释
+  ~630ms（async poll/锁/policy）+ parse 仅 38ms（serde 不是瓶颈）；
+  read_snapshot 另有 into_detached/from_state ~1.0s（open 不走）。cold=0：
+  该会话没有 legacy assistant frame。再压需动引擎（去 restore 期 sha /
+  reducer 增量结构）——upstream 级改动，暂不做。引擎侧已留 env 门控诊断
+  （streaming.rs Scanner 分段），补丁层随 G:\pi-rust-main 本地化（非 git）。
 - **切换点击遍历实测（2026-11-21，StrictMode dev）**：全部会话/器人切换零
   console 错误、引擎落点全对。首内容 0.99-1.24s、单帧最大 355-418ms——
   成本=切窗提交（旧 38-48 轮卸载 + 新首屏挂载，一次同步 commit）；补齐已改
