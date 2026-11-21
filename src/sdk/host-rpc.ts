@@ -786,9 +786,29 @@ export async function dispatchHostRequest<T>(
       // 宿主的隔离锚 = bots-store 的双锚 chatSessionId：有锚只认锚，无锚
       // 返回空表（让上游 mint 自己的会话），绝不跨 bot 认领。
       const bot = profile ? findBot(profile) : null
+      let anchor = bot?.chatSessionId ?? null
+      // 锚交叉治疗（克隆历史数据可把两个 bot 锚到同一会话——实测
+      // 风格和/微软共用 01a1e3ec）：同一 sessionId 被别的 bot 也锚定 =
+      // 本 bot 锚已坏。持久清锚 + 本查询视为无锚（上游 mint 自己的
+      // 会话）——否则插件花名册点谁都会打开同一个 "Bot Chat"
+      // （"bot 没切换" 根因）。
+      if (bot && anchor) {
+        const cross = ensureBotsLoaded().find(
+          (b) => b.name !== bot.name && b.chatSessionId === anchor,
+        )
+        if (cross) {
+          console.error(
+            `[host-rpc] 锚交叉：${bot.name} 与 ${cross.name} 共用 ${anchor.slice(0, 8)}——清锚，mint 新会话`,
+          )
+          botsStore.getState().patchMeta(bot.name, {
+            chatSessionPath: null,
+            chatSessionId: null,
+          })
+          anchor = null
+        }
+      }
       let scoped = rows
       if (bot) {
-        const anchor = bot.chatSessionId ?? null
         scoped = anchor ? rows.filter((r) => r.id === anchor) : []
       }
       const filtered = title ? scoped.filter((r) => (r.name ?? '') === title) : scoped
