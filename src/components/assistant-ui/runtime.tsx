@@ -243,6 +243,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   /** 在途的引擎打开（peek-first 会先画，但发送必须等引擎真就绪——
    *  prompt 持锁，打在旧会话上/撞 no active session 都是错误投递）。 */
   const pendingOpenRef = useRef<Promise<void> | null>(null)
+  /** 内容加载防抖（快速连点会话 → 取消上一次的 pending 加载，只执行最后一次） */
+  const switchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // 转录补页通道（thread.aui 的「显示更早」→ PREPEND_HISTORY）：模块级注册，
   // actor 随 runtime 生命周期更替。
   useEffect(() => {
@@ -1454,66 +1456,74 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 乐观高亮（hermes focusOpenSession 先前端面后等 RPC 的对偶）：点行
       // 立即把选中态切过去，侧栏/页签不用干等 open_session + 全量水合。
       // 打开失败时下面 catch 会拉一次真值把选中态纠正回来。
+      const prevThreadId = currentThreadIdRef.current
       sessionCatalog.getState().setActive(id)
       setCurrentThreadId(id)
       mainViewStore.getState().showChat()
-      try {
-        // **大会话秒开**：引擎 pi_open_session 对巨文件要整树 replay（实测
-        // 11MB ≈ 5s）。尾部预览（文件尾读，不依赖引擎）与打开并行：预览
-        // 先回来且引擎还没就绪 → 先把尾部画出来；打开就绪后统一走引擎页
-        // 对齐（同条目 id 重水合，无 key 变化、无闪烁）。
-        let openError: unknown = null
-        let openSettled = false
-        const openPromise = invoke('pi_open_session', { path })
-          .catch((e) => {
-            openError = e
-          })
-          .finally(() => {
-            openSettled = true
-          })
-        pendingOpenRef.current = openPromise.then(() => undefined)
-        const peek = await peekTranscriptTail(path)
-        // 预览等待期间用户可能已切走：只在仍是当前选中时才挂（以
-        // catalog.activeId 为准——setActive 是同步 Zustand 写）
-        if (peek && !openSettled && sessionCatalog.getState().activeId === id) {
-          applyTranscriptPeek(actorRef, peek, id)
+      // **内容加载防抖**（2026-11-21 用户实测：快速连点会话卡顿）：
+      // 乐观 UI 零成本即时；peek+open+hydrate 的 React 提交 ~300-500ms/次，
+      // 连点会堆叠。取消上一次的 pending 加载，只执行最后一次点击的加载。
+      if (switchDebounceRef.current) clearTimeout(switchDebounceRef.current)
+      switchDebounceRef.current = setTimeout(async () => {
+        try {
+          // **大会话秒开**：引擎 pi_open_session 对巨文件要整树 replay（实测
+          // 11MB ≈ 5s）。尾部预览（文件尾读，不依赖引擎）与打开并行：预览
+          // 先回来且引擎还没就绪 → 先把尾部画出来；打开就绪后统一走引擎页
+          // 对齐（同条目 id 重水合，无 key 变化、无闪烁）。
+          let openError: unknown = null
+          let openSettled = false
+          const openPromise = invoke('pi_open_session', { path })
+            .catch((e) => {
+              openError = e
+            })
+            .finally(() => {
+              openSettled = true
+            })
+          pendingOpenRef.current = openPromise.then(() => undefined)
+          const peek = await peekTranscriptTail(path)
+          // 预览等待期间用户可能已切走：只在仍是当前选中时才挂（以
+          // catalog.activeId 为准——setActive 是同步 Zustand 写）
+          if (peek && !openSettled && sessionCatalog.getState().activeId === id) {
+            applyTranscriptPeek(actorRef, peek, id)
+            threadScrollBridge.getState().requestRestore(id)
+          }
+          if (!openSettled) setEngineAttaching(true)
+          await openPromise
+          setEngineAttaching(false)
+          if (openError) throw openError
+          // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
+          // 下一次 RUN_STARTED 的归约自然覆盖）。
+          errorBridge.getState().setError(null)
+          // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
+          await hydrateTranscriptTail(actorRef, id)
+          if (sessionCatalog.getState().activeId !== id) return // 已切走
+          // 宿主状态面（插件 host.state）：活动/聚焦会话 = 当前线程；机器人
+          // 花名册的"这行是否正在看"与"是否在跑"读这两个 atom。owner/profile
+          // 由 [currentThreadId] 的效果统一算（bot 双锚命中才是 owner）。
+          $hostActiveSessionId.set(id)
+          $hostFocusedStoredSessionId.set(id)
+          // 目录刷新不阻塞切换感知：行高亮已乐观落，title/统计拉到再覆盖。
+          void refreshThreads().catch((e) =>
+            console.error('[pi] 切换后会话目录刷新失败（侧栏行统计可能偏高）', e),
+          )
+          resetSessionScopedBridges(id)
+          // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
+          // 位置恢复阅读位
           threadScrollBridge.getState().requestRestore(id)
+          // 活动会话已换——分支条/fork 点随新会话刷新（防上一会话的投影残留）
+          branchBridge.getState().requestRefresh()
+        } catch (e) {
+          console.error(`[pi] 会话 ${id} 打开失败（已回滚选中态）`, e)
+          // 乐观高亮已把选中态切过去，失败必须纠正回引擎真值，否则侧栏
+          // 高亮一行、聊天区却是上一个会话——比不亮更误导。
+          sessionCatalog.getState().setActive(prevThreadId)
+          setCurrentThreadId(prevThreadId)
+          errorBridge.getState().setError(
+            `无法打开会话：${e instanceof Error ? e.message : String(e)}`,
+            false,
+          )
         }
-        if (!openSettled) setEngineAttaching(true)
-        await openPromise
-        setEngineAttaching(false)
-        if (openError) throw openError
-        // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
-        // 下一次 RUN_STARTED 的归约自然覆盖）。
-        errorBridge.getState().setError(null)
-        // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
-        await hydrateTranscriptTail(actorRef, id)
-        // 宿主状态面（插件 host.state）：活动/聚焦会话 = 当前线程；机器人
-        // 花名册的"这行是否正在看"与"是否在跑"读这两个 atom。owner/profile
-        // 由 [currentThreadId] 的效果统一算（bot 双锚命中才是 owner）。
-        $hostActiveSessionId.set(id)
-        $hostFocusedStoredSessionId.set(id)
-        // 目录刷新不阻塞切换感知：行高亮已乐观落，title/统计拉到再覆盖。
-        void refreshThreads().catch((e) =>
-          console.error('[pi] 切换后会话目录刷新失败（侧栏行统计可能偏高）', e),
-        )
-        resetSessionScopedBridges(id)
-        // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
-        // 位置恢复阅读位
-        threadScrollBridge.getState().requestRestore(id)
-        // 活动会话已换——分支条/fork 点随新会话刷新（防上一会话的投影残留）
-        branchBridge.getState().requestRefresh()
-      } catch (e) {
-        console.error(`[pi] 会话 ${id} 打开失败（已回滚选中态）`, e)
-        // 乐观高亮已把选中态切过去，失败必须纠正回引擎真值，否则侧栏
-        // 高亮一行、聊天区却是上一个会话——比不亮更误导。
-        sessionCatalog.getState().setActive(currentThreadIdRef.current)
-        setCurrentThreadId(currentThreadIdRef.current)
-        errorBridge.getState().setError(
-          `无法打开会话：${e instanceof Error ? e.message : String(e)}`,
-          false,
-        )
-      }
+        })
     },
     [actorRef, hydrateTranscriptTail, refreshThreads, resetSessionScopedBridges],
   )
