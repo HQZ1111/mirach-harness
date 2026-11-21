@@ -3531,6 +3531,9 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   该会话没有 legacy assistant frame。再压需动引擎（去 restore 期 sha /
   reducer 增量结构）——upstream 级改动，暂不做。引擎侧已留 env 门控诊断
   （streaming.rs Scanner 分段），补丁层随 G:\pi-rust-main 本地化（非 git）。
+- **release 模式实测**：`cargo test --release -- --ignored timing_storage_only_giant`
+  → **295ms**（debug 3.0s = **10× 膨胀**）。引擎 replay 在 release 下不是瓶颈。
+  用户感知的"卡顿"全部来自 dev 模式的 StrictMode + jsxDEV + 无优化 sha/reducer。
 - **bot 页签 per-bot 标题（同日续）**：canonical chat 的会话真名仍是
   "Bot Chat"（registry 匹配不动），但①页签标签 = `botChatTabTitle(bot)` =
   `显示名 · Bot Chat`（canonical-chat.ts，openStoredBotChat/openFreshCanonical
@@ -3566,25 +3569,74 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
     build 不 show，不抢焦点）；前端 ✕ 改为 `hide()` 保实例。首次打开实测
     **1178ms → 21ms**（WebView2 二次建窗成本消失）。
 
-## 上游仓库迁移事件（2026-11-20，必读）
+## 上游仓库迁移事件（2026-11-20，必读）→ **已完成重提（2026-11-21）**
 
-**rpi-package（extensions 仓）正在迁移**：维护者 DavidHinton-xcpc 于
-2026-11-20 11:17 同时关闭 **#362**（goal 完成校验窄版）与 **#363**
-（background-tasks `/jobs` 命令面），评论原文："这个仓库正在迁移，extension
-的新仓库后续会公开；相关改动会在新仓库继续推进，因此先关闭此 PR"——两条
-都单独致谢了改动内容，**不是否决，是挂起等迁移**。
+**rpi-package（extensions 仓）迁移 → `pi-rust/rpi-extension`**：维护者
+DavidHinton-xcpc 于 2026-11-20 11:17 同时关闭 **#362**（goal 完成校验窄版）
+与 **#363**（background-tasks `/jobs` 命令面），评论原文："这个仓库正在迁移，
+extension 的新仓库后续会公开；相关改动会在新仓库继续推进"——**不是否决，
+是挂起等迁移**。
 
-- **新仓地址**：`pi-rust/rpi-extension`（org 下 11-18 创建，公开但**还是空的**
-  —0 提交，git 操作 409）。等它有内容/README 落地后再重提；rpi-package 本身
-  仍在正常收维护者 PR（web/server/mcp），说明迁的是 extension 包群。
-- **对同步的影响**：harness 的 vendored 插件（`G:\mirach-plugins\rpi-goal`
-  等）来源 = rpi-package；**下次同步要认准 rpi-extension**。引擎仓
-  bigfish1913/pi-rust 不受影响（#348/#355 已合并）。
-- **重提素材就绪**：分支都留在 fork——`feat/goal-verify-verdicts`（#362 的
-  head 3916920）与 `feat/background-jobs-command`（#363 的 head 685798d），
-  rpi-extension 落地后可直接 cherry-pick / 重开 PR。
-- 本地克隆 `E:\Temp\rpi-package-pr`（remote: origin=HQZ1111 fork、
-  upstream=pi-rust/rpi-package）；新仓落地前不要再往旧仓提 PR。
+- **2026-11-21 rpi-extension 已落地内容**（full workspace import：packages/
+  tools/catalog/registry/docs，crates.io 发布方）。**新仓不含我们的两个改动**
+  （核实过：background-tasks 无命令面、goal 无 verify 动词）→ 已在 fork
+  HQZ1111/rpi-extension 上重提：**rpi-extension #19**（/jobs 命令面）+
+  **rpi-extension #20**（goal 完成校验窄版）。分支：
+  `feat/background-jobs-command`（f2c3abf）/ `feat/goal-verify-verdicts`
+  （733e172），基于 rpi-extension main 607c00d 单提交构建（git 直连被墙，
+  走 Git Data API：tree(base_tree)+commit+ref+PR 四步）。
+- **对同步的影响（已执行）**：vendored 插件来源今后 = rpi-extension；
+  引擎仓 bigfish1913/pi-rust 不受迁移影响（#348/#355 已合并）。
+- 本地克隆 `E:\Temp\rpi-package-pr`（旧仓，仅存档参考）、
+  `E:\Temp\rpi-extension-clone` 未建成功（git 直连断续）——fork 操作全走 API。
+
+## Tauri alpha.6 + 引擎 0.27.0 同步轮（2026-11-21，用户："仓库更新了，更新一下tauri3和rpi，然后重新pr"）
+
+### ① Tauri 3：alpha.4 → **alpha.6**（一次过，零 API 断裂）
+
+- crates：tauri / tauri-runtime-wry → `3.0.0-alpha.6`；tauri-build、
+  tauri-plugin-dialog → `3.0.0-alpha.4`（各 crate 的最新 alpha 各不相同，
+  tauri 自身把 macros/utils 拽到 alpha.4）。npm：`@tauri-apps/api` → alpha.3、
+  `@tauri-apps/cli` → alpha.6。宿主用面（wire_window / tray / runtime-wry
+  显式 Builder / dialog 插件）在 alpha.6 无 API 变化——cargo check 一次过。
+
+### ② rpi 引擎：0.24.0 → **0.27.0**（59f985a，21+ 提交跨 0.25/0.26/0.27）
+
+- **镜像真实基线 = v0.24.0**（非 0.25/0.26）：`git diff --no-index v0.24.0
+  镜像` = **27 文件**本地补丁；其中已上游化（#333 write diffs、#348
+  lease/审批/message_agent、#355 子代理名册——上游版本更新更好）→ 跳过；
+  真正重放的 = **os_env.rs execution_env（431 行，上游该文件 v0.24→0.27
+  零变化 → 整文件直拷）**、find/grep/ls/read.rs 描述（上游零变化 → 直拷）、
+  prebuilt_extensions.rs/settings.rs（上游零变化 → 直拷）、
+  **BUILTIN_TOOL_NAMES 8 项注册（session.rs 内，3-way 合并）**、
+  bash.rs 描述（+463B 合并）、powershell.rs 描述（1 冲突块，取镜像
+  #369 措辞——"IMPORTANT: Avoid…用专用工具"是指向专用工具的定稿）、
+  actions.rs child_agent_roster 文档（1 冲突块，取上游 #355 的更全注释）、
+  session.rs 3 冲突块（全为注释措辞/格式差异，取上游）、
+  bash_windows_shell.rs 测试（本地新文件拷入）。
+- **有意丢弃**：streaming.rs 的 MIRACH_OPEN_TIMING 诊断插桩（纯计时，
+  上游 #368/#394 重写了该文件）。
+- **3-way 合并方法（本次的坑，下次直接用）**：`git merge-file -p ours base
+  theirs` 的三个输入**必须先统一行尾**（worktree 是 CRLF、镜像 LF——不归一
+  化会把整文件打成全冲突，产物 = 双倍大小拼接垃圾）；冲突标记带 label
+  （`<<<<<<< E:\…ours`），数冲突要用 `/^<{7}/m` 不是 `^<{7}$`。
+- **宿主零 API 断裂**：0.24→0.27 的 SDK/agui/session 面在宿主消费点上
+  无需改动——cargo check/test 一次过（727 测试全绿）。
+- 旧镜像保留 = `G:\pi-rust-main.old-0.24`（流式诊断插桩在里面，要找回看它）。
+
+### ③ vendored goal fork 对 SDK 0.27 重编译
+
+61 测试全过（unsafe wrapper 在 0.27 的 safe SDK 上仍编译——
+`#![forbid(unsafe_code)]` 的 fork 本体没有，wrapper 是 fork 内局部 unsafe
+块，合法保留）。DLL 已装（改名替换法，rpi_goal.dll 1090KB，实机探针确认
+verify 动词在）。
+
+### ④ 实机启动（三件同验：Tauri alpha.6 + rpi 0.27 + 新 DLL）
+
+job list / get_state / **47 会话列表** / goal v2 状态 / `/jobs` 守卫探针
+（返回新命令面文案）全通；**goal 武装无假目标**（arm 回执核验生效）。
+门禁：cargo 727 ✓ / vitest 1106 ✓ / tsc 1319（唯一非镜像错 =
+transcript-paging.ts 的 TRIM_HISTORY——并行会话 WIP，非本轮改动）。
 
 ## 状态面板功能全对齐轮（2026-11-20，用户："做，缺pi 引擎面的复制zcode的然后提pr，全部对齐功能"）
 
@@ -3743,6 +3795,7 @@ key 恢复后回复即照常。
 CDP 辅助 = `E:\Temp\cdp.mjs`（shot/eval/click/type/key）、`mirach-menu-click.mjs`
 （单连接：右键行 → 点指定菜单项）、`mirach-click-row.mjs`。测试产物（临时分区、
 复制 bot、群聊用途、新建 bot）全部已清理；群聊用途已清空回 ""。
+
 ## 内存复查（2026-11-21）：弹层 rAF 轮询泄漏 + 设置窗预热撤回
 
 **症状**：主渲染器 JS 堆长跑翻倍（~2h 122MB→244MB 且持续涨，进程 WS 462MB），

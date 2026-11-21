@@ -6,7 +6,33 @@
 
 ## 当前状态
 
-**⚠️ 上游仓库迁移（2026-11-20，必读）**：rpi-package（extensions 仓）**正在
+**✅ 2026-11-21：Tauri alpha.6 + 引擎 0.27.0 同步 + PR 重提（用户："仓库更新了，更新一下tauri3和rpi，然后重新pr"）**
+
+- **Tauri 3 → alpha.6**（tauri/wry alpha.6、build/dialog alpha.4、npm api alpha.3
+  / cli alpha.6）：宿主用面零 API 变化，一次编译过。
+- **rpi 引擎 0.24.0 → 0.27.0**（59f985a）：镜像真实基线 = v0.24.0（27 文件
+  补丁）；已上游化的跳过（#333/#348/#355），真重放 = os_env execution_env
+  （431 行，上游零变化 → 直拷）+ 工具描述路由（read/grep/ls/find 直拷 +
+  bash/powershell 合并）+ BUILTIN_TOOL_NAMES 8 项（session.rs 3-way）+
+  bash_windows_shell.rs 测试拷入；streaming.rs 的 MIRACH_OPEN_TIMING 诊断
+  插桩有意丢弃（上游 #368/#394 重写了该文件）。**3-way 合并必须先统一行尾**
+  （CRLF/LF 不归一 → 整文件假冲突、双倍拼接垃圾；冲突标记带 label，
+  数冲突用 `/^<{7}/m`）。宿主消费面 **0.24→0.27 零 API 断裂**（cargo 727
+  一次过）。旧镜像保留 `G:\pi-rust-main.old-0.24`。
+- **vendored goal 对 SDK 0.27 重编译**：61 测试全过，DLL 已装（改名替换法）。
+- **实机三件同验 ✓**：job list / get_state / 47 会话 / goal v2 / `/jobs`
+  守卫探针全通；goal 武装无假目标（arm 回执核验生效）。
+- **PR 已重提到新仓**：**rpi-extension #19**（/jobs 命令面）+ **#20**（goal
+  完成校验窄版）——新仓是 rpi-package 的迁移归宿（full workspace import，
+  crates.io 发布方），**不含**我们的两个改动（核实过）；分支
+  `feat/background-jobs-command`（f2c3abf）/ `feat/goal-verify-verdicts`
+  （733e172）在 fork HQZ1111/rpi-extension 上，基于其 main 607c00d 单提交
+  构建（git 直连断续 → 走 Git Data API）。**vendored 插件今后同步来源 =
+  rpi-extension**。
+- 门禁：cargo 727 ✓ / vitest 1106 ✓ / tsc 1319（唯一非镜像错 =
+  transcript-paging.ts TRIM_HISTORY——并行会话 WIP，非本轮改动）。
+
+**⚠️ 上游仓库迁移（2026-11-20）——已由上条收口**：rpi-package（extensions 仓）**正在
 迁移，新仓库后续公开**。维护者 DavidHinton-xcpc 11:17 同时关闭我们最后两个
 PR：**#362**（goal 完成校验窄版）与 **#363**（`/jobs` 命令面），原文"相关
 改动会在新仓库继续推进，因此先关闭此 PR"，且都单独致谢了改动内容——**挂起
@@ -99,7 +125,7 @@ vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1�
   peek 64ms；`activeId` 守卫防连点串会话。
 冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
 - bot「没切换」根因：插件 canonical chat 按 (profile,"Bot Chat") 解析，
-  单命名空间下全 bot 同名互窜（5 个 Bot Chat 会话实测）；特性级修复另立轮。- bot 页签 per-bot 标题：页签 = `显示名 · Bot Chat`（会话真名不动，registry
+  单命名空间下全 bot 同名互窜（5 个 Bot Chat 会话实测）；特性级修复另立轮。- **release 实测**：引擎 replay 295ms（debug 3.0s = 10× 膨胀）——引擎不是瓶颈。- bot 页签 per-bot 标题：页签 = `显示名 · Bot Chat`（会话真名不动，registry
   匹配不受影响）；更正"锚交叉"误判（ULID 截断伪影——两 bot 各有自己的
   Bot Chat，插件花名册切换本来就是通的）。- 引擎 replay 根因（load_streaming 分段计时）：sha 506ms + apply 628ms +
   行内 ~630ms（parse 仅 38ms——serde 非瓶颈）；诊断已留在引擎 streaming.rs。- 切换点击遍历（dev/StrictMode）：零错误、落点全对；首内容 ~1s、单帧 ≤420ms；
