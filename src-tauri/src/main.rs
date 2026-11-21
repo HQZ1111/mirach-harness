@@ -702,8 +702,8 @@ fn pi_open_settings_window(app: tauri::AppHandle, section: Option<String>) -> Re
     Ok(())
 }
 
-/// 组装（**不显示**）设置窗：`pi_open_settings_window` 与启动预热共用同一份
-/// 外观/几何逻辑（builder 以 `.visible(false)` 构建，几何定好后由调用方 show）。
+/// 组装（**不显示**）设置窗：builder 以 `.visible(false)` 构建，几何定好后由
+/// 调用方 show。几何逻辑与主窗同一套纪律（见下方 ⓪ 注释）。
 #[allow(dead_code)]
 fn build_settings_window(
     app: &tauri::AppHandle,
@@ -841,20 +841,6 @@ fn pi_close_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         // 已关 = 目标态已达成，不是错误
         None => Ok(()),
     }
-}
-
-/// 设置窗预热：应用启动后延迟构建隐藏实例（不抢焦点、不占首帧）。
-/// 失败只写日志——预热失败不影响正常打开路径。
-fn prewarm_settings_window(app: &tauri::AppHandle) {
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        if app.get_webview_window(SETTINGS_LABEL).is_none() {
-            if let Err(e) = build_settings_window(&app, None) {
-                eprintln!("[settings-window] 预热失败：{e}");
-            }
-        }
-    });
 }
 
 // ── pi 控制面 IPC（docs/pi-integration.md §4.5：HTTP 只管事件流，
@@ -1780,9 +1766,10 @@ fn main() {
             // 的小窗再跳到目标尺寸（用户报的"跳跃"）。
             window.show().map_err(|e| format!("主窗显示失败：{e}"))?;
 
-            // 设置窗预热（2026-11-20）：WebView2 二次建窗 ~1s，预热后首次点开
-            // 设置也瞬开。只 build 不 show；关闭走 hide 保实例。
-            prewarm_settings_window(app.handle());
+            // 设置窗**不预热**（2026-11-21 撤销 2026-11-20 的预热）：预热换
+            // 首次点开 ~1s，代价是常驻一个完整渲染进程（实测 100~150MB 私有
+            // 内存），即使设置从未打开。现在 = 首次打开现场构建，关闭只 hide
+            // 保实例，后续打开仍瞬开。
 
             // 系统托盘（hermes 无此物；ZCode desktopTray.ts 语义的 Tauri 版）
             //

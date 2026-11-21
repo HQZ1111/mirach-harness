@@ -42,6 +42,7 @@ import './styles/ui-primitives.css'
 import './styles/tailwind.css'
 
 import { inTauri } from './lib/tauri-window'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 /**
  * 窗口分派（2026-10-23 起真正生效）。
@@ -71,8 +72,26 @@ const winParam =
     ? null
     : new URLSearchParams(window.location.search).get('win')
 
-/** 设置独立窗口：**不渲染**主窗壳与全局右键菜单（那是主窗的东西）。 */
-const isSettingsWindow = winParam === 'settings'
+/**
+ * 设置独立窗口：**不渲染**主窗壳与全局右键菜单（那是主窗的东西）。
+ *
+ * 判定用「URL `?win=` **或** Tauri 窗口 label」双源（2026-11-21 修）：
+ * CDP 实测到过 settings 窗口的 URL 掉成 `/`（history 里多了一条
+ * `/index.html?win=settings` → `/`）——此时只按 URL 判定会让设置窗
+ * **整棵主窗应用**（会话列表 + composer + 全部 store/轮询），等于把
+ * 主应用跑两份（实测 +150MB JS 堆）。label 是窗口的权威身份，
+ * URL 只作浏览器直开（无 Tauri）时的退路。
+ */
+const settingsLabel = (() => {
+  if (!inTauri) return false
+  try {
+    return getCurrentWindow().label === 'settings'
+  } catch (e) {
+    console.error('[boot] 读取窗口 label 失败——按 URL 判定', e)
+    return false
+  }
+})()
+const isSettingsWindow = winParam === 'settings' || settingsLabel
 
 // 纯浏览器直开（无 Tauri 透明窗体）：铺满不圆角，见 base.css 窗体段
 if (!inTauri) document.body.classList.add('in-browser')

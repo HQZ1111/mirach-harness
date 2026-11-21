@@ -3743,3 +3743,83 @@ key 恢复后回复即照常。
 CDP 辅助 = `E:\Temp\cdp.mjs`（shot/eval/click/type/key）、`mirach-menu-click.mjs`
 （单连接：右键行 → 点指定菜单项）、`mirach-click-row.mjs`。测试产物（临时分区、
 复制 bot、群聊用途、新建 bot）全部已清理；群聊用途已清空回 ""。
+## 内存复查（2026-11-21）：弹层 rAF 轮询泄漏 + 设置窗预热撤回
+
+**症状**：主渲染器 JS 堆长跑翻倍（~2h 122MB→244MB 且持续涨，进程 WS 462MB），
+设置窗（隐藏）常驻一个完整渲染进程。用户口径：主渲染器应在 200MB 内、壳 10MB 内。
+
+### ① 弹层位置轮询 = 无界 React 更新队列（真 bug，已修）
+
+`src/components/motion/popover-position.ts`：`usePopoverPortalPosition` 的 rAF
+每 3 帧调 `setLayout(current => sameLayout(current,next) ? current : next)`；
+`popover.tsx` 给 hook 传的 `active` 是 `portalReady`（挂载后恒 true）→ 8 个常驻
+PopoverContent（tab 总览 ×4、模型选择器、上下文明细、维护条……）关闭后仍 20Hz 派发。
+
+React 对"派发同值 state"走 **eager bail-out**：不调度渲染，但 Update 对象照样挂进
+`queue.pending`——fiber 没理由再渲染，队列只增不减。实测（CDP 遍历 `__reactFiber$`
+数 `queue.pending` 环长）：单队列 15s 84,856→85,157（20/s × 8 实例 ≈160/s）；每条
+连带 action 闭包 + scope + trigger/content 两个几何对象 ≈160B → **~77MB/小时**。
+堆快照对比（旧 2h vs 新冷启）：`{trigger,content}` 822k → 178k、React Update
+826k → 179k。
+
+修法（**不要改回去**）：
+1. hook 内用 `layoutRef` 记最近已派发几何，`sameLayout` 命中时 **dispatch 前 return**
+   （在 updater 里 `return current` 没用，React 仍会 enqueue）；
+2. `popover.tsx` 的 `active` 改传 `open`，关闭即停轮询（打开瞬间 useLayoutEffect
+   仍同步测一次，无闪位）。
+实测修后：UI 静止 maxPending=12，堆 60s 157.8→148.4MB 持续回落。
+
+### ② 设置窗开机预热已撤（内存优先）
+
+2026-11-20 的 `prewarm_settings_window` 在启动后 1.5s 构建隐藏设置窗（首次点开
+1178ms→21ms），代价是**常驻一个完整渲染进程**（实测设置页私有内存 ~100MB、
+WS 136MB）。现改为：首次打开现场构建、关闭仍 `hide()` 保实例（后续仍瞬开）。
+`pi_close_settings_window` 语义不变。
+
+### ③ 窗口身份判定双源（防主窗应用跑两份）
+
+实测 settings 窗口 URL 掉成 `/`（`Page.getNavigationHistory` 两条：
+`/index.html?win=settings` → `/`）。`main.tsx` 原先只按 `?win=` 判定 → 设置窗渲染
+整棵主窗应用（会话列表 + composer + 全部 store/轮询），等于主应用跑两份（实测该
+渲染进程 426MB WS）。现判定 = URL `?win=` **或** Tauri
+`getCurrentWindow().label === "settings"`。
+
+### 当前开销大头（debug 构建实测，2026-11-21 早）
+
+- 主渲染器：JS 堆 ~150-175MB（V8 快照 self ~225MB）
+  - `ExternalStringData` 77MB（脚本源码等外部字符串——dev 未压缩模块图是放大项，
+    release 会显著下降）；
+  - V8 code 28MB + string 27MB + object 19MB + array 13MB；
+  - FiberNode 仅 ~4.6MB（React 树不是大头）。
+- Chromium browser ~127MB、GPU ~90MB、utilities ~70MB（WebView2 进程基线；多一个
+  webview 就多一份）。
+- Rust 宿主：priv ~39–87MB 波动 / WS 85–154MB（链着整个 pi 引擎）。**不是空壳量级**；
+  其中 `EngineShared.retired: HashMap<PathBuf, Arc<HarnessLive>>` **无上限**（为了
+  writer lease 不 drop），每切一个会话留一份 harness（含会话内存态）。引擎已提供
+  `harness.session().storage().release_writer_lease()`（TUI 切会话同款用法，
+  `rpi-harness/session/jsonl/storage.rs:315`），可做"保留最近 N 个、其余 release 后
+  drop"的收紧——待单独一轮。
+
+### WebGPU 结论：不引入
+
+全仓 `canvas` 数量为 0（实测 DOM），UI 是 DOM+CSS+SVG；goo 的 feGaussianBlur 是 SVG
+滤镜且已被 `--beui-popover-goo` 令牌默认关闭。内存问题在 JS 堆与多余渲染进程，
+WebGPU 帮不上，反而增加 GPU 设备/管线常驻（+10~40MB）与 WebView2/D3D12 驱动兼容
+风险。重开条件：本地模型推理（WebLLM/onnxruntime-web）、波形/频谱等 >60fps 自绘、
+视频处理；即便如此先评估 WebGL2。
+
+### 侧车（Node.js）结论：不带
+
+Tauri bundle 仅 NSIS，`resources: ["skills-catalog"]`（技能 markdown，~11MB 文件，
+按需 `pi_skills_search` 读，不常驻）。Rust 侧 `Command::new` 只有 `git` / `gh` /
+`cmd`（Windows）+ `ssh` 与凭据页 bw/op 探测——**无 node、无 sidecar 进程**。开发时
+看到的 node.exe 全是 `npx tauri dev` 工具链（npm → tauri-cli → vite）。
+
+### 测量方法（复现）
+- 进程：`Get-Process mirach-harness,msedgewebview2` 按 `WorkingSet64` /
+  `PrivateMemorySize64` 取数，用 CommandLine `--type=` 分类。
+- 渲染堆：CDP 9223 `HeapProfiler.takeHeapSnapshot` 落盘 + 流式聚合（类型 / 构造名 /
+  字符串前缀 / 保留链）。坑：`.heapsnapshot` 的 `edges[].to_node` 是**字节偏移**
+  （÷6 才是节点下标）；>512MB 不能用 `JSON.parse`（V8 字符串上限），必须流式扫。
+- 滞留队列：页面内遍历 `Object.keys(el).filter(k => k.startsWith('__reactFiber$'))`，
+  沿 `memoizedState / next` 数 `queue.pending` 环长（修好后静止应 <50）。

@@ -468,10 +468,13 @@ export function PopoverContent({
 
   const measureRef = contentRef;
   const panelHover = useHoverGesture();
+  // 只在弹层打开期间跑位置追踪（active 传入 open）：关闭后内容仍在 DOM
+  // （收起动画/首帧对齐要用旧 geometry），但 rAF 轮询没有意义 —— 常驻轮询
+  // 会每 50ms dispatch 一次同值 setState，挂进 React queue.pending 永不回收。
   const layout = usePopoverPortalPosition(
     triggerRef,
     measureRef,
-    portalReady,
+    open,
   );
 
   useEffect(() => setPortalReady(true), []);

@@ -4,6 +4,7 @@ import {
   type MutableRefObject,
   useCallback,
   useLayoutEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -41,6 +42,12 @@ export function usePopoverPortalPosition<
   active: boolean,
 ) {
   const [layout, setLayout] = useState<PortalLayout | null>(null);
+  // 最近一次"已提交/已派发"的几何。必须在这里短路：React 对 dispatch 了
+  // 同值 state 的更新走 eager-bailout（不调度渲染），但 Update 对象仍会挂进
+  // queue.pending；无人重新渲染时队列只增不减。rAF 轮询下就是每 50ms
+  // 泄漏一个 Update（连带闭包/scope/geometry，实测 ~160B/次、8 个常驻弹层
+  // ≈ 20Hz → 一小时近百 MB）。所以"没变"要在 dispatch 之前判断。
+  const layoutRef = useRef<PortalLayout | null>(null);
 
   const update = useCallback(() => {
     const trigger = triggerRef.current;
@@ -60,7 +67,9 @@ export function usePopoverPortalPosition<
         height: content.offsetHeight,
       },
     };
-    setLayout((current) => (sameLayout(current, next) ? current : next));
+    if (sameLayout(layoutRef.current, next)) return;
+    layoutRef.current = next;
+    setLayout(next);
   }, [contentRef, triggerRef]);
 
   useLayoutEffect(() => {
