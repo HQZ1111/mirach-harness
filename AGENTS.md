@@ -3517,6 +3517,12 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   统一走 `hydrateTranscriptTail` 对齐（同条目 id 重水合，无 key 变化/闪烁）。
   实测巨会话点行 **首屏 557ms**（原 ~5s），peek 本身 64~68ms。守卫：
   `sessionCatalog.activeId` 仍是目标会话才挂预览（连点切换不串）。
+- **切换点击遍历实测（2026-11-21，StrictMode dev）**：全部会话/器人切换零
+  console 错误、引擎落点全对。首内容 0.99-1.24s、单帧最大 355-418ms——
+  成本=切窗提交（旧 38-48 轮卸载 + 新首屏挂载，一次同步 commit）；补齐已改
+  **每帧 +48 权重（1-2 轮）**（原 +290 一页一步实测 300-500ms 长任务），
+  消息三组件 memo（ThreadMessage/MessageWithDaySeparator/UserMessage，无 props
+  读 context）后预算步不再整列表重渲。StrictMode 双渲染下 dev 数字 ≈2× release。
 - **打开耗时拆分（MIRACH_OPEN_TIMING）**：prep(模型解析等)≈1.5ms；
   **纯存储重放 3.0s**（11MB scanner+reducer，`JsonlSessionStorage::read_snapshot`
   单测 `--ignored timing_storage_only_giant` 可复测）；装配/插件再加 ~1.4s。

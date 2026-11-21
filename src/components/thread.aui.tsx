@@ -143,6 +143,7 @@ import {
 } from "lucide-react";
 import {
   createContext,
+  memo,
   useCallback,
   useContext,
   useEffect,
@@ -767,7 +768,7 @@ const DaySeparatorRow: FC<{ day: string; time: string }> = ({ day, time }) => (
   </div>
 );
 
-const MessageWithDaySeparator: FC = () => {
+const MessageWithDaySeparator: FC = memo(function MessageWithDaySeparator() {
   const day = useAuiState((s) =>
     s.message.createdAt ? dayLabel(s.message.createdAt) : null,
   );
@@ -786,7 +787,7 @@ const MessageWithDaySeparator: FC = () => {
       <ThreadMessage />
     </>
   );
-};
+});
 
 /**
  * 轮容器列表（ZCode `ConversationTurnRenderUnit` 的宿主投影，2026-11-02）。
@@ -1351,7 +1352,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
   );
 };
 
-const ThreadMessage: FC = () => {
+const ThreadMessage: FC = memo(function ThreadMessage() {
   const { AssistantMessage: AssistantMessageComponent = AssistantMessage } =
     useContext(ThreadComponentsContext);
   const role = useAuiState((s) => s.message.role);
@@ -1370,8 +1371,7 @@ const ThreadMessage: FC = () => {
   if (role === "user") return <UserMessage />;
   if (!hasParts) return null;
   return <AssistantMessageComponent />;
-};
-
+});
 type VoiceRunPosition = "single" | "start" | "middle" | "end";
 
 const useVoiceRunPosition = (): VoiceRunPosition =>
@@ -2045,7 +2045,7 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
   </div>
 );
 
-const UserMessage: FC = () => {
+const UserMessage: FC = memo(function UserMessage() {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
@@ -2089,7 +2089,7 @@ const UserMessage: FC = () => {
       </div>
     </MessagePrimitive.Root>
   );
-};
+});
 
 const UserActionBar: FC = () => {
   const aui = useAui();

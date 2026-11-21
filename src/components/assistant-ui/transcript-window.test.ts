@@ -87,9 +87,9 @@ describe("selectTranscriptWindow", () => {
 });
 
 describe("预算补齐", () => {
-  it("nextBackfillBudget 每次 +290，到整页预算封顶", () => {
-    expect(nextBackfillBudget(FIRST_PAINT_BUDGET)).toBe(310);
-    expect(nextBackfillBudget(310)).toBe(FULL_TRANSCRIPT_BUDGET);
+  it("nextBackfillBudget 每次 +48（1-2 个普通轮），到整页预算封顶", () => {
+    expect(nextBackfillBudget(FIRST_PAINT_BUDGET)).toBe(68);
+    expect(nextBackfillBudget(552)).toBe(FULL_TRANSCRIPT_BUDGET);
     expect(nextBackfillBudget(FULL_TRANSCRIPT_BUDGET)).toBe(
       FULL_TRANSCRIPT_BUDGET,
     );

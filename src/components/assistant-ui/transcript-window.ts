@@ -29,8 +29,10 @@ export const FIRST_PAINT_BUDGET = 20;
 /** 整页预算：约 10-20 个 agentic 轮（工具密集轮 30-90，普通往返 5-10）。 */
 export const FULL_TRANSCRIPT_BUDGET = 600;
 
-/** 首帧之后每个 rAF 追加的步长：两步填满一页，单步远低于可见冻结阈值。 */
-export const BACKFILL_STEP = 290;
+/** 首帧之后每个 rAF 追加的步长：**每帧 1-2 个普通轮**（48 权重）——
+ *  实测（2026-11-20 切换点击遍历）一整页一步会产生 300-500ms 长任务；
+ *  摊到每帧后单帧 ≤~50ms，整页 ~15 帧补完，滚动无感。 */
+export const BACKFILL_STEP = 48;
 
 /** 底部边缘判定的容差（px）：滚到顶才自动翻页。 */
 export const TOP_EDGE_PX = 48;

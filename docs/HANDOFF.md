@@ -98,7 +98,8 @@ vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1�
   就绪后再走 `hydrateTranscriptTail` 对齐。巨会话点行首屏 **557ms**（原 ~5s），
   peek 64ms；`activeId` 守卫防连点串会话。
 冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
-- 打开耗时拆分：纯存储重放 3.0s（引擎地板，--ignored 单测可复测）+ 装配 ~1.4s；
+- 切换点击遍历（dev/StrictMode）：零错误、落点全对；首内容 ~1s、单帧 ≤420ms；
+  补齐改每帧 +48（1-2 轮）+ 消息组件 memo 后预算步无整列表重渲。- 打开耗时拆分：纯存储重放 3.0s（引擎地板，--ignored 单测可复测）+ 装配 ~1.4s；
   装配期间 composer 上方显示「正在准备会话（引擎载入中）…」。- 发送等待：postRun 先 await 在途 `pi_open_session`（peek 先画但 prompt 必须
   打在对的会话上）；bot 切换经 `session-preview-bridge` 同享预览（双锚/activeId/
   已水合三重守卫）。实测：巨会话点行首屏 **259ms**；bot「风格和」797ms 出 7 轮，零错误。
