@@ -88,7 +88,8 @@ export interface TranscriptHydrator {
   send(
     event:
       | { type: 'HYDRATE'; messages: TurnMessage[]; usage?: TurnUsage | null }
-      | { type: 'PREPEND_HISTORY'; messages: TurnMessage[] },
+      | { type: 'PREPEND_HISTORY'; messages: TurnMessage[] }
+      | { type: 'TRIM_HISTORY'; keep: number },
   ): void
 }
 

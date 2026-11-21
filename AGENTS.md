@@ -3846,12 +3846,18 @@ WS 136MB）。现改为：首次打开现场构建、关闭仍 `hide()` 保实�
   - FiberNode 仅 ~4.6MB（React 树不是大头）。
 - Chromium browser ~127MB、GPU ~90MB、utilities ~70MB（WebView2 进程基线；多一个
   webview 就多一份）。
-- Rust 宿主：priv ~39–87MB 波动 / WS 85–154MB（链着整个 pi 引擎）。**不是空壳量级**；
-  其中 `EngineShared.retired: HashMap<PathBuf, Arc<HarnessLive>>` **无上限**（为了
-  writer lease 不 drop），每切一个会话留一份 harness（含会话内存态）。引擎已提供
-  `harness.session().storage().release_writer_lease()`（TUI 切会话同款用法，
-  `rpi-harness/session/jsonl/storage.rs:315`），可做"保留最近 N 个、其余 release 后
-  drop"的收紧——待单独一轮。
+- Rust 宿主：priv ~33MB 起、随会话增（每份在场 harness ≈8MB）/ WS 80–130MB 波动。
+  **不是空壳能到的量级**（二进制链着整个 pi 引擎 + fsqlite + TLS）。
+- **retired 会话表已加上限（2026-11-21，同轮）**：`RetiredSessions`（`HashMap` +
+  进入顺序 `VecDeque`，`RETIRED_HARNESS_CAP = 4`）——超出上限按进入顺序淘汰
+  最老的一份，淘汰时**先 `harness.session().storage().release_writer_lease()`
+  显式放租约再 drop**（drop 本身不释放，会悬空成 "writer lease is already
+  held"）。被淘汰会话再次打开走正常重建（lease 已放）。取用口同轮
+  `.remove()` → `.take()`。实测：连开 6 个不同会话宿主 priv +51MB（首次装载），
+  **再开 5 个只 +1.1MB**（淘汰生效、内存平台化）；被淘汰的会话重新打开正常，
+  无 lease 报错（E2E 15s 节奏点侧栏行）。
+- 渲染器跨会话切换平坦：reload 后连开 6 个会话、每次强制 GC，堆 120.8 → 120–127MB
+  无累积；**之前读到的 254MB 是 HMR 中途态的假象**（dev 限制，reload 即回落）。
 
 ### WebGPU 结论：不引入
 

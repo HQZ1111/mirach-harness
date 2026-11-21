@@ -51,7 +51,7 @@
 //!   历史不再列出**（迁移语义如实；文件不删）。cron（pi_cron.rs）仍用
 //!   vendored pi SDK 自开会话——两引擎并存至迁移完成。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -560,6 +560,57 @@ pub(crate) fn peek_session_tail(path: &str, limit: usize) -> Result<serde_json::
     }))
 }
 
+/// 退役会话的保留上限（最近 N 个）。切回这些会话仍免重建；更老的淘汰。
+const RETIRED_HARNESS_CAP: usize = 4;
+
+/// 退役会话表：`HashMap` + 进入顺序。
+///
+/// 淘汰必须 **显式 release writer lease 再 drop**：rpi 的 JSONL storage
+/// 在 `release_writer_lease()`（`rpi-harness/session/jsonl/storage.rs:315`）
+/// 里才会放下 OS 租约；直接 drop 时引擎内部任务仍引用着它，租约悬空
+/// （下一次重建撞 "writer lease is already held"）。调用面与 TUI 切会话
+/// 的收尾同款（`harness.session().storage().release_writer_lease()`）。
+#[derive(Default)]
+struct RetiredSessions {
+    map: HashMap<PathBuf, Arc<HarnessLive>>,
+    /// 进入顺序（oldest → newest）。只增不删地留 stale 条目会白白吃内存，
+    /// 但条目本身只是 PathBuf，淘汰时按"不在 map 就跳过"处理即可。
+    order: VecDeque<PathBuf>,
+}
+
+impl RetiredSessions {
+    fn insert(&mut self, key: PathBuf, live: Arc<HarnessLive>) {
+        // 同路径重复退役：旧的先按正式口释放，再换新的（正常不会发生，
+        // 同一会话文件不可能同时有两份 harness 持有租约）。
+        if let Some(old) = self.map.insert(key.clone(), live) {
+            release_retired_harness(&old);
+            return;
+        }
+        self.order.push_back(key);
+        while self.map.len() > RETIRED_HARNESS_CAP {
+            let Some(oldest) = self.order.pop_front() else { break };
+            if let Some(old) = self.map.remove(&oldest) {
+                release_retired_harness(&old);
+            }
+        }
+        // 剃掉队首 stale（已被 take 走的键）
+        while let Some(front) = self.order.front() {
+            if self.map.contains_key(front) { break }
+            self.order.pop_front();
+        }
+    }
+
+    fn take(&mut self, key: &Path) -> Option<Arc<HarnessLive>> {
+        self.map.remove(key)
+    }
+}
+
+/// 释放一个退役 harness：取消插件 ask 邮箱 + 显式释放 JSONL writer lease。
+fn release_retired_harness(live: &HarnessLive) {
+    live.reload.ui_dialog.cancel_all();
+    live.harness.session().storage().release_writer_lease();
+}
+
 pub(crate) struct EngineShared {
     rt: PiRuntime,
     cwd: PathBuf,
@@ -571,9 +622,15 @@ pub(crate) struct EngineShared {
     /// 替换也仍被引擎内部任务引用（实测：切到 B 再切回 A 必撞 "writer lease
     /// is already held"）。TUI 用 `set_session` 原地换会话规避；宿主重建
     /// harness 的路径无法释放旧 lease，故把旧 `HarnessLive` 留在本表里复用：
-    /// 再次打开同一路径时直接重新激活，不重新 acquire。进程退出时随 OS
-    /// 句柄一起释放。
-    retired: Mutex<HashMap<PathBuf, Arc<HarnessLive>>>,
+    /// 再次打开同一路径时直接重新激活，不重新 acquire。
+    ///
+    /// **2026-11-21 收紧**：表从"永久保留"改为**最近 N 份**（见
+    /// `RETIRED_HARNESS_CAP`）。超出时按进入顺序淘汰最老的：先显式
+    /// `release_writer_lease()`（引擎提供的正式释放口，drop 本身不释放），
+    /// 再 drop —— 否则每切一个会话就永久占一份 harness（含会话内存态），
+    /// 宿主内存无界增长（实测 25 分钟 39MB→87MB 私有）。被淘汰的会话再次
+    /// 打开时走正常重建路径（lease 已释放，不会撞 already held）。
+    retired: Mutex<RetiredSessions>,
     /// 并列窗格会话表（hermes `_sessions` 多会话对偶）：窗格线程键 →
     /// 独立 harness 句柄。每个窗格一棵会话、各自 lane/锁/事件流，所以两个
     /// 窗格可以在同一进程内**并行收发**；与前台 `live` 互斥同一个会话文件
@@ -873,7 +930,7 @@ impl PiEngine {
                 rt: PiRuntime::new(),
                 cwd: default_workspace(),
                 live: Mutex::new(None),
-                retired: Mutex::new(HashMap::new()),
+                retired: Mutex::new(RetiredSessions::default()),
                 side: Mutex::new(HashMap::new()),
                 model_line: Mutex::new("引擎待启动".into()),
                 messages_cache: Mutex::new(None),
@@ -1221,7 +1278,7 @@ impl PiEngine {
                 .retired
                 .lock()
                 .map_err(|_| "retired 会话表锁中毒".to_string())?
-                .remove(&target_key),
+                .take(&target_key),
         };
         if let Some(cached) = cached {
             let id = self.shared.rt.block_on(async {
@@ -3302,7 +3359,7 @@ fn prompt_inner(
             .retired
             .lock()
             .map_err(|_| "retired 会话表锁中毒".to_string())?
-            .remove(&target);
+            .take(&target);
         let handle = match cached {
             Some(handle) => handle,
             None => {
