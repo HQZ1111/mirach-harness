@@ -92,6 +92,7 @@ import { CreateGroupDialog, GroupChatWorkspace } from './hub/bot-group'
 import { RoutinesPane, ScreenStubPane } from './hub/bot-subpages'
 import { BotFace, avatarColor, botAppearance } from './hub/bot-face'
 import { launchBotSession, newBotChat } from './hub/bot-launch'
+import { useSessionManage } from '@/components/panes/session-manage/session-catalog'
 import {
   botDisplayName,
   botsStore,
@@ -724,6 +725,8 @@ export function BotsPane() {
   // gateway 三组——activity 无数据面，红显占位不生效）
   const [kindFilter, setKindFilter] = useState<'all' | 'bots' | 'groups'>('all')
   const [gatewayFilter, setGatewayFilter] = useState<string>('all')
+  // 主视图当前会话（花名册「正在看」高亮的数据源）
+  const activeId = useSessionManage((s) => s.activeId)
 
   useEffect(() => {
     botsStore.getState().load()
@@ -886,7 +889,9 @@ export function BotsPane() {
     rows.map((bot) => (
       <BotRow
         bot={bot}
-        isActive={false}
+        // 花名册的「正在看」：当前主视图会话 = 该 bot 的永久会话锚。
+        // 此前硬编码 false（2026-11-21 用户："bot 本身好像并没有切换"）。
+        isActive={activeId === bot.chatSessionId}
         key={bot.name}
         launching={launchingName === bot.name}
         sections={sections}

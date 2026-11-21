@@ -851,20 +851,32 @@ const MessageTurnList: FC = () => {
   // ── 转录渲染窗口（hermes transcript-window 移植，2026-11-19）───────────
   // 切会话先挂尾部小预算，rAF 分步补齐到整页预算；窗口边界落在轮上。
   // 只裁剪**渲染**，不动 store 与 scrollTop（滚动记忆单一所有者不受扰）。
-  const threadKey = ids[0] ?? "empty";
+    const threadKey = ids[0] ?? "empty";
   const [renderBudget, setRenderBudget] = useState(FIRST_PAINT_BUDGET);
+  const renderBudgetRef = useRef(renderBudget);
+  renderBudgetRef.current = renderBudget;
+  /** 渐进展开目标（null = 不展开）：显式动作（补页成功/显示更早）设定后，
+   *  rAF 每帧 +48（1-2 轮）走到目标——切换本身不设目标。 */
+  const [expandTarget, setExpandTarget] = useState<number | null>(null);
   const prevThreadKeyRef = useRef(threadKey);
   if (prevThreadKeyRef.current !== threadKey) {
     prevThreadKeyRef.current = threadKey;
     setRenderBudget(FIRST_PAINT_BUDGET);
+    setExpandTarget(null);
   }
+  // **不再自动补齐到整页**（2026-11-21 用户实测："等全部显示并不流畅"）：
+  // 自动 rAF 补齐会在切换后持续挂载数十轮（数秒的连续提交）。首屏只挂
+  // 尾部，向上滚动（滚到顶继续上滚 / 显示更早按钮）按需渐进展开——
+  // 与微信「打开显示最近、上翻加载更早」同语义。
   useEffect(() => {
-    if (renderBudget >= FULL_TRANSCRIPT_BUDGET) return;
-    const frame = requestAnimationFrame(() =>
-      setRenderBudget((current) => nextBackfillBudget(current)),
-    );
+    if (expandTarget === null || renderBudget >= expandTarget) return;
+    const frame = requestAnimationFrame(() => {
+      setRenderBudget((current) =>
+        Math.min(expandTarget, nextBackfillBudget(current)),
+      );
+    });
     return () => cancelAnimationFrame(frame);
-  }, [renderBudget]);
+  }, [renderBudget, expandTarget]);
   const window_ = useMemo(() => {
     const byId = new Map<string, WindowMessageLike>(
       (aui.thread.getState().messages as readonly (WindowMessageLike & { id: string })[]).map(
@@ -880,7 +892,14 @@ const MessageTurnList: FC = () => {
   const hasOlderHistory = useStore(transcriptTailStore, (s) => s.hasMore);
   const showEarlier = useCallback(() => {
     if (transcriptTailStore.getState().hasMore) {
-      void loadOlderTranscript();
+      void loadOlderTranscript().then((ok) => {
+        // 补页成功：渐进展开新页（rAF 每帧 1-2 轮走到 +600 目标）
+        if (ok) {
+          setExpandTarget((prev) =>
+            Math.max(prev ?? 0, renderBudgetRef.current + 600),
+          );
+        }
+      });
       return;
     }
     setRenderBudget(expandBudget);
@@ -902,11 +921,18 @@ const MessageTurnList: FC = () => {
       const viewport = node.closest('[data-slot="aui_thread-viewport"]');
       if (!viewport || viewport.scrollTop > TOP_EDGE_PX) return;
       if (transcriptTailStore.getState().hasMore) {
-        void loadOlderTranscript();
+        void loadOlderTranscript().then((ok) => {
+          if (ok) {
+            setExpandTarget((prev) =>
+              Math.max(prev ?? 0, renderBudgetRef.current + 600),
+            );
+          }
+        });
         return;
       }
       if (windowStartRef.current <= 0) return;
-      setRenderBudget(expandBudget);
+      // 上滚渐进展开：每格 1-2 个普通轮（连续滚动 = 连续渐进加载）
+      setRenderBudget(nextBackfillBudget);
     };
     node.addEventListener('wheel', onWheel, { passive: true });
     return () => node.removeEventListener('wheel', onWheel);

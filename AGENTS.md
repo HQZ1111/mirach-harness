@@ -3517,6 +3517,13 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   统一走 `hydrateTranscriptTail` 对齐（同条目 id 重水合，无 key 变化/闪烁）。
   实测巨会话点行 **首屏 557ms**（原 ~5s），peek 本身 64~68ms。守卫：
   `sessionCatalog.activeId` 仍是目标会话才挂预览（连点切换不串）。
+- **bot「没切换」根因坐实（2026-11-21）**：hermes-bots 插件花名册按
+  (profile, 标题"Bot Chat") 解析每个 bot 的常驻会话——hermes 每 agent 有
+  独立 gateway 命名空间所以唯一；mirach 单引擎单命名空间下**所有 bot 的
+  canonical chat 同名**（实测 5 个 "Bot Chat" 会话）→ 点谁解析到同一个。
+  修复属插件特性级（per-bot 标题/命名空间，连带 system prompt 的 DM 指令
+  与 CLI 流），另立一轮。宿主侧已修：roster「正在看」高亮（此前硬编码
+  isActive=false）+ 锚交叉守卫（launchBotSession）。
 - **引擎 replay 根因拆分（load_streaming 内分段计时，MIRACH_OPEN_TIMING）**：
   11MB/6134 行 loop=1.86s = sha256 506ms + reducer apply 628ms + 行内未解释
   ~630ms（async poll/锁/policy）+ parse 仅 38ms（serde 不是瓶颈）；
@@ -3680,11 +3687,43 @@ delete…"、Open recent session）逐字保留（照抄规矩，不是 bug）�
 3. （连带实测确认，非代码改动）"与此机器人开新聊天" 能真建新会话（pi_get_state
    新 sessionId）、"复制"出的 bot 点开是真空态（此前一轮疑似失败是探针时序）。
 
+### 缺口补齐（2026-11-21，用户："能不能改成打开一个新栏"）
+
+**「在新标签页中打开机器人聊天」→ 主区右侧分出的独立会话栏**（宿主主区是
+单 workspace 面板，不强行做页签模型；"新栏"= 等价承载）。实现：
+
+- `host.openSession`（src/sdk/host.ts）读 `options.intent`：`'tab'` →
+  `openSessionColumnBridge`（会话 bridge 的新门）；默认 intent 先
+  `focusSessionColumnBridge`（已在栏里就置前——hermes 的「已在屏就 front」，
+  行点击不再抢主工作区），未开才走原主会话切换。
+- `session-tab-bridge.ts`：新增 `setSessionColumnOpener(fn, focus)` /
+  `openSessionColumnBridge` / `focusSessionColumnBridge`（未注册 = 错误
+  可见；focus 未登记 = false，调用方继续主会话切换）。
+- `dockview-shell.tsx`：注册实现——面板 id `session-<storedId>`，已开置前；
+  该会话就是主会话 → 置前 workspace（不重复开，防双写）；否则 `addPanel`
+  到 `workspace` 右侧（**新栏**），组件 = 既有 `session`（SessionThreadPane；
+  引擎侧 agui 非 main 线程 → `side_open` 独立柄，与主柄并行流式）。
+- `session-thread-pane.tsx`：非目录会话（隐藏 bot 会话不在侧栏目录）按 id
+  从 `pi_list_sessions` → `pi_sessions_index` 补路径；`session-runtime.ts`
+  的 `useThreadChatRuntime` 返回 `{ runtime, error }`，分栏内直接渲染
+  `ErrorState`（主 runtime 的错误条走全局桥，分栏没有桥——失败不能静默，
+  规矩 12）。
+
+实机（CDP）：右键 微软 → 「在新标签页中打开机器人聊天」→ 主区右侧多出
+「Bot Chat」栏（面板 `session-01a1e3ec-…`，workspace 不动）；再点行 → 置前
+该栏、主会话不切；重启后布局档案恢复该栏；栏内发送 → `side_prompt` 真跑
+（`pi_lane_busy(thread)` 忙→闲、会话文件真追加）。单测
+`session-tab-bridge.test.ts` 5 条锁登记/派发/复位。
+
+**环境备注**：验证期间 BBT 测试 key 失效（直连 relay `/chat/completions`
+401 `Invalid token`），侧栏 run 在引擎里以空 `RUN_FINISHED` 收尾（provider
+失败不进 RUN_ERROR，错误只落会话文件 stopReason:error）——与"新栏"改动无关；
+key 恢复后回复即照常。
+
 ### 留下的缺口（如实，未修）
 
 | 缺口 | 事实 |
 |---|---|
-| 「在新标签页中打开机器人聊天」无标签页 | `host.openSession`（`src/sdk/host.ts`）签名收 `_options` 但**忽略 intent/workspaceMode**——只切主工作区。hermes 是主区 tab 模型；宿主主区是单 workspace 面板，bot 会话 tab 化要另做（会话分栏 bridge 只服务侧栏拖拽，隐藏 bot 会话不在 catalog，无法直接复用）。「与此机器人开新聊天」同理：会话建了但不开新面 |
 | "Open recent session" 恒灰 | `src/sdk/host-rpc.ts::botToRosterRow` 把 `last_session` **写死 null**；连带花名册行年龄永远显示 createdAt（hermes 是"刚刚"式最后活动）、活动铃（`trackInboundActivity`）永不触发。要真做需要 profile→session 归属数据面（pi 会话索引没有 profile 字段），独立一轮 |
 | 连接器页「无法访问托管应用。…重试」 | 上游 Connectors 页在宿主没有云后端时如实报错（`zh_connectors_page.ts` 文案；本机 MCP 管理在设置页「连接器」）——已知、不改 |
 | 技能 0 / 工具集 17 vs hermes 38/23 | 数据面差异：`~/.pi/skills` 本机为空；工具集来自 pi_capabilities 的 17 组（hermes 有自己的 23）。同一 UI 同一行为，数字随环境 |

@@ -207,6 +207,25 @@ export async function launchBotSession(bot: BotPreset): Promise<boolean> {
     )
     return false
   }
+  // 锚交叉守卫（历史克隆数据可把两个 bot 锚到同一会话——实测 风格和/微软
+  // 共用 01a1e3ec）：同一 sessionId 已被别的 bot 锚定 = 本 bot 的锚已坏，
+  // 清掉重建（console 可见），否则点谁都是同一段对话（"bot 没切换"）。
+  const cross = botsStore
+    .getState()
+    .bots.find(
+      (b) =>
+        b.name !== bot.name &&
+        b.chatSessionId &&
+        b.chatSessionId === bot.chatSessionId,
+    )
+  if (cross) {
+    console.error(
+      `[bots] 锚交叉：${bot.name} 与 ${cross.name} 共用会话 ${bot.chatSessionId}——清锚重建`,
+    )
+    botsStore
+      .getState()
+      .patchMeta(bot.name, { chatSessionPath: null, chatSessionId: null })
+  }
   return openOrCreate(bot)
 }
 
