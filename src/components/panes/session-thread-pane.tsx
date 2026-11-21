@@ -16,21 +16,82 @@
  *   本会话再跑，事件落本线程 buffer）。
  */
 import { invoke } from '@tauri-apps/api/core'
+import { useEffect, useState } from 'react'
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
 
 import { Thread } from '@/components/thread.aui'
 import { AssistantThreadPane } from '@/components/panes/assistant-thread-pane'
+import { ErrorState } from '@/components/assistant-ui/elements/error-state'
 import { useThreadChatRuntime } from '@/components/assistant-ui/session-runtime'
 import { useSessionManage } from '@/components/panes/session-manage/session-catalog'
 
 export function SessionThreadPane({ threadId, tabName }: { threadId: string; tabName: string }) {
   const activeId = useSessionManage((s) => s.activeId)
-  const path = useSessionManage((s) => s.entries[threadId]?.path)
+  const catalogPath = useSessionManage((s) => s.entries[threadId]?.path)
+  const [fallbackPath, setFallbackPath] = useState<string | null>(null)
+  const [resolveFailed, setResolveFailed] = useState(false)
   const live = threadId === activeId
+
+  // 非目录会话（插件 `host.openSession(intent:'tab')` 开出的隐藏 bot 会话/
+  // 群成员会话不在侧栏目录）：按 id 从 pi 会话面补路径——pi_get_session_messages
+  // 与 POST sessionPath 都要真路径，缺路径 = 水合空、发送 400（agui 对非
+  // main 线程强制要求 sessionPath；不静默落主会话）。
+  useEffect(() => {
+    if (live || catalogPath || resolveFailed) return
+    let dead = false
+    void (async () => {
+      try {
+        const list = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
+        let hit = list.find((r) => r.id === threadId)?.path ?? null
+        if (!hit) {
+          const index = await invoke<{ sessions?: { id: string; path: string }[] }>(
+            'pi_sessions_index',
+          )
+          hit = index?.sessions?.find((r) => r.id === threadId)?.path ?? null
+        }
+        if (dead) return
+        if (hit) {
+          setFallbackPath(hit)
+        } else {
+          // 死会话（文件已删/工作区已清）：**不挂 runtime**——空 runtime +
+          // SSE 到不存在的线程会引发 React hooks 崩溃链（01a1ebc6 实测），
+          // 改为可见错误（规矩 12）。
+          setResolveFailed(true)
+          console.error(`[session-pane] 会话 ${threadId} 既不在目录也不在 pi 索引——无法定位`)
+        }
+      } catch (e) {
+        if (!dead) console.error('[session-pane] 会话路径解析失败', e)
+      }
+    })()
+    return () => {
+      dead = true
+    }
+  }, [live, catalogPath, threadId, resolveFailed])
 
   if (live) return <AssistantThreadPane />
 
-  return <SessionChatPane threadId={threadId} sessionPath={path} tabName={tabName} />
+  // 解析确认的死会话：可见错误，不挂 runtime
+  if (resolveFailed && !catalogPath && !fallbackPath) {
+    return (
+      <div className="assistant-thread-pane h-full" data-slot="session-thread-pane">
+        <ErrorState
+          className="m-3"
+          data-slot="session-pane-dead-bar"
+          detail={`会话 ${threadId} 的文件不存在（已删除或工作区已清空）——此窗格无法打开`}
+          retrying={false}
+          title="会话不存在"
+        />
+      </div>
+    )
+  }
+
+  return (
+    <SessionChatPane
+      threadId={threadId}
+      sessionPath={catalogPath ?? fallbackPath ?? undefined}
+      tabName={tabName}
+    />
+  )
 }
 
 function SessionChatPane({
@@ -42,11 +103,22 @@ function SessionChatPane({
   sessionPath: string | undefined
   tabName: string
 }) {
-  const runtime = useThreadChatRuntime({ threadId, sessionPath })
+  const { runtime, error } = useThreadChatRuntime({ threadId, sessionPath })
   void tabName
   return (
     <div className="assistant-thread-pane h-full" data-slot="session-thread-pane">
       <AssistantRuntimeProvider runtime={runtime}>
+        {/* 分栏失败可见（主 runtime 的 RUN_ERROR 走全局 error 桥；本窗格的
+            轮次机错误只在这里，没有这段 = 失败静默，规矩 12）。 */}
+        {error ? (
+          <ErrorState
+            className="m-3"
+            data-slot="session-run-error-bar"
+            detail={String(error)}
+            retrying={false}
+            title="运行出错"
+          />
+        ) : null}
         <Thread scoped />
       </AssistantRuntimeProvider>
     </div>
