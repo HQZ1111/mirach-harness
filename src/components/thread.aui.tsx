@@ -89,6 +89,7 @@ import {
   transcriptTailStore,
   useEngineAttaching,
 } from "@/components/assistant-ui/transcript-paging";
+import { findActiveBridge } from "@/components/assistant-ui/find-active-bridge";
 import {
   groupMessagesIntoTurns,
   isLastContentAssistantOfTurn,
@@ -832,6 +833,85 @@ const EngineAttachHint: FC = () => {
   );
 };
 
+/** 轮次挂载门（真虚拟化）：wrapper div 恒在（轮导航器 rect / 滚动锚定
+ *  依赖它），内部消息由 IntersectionObserver 按视口距离挂载/卸载。
+ *  卸载时用**实测高度**的占位 div 保持布局稳定（滚动不跳）。
+ *  查找打开时全量挂载（占位符无文本，查找需要全文 DOM）。
+ *  高度缓存跨切换保留（二次切换直接出占位符，无需重测）。 */
+const GATE_ROOT_MARGIN = "2500px 0px 2500px 0px";
+const turnHeightCache = new Map<string, number>();
+const useFindActive = () => useStore(findActiveBridge, (s) => s.active);
+
+const TurnGate: FC<{
+  gateKey: string;
+  children: ReactNode;
+}> = ({ gateKey, children }) => {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const findActive = useFindActive();
+  const [show, setShow] = useState(() => {
+    // 初始：有缓存高度 = 之前挂载过 → 占位即可（等滚动到视口再真挂）
+    // 无缓存 = 首次见 → 真挂（需要测量高度）
+    if (findActiveBridge.getState().active) return true;
+    return !turnHeightCache.has(gateKey);
+  });
+  const heightRef = useRef(turnHeightCache.get(gateKey) ?? 0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setShow(true);
+          } else {
+            const h = el.getBoundingClientRect().height;
+            if (h > 0) {
+              heightRef.current = h;
+              turnHeightCache.set(gateKey, h);
+            }
+            // 查找打开时不卸载（全文可搜）
+            if (!findActiveBridge.getState().active) {
+              setShow(false);
+            }
+          }
+        }
+      },
+      { rootMargin: GATE_ROOT_MARGIN },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [gateKey]);
+
+  // 挂载期间保持高度缓存新鲜
+  useEffect(() => {
+    if (!show) return;
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const h = el.getBoundingClientRect().height;
+      if (h > 0) {
+        heightRef.current = h;
+        turnHeightCache.set(gateKey, h);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [show, gateKey]);
+
+  if (!show) {
+    return (
+      <div
+        ref={ref}
+        style={{ height: heightRef.current }}
+        aria-hidden="true"
+        data-turn-gate-placeholder="true"
+      />
+    );
+  }
+  return <div ref={ref}>{children}</div>;
+};
+
 const MessageTurnList: FC = () => {
   const ids = unstable_useThreadMessageIds();
   const roleSig = useAuiState((s) =>
@@ -989,13 +1069,15 @@ const MessageTurnList: FC = () => {
                 prevModel={m.prevModel}
               />
             ))}
-            {turn.messageIds.map((id) => (
-              <ThreadPrimitive.Unstable_MessageById
-                key={id}
-                messageId={id}
-                components={{ Message: MessageWithDaySeparator }}
-              />
-            ))}
+            <TurnGate gateKey={`${threadKey}:${turn.key}`}>
+              {turn.messageIds.map((id) => (
+                <ThreadPrimitive.Unstable_MessageById
+                  key={id}
+                  messageId={id}
+                  components={{ Message: MessageWithDaySeparator }}
+                />
+              ))}
+            </TurnGate>
           </div>
         );
       })}

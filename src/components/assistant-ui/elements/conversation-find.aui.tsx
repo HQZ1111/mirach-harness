@@ -36,6 +36,7 @@ import {
   nextActiveIndex,
   normalizeQuery,
 } from "@/components/assistant-ui/conversation-find";
+import { findActiveBridge } from "@/components/assistant-ui/find-active-bridge";
 import { TooltipIconButton } from "@/components/tooltip-icon-button";
 
 interface FindSupport {
@@ -96,6 +97,10 @@ export const ConversationFind: FC = () => {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const [total, setTotal] = useState(0);
+  // 查找打开 = 转录虚拟化门全量挂载（占位符无文本，查找需要全文 DOM）
+  useEffect(() => {
+    findActiveBridge.getState().setActive(open);
+  }, [open]);
 
   const normalized = useMemo(() => normalizeQuery(query), [query]);
 
