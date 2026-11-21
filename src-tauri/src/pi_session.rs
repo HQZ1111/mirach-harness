@@ -2783,9 +2783,18 @@ fn prompt_inner(
     /// get_stats()` 在恢复出来的会话上实测恒 0（usage 聚合只有运行态），
     /// 拿它当权威会让重启后的历史会话显示 0 用量。文件是持久真相，扫描
     /// 规则与 pi_usage.rs 同源。单个文件失败 = 整个命令 Err（不静默补 0）。
+    ///
+    /// **例外**：跨根索引的死会话（工作区已删/文件已清）会反复触发
+    /// NotFound——跳过（不入结果集，侧栏 rowMeta 留空 = 真实状态），
+    /// 不让一个死文件让整批 usage 查询都 Err（否则 console 每秒刷一条）。
     pub fn sessions_usage(&self, paths: &[String]) -> Result<serde_json::Value, String> {
         let mut out = serde_json::Map::new();
         for path in paths {
+            let p = PathBuf::from(path);
+            if !p.exists() {
+                // 文件不存在 = 死会话（跨根索引残留）——跳过，不报错不污染
+                continue;
+            }
             let stats = self.snapshot_stats(path)?;
             out.insert(
                 path.clone(),
