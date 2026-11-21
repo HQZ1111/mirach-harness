@@ -95,7 +95,7 @@ import {
   setStoredSessionOpener,
 } from '@/components/panes/session-manage/session-tab-bridge'
 import { setSessionListRefresher } from '@/components/panes/session-manage/session-refresh-bridge'
-import { botsStore } from '@/components/panes/hub/bots-store'
+import { botsStore, botDisplayName } from '@/components/panes/hub/bots-store'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -478,6 +478,21 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           : { custom: row.custom as Record<string, unknown> }),
       }),
     )
+    // bot 常驻会话（canonical "Bot Chat"）的显示名 = per-bot：所有 bot 的
+    // 会话 pi 侧同名 "Bot Chat"，页签/标题全是同名——切换了也看不出"切到
+    // 哪个 bot 了"（2026-11-21 用户"bot 本身好像并没有切换"）。显示名
+    // = bot 显示名 · Bot Chat（侧栏行本体被 botChatPaths 隐藏，只有页签
+    // 标题/会话标题读它）。registry 匹配按会话真名不受影响。
+    const botChatNames = new Map<string, string>()
+    for (const b of botsStore.getState().bots) {
+      if (b.chatSessionId) botChatNames.set(b.chatSessionId, `${botDisplayName(b)} · Bot Chat`)
+    }
+    if (botChatNames.size > 0) {
+      for (const row of rows) {
+        const label = botChatNames.get(row.id)
+        if (label) row.title = label
+      }
+    }
     // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
     // 侧栏 threads（assistant-ui）title 用统一显示名。
     sessionCatalog.getState().ingest(rows, currentThreadIdRef.current)

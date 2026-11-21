@@ -3531,6 +3531,15 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   该会话没有 legacy assistant frame。再压需动引擎（去 restore 期 sha /
   reducer 增量结构）——upstream 级改动，暂不做。引擎侧已留 env 门控诊断
   （streaming.rs Scanner 分段），补丁层随 G:\pi-rust-main 本地化（非 git）。
+- **bot 页签 per-bot 标题（同日续）**：canonical chat 的会话真名仍是
+  "Bot Chat"（registry 匹配不动），但①页签标签 = `botChatTabTitle(bot)` =
+  `显示名 · Bot Chat`（canonical-chat.ts，openStoredBotChat/openFreshCanonical
+  两处 tabTitle）；②refreshThreads 给 bot 锚会话的 title 覆写为同名格式
+  （页签/标题读 catalog 显示名）——切换 bot 后页签立即可辨（实测
+  「二万人 · Bot Chat」）。③误判更正：此前记录的"锚交叉 共用 01a1e3ec"
+  是**截断 ULID 到 8 位的测量伪影**（两个不同会话同一时间桶前缀相同）——
+  全量 sid 对比（anchors-full.mjs）证实两个 bot 各有自己的 Bot Chat，
+  插件花名册切换本来就是通的；守卫/治疗代码保留（真碰撞仍防御）。
 - **切换点击遍历实测（2026-11-21，StrictMode dev）**：全部会话/器人切换零
   console 错误、引擎落点全对。首内容 0.99-1.24s、单帧最大 355-418ms——
   成本=切窗提交（旧 38-48 轮卸载 + 新首屏挂载，一次同步 commit）；补齐已改

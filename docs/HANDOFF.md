@@ -99,7 +99,9 @@ vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1�
   peek 64ms；`activeId` 守卫防连点串会话。
 冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
 - bot「没切换」根因：插件 canonical chat 按 (profile,"Bot Chat") 解析，
-  单命名空间下全 bot 同名互窜（5 个 Bot Chat 会话实测）；特性级修复另立轮。- 引擎 replay 根因（load_streaming 分段计时）：sha 506ms + apply 628ms +
+  单命名空间下全 bot 同名互窜（5 个 Bot Chat 会话实测）；特性级修复另立轮。- bot 页签 per-bot 标题：页签 = `显示名 · Bot Chat`（会话真名不动，registry
+  匹配不受影响）；更正"锚交叉"误判（ULID 截断伪影——两 bot 各有自己的
+  Bot Chat，插件花名册切换本来就是通的）。- 引擎 replay 根因（load_streaming 分段计时）：sha 506ms + apply 628ms +
   行内 ~630ms（parse 仅 38ms——serde 非瓶颈）；诊断已留在引擎 streaming.rs。- 切换点击遍历（dev/StrictMode）：零错误、落点全对；首内容 ~1s、单帧 ≤420ms；
   补齐改每帧 +48（1-2 轮）+ 消息组件 memo 后预算步无整列表重渲。- 打开耗时拆分：纯存储重放 3.0s（引擎地板，--ignored 单测可复测）+ 装配 ~1.4s；
   装配期间 composer 上方显示「正在准备会话（引擎载入中）…」。- 发送等待：postRun 先 await 在途 `pi_open_session`（peek 先画但 prompt 必须
