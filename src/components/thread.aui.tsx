@@ -87,6 +87,7 @@ import {
   loadOlderTranscript,
   releaseTranscriptHistory,
   transcriptTailStore,
+  useEngineAttaching,
 } from "@/components/assistant-ui/transcript-paging";
 import {
   groupMessagesIntoTurns,
@@ -813,6 +814,23 @@ const MessageWithDaySeparator: FC = () => {
  * pt-14+pb-5 是有意差异，见 AGENTS.md「确认为有意差异」表）。加这层**不改
  * 视觉**，只加结构。
  */
+/** 引擎装配提示（peek-first 秒开的可见面）：尾部已画但 `pi_open_session`
+ *  还在后台 replay——composer 上方如实一行「正在准备会话」，发送会等它
+ *  就绪（prompt 持锁，不打在旧会话上）。 */
+const EngineAttachHint: FC = () => {
+  const attaching = useEngineAttaching();
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  if (!attaching || isRunning) return null;
+  return (
+    <div
+      data-slot="aui_engine-attach-hint"
+      className="text-muted-foreground px-2 py-1 text-xs"
+    >
+      正在准备会话（引擎载入中）…
+    </div>
+  );
+};
+
 const MessageTurnList: FC = () => {
   const ids = unstable_useThreadMessageIds();
   const roleSig = useAuiState((s) =>
@@ -1265,7 +1283,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             {/* 运行状态（2026-11-15 用户定稿）：ZCode 的「工作中 N」挂在
                 **输入框上方**，不在消息流里。全线程只有一个实例（gated by
                 thread.isRunning），轮内不再放第二个。 */}
-            <ThreadThinkingIndicator />
+                        <ThreadThinkingIndicator />
+            {/* 引擎装配在途（peek 已画但 pi_open_session 未返回）：如实提示，
+                避免用户对着可输入但发送要等的界面干等。 */}
+            <EngineAttachHint />
             {!scoped && (
               <>
                 <RunErrorBar />

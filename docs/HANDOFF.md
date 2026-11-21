@@ -6,6 +6,17 @@
 
 ## 当前状态
 
+**⚠️ 上游仓库迁移（2026-11-20，必读）**：rpi-package（extensions 仓）**正在
+迁移，新仓库后续公开**。维护者 DavidHinton-xcpc 11:17 同时关闭我们最后两个
+PR：**#362**（goal 完成校验窄版）与 **#363**（`/jobs` 命令面），原文"相关
+改动会在新仓库继续推进，因此先关闭此 PR"，且都单独致谢了改动内容——**挂起
+等迁移，不是否决**。新仓 = **`pi-rust/rpi-extension`**（公开但 0 提交，
+git 操作 409），等 README/内容落地再往那重提；rpi-package 仍在正常收
+web/server/mcp 的维护者 PR。分支留在 fork（`feat/goal-verify-verdicts`
+3916920、`feat/background-jobs-command` 685798d）可直接复用；**新仓落地前
+别再往旧仓提 PR**；vendored 插件同步也要认新仓。引擎仓
+bigfish1913/pi-rust 不受影响（#348/#355 已合并）。
+
 **✅ 2026-11-20：状态面板功能全对齐轮（终端分区验证 + 引擎 PR #363 + workflow Stop + composer 徽标）**
 
 - **终端分区实机全链 ✓**：真后台作业（模型调 background 工具）→ 分区渲染
@@ -87,7 +98,8 @@ vendored 插件重编译（先验 #375/#378 的 safe 宏）→ cargo build -j 1�
   就绪后再走 `hydrateTranscriptTail` 对齐。巨会话点行首屏 **557ms**（原 ~5s），
   peek 64ms；`activeId` 守卫防连点串会话。
 冷开 = 引擎 replay 地板（0.5MB 362ms / 0.8MB 791ms / 11MB ~4.9s，热开 3~6ms）。
-- 发送等待：postRun 先 await 在途 `pi_open_session`（peek 先画但 prompt 必须
+- 打开耗时拆分：纯存储重放 3.0s（引擎地板，--ignored 单测可复测）+ 装配 ~1.4s；
+  装配期间 composer 上方显示「正在准备会话（引擎载入中）…」。- 发送等待：postRun 先 await 在途 `pi_open_session`（peek 先画但 prompt 必须
   打在对的会话上）；bot 切换经 `session-preview-bridge` 同享预览（双锚/activeId/
   已水合三重守卫）。实测：巨会话点行首屏 **259ms**；bot「风格和」797ms 出 7 轮，零错误。
 - transcript retention（同日补齐）：滚离顶部释放最老历史页（留最近 3 页，再上滚重读）。

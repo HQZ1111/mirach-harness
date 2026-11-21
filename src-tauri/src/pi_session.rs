@@ -696,6 +696,7 @@ pub(crate) fn build_harness_impl(
     extension_filter: Option<&[String]>,
 ) -> Result<BuiltHarness, String> {
     let (harness, events, reload, resolved_provider, model_id, id) = rt.block_on(async {
+        let t_open = std::time::Instant::now();
         let mut resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
             .map_err(|e| format!("模型解析失败: {e}"))?;
         // 宿主侧模型目录：models.json 缺 contextWindow（0）时用
@@ -729,9 +730,31 @@ pub(crate) fn build_harness_impl(
                 }
             }
         }
+        let t_prep = t_open.elapsed();
+        // 诊断拆分（MIRACH_OPEN_TIMING）：纯存储只读重放的成本（不含 harness/
+        // 插件装配）——用于区分「引擎 replay 地板」与「插件钩子开销」。
+        if std::env::var_os("MIRACH_OPEN_TIMING").is_some() {
+            if let Some(p) = session_path {
+                let t_snap = std::time::Instant::now();
+                let fs: Arc<dyn rpi_tools::FileSystem> =
+                    Arc::new(rpi_tools::os_env::OsExecutionEnv::with_cwd(cwd.to_path_buf()));
+                match JsonlSessionStorage::read_snapshot(
+                    fs,
+                    p,
+                    Arc::new(SystemClock),
+                    Arc::new(DefaultIdGenerator::new()),
+                )
+                .await
+                {
+                    Ok(_) => eprintln!("[open-timing] storage-only={:?}", t_snap.elapsed()),
+                    Err(e) => eprintln!("[open-timing] storage-only failed: {e}"),
+                }
+            }
+        }
         let (harness, events, reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
             .await
             .map_err(|e| format!("Harness 构建失败: {e}"))?;
+        let t_build = t_open.elapsed();
         // 宿主就是那个"交互 UI"：上游语义是没有客户端 attach 时插件拒绝
         // 弹 UI（rpi-extensions actions.rs `handle` 的 open 分支原文
         // "ask_user requires an interactive UI"）。`build` 的
@@ -751,6 +774,14 @@ pub(crate) fn build_harness_impl(
             .await
             .map(|m| m.id)
             .map_err(|e| format!("会话元数据读取失败: {e}"))?;
+        if std::env::var_os("MIRACH_OPEN_TIMING").is_some() {
+            eprintln!(
+                "[open-timing] prep={:?} build={:?} total={:?}",
+                t_prep,
+                t_build - t_prep,
+                t_open.elapsed()
+            );
+        }
         Ok::<_, String>((harness, events, reload, provider, model_id, id))
     })?;
     let sessions_root = resolve_session_root(cwd);
@@ -4208,4 +4239,20 @@ mod peek_session_tail_tests {
         assert_eq!(page["hasMore"], serde_json::json!(true));
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+#[test]
+#[ignore = "diagnostics: run with --ignored --nocapture"]
+fn timing_storage_only_giant() {
+    let path = r"C:\\Users\\Administrator\\.rpi\\sessions\\--C--Users-Administrator--\\2026-11-15T12-13-00-771Z_01a1df20-07dd-743f-925e-1c6a98ea0c49.jsonl";
+    if !std::path::Path::new(path).exists() { eprintln!("fixture missing; skip"); return; }
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let t = std::time::Instant::now();
+    rt.block_on(async {
+        let fs: Arc<dyn rpi_tools::FileSystem> = Arc::new(rpi_tools::os_env::OsExecutionEnv::with_cwd(std::env::temp_dir()));
+        let snapshot = JsonlSessionStorage::read_snapshot(
+            fs, path, Arc::new(SystemClock), Arc::new(DefaultIdGenerator::new()),
+        ).await;
+        eprintln!("storage-only result ok={} elapsed={:?}", snapshot.is_ok(), t.elapsed());
+    });
 }

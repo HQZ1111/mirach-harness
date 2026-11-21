@@ -3517,6 +3517,13 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   统一走 `hydrateTranscriptTail` 对齐（同条目 id 重水合，无 key 变化/闪烁）。
   实测巨会话点行 **首屏 557ms**（原 ~5s），peek 本身 64~68ms。守卫：
   `sessionCatalog.activeId` 仍是目标会话才挂预览（连点切换不串）。
+- **打开耗时拆分（MIRACH_OPEN_TIMING）**：prep(模型解析等)≈1.5ms；
+  **纯存储重放 3.0s**（11MB scanner+reducer，`JsonlSessionStorage::read_snapshot`
+  单测 `--ignored timing_storage_only_giant` 可复测）；装配/插件再加 ~1.4s。
+  引擎地板坐实——宿主侧已把全部可见延迟移出关键路径（peek-first），
+  仅「打开窗口内立即发送」会等装配完成（postRun await）。
+- **装配提示**：`engineAttaching`（transcript-paging store）+ composer 上方
+  「正在准备会话（引擎载入中）…」一行（EngineAttachHint，`isRunning` 时让位）。
 - **发送等待打开**：peek 先画后，发送（postRun）会先 `await pendingOpenRef`
   （切换路径设置的在途 open Promise）——prompt 持锁，不能打在旧会话上/落空。
 - **bot 切换同享预览**：`session-preview-bridge.ts`（请求桥）——bots-pane
@@ -3529,6 +3536,26 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
   - **设置窗预热 + hide 复用**：`setup` 里延迟 1.5s 构建**隐藏**设置窗（只
     build 不 show，不抢焦点）；前端 ✕ 改为 `hide()` 保实例。首次打开实测
     **1178ms → 21ms**（WebView2 二次建窗成本消失）。
+
+## 上游仓库迁移事件（2026-11-20，必读）
+
+**rpi-package（extensions 仓）正在迁移**：维护者 DavidHinton-xcpc 于
+2026-11-20 11:17 同时关闭 **#362**（goal 完成校验窄版）与 **#363**
+（background-tasks `/jobs` 命令面），评论原文："这个仓库正在迁移，extension
+的新仓库后续会公开；相关改动会在新仓库继续推进，因此先关闭此 PR"——两条
+都单独致谢了改动内容，**不是否决，是挂起等迁移**。
+
+- **新仓地址**：`pi-rust/rpi-extension`（org 下 11-18 创建，公开但**还是空的**
+  —0 提交，git 操作 409）。等它有内容/README 落地后再重提；rpi-package 本身
+  仍在正常收维护者 PR（web/server/mcp），说明迁的是 extension 包群。
+- **对同步的影响**：harness 的 vendored 插件（`G:\mirach-plugins\rpi-goal`
+  等）来源 = rpi-package；**下次同步要认准 rpi-extension**。引擎仓
+  bigfish1913/pi-rust 不受影响（#348/#355 已合并）。
+- **重提素材就绪**：分支都留在 fork——`feat/goal-verify-verdicts`（#362 的
+  head 3916920）与 `feat/background-jobs-command`（#363 的 head 685798d），
+  rpi-extension 落地后可直接 cherry-pick / 重开 PR。
+- 本地克隆 `E:\Temp\rpi-package-pr`（remote: origin=HQZ1111 fork、
+  upstream=pi-rust/rpi-package）；新仓落地前不要再往旧仓提 PR。
 
 ## 状态面板功能全对齐轮（2026-11-20，用户："做，缺pi 引擎面的复制zcode的然后提pr，全部对齐功能"）
 

@@ -42,6 +42,7 @@ import {
   peekTranscriptTail,
   registerTranscriptActor,
   resetTranscriptTail,
+  setEngineAttaching,
   transcriptTailStore,
 } from './transcript-paging'
 import { approvalBridge } from './approval-bridge'
@@ -600,7 +601,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
                   path: prefs.lastSessionPath,
                 }).then(() => undefined)
                 pendingOpenRef.current = restoreOpen
+                setEngineAttaching(true)
                 await restoreOpen
+                setEngineAttaching(false)
                 if (cancelled) return
                 st = await invoke<{ sessionId: string | null }>('pi_get_state')
               }
@@ -1461,7 +1464,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           applyTranscriptPeek(actorRef, peek, id)
           threadScrollBridge.getState().requestRestore(id)
         }
+        if (!openSettled) setEngineAttaching(true)
         await openPromise
+        setEngineAttaching(false)
         if (openError) throw openError
         // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
         // 下一次 RUN_STARTED 的归约自然覆盖）。

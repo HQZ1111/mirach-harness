@@ -57,6 +57,9 @@ interface TranscriptTailState {
   /** 已加载页的账本（oldest→newest），retention 用：每页投影后的消息条数
    *  与页首条目 id。 */
   pages: readonly { messages: number; firstEntryId: string | null }[]
+  /** 引擎装配在途（peek 已画、pi_open_session 未返回）——composer 上方
+   *  如实提示「正在准备会话」，避免用户对着可输入但发不出去的界面干等。 */
+  engineAttaching: boolean
 }
 
 const emptyTail: TranscriptTailState = {
@@ -65,6 +68,7 @@ const emptyTail: TranscriptTailState = {
   hasMore: false,
   loading: false,
   pages: [],
+  engineAttaching: false,
 }
 
 /** 保留窗口：滚离顶部（往下滚）后只留最近 N 页历史，其余从 actor store
@@ -116,7 +120,17 @@ export async function hydrateTranscriptTail(
     hasMore: page?.hasMore === true && wire.length > 0,
     loading: false,
     pages: [{ messages: messages.length, firstEntryId: page?.entryIds?.[0] ?? null }],
+    engineAttaching: false,
   })
+}
+
+/** 组件订阅：引擎装配是否在途（composer 上方提示）。 */
+export const useEngineAttaching = () =>
+  useStore(transcriptTailStore, (s) => s.engineAttaching)
+
+/** 切换/恢复路径使用：标记引擎装配在途 / 结束。 */
+export function setEngineAttaching(attaching: boolean): void {
+  transcriptTailStore.setState({ engineAttaching: attaching })
 }
 
 /**
