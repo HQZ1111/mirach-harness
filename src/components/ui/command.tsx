@@ -5,6 +5,8 @@ import { Command as CommandPrimitive } from "cmdk"
 import { cn } from "cn"
 import { SearchIcon } from "lucide-react"
 
+import { Codicon } from "@/components/ui/codicon"
+
 import {
   Dialog,
   DialogContent,
@@ -155,6 +157,12 @@ function CommandItem({
   )
 }
 
+function CommandItemCheck({ checked }: { checked: boolean }) {
+  return checked ? (
+    <Codicon className="ml-auto pl-2 text-foreground" name="check" size="0.75rem" />
+  ) : null
+}
+
 function CommandShortcut({
   className,
   ...props
@@ -179,6 +187,7 @@ export {
   CommandEmpty,
   CommandGroup,
   CommandItem,
+  CommandItemCheck,
   CommandShortcut,
   CommandSeparator,
 }

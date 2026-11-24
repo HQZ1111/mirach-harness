@@ -4,10 +4,7 @@
 import { Check } from "lucide-react";
 import {
   AnimatePresence,
-  animate,
   motion,
-  useMotionValue,
-  useMotionValueEvent,
   useReducedMotion,
 } from "motion/react";
 import {
@@ -32,14 +29,6 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import {
-  buildGooGeometry,
-  GooSurface,
-} from "@/components/motion/goo-layer";
-import {
-  EASE_OUT,
-  POPOVER_GOO,
-  POPOVER_GOO_CLOSE,
-  POPOVER_GOO_OPEN,
   SPRING_LAYOUT,
   SPRING_PANEL,
 } from "@/lib/ease";
@@ -52,16 +41,15 @@ type MenuPoint = { x: number; y: number };
 const VIEWPORT_PADDING = 8;
 const LONG_PRESS_DELAY = 520;
 const LONG_PRESS_TOLERANCE = 10;
-// 原 clip-path 展开的时长常量已删除：进出场改由 tokens.css 的
-// --beui-spring-goo-open/close 驱动（与模型选择器同一套 goo 动效）。
+// 进场 = tw-animate 默认 fade+zoom（2026-11-22 goo 退役后不再有自绘形变）。
 
 /**
  * 菜单从哪里长出来。
  *
  * - `point`：右键落点（0×0 锚点）。上游 beui 的唯一形态。
  * - `trigger`：触发钮矩形。**本地扩展**（2026-10-26 归拢）：侧栏选项、会话行
- *   ⋯、标签条 + 都是"按钮下面挂菜单"，与右键共用同一套 goo 动效，只是锚点
- *   从"一个点"换成"一颗按钮"——观感与模型选择器（beui Popover）一致。
+ *   ⋯、标签条 + 都是"按钮下面挂菜单"，与右键共用同一套默认弹层动效，只是
+ *   锚点从"一个点"换成"一颗按钮"。
  */
 type MenuAnchor = "point" | "trigger";
 
@@ -90,7 +78,7 @@ interface ContextMenuContextValue {
   sideOffset: number;
   panelRadius: number;
   gooStrength: number;
-  /** 是否做液滴粘性合并（见 `GooSurfaceProps.goo`）。 */
+  /** 保留字段（历史 goo 粘性合并开关，2026-11-22 起无效果）。 */
   goo: boolean;
   triggerRef: React.MutableRefObject<HTMLElement | null>;
   contentRef: React.MutableRefObject<HTMLDivElement | null>;
@@ -104,6 +92,16 @@ interface ContextMenuContextValue {
   triggerRect: { left: number; top: number; width: number; height: number };
   activeId: string | null;
   setActiveId: (id: string | null) => void;
+  /**
+   * 当前展开的二级子菜单 id（同层互斥）。
+   *
+   * 2026-11-23 用户实测："鼠标从上滑到下，会出现很多弹窗"——每个
+   * `ContextMenuSub` 原先各自持有 open，SubTrigger 的 pointerenter 只开不关，
+   * 扫过 7 个二级项就叠 7 个 portal。改由父菜单只记一个 id：新子菜单打开
+   * 即关闭旧的；指针移到非 SubTrigger 项时也清空。
+   */
+  openSubmenuId: string | null;
+  setOpenSubmenuId: (id: string | null) => void;
   reduce: boolean;
 }
 
@@ -169,18 +167,9 @@ export interface ContextMenuProps {
   sideOffset?: number;
   /** 面板圆角。默认 12。 */
   panelRadius?: number;
-  /** goo 滤镜的模糊半径，越大越"熔"。默认 8。 */
+  /** 保留 prop（历史 goo 滤镜参数，2026-11-22 起无效果）。 */
   gooStrength?: number;
-  /**
-   * 是否做液滴粘性合并。
-   *
-   * **默认值 = 令牌 `--beui-popover-goo`（ease.ts 的 POPOVER_GOO）**，调用点
-   * 不该传这个 prop（2026-11-01 用户："调用点没传，直接在令牌中统一开关
-   * 不行吗"）——一个令牌管全部，改观感只改 tokens.css。
-   *
-   * 关掉时菜单是独立的圆角矩形 + 投影，触发钮与菜单之间没有脖子，
-   * 按钮也不被投影。
-   */
+  /** 保留 prop（历史 goo 粘性合并开关，2026-11-22 起无效果）。 */
   goo?: boolean;
   /** 祖先菜单 id 链（子菜单内部用，宿主不必传）。 */
   ancestorIds?: string[];
@@ -207,7 +196,7 @@ export function ContextMenu({
   sideOffset = 6,
   panelRadius = 12,
   gooStrength = 8,
-  goo = POPOVER_GOO,
+  goo = false,
   ancestorIds = [],
   anchorEl = null,
 }: ContextMenuProps) {
@@ -216,6 +205,7 @@ export function ContextMenu({
   const [modality, setModality] = useState<OpenModality>("pointer");
   const [invocation, setInvocation] = useState(0);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [openSubmenuId, setOpenSubmenuId] = useState<string | null>(null);
   const controlled = controlledOpen !== undefined;
   const open = controlled ? controlledOpen : internalOpen;
   const triggerRef = useRef<HTMLElement | null>(null);
@@ -246,7 +236,10 @@ export function ContextMenu({
     (next: boolean) => {
       if (!controlled) setInternalOpen(next);
       onOpenChange?.(next);
-      if (!next) setActiveId(null);
+      if (!next) {
+        setActiveId(null);
+        setOpenSubmenuId(null);
+      }
     },
     [controlled, onOpenChange],
   );
@@ -257,6 +250,7 @@ export function ContextMenu({
       setModality(nextModality);
       setInvocation((current) => current + 1);
       setActiveId(null);
+      setOpenSubmenuId(null);
       setOpen(true);
     },
     [setOpen],
@@ -267,7 +261,14 @@ export function ContextMenu({
     setModality("pointer");
     setInvocation((current) => current + 1);
     setActiveId(null);
+    setOpenSubmenuId(null);
   }, []);
+
+  // 受控 open 从外部关闭（父菜单卸载前/单开单关）也要清掉二级 id，
+  // 否则下次打开会闪回上一次的子菜单。
+  useEffect(() => {
+    if (!open) setOpenSubmenuId(null);
+  }, [open]);
 
   // 触发钮矩形：每次打开都重量一次（布局可能已变——侧栏滚动、窗口 resize）。
   // `anchorEl`（子菜单用）优先于 `triggerRef`（ContextMenuTrigger 注册的）。
@@ -371,6 +372,8 @@ export function ContextMenu({
       triggerRect,
       activeId,
       setActiveId,
+      openSubmenuId,
+      setOpenSubmenuId,
       reduce,
     }),
     [
@@ -392,6 +395,7 @@ export function ContextMenu({
       goo,
       triggerRect,
       activeId,
+      openSubmenuId,
       reduce,
     ],
   );
@@ -615,23 +619,17 @@ export function ContextMenuContent({
   const [mounted, setMounted] = useState(false);
   const [position, setPosition] = useState<MenuPoint>(context.point);
   const [size, setSize] = useState({ width: 0, height: 0 });
-  const [closedAtRest, setClosedAtRest] = useState(true);
   const typeahead = useRef("");
   const typeaheadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const progress = useMotionValue(0);
-  const filterId = `${context.menuId.replace(/:/g, "")}-goo`;
 
   useEffect(() => setMounted(true), []);
 
-  // 两种锚点形态共用同一套 goo 几何（goo-layer.tsx 的 buildGooGeometry）：
+  // 两种锚点形态共用的落位计算（视口坐标，portal 到 body）：
   //
-  // - 落点式（anchor='point'）：锚点 = 右键落点（0×0），面板偏移 =
-  //   钳位后的左上 - 落点。面板从那一点"长"出来。
+  // - 落点式（anchor='point'）：锚点 = 右键落点（0×0），面板左上 =
+  //   钳位后的落点。
   // - 触发钮式（anchor='trigger'）：锚点 = 触发钮矩形，面板偏移由
-  //   side/align/sideOffset 反推。观感与模型选择器（beui Popover）一致。
-  //
-  // 两种形态最终都落到同一份 GooSurface —— 这就是"所有弹窗效果归拢成
-  // 一个"的落点（2026-10-26 用户定稿）。
+  //   side/align/sideOffset 反推。
   const triggerRect = context.triggerRect;
   const anchorW = context.anchor === "trigger" ? triggerRect.width : 0;
   const anchorH = context.anchor === "trigger" ? triggerRect.height : 0;
@@ -690,20 +688,6 @@ export function ContextMenuContent({
     position,
   ]);
 
-  const geo = useMemo(
-    () =>
-      buildGooGeometry(
-        anchorW,
-        anchorH,
-        placement.left - origin.x,
-        placement.top - origin.y,
-        size.width,
-        size.height,
-        context.panelRadius,
-      ),
-    [anchorW, anchorH, placement, origin, size, context.panelRadius],
-  );
-
   useLayoutEffect(() => {
     if (!context.open) return;
     const content = context.contentRef.current;
@@ -739,34 +723,6 @@ export function ContextMenuContent({
     context.modality,
     context.reduce,
   ]);
-
-  // 开/合各跑一次 goo 形变（弹簧曲线走 tokens.css 的 --beui-spring-goo-*）。
-  useEffect(() => {
-    if (context.open) {
-      setClosedAtRest(false);
-      if (context.modality === "keyboard") {
-        progress.jump(1);
-        return;
-      }
-      const animation = animate(
-        progress,
-        1,
-        context.reduce ? { duration: 0 } : POPOVER_GOO_OPEN,
-      );
-      return () => animation.stop();
-    }
-    if (context.reduce) {
-      progress.jump(0);
-      setClosedAtRest(true);
-      return;
-    }
-    const animation = animate(progress, 0, POPOVER_GOO_CLOSE);
-    return () => animation.stop();
-  }, [context.open, context.modality, context.reduce, progress]);
-
-  useMotionValueEvent(progress, "animationComplete", () => {
-    if (!context.open) setClosedAtRest(true);
-  });
 
   useEffect(() => {
     if (!context.open) return;
@@ -835,48 +791,67 @@ export function ContextMenuContent({
     }
   };
 
-  if (!mounted) return null;
-  // 关闭且退场播完 → 整个 portal 卸载。
-  //
-  // 不卸载的代价实测（2026-10-26）：每个菜单都带一份常驻 `<svg><filter>`，
-  // 侧栏一屏 30 个文件树行 + 20 个会话行 → 31 个 portal / 31 个
-  // feGaussianBlur 常驻合成树（实测 portalCount=31）。它们的 goo 滤镜虽然
-  // 不可见，但仍参与合成层与 filter 解析，是白付的开销。
-  //
-  // `closedAtRest` 是"退场动画播完了"的信号（由 animationComplete 置位），
-  // 所以卸载发生在形变收尾之后，不会切断退场。
-  if (closedAtRest && !context.open) return null;
+  if (!mounted || !context.open) return null;
 
-  return (
-    <GooSurface
-      contentClassName={cn(
+  // **必须 portal 到 body**：fixed 定位 + 视口坐标（anchor 矩形来自
+  // getBoundingClientRect）。留作内联节点时，带 layout containment 的祖先
+  // （侧栏的 `@container` / dockview 面板 / 滚动列表）会成为 fixed 的包含块
+  // ——菜单按"祖先左上角 + 视口坐标"偏移（实测：role=menu 存在、有焦点，
+  // 屏幕上看不见）。外部点击检测本来就按"panel 在 portal、两棵树都参与"
+  // 写的：contentRef 命中即内部。
+  //
+  // 动效 = 默认弹层效果（tw-animate 的 fade+zoom），不再是自绘 goo 形变
+  // （2026-11-22 用户："这个弹窗效果组件就不要了，换成默认的弹窗效果"）。
+  // 缩放原点 = 锚点方向：trigger 锚按 side/align（面板从按钮那侧长出来），
+  // 落点锚用默认中心（没有"按钮边"可依）。配合"测量完成后才开始动画"，
+  // 打开是干净的一次淡入+缩放，不会先出现再位移一下。
+  const transformOrigin =
+    context.anchor === "trigger"
+      ? context.side === "bottom"
+        ? `${context.align === "start" ? "left" : context.align === "end" ? "right" : "center"} top`
+        : context.side === "top"
+          ? `${context.align === "start" ? "left" : context.align === "end" ? "right" : "center"} bottom`
+          : context.side === "right"
+            ? "left center"
+            : "right center"
+      : undefined;
+
+  return createPortal(
+    <div
+      aria-label={ariaLabel}
+      aria-hidden={false}
+      className={cn(
         // 去描边（用户 2026-10-14 全局去描边：菜单不留描边线）
-        "min-w-56 rounded-xl bg-card p-1.5 text-foreground outline-none",
+        "fixed z-[9999] min-w-56 rounded-xl bg-card p-1.5 text-foreground shadow-[0_8px_24px_rgba(0,0,0,0.14)] outline-none",
+        size.width > 0 && !context.reduce && "animate-in fade-in-0 zoom-in-95",
         className,
       )}
-      contentId={context.menuId}
-      contentProps={{
-        role: "menu",
-        "aria-label": ariaLabel,
-        "aria-hidden": !context.open,
-        tabIndex: -1,
-        onKeyDown,
-        onContextMenu: (event) => event.preventDefault(),
+      data-menu-portal={context.menuId}
+      id={context.menuId}
+      onContextMenu={(event) => event.preventDefault()}
+      onPointerOver={(event) => {
+        // 指针离开二级项、回到父菜单的普通项 → 收起当前子菜单。子菜单是
+        // 独立 portal，进入它不会触发本面板的 pointerover；同一个
+        // SubTrigger 及其子节点也不收（悬停中）。
+        if (context.openSubmenuId === null) return;
+        const target = event.target as HTMLElement | null;
+        if (target?.closest("[data-submenu-trigger]")) return;
+        context.setOpenSubmenuId(null);
       }}
-      contentRef={context.contentRef}
-      filterId={filterId}
-      geo={geo}
-      goo={context.goo}
-      gooStrength={context.gooStrength}
-      interactive={context.open}
-      origin={{ left: origin.x, top: origin.y }}
-      portalId={context.menuId}
-      progress={progress}
-      reduce={context.reduce}
-      visible={!closedAtRest}
+      onKeyDown={onKeyDown}
+      ref={context.contentRef}
+      role="menu"
+      style={{
+        left: placement.left,
+        top: placement.top,
+        transformOrigin,
+        visibility: size.width > 0 ? "visible" : "hidden",
+      }}
+      tabIndex={-1}
     >
       {children}
-    </GooSurface>
+    </div>,
+    document.body,
   );
 }
 
@@ -885,10 +860,9 @@ type ContextMenuItemTone = "default" | "destructive";
 // ── 子菜单（本地扩展，2026-10-26 归拢）───────────────────────────────────
 //
 // 上游 beui ContextMenu 是单层（只有右键一层），本项目的侧栏菜单是三层
-// （分组 ▸ / 排序 ▸ / 显示 ▸ 各带子菜单）。要让侧栏与右键同一套 goo 观感，
-// 子菜单必须也走同一个 GooSurface —— 于是这里把"子菜单"实现成**独立的
-// ContextMenu 实例**（自己一份 progress/filter/portal），只是锚点 = 父菜单
-// 里那一行 SubTrigger 的矩形、方向固定 right（放不下翻左）。
+// （分组 ▸ / 排序 ▸ / 显示 ▸ 各带子菜单）。子菜单实现成**独立的
+// ContextMenu 实例**（自己的 portal），锚点 = 父菜单里那一行 SubTrigger
+// 的矩形、方向固定 right（放不下翻左）；弹层观感 = 默认 fade+zoom。
 //
 // 与父菜单的协作：
 // - 打开：SubTrigger 的 hover/click → `openTriggered()`（推进 invocation）
@@ -910,23 +884,46 @@ const SubMenuContext = createContext<{
   setTriggerEl: (el: HTMLElement | null) => void;
 } | null>(null);
 
+/** 二级悬停打开延迟：滑过一行不该弹子菜单（Radix SubTrigger 同款节流）。 */
+const SUBMENU_OPEN_DELAY = 120;
+
 export function ContextMenuSub({
   children,
   open: controlledOpen,
   defaultOpen = false,
   onOpenChange,
 }: ContextMenuSubProps) {
-  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const parent = useContextMenuContext("ContextMenuSub");
+  const subId = useId();
   const [triggerEl, setTriggerEl] = useState<HTMLElement | null>(null);
   const controlled = controlledOpen !== undefined;
-  const open = controlled ? controlledOpen : internalOpen;
+  // 同层互斥：由父菜单记录唯一打开的 submenu id（不是每个 Sub 各持一份
+  // open——那样扫过多个二级项会同时留下多个 portal）。
+  const open = controlled
+    ? controlledOpen
+    : parent.openSubmenuId === subId;
   const setOpen = useCallback(
     (next: boolean) => {
-      if (!controlled) setInternalOpen(next);
+      if (controlled) {
+        onOpenChange?.(next);
+        return;
+      }
+      if (next) parent.setOpenSubmenuId(subId);
+      else if (parent.openSubmenuId === subId) parent.setOpenSubmenuId(null);
       onOpenChange?.(next);
     },
-    [controlled, onOpenChange],
+    [controlled, onOpenChange, parent, subId],
   );
+
+  // defaultOpen 只对没接父菜单的独立用法负责；正常菜单里由父 id 接管。
+  useEffect(() => {
+    if (defaultOpen && parent.openSubmenuId === null) {
+      parent.setOpenSubmenuId(subId);
+    }
+    // 仅首挂载：之后的开合由 SubTrigger/父菜单驱动。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const value = useMemo(
     () => ({ open, setOpen, triggerEl, setTriggerEl }),
     [open, setOpen, triggerEl],
@@ -952,6 +949,16 @@ export function ContextMenuSubTrigger({
 }: ContextMenuSubTriggerProps) {
   const sub = useSubMenuContext("ContextMenuSubTrigger");
   const id = useId();
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelOpen = useCallback(() => {
+    if (openTimer.current) {
+      clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+  }, []);
+
+  useEffect(() => cancelOpen, [cancelOpen]);
 
   return (
     <button
@@ -973,9 +980,21 @@ export function ContextMenuSubTrigger({
       ref={sub.setTriggerEl}
       onPointerEnter={(event) => {
         if (disabled || event.pointerType === "touch") return;
-        sub.setOpen(true);
+        // 延迟打开：鼠标纵向滑过菜单时，每个二级项都立刻弹一次会让子菜单
+        // 一路跟着闪；停在该行 120ms 才真正打开。移出即取消。
+        cancelOpen();
+        openTimer.current = setTimeout(() => {
+          openTimer.current = null;
+          sub.setOpen(true);
+        }, SUBMENU_OPEN_DELAY);
+      }}
+      onPointerLeave={() => {
+        cancelOpen();
+        // 子菜单内容在独立 portal：这里不关，否则鼠标往右移进子菜单的
+        // 瞬间它就被卸载。离开父菜单/移到别的项由父面板 pointerover 收。
       }}
       onClick={() => {
+        cancelOpen();
         if (disabled) return;
         sub.setOpen(!sub.open);
       }}

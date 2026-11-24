@@ -1,5 +1,14 @@
 # bots 插件移植完成度审计（2026-11-17 复核轮）
 
+> **2026-11-22 更正（必读）**：本文的「插件 UI 100% 原样」只指
+> `src/hermes-mirror/plugins/hermes-bots/**` 的**生产文件拷贝**；宿主同期还有
+> 一套自造的精简 UI（`bots-pane.tsx` / `bot-group.tsx` / `bot-subpages.tsx` /
+> `bots-dialog.tsx` / `bot-launch.ts` / `bot-stub-store.ts` / `bot-face.tsx`），
+> 2026-11-22 已**全部删除**，插件成为唯一 bots UI。宿主适配层仍是自研
+> （bots-store / host-rpc / Rust pi_bot/pi_groups/pi_cron），不等于 hermes
+> Python gateway；profile 隔离目前只到 session_dir，详见 `AGENTS.md`
+> 「2026-11-22 环境（profile）与 bots 插件边界」。
+>
 > 口径说明：本文的「宿主」= **mirach 桌面应用（Tauri + 前端，即插件宿主）**，
 > 不是 pi/rpi 引擎。引擎侧会话数据面缺口见 `docs/zcode-parity-gaps.md`。
 >
@@ -13,7 +22,7 @@
 
 | 层 | 状态 |
 |---|---|
-| 插件 UI / 业务代码（`src/hermes-mirror/plugins/hermes-bots/**`） | **100% 原样**（121 文件全量 vendored，未改写） |
+| 插件 UI / 业务代码（`src/hermes-mirror/plugins/hermes-bots/**`） | **100% 原样**（126 文件全量 vendored，未改写） |
 | 宿主 SDK/适配层（`src/sdk/**`、`src/plugin**`、`panes/`） | **本轮补齐**（下表逐项） |
 | 引擎/后端能力 | 群聊成员轮次=后台 bot 泳道真跑；canonical driver 未移植（见 §3） |
 
@@ -219,8 +228,9 @@ provider，defaultProvider=BBT/deepseek-v4.1-flash）。**「真模型端到端�
 | MCP OAuth | notion dry-run：discovery + DCR 成功（client_id 注册） |
 
 同日新增宿主面：MCP OAuth（标准 DCR+PKCE+刷新）、本地技能目录（139 技能）、
-canonical approvals/retry/discard/router。**仍未做**：lead 路由、权限闸运行时
-切换（引擎侧，见 pi-host-gaps §6）、message_agent/relay（引擎扩展）、display。
+canonical approvals/retry/discard/router。~~**仍未做**：lead 路由、权限闸运行时
+切换（引擎侧）、message_agent/relay、display~~ ——全部已被 §8/§9 收口
+（relay 也在 §9 全接；lead 见 §8 表末行现状）。
 
 ## 8. 2026-11-18 夜：引擎侧四件套落地后，§7 清单里的"仍缺"全部闭环
 
@@ -234,8 +244,8 @@ canonical approvals/retry/discard/router。**仍未做**：lead 路由、权限�
 | message_agent | ✅ 引擎内置工具 + 宿主投递/回信；微软→remote-bot 真链通过（含回信落回发送者） |
 | display（屏幕面板） | ✅ 宿主 `pi_display.rs`（GDI+RFB）→ screen-pane noVNC 1280×720 真帧；接管/交还 lease 闭环 |
 | 任务身份/终局回执/租约 | ✅ 引擎 `task_lease.rs` + canonical driver 接线；fencing 拒陈旧 token、cancelled/settled receipt、recovered→indeterminate 全部实测 |
-| relay（跨网关） | ❌ 有意不做（单身份宿主无 relay 概念，显式报错） |
-| lead 路由 | ❌ 仍未做（与租约无关；可后续补一次廉价模型调用） |
+| relay（跨网关） | ✅ §9 全接（此行"有意不做"已过时）：`pi_relay.rs` 四门 + `pi_gateway.rs` WS + 双向实机 E2E |
+| lead 路由 | 🟡 **Rust 决策层已移植（2026-11-19/20）**：`hosted_rooms/lead.rs`（路由指令/点名解析）+ `plan.rs`/`decision_engine` 的 `lead_routing` 任务 + `groups_plan` 按设置发 lead 轮；前端走**通用成员轮**（lead 的点名回复落日志后由决策引擎接力——与上游"路由答案永不广播"同机制），router(auto) 已实机。**lead 未单独实机验证**（无专 UI 面，设置入口 `routing=lead`） |
 
 **engine E2E 残留**：canonical 群聊**含租约**的整房间 UI 流程未再跑一遍
 （建房→多成员→settled）；各原语（快照/fencing/恢复/meta 落盘）已单独实测，
@@ -244,7 +254,7 @@ driver 消费面单测在 vitest 门禁内。
 ## 9. 2026-11-18 第二波：跨网关全链打通（上表 relay 一行已过时）
 
 （用户："垮网关是bots的核心，看bots的代码有没有漏项"。审计 =
-镜像 121 文件 vs 上游 283，缺的全是测试；真漏项在数据面，逐项修复见
+镜像 126 文件 vs 上游 287，缺的全是测试；真漏项在数据面，逐项修复见
 `docs/HANDOFF.md` 同轮条目。）
 
 | 面 | 现状 |
@@ -267,13 +277,117 @@ driver 消费面单测在 vitest 门禁内。
 | **远端连接 token 管理** | ✅ **已接**：token 进 OS 凭据管理器（service `mirach.connections`，entry=连接 id；注册表 JSON 只存派生 `tokenSet/tokenPreview`，每次读取从 keyring 重算）；`pi_connections_save` 的 `token` 字段只写不读（空串=清除，删除连接同步删 entry）；连接页编辑表单有 token 密码输入 + 清除钮 + `token ...abcd` 徽章（preview = hermes `tokenPreview` 同款：≤8 → "set"，否则 `...`+末 6 位）；`pi_gateway_connect` 的 token=null 时**由 Rust 取 keyring**（token 永不过前端）。**`pi_connections_test` 对 remote/cloud 变真**：用注册表 URL + keyring token 开一次性 WS 等 `gateway.ready`（8s），失败红显真错误；ssh 无隧道实现，仍 stub 红显 |
 | **`image.generate`** | ✅ **真后端**（`src-tauri/src/pi_image.rs`）：OpenAI 兼容 `{base}/images/generations`；provider = `settings.image.provider` > `default_provider` > models.json 首个有凭据者；key 走 models.json apiKey（字面量 / `env:VAR` / 裸环境变量）→ auth.json → provider env；probe = GET `{base}/models` 挑图像型模型（image/dall-e/imagen/flux/…，**真网络检查**），无图像模型 → `available:false`（插件隐藏生成入口）；`settings.image.model` 可覆盖；生成 b64 → `image_data` data URL，失败走契约 `error` |
 | **`pet.gallery` / `pet.thumb`** | ✅ **已接**（`src-tauri/src/pi_pet.rs`，hermes `agent/pet/*` 对偶）：gallery = petdex 公共 manifest（UA `hermes-agent-petdex`，300s 进程内缓存；`installed` 读 `~/.rpi/agent/pets/<slug>/pet.json`）；thumb = 已装 spritesheet 优先、否则**仅 petdex.dev 主机** URL（上游 `_is_petdex_host` 同款反 SSRF），裁首帧 192×208 → 96×104 NEAREST → PNG data URI + `pets/.thumbs/<slug>.png` 磁盘缓存。镜像 pet.tsx 的 Pet tab 从此有真数据 |
-| peer 房间（groups.peer.*） | 🟡 **Desktop 驱动全通 + mirach peer 借出面已接（第四/五波）**：authority 侧（邀请对端 bot 进本机房间）`groups.peer.register/revoke` + canonical driver 对 peer 成员按 profile 解析 remote 路由；实机（hermes 插件流程）：1 本机 + 2 远端成员建房 → 全员 seat → 全员回复 → settled。**lending 侧（本机被借出）**：`pi_peer.rs` 原生 HTTP 服务（127.0.0.1:9731，Bearer 配对令牌走 OS 凭据管理器）——对端 mirach 用 URL + 令牌接入后，canonical driver 的 remote 路由经 `pi_peer_call` 走对端 `session.create/resume/prompt.submit/interrupt/compact`；实机（mock peer + 真 canonical driver）：1 本机 + 1 远端 mirach 成员建房 → 本机真模型回复 + 远端 peer bot 经 peer HTTP 回复 → 双 turn.settled → settled。**仍未做**：hermes 网关 wire 兼容（`groups.peer.invite` WS 方法 + `/v1/room-members/*` HTTP 路由——那是整个 hermes 网关 HTTP 服务端，宿主没有）|
+| peer 房间（groups.peer.*） | ✅ **全通（第四/五波 + 2026-11-19 hermes wire）**：authority 侧（邀请对端 bot 进本机房间）`groups.peer.register/revoke` + canonical driver 对 peer 成员按 profile 解析 remote 路由；实机（hermes 插件流程）：1 本机 + 2 远端成员建房 → 全员 seat → 全员回复 → settled。**lending 侧（本机被借出）**：`pi_peer.rs` 原生 HTTP 服务（127.0.0.1:9731，Bearer 配对令牌走 OS 凭据管理器）——对端 mirach 用 URL + 令牌接入后，canonical driver 的 remote 路由经 `pi_peer_call` 走对端 `session.create/resume/prompt.submit/interrupt/compact`；实机（mock peer + 真 canonical driver）：1 本机 + 1 远端 mirach 成员建房 → 本机真模型回复 + 远端 peer bot 经 peer HTTP 回复 → 双 turn.settled → settled。**hermes 网关 wire 已接（2026-11-19，此前"宿主没有"的行已过时）**：WS `groups.peer.invite/register/revoke` + `/v1/room-members/*`（capabilities/invitations/grants refresh·revoke/runs close）+ `/v1/runs` 全族（幂等 admission/SSE/stop/approval/clarify/steer）——2026-11-19/20 按 hermes 客户端语义（peerTargetState/seatPeer/_admit_dispatch/refresh/stop_receipt/revoke）E2E 全绿。**如实差异**：lender catalog `persistent_process:false`（桌面进程，与上游 `HERMES_DESKTOP=1` 同口径）→ 真 hermes Desktop 会以 `persistent_process_required` 拒 seat |
 | per-bot MCP 勾选 | 🟡 **per-bot 配置文件已接（2026-11-18 第四波）**：bots 对话框 MCP 页 = 全局 `mcp.json` 服务器多选（`pi_mcp_servers` 真清单）；启动时 `pi_bot_mcp_config` 只过滤所选服务器生成 `~/.rpi/agent/bot-mcp/<bot>.json`，`configPath` 注入 system prompt（rpi-mcp-adapter 的 `mcp_list/mcp_call/mcp_resource` 本就按 `configPath` 读配置——per-bot 真生效）。**限制（如实）**：不选 = 不注入该配置；adapter 的四个 MCP 工具是**进程级注册**，宿主没有 per-session 工具遮蔽面，所以"不选"不能从工具层阻断模型自行使用全局配置 |
 | SSH 隧道 | ✅ **已接（2026-11-19）**：`pi_ssh.rs` —— 注册表 ssh 条目加 `gatewayPort`（缺省 = hermes api_server 默认 8642）；`pi_ssh_tunnel_start` 起 `ssh -N -L 127.0.0.1:<local>:127.0.0.1:<gateway_port>` 子进程（`BatchMode=yes` + `ExitOnForwardFailure=yes` + `StrictHostKeyChecking=accept-new`），等本地端口就绪返回隧道 URL；`pi_gateway_connect` 对 url 为空的 SSH 连接自动起隧道 + WS 走本地端口；`pi_connections_test` 对 ssh 变真（隧道 + gateway.ready 探测）；连接页 ssh 编辑器加网关端口字段；`RunEvent::Exit` 时 `stop_all()` kill 全部子进程。**限制（如实）**：密钥需在 agent（`BatchMode=yes` 不弹交互）；hermes SSH 模式是 1197 行完整远端 backend 管理，宿主只做了端口转发这一层 |
 | `groups.replica_state` | ✅ **已接（2026-11-19）**：`hosted_rooms/replicas.rs` 补 SQL 写入层（ingest_page / replica_state_query / promote_replica / demote_room 逐行翻译 hermes `hosted_room_replicas.py`）；`pi_groups.rs` 分派 + peer HTTP 接收路由 `POST /v1/mirach/rooms/{id}/replicate`（bearer 鉴权 → ingest_page 写本地 replica 表）。`groups.replicate` 读房间事件构建 ReplicaPage 给调用方发到 peer |
 | `groups.demote` | ✅ **已接（2026-11-19）**：`pi_groups.rs` 分派 → `replicas::demote_room`（上游 `demote_room()` 逐行移植——当本机权威 epoch 过期时追加 `authority.lost` 并采纳对端新谱系；幂等） |
 | `groups.promote` | ✅ **已接（2026-11-19）**：`pi_groups.rs` 分派 → `replicas::promote_replica`（上游 `promote_replica()` 逐行移植——replica 接管为 authority（epoch+1），复制日志 + `authority.claimed`；防止重复接管与 room_id 冲突） |
 | `groups.replicate` | ✅ **已接（2026-11-19）**：读房间事件构建 ReplicaPage（events + authority + latest_seq），调用方经 peer HTTP `POST /v1/mirach/rooms/{id}/replicate` 发到 peer → peer ingest 进本地 replica 表 |
-| `groups.peer.invite` | 🟡 mirach 原生 peer 面已替代（对端 mirach 走 `pi_peer_call`）；hermes Desktop wire 兼容（WS invite + `/v1/room-members/*`）需要 hermes 网关 HTTP 服务端——**宿主架构不同**，如实报错 |
+| `groups.peer.invite` | ✅ **hermes Desktop wire 已接（2026-11-19）**：WS 方法（invite/register/revoke）+ `/v1/room-members/*` HTTP + `/v1/runs` 全族落在 peer 服务（`pi_gateway_peer.rs` + `pi_peer.rs` + `hosted_rooms/grants.rs`）；按 hermes 客户端语义 E2E 全绿（见 `AGENTS.md`「hermes peer lending wire」）。mirach↔mirach 原生面照旧走 `pi_peer_call` |
 | `display.install` | ✅ **已接（2026-11-19）**：`pi_ssh.rs` SSH exec 检查/安装远端 RFB 服务；`display.observe` 对 SSH 连接经隧道连远端 RFB |
 
+
+
+## 11. 2026-11-20 实点对账轮（hermes Desktop 逐键 vs mirach）
+
+方法：CDP 真鼠标逐面点击两侧（hermes 9222 / mirach 9223），取证菜单项、对话框
+尺寸与运行时行为。完整逐面清单与修复细节见 `AGENTS.md`「bots 实点对账
+（2026-11-20）」。
+
+- **实点一致**：行/群行打开、行右键菜单（含上游英文 "Open recent session"）、
+  筛选、新建/复制/删除/置顶/隐藏、新建+编辑机器人（头像页签、高级四页签）、
+  管理群组、群聊设置（用途/共享笔记/路由）、群详情抽屉、屏幕窗格、例程/电台。
+- **已修**：
+  1. 分组行/传统 GroupRow 右键落到全局窗口菜单 → 行根加
+     `data-bots-menu-row` + `context-menu-scope.ts` 登记（单测 +1）。
+  2. BotChatEmpty 英文 + 品牌名：`sdk/wordmark.tsx` 吞掉 `text` prop；
+     `thread.aui.tsx` 空态贡献槽未挂 I18nProvider。两处已修，实机显示
+     「二万人 (copy) / 说点什么开始吧。」。
+  3. **「在新标签页中打开机器人聊天」→ 主区右侧独立会话栏（2026-11-21）**：
+     `host.openSession` 认 `intent:'tab'` → 会话 bridge 的新栏门 + dockview
+     `session-<storedId>` 面板（引擎侧 `side_open` 独立柄）；行点击先置前
+     已开的栏。实机：新栏/置前/重启恢复/栏内发送全通过；单测
+     `session-tab-bridge.test.ts`（5 条）。细节见 `AGENTS.md`「缺口补齐
+     （2026-11-21）」。
+  4. **本机屏幕对齐（2026-11-21 对照 hermes 本机）**：hermes 本机没有 bot
+     desktop，打开屏幕是空态「此主机没有机器人屏幕 / 此机器人使用主机自身
+     的显示器」；宿主不再用 GDI 截自己的 Windows 桌面冒充 bot 屏，
+     `pi_display.rs` 默认 `supported:false`，`MIRACH_HOST_SCREEN=1` 才启用
+     （显式自测）。
+- **未修（结构性）**：
+  - `botToRosterRow.last_session = null`（Open recent 恒灰、行年龄恒 createdAt、
+    活动铃不响、activity 筛选无数据）——需 profile↔session 归属数据面；
+  - 连接器页无云后端时如实报「无法访问托管应用」；
+  - 技能 0 / 工具集 17 是本机数据面（`~/.pi/skills` 为空），非 UI 缺口；
+  - provider 失败不进 `RUN_ERROR`（引擎以空 `RUN_FINISHED` 收尾，错误只落
+     会话文件）——主/分栏都只剩"空回复"，引擎侧错误事件面独立一轮。
+
+## 12. 2026-11-23：对齐 hermes 新版 bots（逐字复制，不自己写）
+
+上游 `D:\hermes-agent-main\apps\desktop\src\plugins\hermes-bots` 本轮新增
+三个生产文件，宿主全部逐字复制：
+
+| 文件 | 作用 | 宿主接线 |
+|---|---|---|
+| `teammate-waits.tsx` | Bot Chat composer 上方「等待队友」条（5s 轮询 `bot_delivery.list`，queued/claimed/working/waiting_on_you/failed；失败可忽略；unknown outcome 明示永不自动重发） | `plugin.tsx` 注册到 `COMPOSER_AREAS.top`；`composer-wired.tsx` 的 `ComposerTopSlot` 提供槽位；`hermes-shim/app/composer-session.tsx` 提供 `useComposerSession`（SDK 导出同上游 `sdk/areas.ts`） |
+| `teammate-wait-locales.ts` | 上条的 en/ja/zh/zh-hant 文案 | `i18n.ts` 四语言 `waiting` 段并入 `BotsMessages` |
+| `group-chat-record.ts` | `durableGroupChatRoom` / `hydrateDurableGroupChatRoom` 单一真源 | `plugin.tsx` 水合、`group-chat.ts` 的 `durableGroupChatRooms`/`updateGroupChat`、`group-chat-view.tsx` 解散路径全部改走 helper |
+
+**修掉的宿主真缺陷**（旧内联实现与上游漂移）：
+
+- `durableGroupChatRooms` 缺 `sessionOwners` / `holds`（远端同步或其它
+  调用方落盘即丢这两个表）；
+- `plugin.tsx` 水合缺 `holdDetection` / `heldMessages`（重启丢「用户停止」
+  与 held 回放）；
+- `updateGroupChat` 内联 durable 映射与 helper 重复（上游已统一为
+  `void persistGroupChatRooms(all)`）；解散路径同理。
+
+**`bot_delivery.list`**：hermes 网关方法，宿主没有网关——由
+`src/lib/bot-delivery.ts` 登记 `message_agent` 的未收尾投递（本机直投
+queued→claimed→working→settle/failed；远端 relay 由 `bot_relay:reply`
+事件 settle），`host-rpc.ts` 回答该 RPC。只登记真有 waiter 的投递，
+settle 即删；窗口重启后内存表清空（无可证明的未收尾投递，不编造）。
+
+**对比口径**：生产文件上游独有 0；宿主独有仅 `roster-active-pill.tsx` /
+`skills-hub.tsx`，加上已注明的宿主增行（选中 pill、skills hub 入口）。
+`create-dialog.tsx` 的 id 校验恢复上游 `PROFILE_ID_ARG_RE`
+（`src/lib/profile-id.ts` 逐字复制）。**bot 对话区标题 2026-11-23 定稿**：
+会话真名仍是 "Bot Chat"，显示层优先派生标题（首条用户消息），无则机器人
+显示名（`runtime.tsx` 的 bot 锚会话 `row.title` 覆写）；`canonical-chat.ts`
+保持上游逐字；旧存档侧栏标题在 dockview 恢复时改写。
+
+**主题（2026-11-23）**：宿主壳最初是 light-only，镜像主题层跟随 OS
+（system → dark）→ 机器人页的菜单/对话框用暗色 token、宿主文字仍暗色
+（黑底黑字 + 描边），当时临时把 boot paint 固定 `light`。同日晚「外观」页
+落地后已补 `tokens.css` 的 `:root:root.dark` 暗色壳令牌，主窗/设置窗根挂
+`ThemeProvider`，boot paint 按存储 mode 解析（缺省 light）；机器人页菜单/
+对话框在暗色下也使用同一套令牌。
+
+**tokens**：`hermes-tokens.css` 补了 `--ui-bg-primary` / `--ui-bg-secondary`
+（上游 styles.css 公式）——`teammate-waits` 卡片底直接读后者，此前缺失
+会解析成透明。**群聊房间输入区（2026-11-23）**：`group-room-ui.tsx` 与上游
+逐字一致，但宿主缺 `--composer-control-gap` / `--composer-surface-pad-x/y` /
+`--composer-input-min-height` / `--conversation-text-base-size` /
+`--conversation-text-font-size` / `--composer-fill` / `--composer-ring-strength`
+→ 内距/间距/输入行高全为 0；已按主输入框几何补进 hermes-tokens.css，房间
+输入区圆角统一 20px。`--chrome-action-hover` 别名也补进 tokens.css（整个
+插件的 hover 底此前透明）。SDK 的 `composerInputBacking` /
+`composerSurfaceRing` 改为直接复用镜像 `components/chat/composer-dock`
+（旧近似值造成"框里套小框"）。**群聊输入区（2026-11-23 续）**：`RoomComposer`
+改用宿主 `ComposerBar` / `ComposerSend` / `ComposerAttachButton`（SDK 导出），
+布局/圆角/发送钮与主输入框一致；`turn.failed` notice 补 `wrap-anywhere`
++ `overflow-hidden`。**SDK 时间工具（2026-11-23）**：`hermes-shim/lib/time.ts`
+的 `relativeTime` 落后镜像一版（缺第三个 `locale` 参数，群聊消息行 3 参调用
+TS2554）——已同步 `hermes-mirror/lib/time.ts` 的 locale-aware 实现。**对话头像系统**：设置→形象（41 张内置头像
+`public/avatars/user`，localStorage `mirach:user-avatar`）+ 对话区用户右/AI 左
+头像；名字与内容同边、头像在外侧（40px，中线对齐；机器人页行头像 40px）；AI 头像 = bot image，
+回落 `/brand/logo.png`；默认 Mirach bot 头像 = logo（botsStore + 插件
+bot-meta 一次性迁移）。**删除机器人（2026-11-23 对齐 hermes
+`profiles.delete`）**：`host.deleteProfile` / `cli.exec profile delete` →
+`host-rpc.deleteBotProfile` 先调 Rust `pi_profile_delete` 删除
+`~/.rpi/agent/profiles/<name>`（default/符号链接拒绝，不存在幂等），成功后
+才删 botsStore + `bot-meta-v2` + 选中项 + `bot-ui-meta`；失败原样抛、注册
+表不动。群聊成员保留（hermes `member_roster` 同语义），但驱动跑轮前查本地
+名册，已删 profile → `turn.failed` + `reason_code: member_unavailable`，
+不会经 `ensure_profile_dirs` 复活目录。

@@ -76,7 +76,12 @@ export function getTerminalTheme(): ITheme {
   return Object.fromEntries(
     Object.entries(TERMINAL_THEME_TOKENS).map(([key, [tokenName, fallback]]) => [
       key,
-      normalizeCssColor(readTerminalColor(style, tokenName, fallback), fallback),
+      // 终端底色不由 xterm 画：`.term-pane` 在普通态用 --term-bg、背景图开启时
+      // 透明（见 panes.css），xterm viewport 始终透出容器。否则 xterm 创建
+      // 时机早于背景图 onLoad，会永久留一层 #fff。
+      key === 'background'
+        ? 'rgba(0, 0, 0, 0)'
+        : normalizeCssColor(readTerminalColor(style, tokenName, fallback), fallback),
     ]),
   ) as ITheme
 }

@@ -46,6 +46,8 @@ interface ConfirmDialogProps {
   destructive?: boolean
   /** Close as soon as onConfirm resolves — for optimistic actions. */
   dismissOnConfirm?: boolean
+  /** Blocks confirm until the caller's prerequisite (e.g. an acknowledge checkbox). */
+  confirmDisabled?: boolean
   /** A third, non-destructive way out, shown between Cancel and Confirm. */
   secondaryAction?: ConfirmSecondaryAction
 }
@@ -63,6 +65,7 @@ export function ConfirmDialog({
   cancelLabel = '取消',
   destructive = false,
   dismissOnConfirm = false,
+  confirmDisabled = false,
   secondaryAction,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null)
@@ -90,7 +93,7 @@ export function ConfirmDialog({
   }, [])
 
   async function run() {
-    if (busy) {
+    if (busy || confirmDisabled) {
       return
     }
 
@@ -129,7 +132,7 @@ export function ConfirmDialog({
         onKeyDown={(event) => {
           // Enter/Space 确认，不管焦点在哪个按钮（preventDefault 防焦点上的
           // 取消钮把它吞掉）。
-          if ((event.key === 'Enter' || event.key === ' ') && !busy) {
+          if ((event.key === 'Enter' || event.key === ' ') && !busy && !confirmDisabled) {
             event.preventDefault()
             void run()
           }
@@ -137,6 +140,9 @@ export function ConfirmDialog({
         onOpenAutoFocus={(event) => {
           // 焦点必须落在对话框内，否则上面的键盘处理收不到——焦点留在打开
           // 它的元素（菜单项、侧栏行）上，Enter 会重新触发那个。
+          // confirmDisabled 时让 Radix 把焦点交给第一个可聚焦元素（通常是
+          // children 里的确认勾选框）。
+          if (confirmDisabled) return
           event.preventDefault()
           confirmRef.current?.focus()
         }}
@@ -174,7 +180,7 @@ export function ConfirmDialog({
             </Button>
           )}
           <Button
-            disabled={busy}
+            disabled={busy || confirmDisabled}
             onClick={() => void run()}
             ref={confirmRef}
             variant={destructive ? 'destructive' : 'default'}

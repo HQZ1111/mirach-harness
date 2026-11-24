@@ -102,6 +102,31 @@ describe('parseGoalState（rpi-goal goal-state 条目）', () => {
     ).toBe('notSatisfied')
   })
 
+  it('goal v2 停止词 → 面板词表（blocked / waiting / usage_limited / budget_limited）', () => {
+    expect(parseGoalState({ active: { title: 'x', status: 'blocked' } })?.status).toBe('blocked')
+    expect(parseGoalState({ active: { title: 'x', status: 'waiting' } })?.status).toBe('waiting')
+    expect(parseGoalState({ active: { title: 'x', status: 'usage_limited' } })?.status).toBe(
+      'usageLimited',
+    )
+    expect(parseGoalState({ active: { title: 'x', status: 'budget_limited' } })?.status).toBe(
+      'budgetLimited',
+    )
+  })
+
+  it('verifying：v2 verifyIteration 合成在途行，snake_case 结论归一', () => {
+    const goal = parseGoalState({
+      active: {
+        title: 'x',
+        status: 'verifying',
+        verifyIteration: 2,
+        verifyStartedAt: 99,
+        verifications: [{ iteration: 1, outcome: 'not_satisfied', at: 50, reason: 'r' }],
+      },
+    })
+    expect(goal?.verifying).toEqual({ iteration: 2, startedAt: 99 })
+    expect(goal?.verifications[0].outcome).toBe('notSatisfied')
+  })
+
   it('可选字段缺席 → 零值/null（不造假 0 秒起算）', () => {
     const goal = parseGoalState({ active: { title: 'x', status: 'paused' } })
     expect(goal).toEqual({

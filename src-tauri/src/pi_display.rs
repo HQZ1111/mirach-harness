@@ -122,8 +122,26 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "this-device".into())
 }
 
+/// 本机 bot 是否有"机器人屏幕"。
+///
+/// hermes 的 Bot Screen 是 **Linux 网关主机上的 headless Xfce 虚拟屏**
+/// （`tools/bot_desktop/`）；Windows 本机网关没有这块屏，按钮打开后是
+/// "此主机没有机器人屏幕 / 此机器人使用主机自身的显示器"。宿主此前把
+/// **用户自己的 Windows 桌面**经 GDI 截屏冒充 bot 屏幕，这不是移植语义
+/// （用户 2026-11-21 对照 hermes 本机行为后裁定对齐）。默认关闭；保留
+/// `MIRACH_HOST_SCREEN=1` 供显式自测，不再作为默认产品面。
+fn host_screen_enabled() -> bool {
+    std::env::var("MIRACH_HOST_SCREEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 fn status_json(profile: &str) -> Value {
-    let (width, height, supported) = screen_geometry();
+    let (width, height, supported) = if host_screen_enabled() {
+        screen_geometry()
+    } else {
+        (0, 0, false)
+    };
     let (lease, epoch) = current_lease(profile);
     json!({
         "profile": profile,
@@ -138,17 +156,17 @@ fn status_json(profile: &str) -> Value {
         "running": supported,
         "kind": "local-screen",
         "label": hostname(),
-        "blocker": if supported { Value::Null } else { json!("本机屏幕捕获不可用") },
+        "blocker": if supported { Value::Null } else { json!("此主机没有机器人屏幕：机器人屏幕运行在 Linux 网关主机上") },
         "display": Value::Null,
         "missing": [],
         "detail": if supported {
-            json!("本机桌面镜像（非按 profile 隔离的虚拟屏）")
+            json!("本机桌面镜像（非按 profile 隔离的虚拟屏，MIRACH_HOST_SCREEN=1 显式启用）")
         } else {
-            json!("本平台不支持屏幕捕获")
+            json!("机器人屏幕在 Linux 网关上运行；本机 bot 使用主机自身的显示器")
         },
         // 上游契约 geometry = 字符串（面板头部 `{display} · {geometry}`）。
-        "geometry": format!("{width}x{height}"),
-        "counts": { "online": 1, "total": 1 },
+        "geometry": if supported { json!(format!("{width}x{height}")) } else { Value::Null },
+        "counts": { "online": if supported { 1 } else { 0 }, "total": 1 },
         "elapsedS": 0,
         "image_switch": Value::Null,
         // 上游契约：lease 恒为对象（无人持有 = holder:"agent"）。
@@ -318,6 +336,12 @@ static WS_PORT: OnceLock<u16> = OnceLock::new();
 
 /// 启动 display WS 服务（幂等）。端口随机，前端经 `pi_display_ws_port` 读取。
 pub fn start_server() {
+    // 默认关闭本机桌面镜像（见 host_screen_enabled）。显式启用才起 RFB。
+    if !host_screen_enabled() {
+        eprintln!("[display] 本机 bot 无机器人屏幕（Linux 网关专属能力）；RFB 未启动");
+
+        return;
+    }
     static STARTED: OnceLock<()> = OnceLock::new();
     if STARTED.get().is_some() {
         return;
@@ -517,6 +541,9 @@ pub fn pi_display_status(profile: Option<String>) -> Result<Value, String> {
 
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_display_thumbnail(profile: Option<String>) -> Result<Value, String> {
+    if !host_screen_enabled() {
+        return Err("此主机没有机器人屏幕（Linux 网关专属能力）".into());
+    }
     let profile = profile.unwrap_or_else(|| "local".into());
     // 契约（gateway-contract DisplayThumbnailResult）：`{data_url, suppressed}`。
     // 人持租约时缩略图被抑制（frame 可能拍到正在输入的内容）——data_url 置
@@ -535,7 +562,7 @@ pub fn pi_display_observe(
     profile: Option<String>,
     viewer_id: Option<String>,
 ) -> Result<Value, String> {
-    if !screen_geometry().2 {
+    if !host_screen_enabled() || !screen_geometry().2 {
         return Err("本机屏幕捕获不可用".into());
     }
     let profile = profile.unwrap_or_else(|| "local".into());
@@ -575,7 +602,7 @@ pub fn pi_display_start(profile: Option<String>) -> Result<Value, String> {
     // "start" 在宿主语义 = 确保屏幕可观察（本机屏幕恒在，无需启动服务）。
     // 返回**展平状态**（screen-pane 的 `displayRequest<DisplayStatus>` 直接
     // setScreenStatus——包封形状会同 observe 一样读不到 running）。
-    if !screen_geometry().2 {
+    if !host_screen_enabled() || !screen_geometry().2 {
         return Err("本机屏幕捕获不可用".into());
     }
     Ok(status_json(&profile))

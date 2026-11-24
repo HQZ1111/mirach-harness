@@ -7,6 +7,7 @@ import {
   collectChangedFiles,
   countPiDiff,
   formatSummaryStatistics,
+  hiddenReasoningIndices,
   isSummaryRow,
   isTailSummaryGroup,
   normalizeSummaryPath,
@@ -144,6 +145,40 @@ describe('buildWorkSummaryItems（连续摘要组扫描）', () => {
     const parts = [tool('read'), tool('bash'), tool('grep')]
     const items = buildWorkSummaryItems(parts, [1, 9])
     expect(items).toEqual([{ kind: 'rows', key: 'rows:1', indices: [1] }])
+  })
+
+  it('隐藏的非首条思考被剔除、不断组（showReasoning=false，ZCode 同语义）', () => {
+    const parts = [
+      reasoning({ text: '第一条思考' }),
+      tool('read'),
+      reasoning({ text: '第二条思考' }),
+      tool('bash'),
+      reasoning({ text: '第三条思考' }),
+    ]
+    const hidden = hiddenReasoningIndices(parts, false)
+    expect([...hidden].sort()).toEqual([2, 4])
+    const items = buildWorkSummaryItems(parts, [0, 1, 2, 3, 4], { hiddenReasoning: hidden })
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ kind: 'rows', indices: [0, 1, 3] })
+  })
+
+  it('空思考不占「第一条」的位置；showReasoning=true 时无隐藏', () => {
+    const parts = [
+      reasoning({ text: '' }),
+      reasoning({ text: '真正的第一条' }),
+      reasoning({ text: '第二条' }),
+    ]
+    expect([...hiddenReasoningIndices(parts, false)]).toEqual([2])
+    expect(hiddenReasoningIndices(parts, true).size).toBe(0)
+  })
+
+  it('显示待办时 todo 行作为普通部件进流（ZCode showTodoToolCalls=true）', () => {
+    const parts = [tool('read'), tool('todo'), tool('grep')]
+    const items = buildWorkSummaryItems(parts, [0, 1, 2], { showTodos: true })
+    expect(items.map((item) => item.kind)).toEqual(['rows', 'part', 'rows'])
+    expect(items[0]).toMatchObject({ kind: 'rows', indices: [0] })
+    expect(items[1]).toMatchObject({ kind: 'part', index: 1 })
+    expect(items[2]).toMatchObject({ kind: 'rows', indices: [2] })
   })
 })
 

@@ -1,16 +1,19 @@
 /**
  * 插件注册表——hermes `contrib/plugins.ts` 的宿主对偶：bundled 插件静态
- * import（首批两个：mirach-connections / mirach-pkg）。挂载 = activatePlugin
- * 的贡献表按 area 消费（settings-overlay 消费 settings.page 区）。
+ * import。挂载 = activatePlugin 的贡献表按 area 消费（settings-overlay
+ * 消费 settings.page 区）。
+ *
+ * 2026-11-24 用户："插件集成里面的核心和包是什么，删除"——mirach-pkg 的
+ * 「包」页整页删除并退出 bundled 列表；mirach-connections 只保留
+ * bots.roster.grouping（「连接」设置页也删了）。
  */
 import type { Contribution, ContributionArea } from './types'
 import { activatePlugin } from './context'
 
 import ConnectionsPlugin from './mirach-connections/plugin'
-import PkgPlugin from './mirach-pkg/plugin'
 
-// 静态 import（hermes 的 import.meta.glob eager 同语义；首批两插件常开）
-const BUNDLED = [ConnectionsPlugin, PkgPlugin]
+// 静态 import（hermes 的 import.meta.glob eager 同语义）
+const BUNDLED = [ConnectionsPlugin]
 
 export interface ActivatedPlugins {
   contributions: Record<ContributionArea, Contribution[]>

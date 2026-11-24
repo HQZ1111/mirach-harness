@@ -87,6 +87,7 @@ import {
   type TerminalExit,
   type UnlistenFn,
 } from './terminal/terminal-pty'
+import { appearanceStore } from '@/lib/appearance-prefs'
 
 /** ConPTY 在增高时不会像 Unix PTY 拉回 scrollback——开启 xterm 的
  *  windowsPty 兼容，否则 PSReadLine 重绘会覆盖上一条命令输出行（ZCode 同款） */
@@ -120,6 +121,8 @@ interface TerminalSessionRT {
   /** StrictMode 卸载竞态：spawn 未就绪的会话被标记后回收孤儿 PTY */
   cancelled: boolean
   unlisten: UnlistenFn[]
+  /** 外观 → 终端字体：设置变化时热更新 xterm.options。 */
+  fontUnsubscribe: (() => void) | null
   detachTextareaInput: (() => void) | null
   pendingSize: TerminalSize | null
   lastSentSize: TerminalSize | null
@@ -212,6 +215,8 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
     rt.cancelled = true
     for (const un of rt.unlisten) un()
     rt.unlisten = []
+    rt.fontUnsubscribe?.()
+    rt.fontUnsubscribe = null
     rt.detachTextareaInput?.()
     rt.detachTextareaInput = null
     if (rt.ptyId != null) {
@@ -254,6 +259,8 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
       const term = new XTerm({
         fontSize: font.fontSize,
         fontFamily: font.fontFamily,
+        // 终端背景跟栏面走：开启背景图时 xterm viewport 不能刷一层不透明白。
+        allowTransparency: true,
         theme: getTerminalTheme(),
         scrollback: 5000,
         linkHandler: {
@@ -286,6 +293,7 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
         pendingExit: null,
         cancelled: false,
         unlisten: [],
+        fontUnsubscribe: null,
         detachTextareaInput: null,
         pendingSize: null,
         lastSentSize: null,
@@ -298,6 +306,15 @@ export function TerminalPane({ api, cwd }: { api?: DockviewPanelApi; cwd?: strin
         recentHandled: [],
       }
       sessionRef.current = rt
+
+      // 设置 → 外观 → 终端字体：已有终端也即时换字体（新终端本来就读令牌）。
+      rt.fontUnsubscribe = appearanceStore.subscribe(() => {
+        const next = getTerminalFont()
+        term.options.fontFamily = next.fontFamily
+        term.options.fontSize = next.fontSize
+        // 主题 / 背景图开关也会改变终端底色（背景图开启时透明）。
+        term.options.theme = getTerminalTheme()
+      })
 
       /** 输出落屏（PSReadLine 重绘归一需要 shell 名） */
       const writeOutput = (text: string) => {

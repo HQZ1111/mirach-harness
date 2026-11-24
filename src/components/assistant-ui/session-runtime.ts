@@ -57,6 +57,9 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
   const interrupted = useSelector(actorRef, (s) => s.context.interrupted)
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
+  // 本窗格的 RUN_ERROR（主 runtime 经全局 errorBridge 显示；分栏没有全局
+  // 桥，直接在窗格内渲染——失败必须可见，规矩 12）。
+  const error = useSelector(actorRef, (s) => s.context.error)
 
   // 水合：按会话文件路径读（真相在 pi；pi_get_session_messages 叶链还原
   // 当前分支）。挂载/路径变化各一次；流式增量走 SSE 不重读。
@@ -218,5 +221,5 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
     onNew: onNew as (m: AppendMessage) => Promise<void>,
     onCancel,
   })
-  return runtime
+  return { runtime, error }
 }

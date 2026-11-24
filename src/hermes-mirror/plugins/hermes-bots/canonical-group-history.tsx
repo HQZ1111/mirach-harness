@@ -73,7 +73,7 @@ function EventBody({ event, labels, notice }: { event: CanonicalGroupEvent; labe
     const detail = reason === 'member_unavailable' ? labels.turnNoAnswer : groupReasonText(event.payload.error, labels) ||
       groupReasonText(event.payload.reason, labels) || groupReasonText(event.payload.reason_code, labels)
 
-    return <p className="min-w-0 text-[0.6875rem] text-(--ui-text-tertiary)" data-selectable-text="true">
+    return <p className="wrap-anywhere min-w-0 text-[0.6875rem] text-(--ui-text-tertiary)" data-selectable-text="true">
       <strong className="font-medium text-(--ui-text-secondary)">{notice}</strong>{detail && <>: {detail}</>}
     </p>
   }

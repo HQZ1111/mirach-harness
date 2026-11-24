@@ -19,6 +19,302 @@
 **没有 Python**：hermes 官方的 Python 后端从未复制；源码里 "python" 字样只是
 文案/类型引用，node_modules 里几个 .py 是 katex 的构建期脚本。
 
+## 2026-11-22 环境（profile）与 bots 插件边界（当前有效）
+
+### 概念对齐（hermes 事实）
+
+- hermes 的默认环境 = profile `default`，home = `~/.hermes` 根；名册未改名时
+  显示产品名 **Hermes**；「本机 / This device」是 connection 标签，不是 bot。
+  宿主品牌替换后默认显示 **Mirach**（`bots-store.makeDefaultBot`，旧种子
+  「本体」一次性迁移；名字仍是 `default`）。
+- 本地 bot = 一个 profile 环境。具名 profile 的 home 在 hermes 是
+  `<root>/profiles/<name>`；宿主对偶在 `~/.rpi/agent/profiles/<name>`。
+- **bot 行点击 = 导航（openRosterBot），不切 workspace/profile**；只有
+  「环境」菜单（`active-profile-bridge`）才显式切环境。新建 bot 聊天把
+  `profile` 随 `session.create` 传给引擎（落该 bot 的 home），同样不抢
+  当前活动环境。之前把 openSession 做成切环境是错的，已回退。
+
+### 宿主的真实隔离程度（不要夸大）
+
+- **已隔离**：会话目录/列表扫描根（`pi_profiles.rs`；具名 profile 只扫
+  `<home>/sessions`），以及 bot 会话创建落点（`pi_bot.rs` 的
+  `ensure_profile_dirs`）。切环境会让左侧栏整体换源。
+- **未隔离**：auth.json / models.json / settings.json / trust.json / skills /
+  extensions / SYSTEM.md 仍是进程级 `RPI_CODING_AGENT_DIR` / `~/.rpi/agent`；
+  bot 的模型/人格/工具集是创建时拷贝的 SessionOptions，不是 profile home。
+  **不得再写「每个环境只启用自己的配置」**，当前只做到会话面。
+- **cron 的 `Job.bot` 只是归档/过滤标签**（`pi_cron.rs` 注释）；执行在
+  `~/.rpi/agent/cron/sessions`，用创建时复制的 provider/model/prompt +
+  全局 auth/settings。bot 切走/删掉，作业仍会触发，但不是「在该 bot 的
+  环境里跑」。hermes 是 per-profile `cron/jobs.json` + profile 路由。
+
+### rpi 上游方案（已完成原型，PR 前必须先提 issue）
+
+- 工作树：`E:\Temp\pi-pr1-latest`（上游 `main@301c98c` 的树，非 git 目录；
+  发布走 GitHub API）。**2026-11-23 方案 = `AgentHome` 构造注入，已合并**
+  （PR #409，merge commit `301c98c`；树与 PR head `49fa12c` 相同）：
+  `config::AgentHome` 一次解析 home，`session::build(home,…)` /
+  `prepare_extensions(home,…)` / `build_prepared(home,…)` /
+  `ReloadContext.home` 全链传递；provider/resolver、settings/trust、
+  resource dirs、`Scope::Global`/`host_leases_for`、native-package 扩展
+  读取都用同一值。**没有 `--agent-dir` 旗标、没有 `set_var` pin、没有
+  公开 `_at` twins**。CLI 传 `AgentHome::process()`，行为不变。
+- 测试：`agent_dir_home.rs` **5 条**（双 home 隔离 + 并发 + 真
+  `session::build` 显式 home B 在 `RPI_CODING_AGENT_DIR=A` 下只读 B 的
+  skills + 相对 home 立即拒绝 + 同进程两个真 `session::build` 各读自己的
+  home/skills）；库 1263 过 / 3 ignored；`RUSTFLAGS=-D warnings cargo check
+  -p rpi-cli --all-targets` 过。本地 `native_durable` 2 条 integration 仍是
+  fixture 构建失败（`plugin_stub.dll` 未产出），与补丁无关。
+- **PR 历史**：issue `https://github.com/bigfish1913/pi-rust/issues/405`
+  保持 open；PR #406（`--agent-dir` + env pin）已被作者 closed 未合并，
+  理由 = 进程级 pin 无法支持同进程多 profile。作者要求 `SessionHome`
+  （一次解析，注入 session services + resource_management/install/prebuilt）。
+  PR #409 按该 shape 提交并于 2026-11-24 **approved + merged**
+  （merge commit `301c98c`）。Review 的非阻塞项由
+  `https://github.com/bigfish1913/pi-rust/pull/414`（branch
+  `feat/agent-home-polish`）跟进：
+  `AgentHome::from_option` 改为 `Result` 并立即拒绝相对路径
+  （`ConfigError::InvalidAgentHome`）；全部 `--agent-dir` 文案改成
+  "explicit agent home"；补双 home 同进程 build 测试。
+- **宿主事实核对（2026-11-22，重要）**：mirach-harness **不是**
+  `rpi-extcore` 架构——`src-tauri/Cargo.toml:32` 以 path 依赖 `rpi-cli`，
+  `pi_session.rs:828` 直接调 `rpi_cli::session::build`，`pi_bot.rs` 每个 bot
+  成员一个 `BotSession`（同一进程）。宿主当前只隔离会话根
+  （`pi_profiles.rs` 给 `Args.session_dir`）；auth/models/settings/trust/
+  skills/extensions/native-packages/event log 仍是 `pi_paths::agent_dir()`
+  / `RPI_CODING_AGENT_DIR` 进程级。**不得再写「宿主已有 profile 配置隔离」**。
+  已在 issue #405 用上述证据回复。
+- `rpi-extcore` 评估：crate 0.2.16（repo `pi-rust/rpi-package`）提供
+  `Service`/`HostSession`，每个 session 起 `rpi --mode rpc` 子进程；但
+  `SessionOptions`/`BackendConfig` **没有 env/agent_dir 字段**，子进程继承
+  父环境，per-profile 需要一进程一 profile 或给 extcore 加 per-child env。
+  宿主换 extcore = 把进程内 `AgentHarness` 全部改 RPC，属于独立架构迁移，
+  不是本 PR 级别。暂走 in-process `AgentHome`。
+- 发布方式 = GitHub API（本机 git HTTPS 到 GitHub 被 reset，API 正常；
+  凭据在 Windows Credential Manager 的 `git:https://github.com`）。
+
+### bots 插件边界（关闭必须干净）
+
+- **bots 的唯一 UI = hermes-bots 插件**。已删除宿主自造的精简替身：
+  `bots-pane.tsx`、`hub/bot-launch.ts`、`bot-group.tsx`、`bot-subpages.tsx`、
+  `bots-dialog.tsx`、`bot-stub-store.ts`、`bot-face.tsx`。
+- 总门 = `src/plugins/bots-gate.ts`：`pluginActive('hermes-bots')` +
+  `$botsRuntimeLoaded`（bundled 注册成功后置 true；**不要用
+  `$pluginRecords` 状态**——runtime-loader 的周期 refresh 会误 drop bundled
+  记录）。关闭插件时：左栏 Mirach 变纯文本、bots/routines 面板移除、
+  `canonical-group-driver` 停止、Bot Chat 隐藏过滤关闭、连接页入口隐藏。
+- `botChatPaths` 双锚隐藏仍是**前端显示过滤**：pi 无 hidden 会话面；关闭插件
+  后过滤关闭，旧 Bot Chat 行重新显示。
+- **2026-11-23 对齐 hermes 新版**：`teammate-waits.tsx` /
+  `teammate-wait-locales.ts` / `group-chat-record.ts` 逐字复制。宿主补了
+  `composer.top` 贡献槽（`components/assistant-ui/composer-top-slot.tsx`，
+  挂在 `composer-wired.tsx` 的 ComposerBar 首行）与
+  `useComposerSession`（`hermes-shim/app/composer-session.tsx`，SDK 按上游
+  `sdk/areas.ts` 导出）；`bot_delivery.list` 由
+  `lib/bot-delivery.ts` 的内存登记表回答（本机直投 + 远端 relay 未收尾
+  投递；settle 即删，重启清空）。群聊 durable 记录只走
+  `group-chat-record.ts` 的 helper——不要再写内联 durable 映射（旧版会丢
+  `sessionOwners`/`holds`/`holdDetection`/`heldMessages`）。
+- **2026-11-23 群聊房间输入区**：`group-room-ui.tsx` 与上游逐字一致；显示
+  依赖的上游 composer 令牌（`--composer-control-gap` /
+  `--composer-surface-pad-x/y` / `--composer-input-min-height` /
+  `--conversation-text-base-size/font-size` / `--composer-fill` /
+  `--composer-ring-strength`）与 `--chrome-action-hover` 已补进
+  `tokens.css` / `hermes-tokens.css`；SDK 的 `composerInputBacking` /
+  `composerSurfaceRing` 直接复用镜像 `components/chat/composer-dock`，
+  房间输入区圆角 20px 与主输入框一致。**不要再写回旧的近似常量**
+  （`rounded-md border bg-background` 会造成框里套小框）。
+- **镜像主题层与宿主暗色壳（2026-11-23）**：此前宿主只有 light 调色板，
+  镜像主题层跟随 OS（system → dark）会得到黑底黑字 + 描边（用户实报
+  "机器人页弹窗都是黑的"），当时临时固定 `light`。**外观页落地后已补
+  `tokens.css` 的 `:root:root.dark` 暗色令牌**，boot paint 恢复按存储 mode
+  解析（缺省 light），主窗/设置窗根都挂 `ThemeProvider`——不要再把 boot
+  写回固定 light，也不要在没有 `.dark` 令牌时让 mirror 跟随 OS。
+- **群聊输入区 = 主输入框组件（2026-11-23）**：`RoomComposer` 用宿主
+  `ComposerBar` / `ComposerSend` / `ComposerAttachButton`（SDK 导出），
+  **不要再写自造 surface**（`room-composer-surface` 已删；用户："是你自己
+  又做了一个"）。错误 notice 必须 `wrap-anywhere` + `overflow-hidden`。
+- **对话头像系统（2026-11-23）**：设置 →「形象」= 41 张内置头像
+  （`public/avatars/user/u01..u41.jpg`，localStorage `mirach:user-avatar`）；
+  对话区**每条消息最上面**一行身份区：名字与内容同边（AI 左 / 用户右），
+  名字中线与头像中线对齐（`h-[40px]` + `items-center`），**头像在外侧**
+  （AI 最左 / 用户最右，40px；机器人页行头像同尺寸）——不要整体水平居中（用户实报"各自还在左右，
+  现在跑中间了"），也不要让头像贴内容边（"头像应该在外面"）。用户名 =
+  个性「显示名称」（未设 = 你）；AI 名 = bot 显示名（普通会话 = Mirach）。AI
+  头像 = bot `image`，无图/普通会话回落 `/brand/logo.png`。默认 Mirach bot
+  头像 = `/brand/logo.png`（`makeDefaultBot` + botsStore/插件 bot-meta 各
+  一次迁移；迁移标记后用户再改不再覆盖）。群聊轮次状态条必须在输入卡
+  **上面**（`RoomComposer` 的 `status` 在 `ComposerBar` 外），不要再塞进
+  输入框。
+- **删除机器人 = 删 profile home（2026-11-23）**：`host.deleteProfile` /
+  `cli.exec profile delete` 都走 `host-rpc.deleteBotProfile`：先 Rust
+  `pi_profile_delete` 删 `<agent_dir>/profiles/<name>`（default 拒绝、符号
+  链接拒绝、不存在 = `removed:false` 幂等），**成功后才**删 botsStore 与
+  `bot-meta-v2` / 选中项 / `bot-ui-meta` 缓存；删除失败原样抛出、注册表不动。
+  群聊成员**不跟着删**（hermes `member_roster` 同语义：房间保留成员行），
+  但 `canonical-group-driver` 的 `memberUnavailableReason` 会在跑轮前查本地
+  名册——已删 profile 直接 `turn.failed` + `reason_code: member_unavailable`，
+  绝不再经 `ensure_profile_dirs` 把目录拉起来。
+- **设置 →「外观」（2026-11-23，hermes 整页复制）**：`app/settings/
+  appearance-settings.tsx` 照 hermes Appearance 页重写（行距/文案/控件
+  顺序一致），数据面 = `lib/appearance-prefs.ts`（localStorage
+  `mirach:appearance.v1`，跨窗口 storage 同步）：
+  - 主题：`ThemeProvider` 已挂到主窗与设置窗根（`main.tsx`），
+    `ThemeMode` 明亮/暗色/跟随系统 + 皮肤画廊；宿主壳令牌由
+    `themes/context.tsx::applyHostTheme` 从当前皮肤同步（`--brand/--text/
+    --surface-base/--stroke/--accent/--ui-*`），换主题会真的改整窗颜色；
+    暗色兜底令牌在 `tokens.css` 的 `:root:root.dark`。`normalizeMode`
+    缺省 **light**（宿主历史只有浅色）；boot paint 按存储 mode 解析。
+    **2026-11-24 修正**：模式切换放大成单独一排（3 个大按钮），画廊
+    不再用 `max-h-96` 内层截断、整页滚动完整显示；主题名/描述中文化
+    （`THEME_ZH`）。**不再有「默认」主题卡**：`nous` 从设置画廊隐藏，
+    点击已选主题写入哨兵 `HOST_THEME_NONE`，`applyHostBase` 清掉
+    `applyTheme` 写过的全部根内联变量（`APPLIED_THEME_PROPS`），恢复
+    tokens.css 宿主基础外观，再派发 `mirach:appearance-reapply` 让外观偏好
+    （字号/字体/主题色/文字色/背景）重新落回。
+  - 主题色 + 文字颜色（主题画廊下方）：预设 `#006fff/#f97316/#ef4444/
+    #10b981/#94a3b8/#a855f7` + 自定义 color picker +「默认」；已选预设
+    再点一次回默认。`applyAccent` 写 `--brand/--h2-color/--logo-text-color/
+    --tab-text-active/--fl-accent` 等；`setTextColor` 写 `--text/--foreground/
+    --ui-text-primary/--tab-text`，换肤时 `applyHostTheme` 从存档读取用户
+    文字色并重新覆盖。**位图 logo 也跟随主题色**：`lib/logo-tint.ts` 把
+    #006fff 与目标色的 HSL 差算成 `--logo-hue-rotate`/`--logo-saturate`，
+    `.rail-logo-mark` 用 `filter: hue-rotate() saturate()` 旋转蓝底（白脸
+    不受影响）；`--logo-word-btn-hover-color` 也改为 `var(--brand)`，不再
+    写死 #006fff。
+  - 界面缩放：90/100/110/125/150/175，`getCurrentWebview().setZoom`；权限
+    `core:webview:allow-set-webview-zoom`（capabilities/default.json）；
+    Ctrl/Cmd +/-/0 快捷键在 `AppPrefsBoot` 安装。
+  - 聊天文字大小：90–175，`--chat-text-scale`；主 thread 正文、用户气泡、
+    AI markdown（`components/markdown-text.tsx` 的 `.aui-md`）和 composer
+    都读 `--conversation-text-font-size`。**100% = 15px 绝对值**
+    （`--conversation-text-base-size: 15px`；2026-11-24 用户校正"之前是 15"），
+    再点已选档位恢复 100%。
+  - 聊天字体 / 终端字体：hermes 同款 ComboboxInput（本地
+    `app/settings/combobox-input.tsx` 复制，popover z-index 抬到
+    `--z-modal+10`，否则被设置浮层盖住点不到）+ 实时预览；聊天字体写
+    `--font-family`（`--font-family-default` 为原 HarmonyOS 栈）并同步
+    `$chatFontFamily`；终端字体写 `--term-font-family`，`TerminalPane`
+    订阅 appearanceStore 热更新已有 xterm。
+  - 开场标识：空对话显示 **MIRACH 字标** +「有什么可以帮你的？」；关闭
+    整块隐藏。**2026-11-24 按 hermes `Wordmark` 的 `.fit-text` 复制**：
+    字标宽度 = 输入框列宽（`thread.aui` 里 `width="100%"`），字号由
+    `--fit-ratio` 随宽度缩放（实测 934px 列 → 215px 字），不再写死 32px。
+    **letter-spacing 必须同时挂 `.mirach-wordmark` 和它内部每个 span 的
+    `0.08em`**——只写在 p 上会在父字号 15px 结算，200px 大字只有 1.2px
+    间距，左右各空 74px；逐 span 解析后文字左右边与输入框误差 <0.1px。
+    结构里的第二份 `aria-hidden` 文案是宽度参照，不能删。starter
+    suggestions 气泡整组已删除（用户："总结我们当前对话进度等气泡提示
+    组件删除卸载"）。
+  - 底部动效：`BottomWave`（`components/bottom-wave.tsx` +
+    `styles/appearance.css`）——窗口底部两层弧形渐变波浪，颜色 `--brand`，
+    **高度 33.333dvh（软件 1/3）、从底边起**。2026-11-24 用户："不能挡
+    文字和各种组件"：组件挂在 `.app-shell` 内、`.app-main` 之下
+    （wave z-index 0 / app-main z-index 1），只在栏间空隙和半透明栏面后
+    可见，不再 fixed 覆盖消息/会话行/输入框；pointer-events:none，
+    `prefers-reduced-motion` 停动画。
+  - 聊天背景（2026-11-24 最终口径）：`GlobalBackdrop` 在 #root 后铺**一张**
+    图；**每栏容器**通过 `--surface`/`--surface-shell` 的透明度档位透出
+    它，基础色仍是主题的 `--surface-base`/`--surface-shell-base`，颜色不变。
+    透明度 5/15/30/50/100 → surface 保留 96/90/82/72/55%（shell 再低 8，
+    最低 45%）；变量 `--backdrop-surface-keep`/`--backdrop-shell-keep` 只在
+    `<img onLoad>` 挂 `data-mirach-backdrop-ready` 后由 CSS 消费，图片读
+    失败不会把窗口透成桌面。**每栏只留最外层 `.dv-groupview` 一层色**：
+    `[data-slot='aui_thread-list-root']` / `[data-testid='workspace-file-tree-panel']`
+    在背景开启时 transparent，否则会在会话列表/文件树里再叠一层"容器"。
+    输入区照 hermes `styles.css` 的 composer fill：ComposerBar rest =
+    `--composer-fill` **55%** + 12px backdrop blur saturate(1.12)（不再叠
+    白色渐变；footer 已 portal 到滚动区外，输入框后面没有消息）；
+    footer **通过 portal 移到 viewport 外侧**（`createPortal` 保留
+    ThreadViewport context），消息滚动区结束在 footer 上方；viewport 用
+    `mask-image` 在最后 64px 渐隐到透明——不画颜色、不裁输入框，也没有
+    硬边界。footer 本身全栏宽，里面的 status/composer 用
+    `max-w-(--dsh-chat-content-width)` 居中，输入框宽度保持内容列宽
+    （用户："输入框的宽度怎么跟着变了"→"输入框很白是不是层级变了"）。
+    来源只有两项：
+    内置图片横向切换（`BUILTIN_BACKDROPS`）或自定义上传（Tauri dialog →
+    存路径 → `fs_read_data_url` data URL，大图不进 localStorage）。
+  - 文件浏览器 = 主窗 dockview `files` 面板，跨窗口镜像键
+    `mirach:appearance.file-browser.v1`；消息气泡透明度 =
+    `--user-bubble-keep`（0 实心 / 100 只剩描边），描边另有
+    `bubbleOutline` 开关（关 = `border-transparent`）。
+  - **窗口透明已接通**：`tauri.conf.json` `transparent: true` +
+    `lib/translucency-host.ts` 在任何主题模块前装 `window.hermesDesktop`
+    桥（`translucencySupported/glassSupported = true`、`setTranslucency`）；
+    Clear 用 `#root` opacity（0→1，100→0.3）模拟整窗淡出，Glass 用
+    `getCurrentWindow().setEffects(Acrylic)` + `--translucency-glass-keep`
+    让 surface 半透明；权限 `core:window:allow-set-effects`。
+  - 悬停/选中统一：`--hover-wash: #f1f4f8`、`--select-wash: #e3eaf2`
+    （暗色 rgba(148,163,184,.12/.18)；2026-11-24 用户"太亮、饱和度太高"
+    后降饱和），`--tab-hover-bg` / `--ui-row-*` /
+    `--ui-control-*` 全部别名到这两个令牌；`--accent` 固定浅蓝。
+  - 首选项默认：界面缩放 100、聊天文字 100（15px 基准）、气泡 0 + 描边开、
+    开场标识开、聊天背景关、底部动效关、文件浏览器关；主题 mode 缺省 light。
+    **所有可选项都有默认/重置**：已选缩放或聊天字号再点回 100，主题/皮肤
+    再点回 `HOST_THEME_NONE`（宿主基础外观，无主题），主题色/文字色再点回
+    跟随主题，内置背景再点回第一张，气泡透明度有「默认」按钮。
+
+## 2026-11-23 设置页「数据与统计」全链路对齐（ZCode，当前有效）
+
+用户口径："除了分享管理以外全部复制，不许自己做"。四个子页的现状：
+
+- **数据同步** = ZCode 的远端设备配置同步（SSH / WSL / Docker），不是网关连接。
+  设备存 `~/.rpi/agent/data-sync-devices.json`，推送 = 本机 `tar.exe` 打包
+  skills/extensions/mcp.json 流到远端 `~/.rpi/agent`。密钥只进 keyring，
+  askpass 用临时 `.cmd` + `MIRACH_SSH_SECRET`；**不得回显/落盘**。
+- **迁移数据** = Claude Code 导入器（会话 / Skills / MCP / AGENTS.md；commands
+  如实不支持），会话经 `JsonlSessionRepo` 写成真 pi JSONL。UI 是 ZCode 六步
+  向导（迁移对话框），不是自造表单。
+- **项目管理**：全量 ZCode ProjectManagement 语义——未使用检测
+  （missing/empty/idle）、建议卡（stats 加载完成才显示，避免闪错数）、
+  搜索/过滤/排序、**全选 indeterminate**、置顶 Pin、多 root +N 浮层、
+  窄屏三列折行、失败条「重试 + 关闭」、批量移除 toast「撤销」、已移除项目
+  分组（软删可恢复；宿主无 purge 命令，不放假彻底删除）。
+  **工作区 = 项目**（2026-11-23 补）：启动时 `runtime.refreshThreads` 按
+  `pi_sessions_index` 的 distinct cwd 自动补登记项目（`workspace-projects.ts`；
+  已有项目根/软删项目根覆盖的 cwd 跳过，不复活用户移除的项目）；「选择文件夹」
+  新建会话前先 `ensureProjectForWorkspace`（同根活跃复用 / 回收站恢复 / 新建），
+  再 `pi_new_session`，失败则整个请求失败。此前只建会话不落项目注册表，项目页
+  恒 0。
+- **归档管理**：标题行「全部永久删除 / 永久删除筛选结果」、搜索清空、排序
+  「更新时间 / 创建时间」、项目过滤（未归类 / 名 · 已移除 / 已移除项目）、
+  组折叠箭头、删除确认、逐条结果「成功 N 项，失败 M 项，跳过 K 项」。
+  当前打开会话删除时跳过并计入 skipped（引擎拒绝删活动会话）。
+- **用量**：ZCode App Usage 全量；`daily[].models` 是每天各模型 token，
+  趋势图 = top 6 模型多折线 + 图例（不是单条总量线）；
+  `summary.longestSessionMs` = 单会话首末消息时间戳差的最大值（旧文件无
+  时间戳不计，不造 0）。**Coding Plan 不移植**（云端订阅 API，宿主无账户）；
+  **分享管理不移植**（用户明确排除，宿主无分享服务）。
+- **wire 变更**：`pi_sessions_index.sessions[]` 加 `createdAt`（header.createdAt
+  Unix ms，缺失 0）；`pi_usage_snapshot.daily[]` 加 `models`，summary 加
+  `longestSessionMs`。改这两处时同步 TS 类型 + 测试夹具。
+
+## 2026-11-24 设置页导航/布局/记忆插件（当前有效）
+
+- **导航真相**（`settings-overlay.tsx` 的 NAV_GROUPS）：通知单页（无提醒/
+  声音子页）；模型子项 = API 密钥 / 自定义端点 / 默认模型（**账号已删**）；
+  安全与数据 = 安全 / 密码与登录 / 会话管理 / 键盘快捷键 / 知识库（**项目
+  顶层项已删**）；**会话管理总项**的四个子项 = 数据同步 / 使用统计 / 项目
+  管理 / 归档管理（原「数据与统计」组不复存在）。关于只有版本与更新。
+- **布局**：`--dialog-nav-w` = 200px；`.set-nav-head` padding-left 20 对齐组
+  标题；`.set-inset-head` 是独立卡片（同 --surface/描边/--radius-panel-lg，
+  padding 0 16px），标题与卡内正文同基线；`.set-scroll` 底部不留 20px，
+  内容卡（`.set-section` / `.set-persona` / 最后一张 `.set-acct-card`）
+  `flex:1 0 auto`，只有一项也撑到左栏岛底边。
+- **通知页**：逐字对齐 hermes `notifications-settings.tsx`——启用通知 +
+  七类事件 + 完成提示音（选择 + 预览）+ 测试按钮；每行用 `SetPrefRow`
+  文字左、`Switch` 右、垂直居中。**不要改回 checkbox/子页**。
+- **记忆插件 rpi-optchat**：`rpi install rpi-optchat` 装到
+  `~/.rpi/agent/extensions/rpi_optchat.dll`，原生扩展装即启用；引擎工具
+  集实测含 `zoom`/`search`。设置页状态读 `pi_pkg_list`，不写死「未安装」。
+  `/optchat` 命令只在终端可用；MEMORY.md/USER.md 与 mem0 仍无对偶。
+- **rpi settings 审计口径**：`retry.maxAgentDelayMs` 才是引擎退避上限
+  （`max_delay_ms` 已删）；`shellPath` / `shellCommandPrefix` 真消费，已接
+  「技能与工具 → 终端执行」。TUI 专属键（theme/keybindings/editorPaddingX…）
+  与无消费方键（branchSummary/compaction.modelOverrides）**有意不做 UI**。
+- **插件集成**：mirach-pkg 目录删除；mirach-connections 只保留
+  `bots.roster.grouping`（设置页「连接」删除）；无贡献时整组隐藏。
+
 ## 工具链钉版（升级前必读）
 
 | 包 | 版本 | 为什么 |
@@ -36,11 +332,16 @@
 ## 门禁（提交前必须全绿）
 
 ```
-npx tsc --noEmit                 # 0 错误
-npm test                         # 595 用例 / 47 文件
-cd src-tauri && cargo test       # 122 用例
-cd src-tauri && cargo check      # 0 错误（既有 1 条 agui.rs 递归深度 warning 是上游 lint，非本工程引入）
+npx tsc --noEmit                 # 注意：本分支 hermes-mirror 仍有历史缺模块错误（见 2026-11-22 节）
+npm test                         # 当前 1121 用例 / 95 文件
+cd src-tauri && cargo test       # 当前 738 用例
+cd src-tauri && cargo check      # 0 错误（既有 warning 是上游/未用代码 lint）
 ```
+
+> **2026-11-22 实测事实**：`npx tsc --noEmit` 并非 0 错——`src/hermes-mirror/**`
+> 有约 1318 条历史错误（`@/types/hermes`、`@/lib/session-owner-stamp` 等宿主
+> 没有的上游模块）。改到镜像区时只能用「本次改动文件无新增错误」判定，
+> 不得再宣称全量 tsc 绿。
 
 `npm test` 配置 = `vitest.config.ts`（node 环境、`@` 别名）+ `vitest.setup.ts`
 （localStorage Map 替身——**无条件安装**，见陷阱 11）。
@@ -301,6 +602,19 @@ CSS 阴影随之消失；而"边距里有阴影"和"边距可穿透"在 WebView2
 - `WindowFromPoint` 不按 `HTTRANSPARENT` 语义走，不能当穿透的验证工具；
   真实穿透要用 `SendInput` 点击后看前景窗口。
 
+> **【已废止 · 2026-11-22】** 用户："这个弹窗效果组件就不要了，换成默认的
+> 弹窗效果就行"——goo（GooSurface / goo-layer.tsx / `--beui-popover-goo`）
+> 已整体删除：`context-menu.tsx` 与 `popover.tsx` 的弹层改为 portal 到 body
+> 的 fixed 面板 + tw-animate 默认 `animate-in fade-in-0 zoom-in-95`；
+> 下方 2026-10-26 / 11-01 的 goo 设计记录与 goo-layer.test 守卫**仅作历史**，
+> 不要再照它实现。现行落位规则见「侧栏按钮打通审计」一节的根因段。
+>
+> **默认缩放的进场纪律（2026-11-22 修"打开后抖一下"）**：`animate-in` 必须
+> 在**测量完成的那一帧**才挂（popover：`open && layout`；菜单：
+> `size.width > 0`），且 `transform-origin` 指向锚点边缘
+> （side=top → 底缘、bottom → 顶缘，x 随 align）。中心缩放 + 先画后测的组合
+> 会在可见第一帧把面板先按旧几何画出来再挪位，观感就是"打开后抖动一下"。
+
 ## 弹层动效：只有一个来源（2026-10-26 用户定稿）
 用户："能不能归拢成一个，现在输入框的模型选择，右键，左侧栏，三种效果，
 所有的弹窗效果归拢成一个"。
@@ -322,13 +636,13 @@ CSS 阴影随之消失；而"边距里有阴影"和"边距可穿透"在 WebView2
 | 全局右键菜单 | `point`（右键落点，0×0 锚点） | `layout/app-context-menu.tsx` |
 | 侧栏选项（含 3 层子菜单） | `trigger` | `thread-list.aui.tsx` 的 `SidebarViewMenu` |
 | 会话行 ⋯ / 右键 | `trigger` / `point`（同一个菜单实例，开时定） | `thread-list.aui.tsx` 的 `ThreadListItem` |
-| 文件树行右键 | `trigger` | `panes/workspace-file-tree/WorkspaceFileTreeRowView.tsx` |
+| 文件树行右键 | `point`（左键保留展开/选中） | `panes/workspace-file-tree/WorkspaceFileTreeRowView.tsx` |
 | 标签条「+」 | `trigger` | `layout/tab-strip-new.tsx` |
 
 **模态对话框例外**：居中、无锚点，goo 的"从某处长出来"语义不适用，仍是
 Radix Dialog + `ui-primitives.css` 的 `beui-dialog-in/out` 关键帧。
 
-**必须知道的四件事**（都是实测坑）：
+**必须知道的五件事**（都是实测坑）：
 
 1. **CSS 不能给菜单挂 animation**。菜单元素由 motion 的 clip-path 动画驱动，
    再叠一层 `@keyframes` 会把形变覆盖成缩放淡入——这正是归拢前"三种效果"的
@@ -343,6 +657,14 @@ Radix Dialog + `ui-primitives.css` 的 `beui-dialog-in/out` 关键帧。
 4. **子菜单是独立 `ContextMenu` 实例**（锚点 = 父菜单里那一行的矩形）。
    外部点击判定要把"任何 `data-menu-portal` 命中祖先 id 链"算内部，否则点进
    子菜单会把父菜单一起关掉（三层结构会整串塌）。
+5. **二级悬停菜单必须同层互斥 + 延迟打开**（2026-11-23 用户实报"鼠标从上
+   滑到下会出现很多弹窗"）。每个 `ContextMenuSub` 不能各持一份 `open`——
+   SubTrigger 的 pointerenter 只开不关，扫过 6 个二级项会叠 6 个 portal。
+   现由父菜单记唯一的 `openSubmenuId`：新子菜单打开即替换旧的；指针移到
+   父面板的非 SubTrigger 项时清空（`ContextMenuContent` 的 onPointerOver）。
+   打开延迟 `SUBMENU_OPEN_DELAY=120ms`，pointerleave 取消，避免纵向滑过
+   时一路闪。CDP 实测：6 个二级项逐个 hover，portal 恒 = 2（父 + 当前
+   子菜单）；移到普通项 → 1；关菜单 → 0。
 
 **守卫**：`motion/goo-layer.test.ts` 锁住几何两种形态 + "只有一个 goo 滤镜
 实现" + "CSS 不再给菜单挂 keyframes" + "四个调用点不再 import Radix
@@ -476,6 +798,62 @@ cutout，若仍收缩到触发钮矩形，面板会变成**盖在按钮上的白
    Err ✓、菜单渲染截图对齐（Lightbulb + 单选点 + yolo 警示盾）。
    **mode_state 无会话时返回默认值不报错**（composer 在 New Chat 态也要
    显示）——有意为之，不是兜底：模式是进程级偏好，不依赖会话。
+
+**2026-11-23 模式芯片重做：只要「计划模式 / 完全访问」，且会话级**
+（用户："只要计划模式和完全访问，要会话级别的，完整移"）。上面 11-01 的
+三态/进程级语义作废：
+
+- **完全访问 = 会话级 pin**。引擎 `approval_gate` 新增
+  `set_session_mode` / `session_mode` / `clear_session_mode`（按会话 id 的
+  HashMap；进程 `MODE` 只作未 pin 时的 fallback）；`evaluate` 先解析当前
+  harness 的 session id 再查模式。宿主 `approval_modes.rs` 持久化
+  `<agent_dir>/approval-modes.json`（会话 id → always-ask/write/yolo；
+  **planning 不落盘**——插件重启后不恢复 active，落盘会留下假计划态），
+  `install_live` 时恢复。主会话创建（lazy / 选文件夹 / open）默认
+  **pin always-ask**；New Chat 里选的 full access 暂存 pending，第一份主
+  会话创建时消费并落盘。IPC 增加 `sessionId`：
+  `pi_mode_state({sessionId?})` / `pi_set_approval_mode({mode, sessionId?})`。
+  **前端不再恢复 `mirach:approval-mode` localStorage**（已删）。
+- **计划模式 = 每个会话一个插件实例**。`rpi_plan_mode` 把 active /
+  previous_tools 存在模块级 static，且 SDK 的 RUNTIME 是 OnceLock——同路径
+  多会话 LoadLibrary 会共享同一份状态（实测 A 开计划、B 也 planning；
+  后开会话的 `/plan` 改的是第一个会话的工具集）。引擎 `rpi-extensions`
+  loader 对 `rpi_plan_mode.dll` 做 **per-session 临时副本**再加载
+  （`%TEMP%/mirach-plugin-instances/`；Windows 不同路径 = 独立模块实例/
+  独立 static）。其它插件不受影响。实测 A planning / B off / 回 A
+  planning；full access 同样 A yolo / B ask / 回 A yolo。
+- **计划入口/退出 = `pi_set_plan_mode({enabled, sessionId?})`**（宿主
+  `set_plan_mode_for`）：按会话找主柄/窗格 harness，在该会话自己的扩展
+  实例上执行 `/plan start|exit`。计划期间审批 pin 设 **`ApprovalMode::Planning`**
+  （不是 yolo）：插件收窄工具目录是 run 开始时快照，**对话进行中切计划**
+  时目录要下一轮才换；Planning gate 在 `before_tool_call` 层确定性拦截
+  write/edit 等变更工具（read/bash/powershell/docs/plan_mode_complete 放行），
+  当前 run 立即生效。退出回 always-ask。New Chat（无会话）把选择暂存
+  pending，第一份主会话创建后消费并执行 `/plan start` + Planning。窗格计划
+  态也走同一入口（审批卡不渲染，但计划插件只放行非变更工具）。
+  `mode_state` 每 2s 轮询时对账插件态与 pin（`plan_mode_complete` 自行退出
+  → 回 always-ask；计划态恢复但 pin 丢失 → 补 Planning），**对账只改内存**。
+  `Planning` 只能经受 `pi_set_plan_mode` 设置，`pi_set_approval_mode('planning')`
+  报错（避免 gate 与插件半态）。**计划态不跨进程重启**（重启后插件
+  active=false，实测；只有 full access 进 `approval-modes.json`）。
+- **UI**：`permission-mode-chip.tsx` 只剩两项——计划模式、完全访问（都是
+  会话级）；完全访问走 `ConfirmDialog` + “我已了解风险”勾选（`ConfirmDialog`
+  新增 `confirmDisabled`）。互斥：进计划先退 full access；开 full access
+  先退计划。两者都关 = 默认逐次确认。2s 轻轮询兜 `plan_mode_complete`
+  自行退出与外部切换。
+- **诊断面 `pi_active_tools({sessionId?})`**：直接读指定会话 harness 的
+  active tools（`AgentLane::get_active_tools`）。实测 A 计划态 =
+  `read/bash/docs/plan_mode_complete`（4 个），同时 B = 50 个且含 write；
+  回 A 仍 4 个，退出计划恢复 write。证明 per-session 插件副本 + 工具集
+  隔离都是真的。
+- **并列窗格**：审批卡只在前台渲染，宿主拒绝把窗格会话切到会等待审批的
+  档位（保持全访问），错误可见——不让工具调用等一个永不出现在卡。
+- **引擎本地补丁（同步上游要重放）**：`crates/rpi-cli/src/approval_gate.rs`
+  （per-session mode map）与 `crates/rpi-extensions/src/loader.rs`
+  （`rpi_plan_mode` per-session copy）。两者都在 `G:\pi-rust-main`，非宿主
+  仓库；上游升级时按本地补丁层重放，不要丢。
+- **计划审阅卡仍无**：rpi-plan-mode 的 `plan_mode_complete` 是存盘即退出，
+  没有 dsh 的 exit_plan_mode 审批闸；本轮不造 pending 卡。
 
 
 ### 五轮修复（2026-11-01 同日）：持久化协议破坏 + 让位连带 + 上下文按钮
@@ -2317,8 +2695,53 @@ tailwind-merge`，`registryDependencies: []`。
 保留：`Group` / `GroupLabel` / `GroupContent` / `Menu` / `MenuItem` /
 `MenuButton` / `MenuSub` / `MenuSubItem` / `MenuSubButton` +
 `layoutId` 滑动 pill + `clip-path` 子级 stagger + `whileTap` 按压。
-本地只加两个可选 prop：`sectionId`（渲染 `data-section-id`）与
-`tabIndex`（roving），以及 `activePillClassName`（见下条）。
+本地扩展 props：`sectionId`（渲染 `data-section-id`）、`tabIndex`（roving）、
+`activePillClassName`（见下条），以及 2026-11-23 的 `sharedHover` /
+`sidebarRow`（见下条）。
+
+**2026-11-23 滑动悬停块两处修正（用户实报）**：
+
+- **设置页左栏可展开节支持再点收起**：`settings-overlay.tsx` 的
+  `collapsedSubmenus`（`Set<SectionId>`）——再点当前选中的可展开节 = 收起；
+  切节 / ↑↓ / 深链 `mirach:settings:section` 走 `activateSection()` 自动展开。
+  `aria-expanded` / chevron 跟 `submenuOpen`（不是单纯的 `isActive`）。
+- **设置页子项接入滑动悬停**：`SharedLayoutBg` 的 pill 是**每组一份**且只
+  认直接子项——子项在父项 li 内部，永远吃不到（用户："子项没有滑动效果"）。
+  设置页改用 `AnimatedSidebarMenu sharedHover={false}`（不再注入每组 pill）
+  + nav 容器层的 `AnimatedSidebarHoverPill`：按 `[data-sidebar-row]`
+  （`AnimatedSidebarMenuButton sidebarRow` / 子项按钮）现测矩形，组头与
+  子项共用一条 pill。坐标公式同 `SessionListHoverPill`（abs 随内容滚动 →
+  top 含 `scrollTop`；`.set-nav` 补 `position: relative`）。
+  **其它三处 SharedLayoutBg 消费点（入口条 / 文件树 / 按组菜单）语义未动。**
+- **主窗会话列表 `SessionListHoverPill` 与可折叠组头**：指针命中
+  段头/日期桶/工作区桶/状态桶 → **淡出 pill**（不再停在上一行，也不与
+  组头的 hover 反馈"打架"）——但**只 suspend、不清 `shownRef`**（2026-11-23
+  用户实报"滑动组件没有滑动的效果了"：分组模式行间夹着分隔线，旧实现每次
+  命中都 `hide()` 归零滑行状态，下一行只能重新淡入）。位移曲线统一用
+  `SLIDE_EASE_CSS`（`lib/ease.ts`，easeOutCubic）+ **top 260ms**——原
+  `EASE_OUT_CSS` 是 expo（60ms 吃掉 80% 距离），45px 行位移看起来像瞬跳。
+  锚定行被卸载或开始播
+  `.disclose-row--closing` → MutationObserver 全量收起（收起组后不再残留旧
+  几何）；其它行增删位移 / 列表滚动 → 重测（滚动用 `elementFromPoint`，
+  pointerover 不因滚动触发）。行间 1px 间隙仍不动作（逐行滑过不闪断）。
+- **设置页 `AnimatedSidebarHoverPill` 同规则**：组标题/空态走 `suspend()`，
+  跨组选下一项仍保留 top/left 滑动过渡。
+
+**2026-11-23 机器人页选中底 + 输入框圆角（用户："机器人页也用这个组件
+选择，对话输入框的圆角改成20"）**：
+
+- **机器人名单选中底改为滑动 pill**：新 `hermes-bots/roster-active-pill.tsx`
+  挂在 `[data-slot="bots-roster"]` 滚动容器（`relative` + top 含 scrollTop），
+  读唯一 `[data-roster-active]` 行现测矩形；行由 `bot-row.tsx`（bot 行 /
+  GroupRow）与 `canonical-group-row.tsx` 写该属性。**行 class 不再画**
+  `bg-(--ui-row-active-background)`（否则 pill 被同色行底盖住），行补
+  `relative` 绘制在 pill 之上。MutationObserver 盯 `data-roster-active` /
+  childList，ResizeObserver 兜行高变化；首次出现只淡入，之后换行才滑。
+- **composer 圆角 20**：主输入卡的 `rounded-[32px]` 改 `rounded-[20px]`
+  （`assistant-ui/elements/composer.tsx`，padding/gap 不动）；同时把
+  `thread.aui.tsx` 的 `--composer-radius` 32→20（编辑消息 composer /
+  ask·approval 卡 / 附件 tile 的 calc 同源）。
+
 
 **颜色必须接回 mirach 令牌**：beui 全用 shadcn 令牌（`text-muted-foreground`
 ≈#7a7a7a、`bg-muted` ≈#f2f2f2）。照抄会让 ①组标题与行文字**同一个灰**
@@ -2437,6 +2860,31 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
 **300**、许可 **270–400**，不随窗口缩放；主栏吃剩余（min 395）。dockview 存档
 按**比例**记宽，所以 `repinRailWidths()` 在 resize 后把两轨钉回绝对目标宽；
 主栏撞 min 时（几何让位）不记目标宽，否则窗口恢复后栏宽会永久停在让位值。
+
+**窗口最小尺寸 = 1280×600**（2026-11-24）：四列 min 总和（270+240+395+270
++ 分隔条约 1210）低于它就从右边缘裁栏。`tauri.conf.json` 的
+`minWidth/minHeight`、`window_state.rs::MIN_W/MIN_H`、`main.rs` 运行时
+`set_min_size` 三处同值。**所有 `addPanel` 必须 min+max 都带**；组级约束
+不随存档 round-trip，boot `normalizeColumns` 按 `region` 统一补
+（rail 270–400 / chat ≥395）。旧存档里的 `routines` 独立第五列会补
+`params.region='panels'` 并 `moveTo` 并回面板组，不能留成单独列。
+
+**面板栏允许上下/左右分栏**（2026-11-24）：
+- `normalizeColumns` 只迁移**旧档的 routines 第五列**。判据 = 根级 leaf
+  **且宽度 < RAIL_MIN_WIDTH(270)**（历史被挤成 100px）；用户拖出的左右分栏
+  列宽 ≥270，必须原样保留。上下分栏则是嵌套 branch，也原样保留。
+- `alignVisibleToOrder` 在 panels 区出现多个组（分栏）时**跳过面板栏贴边
+  重排**：只挑其中一个组 moveTo 到最右会把另一组挤到左边，重载后顺序翻转。
+- 左右分栏 = 根级多一列，1280 窗口必然裁切 → `ensureWindowFitsColumns`
+  按每列组 `minimumWidth` 求和（上下堆叠按 x 去重），窗口不够就 `setSize`
+  长窗，并把 Tauri `setMinSize` 抬到同一值；列数减少时最小宽收回 1280。
+  需要权限 `core:window:allow-set-min-size`。
+- **存档不许写半成品树**：boot 只在 `normalizeColumns()` 真迁移 routines
+  时落盘；`saveLayout` 在 `leftHidden=false`/`panelsHidden=false` 但 JSON
+  缺对应 `region` panel 时拒绝写入（HMR 重载曾把好布局写成只剩左/主栏）。
+- `routinesPaneSync` 用 `routinesContributionSeen` 区分"启动早期贡献还没
+  注册"与"贡献已注销"——前者不摘面板（否则插件加载后按普通标签重建，
+  分栏被毁），后者才摘。
 
 **拖放准入**（2026-10-22 用户定稿，`drop-admission.test.ts` 守着）：
 - **左栏不是拖拽目标**——不收标签、周围也不分栏。
@@ -2582,6 +3030,13 @@ min=0。理由与三条实锤坑见该文件头注释，摘要：
   怪字距、l 长成 I）。修法 = panes.css 用 `.term-host .xterm *` 更高
   优先级钉回 `--term-font-family`。宿主暂无深色主题；真做时按 ZCode
   `.dark` 段（neutral-950 底 + 600 系 ANSI）移植。
+- **终端背景透明（2026-11-24）**：`.term-pane` 不再叠第二层
+  `--surface`（组容器已有一层 55% 栏面色）。普通态 `.term-pane` 用
+  `--term-bg`，`html[data-mirach-backdrop-ready]` 时 transparent；xterm
+  构造开 `allowTransparency:true`，主题 `background` 恒
+  `rgba(0,0,0,0)`——不能在建实例时读背景图 ready 状态，否则终端先于
+  图片 onLoad 创建会永久留一层 `#fff`。实测 `.term-pane` / `.xterm` /
+  `.xterm-viewport` 三层全透明。
 - **会话登记 = 页面归属（label + token）+ 孤儿回收**（2026-11-18 第二轮，
   用户："显示达到上限 8 无法打开了"）：根因 = **页面 reload（dev HMR /
   webview 重启）后旧页面的 kill 钩子随页面消失**，遗留 PTY 永远活着、
@@ -2909,7 +3364,7 @@ session.rs +50/-3 + 两个 lib.rs 一行。**镜像里用户自己的本地补�
 | 任务租约（fencing/终局回执/recover） | `rpi-harness/src/task_lease.rs`（落盘 `<session>.tasks.json`） | `pi_bot.rs`（prompt=task 身份+meta；`pi_bot_state` 出 task/tasks；`pi_bot_take_recovered`；`pi_bot_interrupt_task` 带 fencing）→ host-rpc `session.resume`/`task.interrupt` → canonical driver |
 | 审批闸运行时三态 | `rpi-cli/src/approval_gate.rs`（AtomicU8 + handler + before_tool_call 组合在扩展 hook 后） | `pi_engine_bridges.rs`（`mirach://approval-request` + 600s 裁决）→ `engine-bridges.tsx` ApprovalDialog；模式钮三态 |
 | agent 互发 | `rpi-cli/src/message_agent.rs`（内置工具，handler 未装不注册） | `mirach://agent-message` + 30s ack → 前端真投递/回信；**bot-launch 提示词里的 `hermes -p … chat` shell 指令是 hermes 形态，宿主实际走引擎工具** |
-| 本机屏幕 RFB | 无（宿主子系统 `pi_display.rs`：GDI + RFB 3.8 WS + ticket + lease） | screen-pane 经 `resolveSiblingWsUrl('/api/display/ws')` 直连 noVNC |
+| 本机屏幕 RFB | 无（宿主子系统 `pi_display.rs`：GDI + RFB 3.8 WS + ticket + lease） | screen-pane 经 `resolveSiblingWsUrl('/api/display/ws')` 直连 noVNC。**2026-11-21 对齐：默认关闭**（hermes 本机网关没有 bot 屏幕，按钮打开是"此主机没有机器人屏幕 / 此机器人使用主机自身的显示器"）；`MIRACH_HOST_SCREEN=1` 才启用主机桌面镜像，仅作显式自测 |
 
 **必读坑（都实测过）**：
 1. **`durable_binding` 只在 `native_durable` 时填充**（engine session.rs 原逻辑）
@@ -3429,12 +3884,16 @@ hermes 的 render-weight + transcript window 逐条移植（纯函数 + 9 条单
 `partPaintWeight`（text/reasoning=ceil(chars/512)；todo 族=0；卡类工具 6；
 其余 1）、`selectTranscriptWindow`（**从最新往回按轮累计**，够预算且 ≥
 MIN_VISIBLE_TURNS=8 才停；轮永不切开）、FIRST_PAINT=20 → FULL=600 分步
-（rAF `nextBackfillBudget` +290/帧）→ `expandBudget`（"显示更早"按钮 /
+（rAF `nextBackfillBudget` +48/帧）→ `expandBudget`（"显示更早"按钮 /
 滚到顶继续上滚）。接线在 `thread.aui.tsx::MessageTurnList`：**切会话按
 `ids[0]` 复位预算**（render 期 reset，不靠 effect）、只裁**渲染**不动
 store 与 scrollTop。**与 hermes 的差异**：后端分页（tail 120 行
 `getOlderSessionMessages`）**未移植**——宿主 store 仍是全量水合，此窗只管
 DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到 0.6s）。
+
+**TurnGate 已退役（2026-11-24）**：轮级 IntersectionObserver 卸载 + 等高
+占位已删（用户实报"长会话往上滚动没法滚动、闪烁；切换会话也有闪烁"）。
+此渲染窗口保留；不再按视口卸载轮次，DOM/滚动高度稳定。
 
 ### ② 引擎派生面缓存（`pi_session.rs`，宿主侧零引擎改动）
 
@@ -3534,15 +3993,19 @@ DOM；巨会话首屏仍受 IPC 载荷约束（下节的缓存把热路径砍到
 - **release 模式实测**：`cargo test --release -- --ignored timing_storage_only_giant`
   → **295ms**（debug 3.0s = **10× 膨胀**）。引擎 replay 在 release 下不是瓶颈。
   用户感知的"卡顿"全部来自 dev 模式的 StrictMode + jsxDEV + 无优化 sha/reducer。
-- **bot 页签 per-bot 标题（同日续）**：canonical chat 的会话真名仍是
-  "Bot Chat"（registry 匹配不动），但①页签标签 = `botChatTabTitle(bot)` =
-  `显示名 · Bot Chat`（canonical-chat.ts，openStoredBotChat/openFreshCanonical
-  两处 tabTitle）；②refreshThreads 给 bot 锚会话的 title 覆写为同名格式
-  （页签/标题读 catalog 显示名）——切换 bot 后页签立即可辨（实测
-  「二万人 · Bot Chat」）。③误判更正：此前记录的"锚交叉 共用 01a1e3ec"
-  是**截断 ULID 到 8 位的测量伪影**（两个不同会话同一时间桶前缀相同）——
-  全量 sid 对比（anchors-full.mjs）证实两个 bot 各有自己的 Bot Chat，
-  插件花名册切换本来就是通的；守卫/治疗代码保留（真碰撞仍防御）。
+- **bot 对话区标题 / 页签（2026-11-23 定稿）**：`ChatTabLabel` 下行（会话名）
+  与页签读 `sessionDisplayName`。canonical chat 的**真名仍是 "Bot Chat"**
+  （引擎落盘 + registry 匹配不动），显示层与普通会话同款：**优先派生标题**
+  （首条用户消息），还没有派生标题时回落到 `botDisplayName(bot)`。
+  `runtime.tsx` refreshThreads 对 bot 锚会话的 `row.title` 覆写负责这一层
+  （用户："下面是会话名，现在会话名变成 bot chat 了"）。旧布局存档里的
+  `Bot Chat · <机器人>` / `<机器人> · Bot Chat` 侧栏标题在 dockview 恢复时
+  一并改写。`canonical-chat.ts` 的 `tabTitle` 仍是上游 `CANONICAL_CHAT_TITLE`
+  （文件与上游逐字一致）。
+- **误判更正（2026-11-21）**：此前记录的"锚交叉 共用 01a1e3ec"是**截断 ULID
+  到 8 位的测量伪影**（两个不同会话同一时间桶前缀相同）——全量 sid 对比
+  （anchors-full.mjs）证实两个 bot 各有自己的 Bot Chat，插件花名册切换本来
+  就是通的；守卫/治疗代码保留（真碰撞仍防御）。
 - **切换点击遍历实测（2026-11-21，StrictMode dev）**：全部会话/器人切换零
   console 错误、引擎落点全对。首内容 0.99-1.24s、单帧最大 355-418ms——
   成本=切窗提交（旧 38-48 轮卸载 + 新首屏挂载，一次同步 commit）；补齐已改
@@ -3724,7 +4187,8 @@ v2 fork 的成功回执 =「🔒 Completion verification armed」两种核验都
 对话框（仅"创建并加入"输入，两侧同）、群聊设置（用途/共享笔记/路由下拉/
 deliver 目标）、群行右键（打开群聊/解散——mirach 修复后与 hermes 同）、
 群房间头（返回/群组详情/重命名/解散 + 详情抽屉成员行）、隐藏/取消隐藏、
-置顶/取消置顶、复制、删除确认、屏幕窗格（noVNC 真帧 + 接管）、例程/电台
+置顶/取消置顶、复制、删除确认、屏幕窗格（本机无 bot 屏：与 hermes 同一空态）、
+例程/电台
 窗格 —— 全部实点通过。上游英文硬串（删除对话框 "This will permanently
 delete…"、Open recent session）逐字保留（照抄规矩，不是 bug）。
 
@@ -3771,10 +4235,19 @@ delete…"、Open recent session）逐字保留（照抄规矩，不是 bug）�
   规矩 12）。
 
 实机（CDP）：右键 微软 → 「在新标签页中打开机器人聊天」→ 主区右侧多出
-「Bot Chat」栏（面板 `session-01a1e3ec-…`，workspace 不动）；再点行 → 置前
-该栏、主会话不切；重启后布局档案恢复该栏；栏内发送 → `side_prompt` 真跑
-（`pi_lane_busy(thread)` 忙→闲、会话文件真追加）。单测
+「Bot Chat」栏（面板 `session-01a1e3ec-…`，workspace 不动）；再点行 →
+置前该栏、主会话不切；重启后布局档案恢复该栏；栏内发送 → `side_prompt`
+真跑（`pi_lane_busy(thread)` 忙→闲、会话文件真追加）。单测
 `session-tab-bridge.test.ts` 5 条锁登记/派发/复位。
+
+**屏幕对齐（同日第二轮，用户："hermes 本机的屏幕是没法打开的"）**：
+hermes 本机（Windows 网关）没有 bot desktop，`打开屏幕` 打开的是空态页
+「此主机没有机器人屏幕 / 此机器人使用主机自身的显示器」；宿主此前用
+GDI 截自己的 Windows 桌面冒充 bot 屏（AGENTS 旧行称"宿主子系统"），
+语义不对。现 `pi_display.rs::host_screen_enabled()` 默认 false（`support
+ed/available/installed/ready/running` 全 false、geometry null），
+mirach 与 hermes 本机一致显示空态；RFB 代码保留，`MIRACH_HOST_SCREEN=1`
+才启用（仅显式自测）。实机：打开屏幕 → 同一句空态文案，无 noVNC 连接。
 
 **环境备注**：验证期间 BBT 测试 key 失效（直连 relay `/chat/completions`
 401 `Invalid token`），侧栏 run 在引擎里以空 `RUN_FINISHED` 收尾（provider
@@ -3882,3 +4355,52 @@ Tauri bundle 仅 NSIS，`resources: ["skills-catalog"]`（技能 markdown，~11M
   （÷6 才是节点下标）；>512MB 不能用 `JSON.parse`（V8 字符串上限），必须流式扫。
 - 滞留队列：页面内遍历 `Object.keys(el).filter(k => k.startsWith('__reactFiber$'))`，
   沿 `memoizedState / next` 数 `queue.pending` 环长（修好后静止应 <50）。
+
+## 侧栏按钮打通审计 + 配置档案筛选（2026-11-21 续）
+
+用户："会话列表按钮都打通了吗？有的是灰色，有的点击没反应……会话分组选项
+里面的配置，好多按钮都是灰的"。
+
+**根因（三个点/分组菜单"点不了"，2026-11-21 已修）**：`context-menu.tsx` 的
+GooSurface 根是 `position:fixed` + 视口坐标，但 `ContextMenuContent` **没有
+portal 到 body**，而是留在侧栏/滚动列表的 React 树里。带 layout containment
+的祖先成为 fixed 的包含块 → 菜单按"祖先左上 + 视口坐标"偏移、且被列表
+overflow 裁掉：DOM 里 `role=menu` 存在、UIA 也能看到焦点，屏幕上却什么都看
+不见。修法 = 与 `popover.tsx:580` 同一条纪律
+`return createPortal(<GooSurface …/>, document.body)`。实测修复后：会话行 ⋯
+菜单、分组 ▸（项目/状态）、排序 ▸（更新时间/状态）、筛选 ▸ 状态（空闲桶）、
+配置档案 ▸（全部/二万人）、收件箱样式、已归档、全部折叠逐项真鼠标点选均
+可见且生效（26 行 → 配置档案过滤 1 行 → 复原）。
+
+### ① 会话行按钮审计结论
+
+- 行操作全接线（重命名 / 归档 / 置顶 / 复制 ID / 导出 HTML / 分叉 / 删除 /
+  打开），真实 UI 点击逐项验过，无死钮。
+- 「分支」项恒 disabled = 有意（pi 无分支重放面，只有 fork 点；保留项作提示）。
+- 「配置档案栏」「拉取请求」disabled = 诚实面：前者视觉条未移植（见 ②），
+  后者 pi 无 PR 概念。
+- 「全部标记为已读」在 unreadCount=0 时置灰 = 条件态，不是故障。
+- **复制 ID 真缺陷（已修）**：菜单关闭后 webview 失焦，
+  `navigator.clipboard.writeText` 抛 `NotAllowedError: Document is not focused`。
+  修法 = 写剪贴板前 `document.hasFocus()` 为假先 `window.focus()`。
+- **例程面板移除崩溃（已修）**：dockview 的 `getPanel` 会返回已 disposed 的
+  陈旧引用，`removePanel` 抛 "resource already disposed"；移除前先查
+  `containerApi.panels` 成员资格。
+
+### ② 配置档案 ▸（已被 2026-11-22 环境切换取代）
+
+**旧实现已删除**：`sidebarViewStore.profileFilter` / `mirach.harness.sidebar.
+profileFilter.v1` / 前端「只显示该 bot 锚定会话」的过滤全部退役——那是
+「表面过滤」，用户明确要求改为 hermes 的 profile 环境隔离。
+
+现行语义：侧栏选项「环境 ▸」= 显式切引擎活动环境（`active-profile-bridge`
+→ `pi_profile_set_active` → 列表整体换源；默认 = Mirach/全局根）。bot 行
+点击**只打开会话，不切环境**；新 bot 聊天把 profile 传给创建 IPC。详见
+本文件开头「2026-11-22 环境（profile）与 bots 插件边界」。
+
+### 验证纪律（本轮踩到）
+
+CDP 探针里 `import('/src/.../sidebar-view.ts')` 读写 store 时，若页面经过
+HMR/陈旧 boot，可能读到与应用不同的模块实例：探针读回 filter 正确、列表却
+不动。**以真实 UI 路径（点菜单 radio）为准**；直接 store 探针仅作辅助，
+两者不一致先重载页面再测。

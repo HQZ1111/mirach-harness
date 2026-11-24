@@ -42,6 +42,9 @@ import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assi
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { PermissionModeChip } from '@/components/assistant-ui/permission-mode-chip'
+import { ComposerStatusBadge } from '@/components/assistant-ui/composer-status-badge'
+import { ComposerTopSlot } from '@/components/assistant-ui/composer-top-slot'
+import { useThreadSessionId } from '@/components/assistant-ui/thread-session-id'
 import { ModelSelector, type ModelOption } from '@/components/assistant-ui/model-selector.aui'
 import {
   modelCatalogStore,
@@ -80,6 +83,9 @@ function useDictation(onFinal: (text: string) => void) {
   const [transcribing, setTranscribing] = useState(false)
   const [seconds, setSeconds] = useState(0)
   const recRef = useRef<{ stop: () => void } | null>(null)
+  /** onend 不保证一定到达（WebView2 权限拒绝/设备拔出）；停止后留一个
+   *  看门狗，不能让 transcribing 永久卡住（用户："点击之后没法取消"）。 */
+  const settleTimerRef = useRef<number | null>(null)
   // 识别实例启动后不会重绑回调——必须经 ref 读最新 onFinal。否则闭包
   // 捕获启动那一刻的 value：第一段识别写入后 value 变了，第二段识别
   // 仍按旧 value 追加 = 覆盖第一段（审查 #2 实锤）。
@@ -92,23 +98,53 @@ function useDictation(onFinal: (text: string) => void) {
     const timer = window.setInterval(() => setSeconds((s) => s + 1), 1000)
     return () => window.clearInterval(timer)
   }, [recording])
-  // 身份校验收尾：onend 触发时用户可能已重新 start（recRef 指向新
-  // 实例）——旧实例的收尾只清自己的状态，不得停掉新识别（审查 #3 实锤）。
+  const clearSettleTimer = useCallback(() => {
+    if (settleTimerRef.current === null) return
+    window.clearTimeout(settleTimerRef.current)
+    settleTimerRef.current = null
+  }, [])
+  // 收尾：onend / onerror / 看门狗都走这里，清干净两段状态。
   const settle = useCallback(() => {
+    clearSettleTimer()
     recRef.current = null
     setRecording(false)
     setTranscribing(false)
-  }, [])
+  }, [clearSettleTimer])
   const stop = useCallback(() => {
     const rec = recRef.current
-    if (!rec) return
-    // 先摘句柄再 stop：onend 身份校验失配 → 不重复清态；recording
-    // 立即落假 → ComposerVoice 沉降为 Transcribing 微光（官方两段态）。
-    recRef.current = null
-    rec.stop()
+    if (!rec) {
+      setRecording(false)
+      setTranscribing(false)
+      return
+    }
+    // 不要在这里把 recRef 置空：onend 的身份校验还要靠它收尾
+    // （旧实现先置空 → onend 永远失配 → transcribing 卡死）。
     setRecording(false)
     setTranscribing(true)
-  }, [])
+    clearSettleTimer()
+    settleTimerRef.current = window.setTimeout(() => settle(), 3000)
+    try {
+      rec.stop()
+    } catch (e) {
+      console.error('[dictation] stop failed', e)
+      settle()
+    }
+  }, [clearSettleTimer, settle])
+  /** 用户再点一次麦克风 / 关闭面板：立刻中止，不等待 onend。 */
+  const cancel = useCallback(() => {
+    const rec = recRef.current
+    recRef.current = null
+    clearSettleTimer()
+    if (rec) {
+      try {
+        rec.stop()
+      } catch (e) {
+        console.error('[dictation] cancel stop failed', e)
+      }
+    }
+    setRecording(false)
+    setTranscribing(false)
+  }, [clearSettleTimer])
   const start = useCallback(() => {
     const w = window as unknown as Record<string, unknown>
     const SR = (w.SpeechRecognition ?? w.webkitSpeechRecognition) as
@@ -118,6 +154,7 @@ function useDictation(onFinal: (text: string) => void) {
           interimResults: boolean
           onresult: ((e: { resultIndex: number; results: { isFinal: boolean; 0: { transcript: string } }[] }) => void) | null
           onend: (() => void) | null
+          onerror: ((e: unknown) => void) | null
           start: () => void
           stop: () => void
         })
@@ -135,15 +172,26 @@ function useDictation(onFinal: (text: string) => void) {
     rec.onend = () => {
       if (recRef.current === rec) settle()
     }
-    rec.start()
+    rec.onerror = (e) => {
+      console.error('[dictation] recognition error', e)
+      if (recRef.current === rec) settle()
+    }
     recRef.current = rec
+    clearSettleTimer()
     setTranscribing(false)
+    try {
+      rec.start()
+    } catch (e) {
+      console.error('[dictation] start failed', e)
+      settle()
+      return
+    }
     setRecording(true)
-  }, [settle])
+  }, [clearSettleTimer, settle])
   const supported =
     typeof window !== 'undefined' &&
     !!((window as unknown as Record<string, unknown>).SpeechRecognition ?? (window as unknown as Record<string, unknown>).webkitSpeechRecognition)
-  return { active: recording || transcribing, recording, transcribing, seconds, supported, start, stop }
+  return { active: recording || transcribing, recording, transcribing, seconds, supported, start, stop, cancel }
 }
 
 export function ComposerWired() {
@@ -154,7 +202,17 @@ export function ComposerWired() {
   // 运行中仍可提交（排队），附件也算内容——不能只看文本
   const composerAttachmentCount = useAuiState((s) => s.composer.attachments.length)
   const canQueueWhileRunning = value.trim().length > 0 || composerAttachmentCount > 0
-  const threadId = useAuiState((s) => s.threadListItem.id)
+  const threadIdFromAui = useAuiState((s) => s.threadListItem.id)
+  // 分栏 runtime 没有 threadListAdapter（threadListItem.id 恒为
+  // DEFAULT_THREAD_ID）——pane 显式提供的落盘 id 优先；主 pane 走 aui 兜底。
+  // assistant-ui 的占位 id（external-store / local 两套常量）归一成 null：
+  // 新草稿不属于任何会话。
+  const scopedThreadId = useThreadSessionId()
+  const threadId =
+    scopedThreadId ??
+    (threadIdFromAui === 'DEFAULT_THREAD_ID' || threadIdFromAui === '__DEFAULT_ID__'
+      ? null
+      : threadIdFromAui)
   const setText = input.setText
   const slash = useSlashMatches(value, COMMANDS)
   // @ 补全：静态行（宿主自带占位人员）+ `composer.atCompletions` 贡献行
@@ -469,6 +527,9 @@ export function ComposerWired() {
         <ComposerPrimitive.AttachmentDropzone asChild>
           {/* 容器：paper 面 + rounded-[20px]（用户 2026-10-05：24→20）+ p-2.5 + gap-2 */}
           <ComposerBar>
+            {/* 上游 composer.top 贡献槽（hermes-bots 的「等待队友」条挂这里）：
+                输入上方的 banner，无贡献时不渲染。 */}
+            <ComposerTopSlot sessionId={threadId} />
             {/* 官方构图第一条：附件区在输入上方；empty:hidden，无附件不占位 */}
             <ComposerAttachmentsRow />
             {slashOpen && (
@@ -506,7 +567,7 @@ export function ComposerWired() {
             ) : (
               <ComposerPrimitive.Input
                 aria-label="消息输入"
-                className="max-h-40 min-h-[40px] w-full resize-none bg-transparent p-0 text-[14px] leading-[20px] text-(--text) outline-none placeholder:text-(--text-4)"
+                className="max-h-40 min-h-[40px] w-full resize-none bg-transparent p-0 text-[length:var(--conversation-text-font-size)] leading-[20px] text-(--text) outline-none placeholder:text-(--text-4)"
                 enterKeyHint="send"
                 onKeyDown={onInputKeyDown}
                 placeholder={
@@ -534,7 +595,11 @@ export function ComposerWired() {
                     plan-mode 插件态 + permission-gate 启动开关，没有运行时
                     切换面——芯片只读展示当前真实模式，菜单里其余态置灰并
                     标注原因（不造假开关）。 */}
-                <PermissionModeChip threadId={threadId} running={isRunning} />
+                <PermissionModeChip threadId={threadId ?? undefined} running={isRunning} />
+                {/* 实时活动徽标（ZCode ConversationBackgroundWorkTrigger 同位）：
+                    有运行中的终端/工作流/智能体时出现，点击直达详情或展开
+                    状态面板；计数与面板分区同一份真值。 */}
+                <ComposerStatusBadge />
               </div>
               <ComposerActions>
                 {/* 上下文明细按钮（ZCode 同位：模型选择器左侧；2026-11-01
@@ -581,10 +646,13 @@ export function ComposerWired() {
                 />
                 {dictation.supported && (
                   <ComposerVoiceButton
-                    active={dictation.recording}
-                    aria-label={dictation.recording ? '停止语音' : '语音输入'}
-                    disabled={dictation.transcribing}
-                    onClick={() => (dictation.recording ? dictation.stop() : dictation.start())}
+                    active={dictation.active}
+                    aria-label={dictation.active ? '停止语音' : '语音输入'}
+                    onClick={() => {
+                      if (dictation.recording) dictation.stop()
+                      else if (dictation.transcribing) dictation.cancel()
+                      else dictation.start()
+                    }}
                   />
                 )}
                 {/* 右侧原 Ring 已撤（2026-11-01）：上下文入口统一到模型选择器

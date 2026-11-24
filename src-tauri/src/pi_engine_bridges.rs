@@ -160,8 +160,9 @@ impl ApprovalHandler for HostApproval {
     }
 }
 
-/// 安装两个宿主门（幂等）。默认审批模式 = Yolo（旧行为），前端启动后按
-/// 用户保存在 localStorage 的模式调用 `pi_set_approval_mode` 覆写。
+/// 安装两个宿主门（幂等）。进程默认审批 = Yolo，只作**未 pin 会话**的
+/// fallback（bot / 并列窗格）；主会话创建时由 `PiEngine` pin 成 always-ask，
+/// full access 是会话级 pin（`approval_modes.json`），前端不再读 localStorage。
 pub fn install(app: &AppHandle) {
     static INSTALLED: OnceLock<()> = OnceLock::new();
     if INSTALLED.get().is_some() {

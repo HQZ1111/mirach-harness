@@ -258,3 +258,11 @@
 .xterm:not(:hover) .xterm-scrollable-element > .scrollbar {
   opacity: 0;
 }
+
+/* 群聊房间输入区（hermes-bots 的 RoomComposer）：上游 `rounded-2xl`（16px）；
+   宿主主输入框定稿 20px（用户 2026-11-23："输入框怎么和我的输入框不一样了"）。
+   两处输入区统一 20px 圆角；其余几何由 hermes-tokens.css 的 --composer-* 令牌
+   对齐主输入框（p 12 / 输入 40 / 文本 14）。 */
+[data-slot='room-composer-surface'] {
+  border-radius: 20px;
+}

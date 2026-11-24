@@ -51,6 +51,7 @@ import {
   buildWorkSummaryItems,
   classifySummaryCategory,
   formatSummaryStatistics,
+  hiddenReasoningIndices,
   isSubagentToolName,
   isTailSummaryGroup,
   isTodoToolName,
@@ -79,6 +80,7 @@ import {
   ReasoningTrigger,
 } from "@/components/assistant-ui/elements/reasoning.aui";
 import { resolveReasoningStreamingSummary } from "@/components/assistant-ui/elements/reasoning";
+import { useConversationDisplay } from "@/components/assistant-ui/conversation-display-store";
 import { File } from "@/components/file";
 import { Image } from "@/components/image";
 import { MarkdownText } from "@/components/markdown-text";
@@ -402,10 +404,18 @@ const WorkItems: FC<{
   ctx: RenderCtx;
   running: boolean;
   turnTailIndex: number;
-}> = ({ indices, ctx, running, turnTailIndex }) => {
+  /** 「显示思考过程」= false 时剔除的非首条思考下标（ZCode 同语义）。 */
+  hiddenReasoning: ReadonlySet<number>;
+  /** 「显示待办」：todo 工具卡片是否进消息流（默认 false = 剔除）。 */
+  showTodos: boolean;
+}> = ({ indices, ctx, running, turnTailIndex, hiddenReasoning, showTodos }) => {
   const items = useMemo(
-    () => buildWorkSummaryItems(ctx.parts as readonly SummaryPartLike[], indices),
-    [ctx.parts, indices],
+    () =>
+      buildWorkSummaryItems(ctx.parts as readonly SummaryPartLike[], indices, {
+        hiddenReasoning,
+        showTodos,
+      }),
+    [ctx.parts, indices, hiddenReasoning, showTodos],
   );
   return (
     <>
@@ -476,6 +486,12 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
   });
   const running = turnWorkOwner ? threadRunning && isCurrentTurnTail : messageRunning;
   const bounds = useWorkBounds();
+  // 「行为与工具」的两枚显示开关（ZCode 设置页同款语义）：
+  // - showReasoning=false → 每轮只留第一条非空思考，其余从流中剔除；
+  // - showTodos=true → todo 工具卡片进消息流（默认 false = 剔除，状态面板
+  //   的待办分区仍是唯一入口）。
+  const showReasoning = useConversationDisplay((s) => s.showReasoning);
+  const showTodos = useConversationDisplay((s) => s.showTodos);
 
   const slots = useMemo<AssistantWorkPartsSlots>(
     // ReasoningGroup / TaskGroup 槽位保留兼容（宿主无消费者；ZCode 的组头
@@ -504,33 +520,49 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
     }
     return splitWorkParts(parts);
   }, [parts, running, turnWorkOwner]);
+  // 隐藏的非首条思考不参与状态判定（流式隐藏行不得把整段判 running——
+  // ZCode 在扫描前剔除隐藏行后同一口径）。
+  const hiddenReasoning = useMemo(
+    () => hiddenReasoningIndices(parts as readonly SummaryPartLike[], showReasoning),
+    [parts, showReasoning],
+  );
   const status = useMemo(
     () =>
       resolveWorkSegmentStatus(
         parts as readonly WorkPartLike[],
-        split.history,
+        hiddenReasoning.size === 0
+          ? split.history
+          : split.history.filter((index) => !hiddenReasoning.has(index)),
         bounds,
       ),
-    [parts, split, bounds],
+    [parts, split, bounds, hiddenReasoning],
   );
   const history = useMemo(() => [...split.history], [split]);
   const following = useMemo(() => [...split.following], [split]);
 
-  // 整轮最后一个可见行（正文也参与；待办行不渲染，跳过）——ZCode
+  // 整轮最后一个可见行（正文也参与）——ZCode
   // `getAssistantSummaryTailRowId` 的宿主对应物。只有「组尾行 === 它」且轮
   // 仍 running 的组是 running 组（滚动当前项）；完成后组收起为总统计。
+  // 不可见的行不参与：待办行默认剔除（showTodos 时才可见）、隐藏的非首条
+  // 思考与空思考同理。
   const turnTailIndex = useMemo(() => {
     const list = parts as readonly SummaryPartLike[];
     for (let i = list.length - 1; i >= 0; i--) {
       const part = list[i];
-      if (part?.type === "tool-call" && isTodoToolName(part.toolName ?? "")) continue;
+      if (hiddenReasoning.has(i)) continue;
+      if (
+        part?.type === "tool-call" &&
+        isTodoToolName(part.toolName ?? "") &&
+        !showTodos
+      )
+        continue;
       if ((part?.type === "text" || part?.type === "reasoning") && !(part.text ?? "").trim()) {
         continue;
       }
       return i;
     }
     return -1;
-  }, [parts]);
+  }, [parts, hiddenReasoning, showTodos]);
 
   // 运行中的唯一指示器是轮尾 ChatLoading（orbs + 工作中 + 计时，见
   // ThreadThinkingIndicator）。ZCode 没有第二个 inline typing dots——
@@ -558,6 +590,8 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
             ctx={ctx}
             running={running}
             turnTailIndex={turnTailIndex}
+            hiddenReasoning={hiddenReasoning}
+            showTodos={showTodos}
           />
         </div>
       </>
@@ -578,6 +612,8 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
               ctx={ctx}
               running={running}
               turnTailIndex={turnTailIndex}
+              hiddenReasoning={hiddenReasoning}
+              showTodos={showTodos}
             />
           </div>
         </WorkSegmentGroup>
@@ -599,6 +635,8 @@ export const AssistantWorkParts: FC<AssistantWorkPartsSlots> = ({
               ctx={ctx}
               running={running}
               turnTailIndex={turnTailIndex}
+              hiddenReasoning={hiddenReasoning}
+              showTodos={showTodos}
             />
           ) : null}
         </div>

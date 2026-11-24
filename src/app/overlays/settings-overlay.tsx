@@ -61,13 +61,10 @@ import { createPortal } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { open as openDirectoryDialog } from '@tauri-apps/plugin-dialog'
 import {
-  Archive,
   Bell,
   BookOpen,
   Brain,
   Cable,
-  ChartColumn,
-  CircleUser,
   Cpu,
   Folder,
   Globe,
@@ -102,10 +99,14 @@ import pkg from '../../../package.json'
 import { inTauri } from '@/lib/tauri-window'
 import { GatewaySettings } from '@/app/settings/gateway-settings'
 import { ProvidersSettings } from '@/app/settings/providers-settings'
-import { AccountSettings } from '@/app/settings/account-settings'
 import { PersonaSettings } from '@/app/settings/persona-settings'
+import { AvatarSettings } from '@/app/settings/avatar-settings'
+import { AppearanceSettings } from '@/app/settings/appearance-settings'
 import { UsageSettings } from '@/app/settings/usage-settings'
 import { VoiceSettings } from '@/app/settings/voice-settings'
+import { AgentBehaviorSettings } from '@/app/settings/agent-behavior-settings'
+import { DataSyncSettings } from '@/app/settings/data-sync-settings'
+import { SkillsToolsSettings } from '@/app/settings/skills-tools-settings'
 import {
   LOCALE_OPTIONS,
   deviceTimeZone,
@@ -127,10 +128,8 @@ import {
 import {
   COMPLETION_SOUND_VARIANTS,
   completionSoundVariantId as readCompletionVariant,
-  hapticsMuted as readHapticsMuted,
   previewCompletionSound,
   setCompletionSoundVariantId,
-  setHapticsMuted as setHapticsMutedPref,
 } from '@/lib/completion-sound'
 import {
   KEYBIND_ACTIONS,
@@ -142,6 +141,7 @@ import {
   AnimatedSidebarGroup,
   AnimatedSidebarGroupContent,
   AnimatedSidebarGroupLabel,
+  AnimatedSidebarHoverPill,
   AnimatedSidebarMenu,
   AnimatedSidebarMenuButton,
   AnimatedSidebarMenuItem,
@@ -232,31 +232,25 @@ function readDefaultModel(doc: SettingsDoc): { provider: string; modelId: string
 // 更新（历史文件兼容），避免同字段双形式并存。未设置的键 = rpi 内置默认
 // （全字段 Option，JSON null 与缺键同为 None）。rpi 无对应字段的旧键
 // （max_delay_ms / failover* / compaction 的 mode、顶层 compaction_mode）
-// 写入是惰性无效果——保留 UI 但不要在文档里新增。
+// 2026-11-24 审计后已连同控件删除——不再写惰性键。
 
 const U32_MAX = 4294967295
 /** u64 字段在 JS 侧以安全整数封顶（超过即失去整数精度）。 */
 const SAFE_U64_MAX = 9007199254740991
 
-/** 压缩段键组（rpi CompactionSettingsJson；顶层 compaction_mode 在 rpi
-    无对应字段——旧 pi 键，写入惰性）。 */
+/** 压缩段键组（rpi CompactionSettingsJson 只有 enabled / reserveTokens /
+    keepRecentTokens / modelOverrides；旧 pi 的 mode / compaction_mode 在
+    rpi 无对应字段，2026-11-24 审计后连同控件一起删除）。 */
 const K_ENABLED = ['enabled'] as const
 const K_RESERVE_TOKENS = ['reserveTokens', 'reserve_tokens'] as const
 const K_KEEP_RECENT_TOKENS = ['keepRecentTokens', 'keep_recent_tokens'] as const
-const K_MODE = ['mode'] as const
-const K_COMPACTION_MODE = ['compaction_mode'] as const
 
-/** 重试段键组（rpi RetrySettings：maxRetries/baseDelayMs 为真字段；
-    max_delay_ms/failover* 在 rpi 无对应，写入惰性不变）。 */
+/** 重试段键组（rpi RetrySettings：maxRetries / baseDelayMs /
+    maxAgentDelayMs 为真字段；旧 max_delay_ms / failover* 在 rpi 无对应，
+    2026-11-24 审计后连同控件一起删除）。 */
 const K_MAX_RETRIES = ['maxRetries', 'max_retries'] as const
 const K_BASE_DELAY_MS = ['baseDelayMs', 'base_delay_ms'] as const
-const K_MAX_DELAY_MS = ['max_delay_ms', 'maxDelayMs'] as const
-const K_FAILOVER_COOLDOWN_SECS = [
-  'failover_cooldown_secs',
-  'failoverCooldownSecs',
-  'cooldownSecs',
-] as const
-const K_MAX_FAILOVERS_PER_TURN = ['max_failovers_per_turn', 'maxFailoversPerTurn'] as const
+const K_MAX_AGENT_DELAY_MS = ['maxAgentDelayMs', 'max_agent_delay_ms'] as const
 
 // ── GUI 相关新增键组（2026-11-14，逐项核对 rpi-cli/src/settings.rs）─────
 //
@@ -286,12 +280,12 @@ const THINKING_BUDGET_ROWS: readonly {
   label: string
   draftKey: string
 }[] = [
-  { keys: K_TB_MINIMAL, label: 'minimal', draftKey: 'thinkingBudgets.minimal' },
-  { keys: K_TB_LOW, label: 'low', draftKey: 'thinkingBudgets.low' },
-  { keys: K_TB_MEDIUM, label: 'medium', draftKey: 'thinkingBudgets.medium' },
-  { keys: K_TB_HIGH, label: 'high', draftKey: 'thinkingBudgets.high' },
-  { keys: K_TB_XHIGH, label: 'xhigh', draftKey: 'thinkingBudgets.xhigh' },
-  { keys: K_TB_MAX, label: 'max', draftKey: 'thinkingBudgets.max' },
+  { keys: K_TB_MINIMAL, label: '极简（minimal）', draftKey: 'thinkingBudgets.minimal' },
+  { keys: K_TB_LOW, label: '低（low）', draftKey: 'thinkingBudgets.low' },
+  { keys: K_TB_MEDIUM, label: '中（medium）', draftKey: 'thinkingBudgets.medium' },
+  { keys: K_TB_HIGH, label: '高（high）', draftKey: 'thinkingBudgets.high' },
+  { keys: K_TB_XHIGH, label: '极高（xhigh）', draftKey: 'thinkingBudgets.xhigh' },
+  { keys: K_TB_MAX, label: '最高（max）', draftKey: 'thinkingBudgets.max' },
 ]
 /** 模型节：队列排空节奏（settings.rs:155-163，kebab-case 落盘）。 */
 const K_STEERING_MODE = ['steeringMode', 'steering_mode'] as const
@@ -310,13 +304,10 @@ const K_HTTP_IDLE_TIMEOUT = ['httpIdleTimeout', 'httpIdleTimeoutMs', 'http_idle_
 
 /** 会话管理节：会话根目录（settings.rs:108-111）。 */
 const K_SESSION_DIR = ['sessionDir', 'session_dir'] as const
-/** 技能与工具节：追加资源目录（settings.rs:164-176；`skills`/`prompts`/
-    `extensions` 是上游兼容简称）。 */
-const K_SKILL_DIRS = ['skillDirs', 'skills', 'skill_dirs'] as const
-const K_PROMPT_DIRS = ['promptDirs', 'prompts', 'prompt_dirs'] as const
-const K_EXTENSION_DIRS = ['extensionDirs', 'extensions', 'extension_dirs'] as const
-/** 技能与工具节：引擎默认启用的工具名列表（settings.rs:186-188）。 */
-const K_DEFAULT_TOOLS = ['defaultTools', 'default_tools'] as const
+/** 核心连接 → 终端执行（settings.rs shellPath / shellCommandPrefix，
+    session.rs 建会话时真消费——2026-11-24 审计纠正了旧注释）。 */
+const K_SHELL_PATH = ['shellPath', 'shell_path'] as const
+const K_SHELL_COMMAND_PREFIX = ['shellCommandPrefix', 'shell_command_prefix'] as const
 
 // ── TUI 专属字段（有 settings.rs 字段，但**不做 UI**）────────────────────
 //
@@ -337,8 +328,6 @@ const K_DEFAULT_TOOLS = ['defaultTools', 'default_tools'] as const
 //   · lastChangelogVersion / lastRpiChangelogVersion —— 升级提示基线，
 //     引擎自维护的标记，不是用户设置（手工改只会让更新提示错乱）。
 //   · showCacheMissNotices —— 终端 transcript 的诊断提示行。
-//   · shellPath —— rpi 解析但不消费（settings.rs:113-118 原文：nothing in
-//     pi-tools carries a shell binary）。给 UI 等于承诺一个不生效的开关。
 //   · branchSummary —— rpi 的两个访问器都注明"尚无消费方"
 //     （settings.rs:144-153/323-341）。
 
@@ -785,6 +774,7 @@ type SectionId =
   | 'notifications'
   | 'core-connection'
   | 'model'
+  | 'agent-behavior'
   | 'memory'
   | 'browser-control'
   | 'computer-control'
@@ -795,11 +785,11 @@ type SectionId =
   | 'sessions'
   | 'projects'
   | 'archives'
+  | 'data-sync'
   | 'shortcuts'
   | 'knowledge'
   | 'usage-stats'
   | 'updates'
-  | 'account'
   // 插件贡献页（2026-11-07）：`plugin:<id>` 动态面——render 在贡献表里
   | `plugin:${string}`
 
@@ -837,8 +827,6 @@ const NAV_GROUPS: readonly NavGroup[] = [
         icon: Palette,
         id: 'appearance',
         label: '外观',
-        placeholder:
-          '配色/圆角/间距是编译期定稿的 CSS 令牌（src/styles/tokens.css），运行期没有主题切换面——改外观需要改令牌文件并重建。',
       },
       {
         icon: Sparkles,
@@ -849,17 +837,10 @@ const NAV_GROUPS: readonly NavGroup[] = [
         icon: UserRound,
         id: 'avatar',
         label: '形象',
-        placeholder: '无形象/角色数据面（宿主不管理头像与形象资源，pi 侧也没有对应配置段）。',
       },
-      {
-        icon: Bell,
-        id: 'notifications',
-        label: '通知',
-        children: [
-          { id: 'alerts', label: '提醒' },
-          { id: 'sounds', label: '声音' },
-        ],
-      },
+      // hermes 的通知页是单页（提醒开关 + 完成提示音同屏），没有
+      // 「提醒 / 声音」子页——2026-11-24 用户要求全链路复制，子项删除。
+      { icon: Bell, id: 'notifications', label: '通知' },
       {
         icon: Cable,
         id: 'core-connection',
@@ -870,12 +851,18 @@ const NAV_GROUPS: readonly NavGroup[] = [
   {
     label: 'Agent 控制',
     items: [
+      // 账号子项删除（2026-11-24 用户："模型的账号项删除"）——凭据统一走
+      // 「安全与数据 · 密码与登录」，模型页只保留密钥 / 自定义端点 /
+      // 默认模型三个子视图。
       { icon: Cpu, id: 'model', label: '模型', children: [
-        { id: 'accounts', label: '账号' },
         { id: 'keys', label: 'API 密钥' },
         { id: 'custom-endpoints', label: '自定义端点' },
         { id: 'defaults', label: '默认模型' },
       ] },
+      // 行为与工具（2026-11-22）：ZCode「Agent 能力 → 行为与工具」整节移植
+      // （agent-behavior-settings.tsx）。ZCode 组内顺序在个性化之后、记忆
+      // 之前；宿主对应位 = 模型之后、记忆与上下文之前。
+      { icon: SlidersHorizontal, id: 'agent-behavior', label: '行为与工具' },
       { icon: Brain, id: 'memory', label: '记忆与上下文' },
       {
         icon: Globe,
@@ -918,23 +905,19 @@ const NAV_GROUPS: readonly NavGroup[] = [
           { id: 'sources', label: '来源' },
         ],
       },
+      // 会话管理 = 总项（2026-11-24 用户："会话管理是总项，把数据与统计里
+      // 的四个作为子项放进去"）。自身页 = 会话存储目录；四个子项分别是
+      // ZCode 数据与统计组的四节。原「安全与数据 → 项目」顶层项删除。
       {
         icon: MessagesSquare,
         id: 'sessions',
         label: '会话管理',
-      },
-      // 项目注册表 / 归档会话（2026-11-15 会话管理 P0）：Rust 侧
-      // pi_projects_* + pi_sessions_index 的用户入口。会话管理只配「会话
-      // 存在哪」，这两项管「会话归到哪 / 收进回收站后怎么处置」。
-      {
-        icon: Folder,
-        id: 'projects',
-        label: '项目',
-      },
-      {
-        icon: Archive,
-        id: 'archives',
-        label: '归档会话',
+        children: [
+          { id: 'data-sync', label: '数据同步' },
+          { id: 'usage-stats', label: '使用统计' },
+          { id: 'projects', label: '项目管理' },
+          { id: 'archives', label: '归档管理' },
+        ],
       },
       {
         icon: Keyboard,
@@ -948,34 +931,30 @@ const NAV_GROUPS: readonly NavGroup[] = [
         placeholder:
           'pi 没有知识库概念（无索引/检索配置段）；技能与提示词模板见「技能与工具」浮层，不是知识库。',
       },
-      {
-        icon: ChartColumn,
-        id: 'usage-stats',
-        label: '使用统计',
-      },
     ],
   },
   {
-    // 插件集成（2026-11-07 有真实插件注册设置页）：mirach-connections（连接
-    // 注册表）+ mirach-pkg（pi 包管理）——贡献经 usePluginContributions
-    // 注入下方 PLUGIN_NAV_ITEMS，emptyNote 仅在无贡献时显示。
+    // 插件集成：只承载真实插件注册的设置页（usePluginContributions）。
+    // 2026-11-24 用户删除「核心（连接）/ 包」两页后，无贡献时整组隐藏
+    // （navGroupsWithPlugins 过滤），不再显示空态占位。
     label: '插件集成',
     items: [],
     emptyNote: '暂无插件提供设置页',
   },
   {
     label: '关于',
-    items: [
-      { icon: Info, id: 'updates', label: '版本与更新' },
-      {
-        icon: CircleUser,
-        id: 'account',
-        label: '账户',
-        placeholder: '本应用没有账户体系（无登录态、无云同步），因此没有账户设置。',
-      },
-    ],
+    // 账户项删除（2026-11-24 用户："关于里面的账户删除"）：宿主无账户体系。
+    items: [{ icon: Info, id: 'updates', label: '版本与更新' }],
   },
 ]
+
+/** 会话管理的四个子视图（2026-11-24 从「数据与统计」组迁入）。 */
+const SESSIONS_CHILD_IDS = new Set<string>([
+  'data-sync',
+  'usage-stats',
+  'projects',
+  'archives',
+])
 
 /** 扁平化后的可选节（键盘 ↑/↓ 的遍历顺序 = 组顺序 + 组内顺序）。 */
 const NAV_ITEMS: readonly NavItem[] = NAV_GROUPS.flatMap((g) => g.items)
@@ -999,8 +978,13 @@ function pluginNavItems(): readonly (NavItem & { sectionId: `plugin:${string}` }
  * 插件贡献是模块级常量，开销可忽略。 */
 function navGroupsWithPlugins(): readonly NavGroup[] {
   const items = pluginNavItems()
-  return NAV_GROUPS.map((g) =>
-    g.label === '插件集成' && items.length > 0 ? { ...g, items, emptyNote: undefined } : g,
+  // 无插件贡献时整组隐藏（2026-11-24：核心/包两页删除后只剩空态文案，
+  // 用户明确要求删掉这两项；组本身也不再占位）。
+  return NAV_GROUPS.filter((g) => g.label !== '插件集成' || items.length > 0).map(
+    (g) =>
+      g.label === '插件集成' && items.length > 0
+        ? { ...g, items, emptyNote: undefined }
+        : g,
   )
 }
 
@@ -1037,10 +1021,19 @@ const IMPLEMENTED_SECTIONS: ReadonlySet<SectionId> = new Set<SectionId>([
   'password-login',
   'shortcuts',
   'core-connection',
-  'account',
   'general',
   'persona',
+  // 外观（2026-11-23）：hermes Appearance 页复制——主题/字体/缩放/气泡。
+  'appearance',
+  // 形象（2026-11-23）：用户头像选择（内置 41 张，localStorage 持久化）。
+  'avatar',
   'usage-stats',
+  // 行为与工具（2026-11-22）：ZCode agentBehavior 节的完整移植——
+  // app/settings/agent-behavior-settings.tsx（显示思考/待办为真实接线）。
+  'agent-behavior',
+  // 数据同步（2026-11-22）：ZCode DataSyncSection 的空态结构（宿主单机版，
+  // 无远端设备栈——页面保留结构并如实说明）。
+  'data-sync',
   // 2026-11-14：rpi settings 的 GUI 相关字段补齐后，这两个从占位改为真实面板
   // （sessions = sessionDir；skills-tools = skillDirs/promptDirs/
   // extensionDirs/defaultTools）。资源**浏览**仍在左栏浮层（pi_list_resources），
@@ -1094,6 +1087,18 @@ function SetPrefRow({
       <div className="set-acct-field-control">{children}</div>
     </div>
   )
+}
+
+/** 通知事件文案：逐条抄 hermes `i18n/zh.ts` 的 settings.notifications.kinds
+    （产品名 Hermes → Mirach）。与 NOTIFICATION_KINDS 同序同键。 */
+const NOTIFICATION_COPY: Record<NotificationKind, { label: string; desc: string }> = {
+  approval: { label: '需要批准', desc: '有命令正在等待你批准或拒绝。' },
+  input: { label: '需要输入', desc: 'Mirach 提出了问题，或需要密码或密钥。' },
+  turnDone: { label: '回复就绪', desc: 'Mirach 在后台时完成了一轮对话。' },
+  turnError: { label: '本轮失败', desc: '后台回合错误。' },
+  backgroundDone: { label: '后台任务完成', desc: '后台终端命令已完成。' },
+  credits: { label: '额度提醒', desc: '额度访问被暂停或恢复。' },
+  plugin: { label: '插件通知', desc: 'Mirach 在后台时，桌面插件发送了通知。' },
 }
 
 export function SettingsOverlay({
@@ -1159,11 +1164,9 @@ export function SettingsOverlay({
   const [keyResult, setKeyResult] = useState<{ provider: string; ok: boolean; message: string } | null>(null)
   // 通知测试发送状态
   const [notifyTestState, setNotifyTestState] = useState<{ ok: boolean; message: string } | null>(null)
-  // 声音子页（hermes sounds 子页）：静音开关 + 完成音变体
-  const [soundMuted, setSoundMuted] = useState(false)
+  // 完成提示音（hermes 通知页同屏）：变体选择
   const [completionVariant, setCompletionVariant] = useState(1)
   useEffect(() => {
-    setSoundMuted(readHapticsMuted())
     setCompletionVariant(readCompletionVariant())
   }, [])
   // 自定义端点（models.json providers CRUD）：新增表单 + 结果
@@ -1196,6 +1199,22 @@ export function SettingsOverlay({
   // ── 主从两栏状态 ──
   // 选中节：左导航高亮 + 右栏条件渲染的依据，默认落模型节。
   const [activeSection, setActiveSection] = useState<SectionId>(initialSection ?? 'model')
+  /** 手动收起的可展开节（2026-11-23 用户："设置页的选项不能折叠"）。
+      默认空 = 选中节自动展开；再点一次当前选中的可展开节 → 收起其子项。
+      切到别的节会把它从集合里移除（重新选中时默认展开）。 */
+  const [collapsedSubmenus, setCollapsedSubmenus] = useState<
+    ReadonlySet<SectionId>
+  >(() => new Set())
+  /** 选中节（导航点击 / 键盘 / 深链共用）：切节并展开目标节的子项。 */
+  const activateSection = useCallback((id: SectionId) => {
+    setActiveSection(id)
+    setCollapsedSubmenus((prev) => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }, [])
   // 深链切节（设置窗常开时 host.navigate 的落点；`mirach:settings:section`）。
   useEffect(() => {
     const onSection = (event: Event) => {
@@ -1206,11 +1225,11 @@ export function SettingsOverlay({
         console.error(`[settings] 深链节 ${raw} 不在导航表——忽略`)
         return
       }
-      setActiveSection(raw as SectionId)
+      activateSection(raw as SectionId)
     }
     window.addEventListener('mirach:settings:section', onSection)
     return () => window.removeEventListener('mirach:settings:section', onSection)
-  }, [])
+  }, [activateSection])
   /** 子视图（hermes 的 pview/kview 等价物）：有 children 的节选中后，
       子项点击切换此值；无 children 的节恒为 null。 */
   const [activeSubView, setActiveSubView] = useState<string | null>(null)
@@ -1229,10 +1248,49 @@ export function SettingsOverlay({
   const [appPrefsSaved, setAppPrefsSaved] = useState<string | null>(null)
   // 最大智能体步数输入草稿（与引擎 settings 数字字段分开：这是 app prefs）
   const [stepsDraft, setStepsDraft] = useState('')
+  // 记忆插件 rpi-optchat（2026-11-24 用户指定）：真实安装状态来自
+  // pi_pkg_list 的原生扩展登记（rpi install 写 native-packages.json）。
+  const [optchat, setOptchat] = useState<
+    { installed: boolean; version: string | null; missing: string[] } | null
+  >(null)
+  const [optchatError, setOptchatError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void invoke<{
+      packages: {
+        scope: string
+        name: string
+        version: string
+        missingArtifacts: string[]
+      }[]
+    }>('pi_pkg_list', { cwd: null })
+      .then((result) => {
+        if (cancelled) return
+        const row = result.packages.find(
+          (p) => p.scope === 'user' && p.name === 'rpi-optchat',
+        )
+        setOptchat(
+          row
+            ? { installed: true, version: row.version, missing: row.missingArtifacts }
+            : { installed: false, version: null, missing: [] },
+        )
+        setOptchatError(null)
+      })
+      .catch((e: unknown) => {
+        console.error('[pi] rpi-optchat 安装状态读取失败', e)
+        if (!cancelled) setOptchatError(describeIpcError(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   /** 右栏固定 inset 头的标题（beui Inset header 形态：当前视图名）。
       从 NAV_ITEMS 取——节名只有一个真相源，不在 JSX 里重复写字面值。 */
-  const activeSectionLabel =
-    ALL_NAV_ITEMS.find((s) => s.id === activeSection)?.label ?? '设置'
+  const activeNavItem = ALL_NAV_ITEMS.find((s) => s.id === activeSection)
+  const activeChildLabel = activeNavItem?.children?.find(
+    (c) => c.id === activeSubView,
+  )?.label
+  const activeSectionLabel = activeChildLabel ?? activeNavItem?.label ?? '设置'
   // 数字字段草稿（键 = 段.键名，如 compaction.reserve_tokens）——从
   // SetNumField 本地 state 提升到此，条件渲染下切节不丢未落盘输入。
   const [numDrafts, setNumDrafts] = useState<Record<string, string | null>>({})
@@ -1257,12 +1315,12 @@ export function SettingsOverlay({
       const idx = ALL_NAV_ITEMS.findIndex((s) => s.id === activeSection)
       const dir = e.key === 'ArrowDown' ? 1 : -1
       const next = ALL_NAV_ITEMS[(idx + dir + ALL_NAV_ITEMS.length) % ALL_NAV_ITEMS.length]
-      setActiveSection(next.id)
+      activateSection(next.id)
       e.currentTarget
         .querySelector<HTMLButtonElement>(`[data-section-id="${next.id}"]`)
         ?.focus()
     },
-    [activeSection],
+    [activateSection, activeSection],
   )
   // 结构化段写入队列（见 drainWrites）：settingsTextRef = 渲染期同步的
   // 最新已提交文本；writesRef.committed = 最后一笔成功落盘的完整文档。
@@ -1405,14 +1463,6 @@ export function SettingsOverlay({
   const writeRetryKey = useCallback(
     (keys: readonly string[], value: unknown | undefined): Promise<void> =>
       enqueueStructuredWrite('retry', 'retry', keys, value, '已写入 settings.json'),
-    [enqueueStructuredWrite],
-  )
-
-  /** compaction_mode 是顶层键（config.rs:231-234，无别名，只认 snake_case），
-      反馈落在压缩段。 */
-  const writeCompactionMode = useCallback(
-    (value: unknown | undefined): Promise<void> =>
-      enqueueStructuredWrite('compaction', null, K_COMPACTION_MODE, value, '已写入 settings.json'),
     [enqueueStructuredWrite],
   )
 
@@ -2067,6 +2117,10 @@ export function SettingsOverlay({
           {/* 左栏头：beui AnimatedSidebarHeader 形态（标题一行，48px） */}
           <div className="set-nav-head">设置</div>
           <nav aria-label="设置节" className="set-nav" onKeyDown={onNavKeyDown}>
+          {/* 跨组滑动悬停块（2026-11-23）：挂在 nav 滚动容器一层，组头与
+              子项共用一条 pill——SharedLayoutBg 的每组 pill 够不到子项
+              （子项在父项 li 内部），用户实报"子项没有滑动效果"。 */}
+          <AnimatedSidebarHoverPill />
           <AnimatedSidebarMenuProvider>
             {ALL_NAV_GROUPS.map((group) => (
               <AnimatedSidebarGroup key={group.label}>
@@ -2075,38 +2129,71 @@ export function SettingsOverlay({
                 </AnimatedSidebarGroupLabel>
                 <AnimatedSidebarGroupContent>
                   {group.items.length > 0 && (
-                    <AnimatedSidebarMenu>
+                    <AnimatedSidebarMenu sharedHover={false}>
                       {group.items.map((s) => {
                         const Icon = s.icon
                         const isActive = s.id === activeSection
+                        const submenuCollapsed =
+                          collapsedSubmenus.has(s.id)
+                        const submenuOpen =
+                          isActive &&
+                          s.children !== undefined &&
+                          !submenuCollapsed
                         return (
                           <AnimatedSidebarMenuItem key={s.id}>
                             <AnimatedSidebarMenuButton
-                              ariaExpanded={s.children !== undefined ? isActive : undefined}
+                              ariaExpanded={
+                                s.children !== undefined
+                                  ? submenuOpen
+                                  : undefined
+                              }
                               icon={<Icon aria-hidden size={16} />}
                               isActive={isActive}
                               onSelect={() => {
-                                setActiveSection(s.id)
+                                if (
+                                  isActive &&
+                                  s.children !== undefined
+                                ) {
+                                  // 再点一次当前节 = 收起/展开子项（用户
+                                  // 2026-11-23："设置页的选项不能折叠"）。
+                                  setCollapsedSubmenus((prev) => {
+                                    const next = new Set(prev)
+                                    if (next.has(s.id)) next.delete(s.id)
+                                    else next.add(s.id)
+                                    return next
+                                  })
+                                  return
+                                }
+                                activateSection(s.id)
                                 // 有子项的节：默认落第一个子视图（hermes 的
                                 // pview/kview 默认值语义）；无子项的节清空。
-                                setActiveSubView(s.children?.[0]?.id ?? null)
+                                // 会话管理例外：总项自己是「会话存储」页，
+                                // 四个子项必须点击才进入。
+                                setActiveSubView(
+                                  s.id === 'sessions'
+                                    ? null
+                                    : (s.children?.[0]?.id ?? null),
+                                )
                               }}
                               sectionId={s.id}
+                              sidebarRow
                               tabIndex={isActive ? 0 : -1}
                             >
                               {s.label}
                             </AnimatedSidebarMenuButton>
                             {/* 子项（hermes 的层级导航）：选中节展开，
-                                缩进渲染——点击 = 选中节 + 切子视图。 */}
-                            {isActive && s.children !== undefined && (
+                                缩进渲染——点击 = 选中节 + 切子视图。
+                                `data-sidebar-row` = 跨组滑动块的行标记。 */}
+                            {submenuOpen && s.children !== undefined && (
                               <AnimatedSidebarMenuSub open>
                                 {s.children.map((child) => (
                                   <AnimatedSidebarMenuSubItem key={child.id}>
                                     <button
                                       className="set-nav-subitem"
+                                      data-sidebar-row=""
                                       data-sub-id={child.id}
                                       onClick={() => {
-                                        setActiveSection(s.id)
+                                        activateSection(s.id)
                                         setActiveSubView(child.id)
                                       }}
                                       type="button"
@@ -2165,7 +2252,7 @@ export function SettingsOverlay({
           {activeSection === 'model' && activeSubView !== 'defaults' && (
             <ProvidersSettings
               onViewChange={(v) => setActiveSubView(v)}
-              view={activeSubView === 'keys' || activeSubView === 'custom-endpoints' ? activeSubView : 'accounts'}
+              view={activeSubView === 'custom-endpoints' ? 'custom-endpoints' : 'keys'}
             />
           )}
 
@@ -2190,7 +2277,7 @@ export function SettingsOverlay({
                     <option key={`${m.provider}/${m.id}`} value={`${m.provider}/${m.id}`}>
                       {m.name || m.id} — {m.provider} ·{' '}
                       {typeof m.contextWindow === 'number'
-                        ? `${m.contextWindow.toLocaleString()} tokens`
+                        ? `上下文 ${m.contextWindow.toLocaleString()} Token`
                         : '上下文窗口未知'}
                     </option>
                   ))}
@@ -2228,7 +2315,7 @@ export function SettingsOverlay({
                     引擎建会话时的默认（宿主新会话同样走 rpi 的 build，故生效）。
                   </p>
                   <SetField
-                    name="defaultThinkingLevel"
+                    name="默认思考档位"
                     note="合法值：off / minimal / low / medium / high / xhigh / max（模型不支持的档位会被 clamp）"
                   >
                     <SetEnumField
@@ -2236,24 +2323,24 @@ export function SettingsOverlay({
                         writeKey('model', null, K_DEFAULT_THINKING_LEVEL, v)
                       }
                       options={[
-                        { value: 'off', label: 'off（关闭思考）' },
-                        { value: 'minimal', label: 'minimal' },
-                        { value: 'low', label: 'low' },
-                        { value: 'medium', label: 'medium' },
-                        { value: 'high', label: 'high' },
-                        { value: 'xhigh', label: 'xhigh' },
-                        { value: 'max', label: 'max' },
+                        { value: 'off', label: '关闭思考（off）' },
+                        { value: 'minimal', label: '极简（minimal）' },
+                        { value: 'low', label: '低（low）' },
+                        { value: 'medium', label: '中（medium）' },
+                        { value: 'high', label: '高（high）' },
+                        { value: 'xhigh', label: '极高（xhigh）' },
+                        { value: 'max', label: '最高（max）' },
                       ]}
                       read={readField(
                         settingsParsed.doc,
                         null,
                         K_DEFAULT_THINKING_LEVEL,
                       )}
-                      unsetLabel="未设置（默认：medium）"
+                      unsetLabel="未设置（默认：中（medium））"
                     />
                   </SetField>
                   <SetField
-                    name="hideThinkingBlock"
+                    name="隐藏思考块"
                     note="隐藏思考块正文、只保留紧凑标签（rpi 终端渲染偏好；宿主对话栏的思考块渲染尚未跟随此键）"
                   >
                     <SetBoolField
@@ -2273,7 +2360,7 @@ export function SettingsOverlay({
                     留空 = 模型内置预算）：
                   </p>
                   {THINKING_BUDGET_ROWS.map((row) => (
-                    <SetField key={row.label} name={`thinkingBudgets.${row.label}`}>
+                    <SetField key={row.label} name={`思考预算 · ${row.label}`}>
                       <SetNumField
                         {...numDraftFor(row.draftKey)}
                         max={U32_MAX}
@@ -2291,9 +2378,8 @@ export function SettingsOverlay({
                     </SetField>
                   ))}
 
-                  <h4 className="set-sub-title">可用模型范围</h4>
                   <SetField
-                    name="scopedModels"
+                    name="可用模型范围"
                     note="一行一个 provider/modelId（也可用逗号分隔）；留空 = 删键，rpi 视为全部目录模型。enabledModels 是上游别名，文档里已有该形式时原地更新。"
                   >
                     <SetTextDraftField
@@ -2330,7 +2416,7 @@ export function SettingsOverlay({
                     （回合结束后跟进）两条队列；这里是排空节奏。rpi 建会话时
                     读取，宿主与终端共用同一 build 路径。
                   </p>
-                  <SetField name="steeringMode" note="steer 队列的排空节奏">
+                  <SetField name="引导队列节奏" note="steer 队列的排空节奏">
                     <SetEnumField
                       onWrite={(v) => writeKey('model', null, K_STEERING_MODE, v)}
                       options={[
@@ -2344,7 +2430,7 @@ export function SettingsOverlay({
                       unsetLabel="未设置（默认：one-at-a-time）"
                     />
                   </SetField>
-                  <SetField name="followUpMode" note="follow-up 队列的排空节奏">
+                  <SetField name="跟进队列节奏" note="follow-up 队列的排空节奏">
                     <SetEnumField
                       onWrite={(v) =>
                         writeKey('model', null, K_FOLLOW_UP_MODE, v)
@@ -2379,16 +2465,15 @@ export function SettingsOverlay({
               </div>
             )}
 
-            {/* ── 重试与故障转移（旧「重试 · Retry」节原样并入）：
-                vendor config.rs:380-404 RetrySettings；默认值取自
-                config.rs 访问器 997-1011/1112-1132 ── */}
-            <h4 className="set-sub-title">重试与故障转移</h4>
+            {/* ── 重试（rpi RetrySettings：enabled / maxRetries /
+                baseDelayMs / maxAgentDelayMs）。2026-11-24 审计：旧
+                max_delay_ms / failover* 控件写的键 rpi 不消费，已删除。 ── */}
+            <h4 className="set-sub-title">重试</h4>
             <p className="set-hint">
               提供方请求瞬时失败（429/配额/过载）的自动重试。改动写入 settings.json
-              的 <span className="set-code">retry</span> 对象；未设置的键 = pi
-              内置默认（enabled 启用、max_retries 3、base_delay_ms 2000、
-              max_delay_ms 60000）。fallback_chains（跨模型故障转移链）等富结构
-              用「安全与数据 · 安全」里的原始配置编辑。
+              的 <span className="set-code">retry</span> 对象；未设置的键 = rpi
+              内置默认（enabled 启用、maxRetries 10、baseDelayMs 2000、
+              maxAgentDelayMs 60000）。
             </p>
             {settingsMissing && (
               <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
@@ -2402,24 +2487,24 @@ export function SettingsOverlay({
               )
             ) : settingsParsed !== null && !('error' in settingsParsed) ? (
               <>
-                <SetField name="enabled">
+                <SetField name="启用重试">
                   <SetBoolField
                     onWrite={(v) => writeRetryKey(K_ENABLED, v)}
                     read={readField(settingsParsed.doc, 'retry', K_ENABLED)}
                     unsetLabel="未设置（默认：启用）"
                   />
                 </SetField>
-                <SetField name="max_retries" note="重试次数上限">
+                <SetField name="最大重试次数" note="重试次数上限">
                   <SetNumField
                     {...numDraftFor('retry.max_retries')}
                     max={U32_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
                     onWrite={(v) => writeRetryKey(K_MAX_RETRIES, v)}
-                    placeholder="默认 3"
+                    placeholder="默认 10"
                     read={readField(settingsParsed.doc, 'retry', K_MAX_RETRIES)}
                   />
                 </SetField>
-                <SetField name="base_delay_ms" note="退避基数（毫秒）">
+                <SetField name="退避基数（毫秒）">
                   <SetNumField
                     {...numDraftFor('retry.base_delay_ms')}
                     max={U32_MAX}
@@ -2429,37 +2514,17 @@ export function SettingsOverlay({
                     read={readField(settingsParsed.doc, 'retry', K_BASE_DELAY_MS)}
                   />
                 </SetField>
-                <SetField name="max_delay_ms" note="退避上限（毫秒）">
-                  <SetNumField
-                    {...numDraftFor('retry.max_delay_ms')}
-                    max={U32_MAX}
-                    onReject={(msg) => rejectNum('retry', msg)}
-                    onWrite={(v) => writeRetryKey(K_MAX_DELAY_MS, v)}
-                    placeholder="默认 60000"
-                    read={readField(settingsParsed.doc, 'retry', K_MAX_DELAY_MS)}
-                  />
-                </SetField>
-                <SetField name="failover_cooldown_secs" note="故障转移后回切主模型前的冷却秒数">
-                  <SetNumField
-                    {...numDraftFor('retry.failover_cooldown_secs')}
-                    max={SAFE_U64_MAX}
-                    onReject={(msg) => rejectNum('retry', msg)}
-                    onWrite={(v) => writeRetryKey(K_FAILOVER_COOLDOWN_SECS, v)}
-                    placeholder="默认 300"
-                    read={readField(settingsParsed.doc, 'retry', K_FAILOVER_COOLDOWN_SECS)}
-                  />
-                </SetField>
                 <SetField
-                  name="max_failovers_per_turn"
-                  note="单轮最多故障转移次数（pi 运行期按 8 封顶）"
+                  name="智能体重试退避上限（毫秒）"
+                  note="单轮内所有重试累计等待的上限（rpi RetrySettings.maxAgentDelayMs，默认 60000）。"
                 >
                   <SetNumField
-                    {...numDraftFor('retry.max_failovers_per_turn')}
-                    max={U32_MAX}
+                    {...numDraftFor('retry.maxAgentDelayMs')}
+                    max={SAFE_U64_MAX}
                     onReject={(msg) => rejectNum('retry', msg)}
-                    onWrite={(v) => writeRetryKey(K_MAX_FAILOVERS_PER_TURN, v)}
-                    placeholder="默认 8"
-                    read={readField(settingsParsed.doc, 'retry', K_MAX_FAILOVERS_PER_TURN)}
+                    onWrite={(v) => writeRetryKey(K_MAX_AGENT_DELAY_MS, v)}
+                    placeholder="默认 60000"
+                    read={readField(settingsParsed.doc, 'retry', K_MAX_AGENT_DELAY_MS)}
                   />
                 </SetField>
               </>
@@ -2480,10 +2545,11 @@ export function SettingsOverlay({
               settings/constants.ts 的 memory 段与 memory/ 子目录）。
 
               映射真相（不造假）：
-                · 持久记忆 / 用户档案 / 记忆提供方 / 预算 / 外部提供方连接
-                  —— rpi 内核没有持久记忆原语（无 memory 工具、插件库也没有
-                  memory 包，MEMORY.md/USER.md 不存在），整组按 hermes 结构
-                  保留并禁用，每行写清缺什么。
+                · 持久记忆 / 用户档案 / 记忆提供方 / 预算 —— 由
+                  rpi-optchat 原生扩展提供（2026-11-24 用户指定并安装
+                  0.1.0）：会话 append-only 日志 + 128 KB 摘要树 +
+                  profile 存储 + zoom/search 工具；MEMORY.md / USER.md
+                  与 mem0 等外部提供方协议仍无对偶。
                 · 上下文引擎（compressor/default/custom）—— rpi 只有压缩器
                   一种实现，固定只读。
                 · 自动压缩 / 预留空间 / 保留近期 tokens / 摘要形态 —— rpi
@@ -2496,62 +2562,87 @@ export function SettingsOverlay({
           <section className="set-section">
             <h4 className="set-sub-title">记忆层</h4>
             <p className="set-hint">
-              hermes 的持久记忆（MEMORY.md / USER.md + 外部记忆提供方）在 rpi
-              引擎里没有对应原语：rpi 只有会话历史与压缩器，没有 memory 工具
-              或记忆提供方协议。下组按 hermes 的字段面完整保留，禁用状态即
-              引擎现状——不是隐藏，也不是假开关。
+              记忆层由 <span className="set-code">rpi-optchat</span> 原生扩展提供
+              （2026-11-24 已安装）：整段会话写入 append-only 日志，按 128 KB
+              摘要树折成有界视图，模型可用 zoom / search 工具回看；profile
+              存储（<span className="set-code">.rpi/optchat/&lt;profile&gt;.jsonl</span>）
+              跨会话保留。hermes 的 MEMORY.md / USER.md 与 mem0 等外部提供方
+              协议 rpi 没有对偶，仍不可用。
             </p>
+            {optchatError !== null && (
+              <div className="set-err">rpi-optchat 安装状态读取失败：{optchatError}</div>
+            )}
+            {optchat?.installed && optchat.missing.length > 0 && (
+              <div className="set-err">
+                安装不完整：缺少 {optchat.missing.join('、')}——重新执行{' '}
+                <span className="set-code">rpi install rpi-optchat --force</span>。
+              </div>
+            )}
             <div className="set-acct-card">
               <div className="set-acct-card-body">
                 <SetPrefRow
                   label="当前记忆提供方"
-                  desc="hermes 读取 GET /api/memory 判断当前记忆提供方是否就绪；宿主没有该接口。"
+                  desc="来自原生扩展登记表（native-packages.json）的真实状态。"
                 >
-                  <span className="set-row-miss">无 — 仅内置记忆（rpi 无记忆提供方）</span>
+                  {optchat === null ? (
+                    <span className="set-hint">读取中…</span>
+                  ) : optchat.installed ? (
+                    <span className="set-row-ok">
+                      OptChat {optchat.version}（rpi-optchat）
+                    </span>
+                  ) : (
+                    <span className="set-row-miss">
+                      未安装 — 执行 rpi install rpi-optchat
+                    </span>
+                  )}
                 </SetPrefRow>
                 <SetPrefRow
                   label="内置层"
-                  desc="hermes 的内置记忆层（MEMORY.md / USER.md，默认开启）；rpi 会话构建不读取任何记忆文件。"
+                  desc="OptChat 的会话日志 / 摘要树 / profile 存储；不是 hermes 的 MEMORY.md / USER.md。"
                 >
-                  <span className="set-row-miss">不可用</span>
+                  <span className="set-code">会话日志 + 128 KB 摘要树</span>
                 </SetPrefRow>
                 <SetPrefRow
                   disabled
                   label="记忆提供方"
-                  desc="hermes 支持内置与外部提供方（mem0 等，经 gateway + OAuth）；rpi 无该协议面。"
+                  desc="OptChat 是原生扩展（装即启用，没有第二个提供方可选）；mem0 等外部协议未移植。"
                 >
-                  <span className="set-code">内置（不可用）</span>
+                  <span className="set-code">OptChat（原生扩展）</span>
                 </SetPrefRow>
                 <SetPrefRow
                   disabled
                   label="持久记忆"
-                  desc="hermes：保存可跨会话复用的长期记忆。rpi 无 memory 工具，无法自动写入。"
+                  desc="rpi-optchat 记录整段会话并镜像到 profile 存储；插件没有单独开关，卸载才停。"
                 >
-                  <Switch aria-label="持久记忆" disabled />
+                  <Switch aria-label="持久记忆" checked={optchat?.installed === true} disabled />
                 </SetPrefRow>
                 <SetPrefRow
                   disabled
                   label="用户档案"
-                  desc="hermes：维护用户偏好档案。rpi 无对应存储与注入面。"
+                  desc="profile 存储：.rpi/optchat/<profile>.jsonl（RPI_OPTCHAT_STORE_DIR 可改根目录）。"
                 >
-                  <Switch aria-label="用户档案" disabled />
+                  <Switch aria-label="用户档案" checked={optchat?.installed === true} disabled />
                 </SetPrefRow>
                 <SetPrefRow
                   disabled
                   label="记忆预算"
-                  desc="hermes 默认 2200 字符；记忆层不可用，故无预算可配。"
+                  desc="摘要树预算 128 KB，超出后同级两两合并到 64 KB（插件内置常量）。"
                 >
-                  <span className="set-code">2200（hermes 默认）</span>
+                  <span className="set-code">128 KB / 折叠到 64 KB</span>
                 </SetPrefRow>
                 <SetPrefRow
                   disabled
                   label="档案预算"
-                  desc="hermes 默认 1375 字符；档案层不可用，故无预算可配。"
+                  desc="profile 存储不设上限；会话日志保留最近 20,000 条消息。"
                 >
-                  <span className="set-code">1375（hermes 默认）</span>
+                  <span className="set-code">无上限（20,000 条窗口）</span>
                 </SetPrefRow>
               </div>
             </div>
+            <p className="set-hint">
+              模型侧工具：zoom / search。宿主对话区暂未提供 /optchat 命令面板
+              （导入、切换 profile、压缩开关需在终端 rpi 里执行）。
+            </p>
 
             <h4 className="set-sub-title">上下文</h4>
             <div className="set-acct-card">
@@ -2617,10 +2708,10 @@ export function SettingsOverlay({
             <h4 className="set-sub-title">引擎实现（rpi compaction 真实字段）</h4>
             <p className="set-hint">
               上下两组的阈值/保护窗在 rpi 侧的等价表达。改动写入 settings.json
-              的 <span className="set-code">compaction</span> 对象与顶层{' '}
-              <span className="set-code">compaction_mode</span>；未设置的键 = rpi
-              内置默认（enabled 启用、reserve_tokens 16384、
-              keep_recent_tokens 20000、mode text、compaction_mode summary）。
+              的 <span className="set-code">compaction</span> 对象；未设置的键 =
+              rpi 内置默认（enabled 启用、reserve_tokens 16384、
+              keep_recent_tokens 20000）。rpi 没有 mode / compaction_mode
+              这两个旧 pi 键——2026-11-24 审计后已从本页删除。
             </p>
             {settingsMissing && (
               <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
@@ -2652,32 +2743,6 @@ export function SettingsOverlay({
                     onWrite={(v) => writeCompactionKey(K_KEEP_RECENT_TOKENS, v)}
                     placeholder="默认 20000"
                     read={readField(settingsParsed.doc, 'compaction', K_KEEP_RECENT_TOKENS)}
-                  />
-                </SetField>
-                <SetField name="mode" note="压缩输出的渲染方式">
-                  <SetEnumField
-                    onWrite={(v) => writeCompactionKey(K_MODE, v)}
-                    options={[
-                      { value: 'text', label: 'text（纯文本摘要）' },
-                      { value: 'snapcompact', label: 'snapcompact（紧凑快照）' },
-                    ]}
-                    read={readField(settingsParsed.doc, 'compaction', K_MODE)}
-                    unsetLabel="未设置（默认：text）"
-                  />
-                </SetField>
-                <SetField
-                  name="compaction_mode"
-                  note="自动压缩策略（顶层键，非 compaction 对象内）：summary = LLM 摘要；shake-first = 先无 LLM 收缩、仍超阈值才摘要；aggressive = 摘要且减半保留窗"
-                >
-                  <SetEnumField
-                    onWrite={writeCompactionMode}
-                    options={[
-                      { value: 'summary', label: 'summary（LLM 摘要）' },
-                      { value: 'shake-first', label: 'shake-first（先收缩）' },
-                      { value: 'aggressive', label: 'aggressive（减半保留窗）' },
-                    ]}
-                    read={readField(settingsParsed.doc, null, K_COMPACTION_MODE)}
-                    unsetLabel="未设置（默认：summary）"
                   />
                 </SetField>
               </>
@@ -2802,7 +2867,8 @@ export function SettingsOverlay({
               旧占位文案「没有需要在此配置的项」被 rpi 的 sessionDir 推翻
               （2026-11-14 补齐）——建/切/重命名/删除仍在左栏会话列表，
               本节只配"会话存在哪"。 ── */}
-          {activeSection === 'sessions' && (
+          {activeSection === 'sessions' &&
+            (activeSubView === null || !SESSIONS_CHILD_IDS.has(activeSubView)) && (
           <section className="set-section">
             <h4 className="set-sub-title">会话存储</h4>
             <p className="set-hint">
@@ -2871,265 +2937,194 @@ export function SettingsOverlay({
               的列表/搜索/排序/置顶/重命名/根目录增删/移除与恢复。节标题由
               右栏 set-inset-head 承担，面板不重复画。彻底删除缺 IPC（只有
               软删/恢复），面板内如实标注。 ── */}
-          {activeSection === 'projects' && <ProjectsSettingsSection headerLabel={null} />}
+          {(activeSection === 'projects' ||
+            (activeSection === 'sessions' && activeSubView === 'projects')) && (
+            <ProjectsSettingsSection headerLabel={null} />
+          )}
+
+          {/* 数据同步（会话管理 / 数据同步，2026-11-22）：ZCode
+              DataSyncSection 的空态结构（宿主单机版无远端设备栈）。 */}
+          {(activeSection === 'data-sync' ||
+            (activeSection === 'sessions' && activeSubView === 'data-sync')) && (
+            <DataSyncSettings />
+          )}
 
           {/* ── 归档会话（安全与数据 / 归档会话）：pi_sessions_index
               ({ archived: true }) 按项目分组，恢复 / 批量删除。活动会话
               跳过并明示（设置页不接管对话区）。 ── */}
-          {activeSection === 'archives' && <ArchivesSettingsSection headerLabel={null} />}
-
-          {/* ── 技能与工具（Agent 控制 / 技能与工具）：rpi 的追加资源目录 +
-              引擎默认工具列表（2026-11-14 补齐）。旧占位文案说"只读资源
-              面板是独立浮层、此处不嵌入"——资源**浏览**仍在左栏浮层
-              （pi_list_resources），本节是**引擎配置的写面**，两者不重复。 ── */}
-          {activeSection === 'skills-tools' && (
-          <section className="set-section">
-            <h4 className="set-sub-title">资源目录</h4>
-            <p className="set-hint">
-              rpi 装载技能 / 提示词模板 / 原生扩展时**追加**的目录（一行一个，
-              也可用逗号分隔）。相对路径相对 settings 的所属者：全局 settings
-              （<span className="set-code">~/.rpi/agent/settings.json</span>）
-              相对 <span className="set-code">~/.rpi/agent</span>，项目{' '}
-              <span className="set-code">.rpi/settings.json</span> 相对项目根。
-              留空 = 删键，只用默认目录。
-            </p>
-            {settingsMissing && (
-              <span className="set-file-missing">settings.json 尚不存在——首次保存将创建</span>
-            )}
-            {settingsText !== null && settingsParseError !== null && (
-              <div className="set-err">
-                settings 文档解析失败——修正「安全与数据 · 安全」里的 JSON 后才能使用本段：
-                {settingsParseError}
-              </div>
-            )}
-            {settingsParsed !== null && !('error' in settingsParsed) && (
-              <>
-                <SetField
-                  name="skillDirs"
-                  note="追加技能目录。宿主自己的技能页（左栏「技能与工具」浮层 / pi_capabilities）当前只扫 <workspace>/.rpi/skills 与 ~/.rpi/agent/skills，不读本键；rpi 建会话时读"
-                >
-                  <SetTextDraftField
-                    {...numDraftFor('skillDirs')}
-                    committed={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_SKILL_DIRS),
-                      ).committed
-                    }
-                    expect="字符串数组"
-                    invalidRaw={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_SKILL_DIRS),
-                      ).invalidRaw
-                    }
-                    multiline
-                    onReject={(msg) => rejectExtra('skills', msg)}
-                    onWrite={(v) => writeKey('skills', null, K_SKILL_DIRS, v)}
-                    parse={parseListText}
-                    placeholder={'skills\nD:\\team-skills'}
-                    rows={3}
-                  />
-                </SetField>
-                <SetField
-                  name="promptDirs"
-                  note="追加提示词模板目录（rpi 的 / 命令模板 loader；宿主资源面板只列举 ~/.rpi/agent/prompts）"
-                >
-                  <SetTextDraftField
-                    {...numDraftFor('promptDirs')}
-                    committed={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_PROMPT_DIRS),
-                      ).committed
-                    }
-                    expect="字符串数组"
-                    invalidRaw={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_PROMPT_DIRS),
-                      ).invalidRaw
-                    }
-                    multiline
-                    onReject={(msg) => rejectExtra('skills', msg)}
-                    onWrite={(v) => writeKey('skills', null, K_PROMPT_DIRS, v)}
-                    parse={parseListText}
-                    placeholder={'prompts\nD:\\team-prompts'}
-                    rows={3}
-                  />
-                </SetField>
-                <SetField
-                  name="extensionDirs"
-                  note="追加原生扩展（Rust cdylib）目录。宿主扩展列表（pi_extensions）只扫 ~/.rpi/agent/extensions 与登记表；rpi 启动扫描读本键"
-                >
-                  <SetTextDraftField
-                    {...numDraftFor('extensionDirs')}
-                    committed={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_EXTENSION_DIRS),
-                      ).committed
-                    }
-                    expect="字符串数组"
-                    invalidRaw={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_EXTENSION_DIRS),
-                      ).invalidRaw
-                    }
-                    multiline
-                    onReject={(msg) => rejectExtra('skills', msg)}
-                    onWrite={(v) =>
-                      writeKey('skills', null, K_EXTENSION_DIRS, v)
-                    }
-                    parse={parseListText}
-                    placeholder={'extensions\nD:\\team-extensions'}
-                    rows={3}
-                  />
-                </SetField>
-
-                <h4 className="set-sub-title">默认工具</h4>
-                <p className="set-hint">
-                  rpi 建会话时只启用这里列出的内置工具（留空 = 删键 =
-                  全部内置工具）。与宿主「工具集」开关不是同一个面：工具集是
-                  宿主的语义分组，存{' '}
-                  <span className="set-code">~/.rpi/agent/harness-capabilities.json</span>
-                  （独立文件，不写 settings.json 以免污染 rpi schema），且 rpi
-                  侧的工具过滤尚未接回宿主；这里写的是引擎自己的{' '}
-                  <span className="set-code">defaultTools</span>（rpi-cli
-                  session.rs 的 build 直接消费）。
-                </p>
-                <SetField
-                  name="defaultTools"
-                  note="一行一个工具名（如 read / bash / edit）；留空 = 全部内置工具"
-                >
-                  <SetTextDraftField
-                    {...numDraftFor('defaultTools')}
-                    committed={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_DEFAULT_TOOLS),
-                      ).committed
-                    }
-                    expect="字符串数组"
-                    invalidRaw={
-                      listFieldView(
-                        readField(settingsParsed.doc, null, K_DEFAULT_TOOLS),
-                      ).invalidRaw
-                    }
-                    multiline
-                    onReject={(msg) => rejectExtra('skills', msg)}
-                    onWrite={(v) =>
-                      writeKey('skills', null, K_DEFAULT_TOOLS, v)
-                    }
-                    parse={parseListText}
-                    placeholder={'read\nbash\nedit\nwrite'}
-                    rows={4}
-                  />
-                </SetField>
-                {extraFeedback.skills.error !== null && (
-                  <div className="set-err">{extraFeedback.skills.error}</div>
-                )}
-                {extraFeedback.skills.saved !== null && (
-                  <span className="set-saved">{extraFeedback.skills.saved}</span>
-                )}
-              </>
-            )}
-          </section>
+          {(activeSection === 'archives' ||
+            (activeSection === 'sessions' && activeSubView === 'archives')) && (
+            <ArchivesSettingsSection headerLabel={null} />
           )}
 
-          {/* ── 版本与更新（关于 / 版本与更新）：应用名/版本（package.json
-              构建期真值）+ 配置文件路径。没有"检查更新"能力——宿主无更新
-              服务，故不画假按钮。 ── */}
+          {activeSection === 'skills-tools' && <SkillsToolsSettings />}
+
+          {/* ── 版本与更新（关于 / 版本与更新）：hermes about-settings 的
+              结构重移植（2026-11-24 用户："版本与更新对齐 hermes 的关于
+              重新完整移植"）。
+              hermes = VersionHero（BrandMark + 版本）→ 更新状态卡（检查/
+              更新/发行说明）→ 自动更新行 → 卸载区。宿主没有更新服务端、
+              自动更新器与卸载器（本地构建），所以状态恒为"本地构建"，按钮
+              禁用并写明真实升级路径——不画假进度、不假装能检查。 ── */}
           {activeSection === 'updates' && (
           <section className="set-section">
-            {/* ── 版本英雄区（hermes VersionHero 的移植；logo/name 已换
-                mirach 品牌——用户原话"这个把名字和logo换了"）。 ── */}
-            <div className="set-about-hero">
-              <img alt="Mirach Harness" className="set-about-logo" src="/brand/logo.png" />
+            <div className="set-about-hero set-about-hero--center">
+              <img alt="Mirach Harness" className="set-about-logo set-about-logo--lg" src="/brand/logo.png" />
               <div>
                 <div className="set-about-name">{pkg.productName}</div>
-                <div className="set-row-env">
-                  应用 {pkg.version} · 引擎 rpi {engineVersion ?? '…'}
-                </div>
+                <div className="set-row-env">版本 {pkg.version}</div>
               </div>
             </div>
-            <dl className="set-about-defs">
-              <dt>应用名</dt>
-              <dd>
-                {pkg.productName}（{pkg.name}）
-              </dd>
-              <dt>应用版本</dt>
-              <dd>{pkg.version}</dd>
-              <dt>引擎版本</dt>
-              <dd>rpi {engineVersion ?? '…'}</dd>
-              {auth !== null && (
-                <>
-                  <dt>settings</dt>
-                  <dd className="set-row-env">{auth.settingsPath}</dd>
-                  <dt>models</dt>
-                  <dd className="set-row-env">{auth.modelsPath}</dd>
-                  <dt>auth</dt>
-                  <dd className="set-row-env">{auth.authPath}</dd>
-                </>
-              )}
-            </dl>
-            <h4 className="set-sub-title">更新</h4>
-            {/* hermes UpdateChannelRow 的形态移植（stable/main 分段）；
-                本宿主无更新服务端与自动更新器——分段禁用 + 如实说明。 */}
-            <div className="set-row">
-              <span className="set-row-provider">更新渠道</span>
-              <span className="set-actions" title="宿主没有更新服务端与自动更新器——升级 = 更新上游源 + 重拷 vendor 后重建">
-                <button className="set-btn set-btn-primary" disabled type="button">
-                  稳定版
-                </button>
-                <button className="set-btn" disabled type="button">
-                  每日构建
-                </button>
-              </span>
+
+            <div className="set-acct-card">
+              <div className="set-acct-card-head">更新</div>
+              <div className="set-acct-card-body">
+                <div className="set-acct-field">
+                  <div className="set-acct-field-text">
+                    <span className="set-acct-field-label">本地构建</span>
+                    <p className="set-acct-field-desc">
+                      宿主没有更新服务端与自动更新器；当前版本即运行中的构建。
+                      升级 = 更新上游源 + 重拷 vendor 后重新构建。
+                    </p>
+                  </div>
+                  <div className="set-acct-field-control">
+                    <div className="set-actions">
+                      <button
+                        className="set-btn"
+                        disabled
+                        title="没有更新服务端，无法检查远端版本"
+                        type="button"
+                      >
+                        检查更新
+                      </button>
+                      <button
+                        className="set-btn set-btn-primary"
+                        disabled
+                        title="没有更新通道，无法在线更新"
+                        type="button"
+                      >
+                        立即更新
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <SetPrefRow
+                  label="自动更新"
+                  desc="hermes 在后台自动检查并安装桌面更新；宿主没有更新器，无法开启。"
+                >
+                  <Switch aria-label="自动更新" disabled />
+                </SetPrefRow>
+                <SetPrefRow
+                  label="更新渠道"
+                  desc="hermes 提供稳定版 / 每日构建两条通道；宿主是本地构建，没有渠道可选。"
+                >
+                  <span className="set-code">本地构建（唯一）</span>
+                </SetPrefRow>
+              </div>
             </div>
-            <p className="set-hint">
-              应用版本来自 package.json、引擎版本来自 vendored pi 的 Cargo.toml
-              ——两者都是构建期真值。宿主没有更新检查通道（无更新服务端），
-              因此不提供"检查更新"按钮；升级 = 更新上游源 + 重拷 vendor 后重建。
-            </p>
+
+            <h4 className="set-sub-title">运行信息</h4>
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <dl className="set-about-defs" style={{ padding: '12px 16px' }}>
+                  <dt>应用名</dt>
+                  <dd>
+                    {pkg.productName}（{pkg.name}）
+                  </dd>
+                  <dt>应用版本</dt>
+                  <dd>{pkg.version}</dd>
+                  <dt>引擎版本</dt>
+                  <dd>rpi {engineVersion ?? '…'}</dd>
+                  {auth !== null && (
+                    <>
+                      <dt>settings</dt>
+                      <dd className="set-row-env">{auth.settingsPath}</dd>
+                      <dt>models</dt>
+                      <dd className="set-row-env">{auth.modelsPath}</dd>
+                      <dt>auth</dt>
+                      <dd className="set-row-env">{auth.authPath}</dd>
+                    </>
+                  )}
+                </dl>
+              </div>
+            </div>
           </section>
           )}
 
           {/* ── 通知（基础设置 / 通知）：hermes notifications-settings 的
-              移植——主开关 + 七类事件开关 + OS 通道测试。偏好持久化在
-              localStorage（hermes 同语义，mirach: 前缀）；派发端（会话
-              事件 → 通知）在 message-queue 一轮接线，当前测试按钮即
-              完整 OS 通道链路。 ── */}
-          {activeSection === 'notifications' && activeSubView !== 'sounds' && (
+              全链路复制（2026-11-24 用户："通知项移植的 hermes 的设置里的
+              通知，是不是全链路复制的"）。单页结构：说明 → 启用通知 →
+              七类事件 ToggleRow → 完成提示音（选择 + 预览）→ 测试按钮 →
+              后台提示。开关是右侧 Switch，行内垂直居中（hermes
+              primitives.ToggleRow / ListRow 同构）。
+              偏好持久化在 localStorage（hermes 同语义，mirach: 前缀）；
+              派发端（会话事件 → 通知）在 message-queue 一轮接线。 ── */}
+          {activeSection === 'notifications' && (
           <section className="set-section">
-            <h4 className="set-sub-title">系统通知</h4>
             <p className="set-hint">
-              控制哪些事件可以弹系统通知。偏好保存在本机
-              （localStorage，主窗与设置窗共享）；派发端接线后，这里的状态
-              就是事件 → 通知管线的门控。
+              原生桌面通知，区别于应用内提示。设置按设备保存，每台电脑各自独立。
             </p>
-            <label className="set-row">
-              <span className="set-row-provider">启用系统通知</span>
-              <input
-                checked={notifyPrefs.enabled}
-                onChange={(e) => onNotifyEnabled(e.target.checked)}
-                type="checkbox"
-              />
-            </label>
-            <h4 className="set-sub-title">按事件种类</h4>
-            {NOTIFICATION_KINDS.map((kind) => (
-              <label className="set-row" key={kind}>
-                <span className="set-row-provider">
-                  {kind === 'approval' && '需要审批时'}
-                  {kind === 'input' && '需要输入时'}
-                  {kind === 'turnDone' && '回合完成'}
-                  {kind === 'turnError' && '回合出错'}
-                  {kind === 'backgroundDone' && '后台任务完成'}
-                  {kind === 'credits' && '额度提醒'}
-                  {kind === 'plugin' && '插件事件'}
-                </span>
-                <input
-                  checked={notifyPrefs.kinds[kind]}
-                  disabled={!notifyPrefs.enabled}
-                  onChange={(e) => onNotifyKind(kind, e.target.checked)}
-                  type="checkbox"
-                />
-              </label>
-            ))}
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <SetPrefRow label="启用通知" desc="关闭后静音下方所有通知。">
+                  <Switch
+                    aria-label="启用通知"
+                    checked={notifyPrefs.enabled}
+                    onCheckedChange={onNotifyEnabled}
+                  />
+                </SetPrefRow>
+                {NOTIFICATION_KINDS.map((kind) => {
+                  const copy = NOTIFICATION_COPY[kind]
+                  return (
+                    <SetPrefRow desc={copy.desc} key={kind} label={copy.label}>
+                      <Switch
+                        aria-label={copy.label}
+                        checked={notifyPrefs.enabled && notifyPrefs.kinds[kind]}
+                        disabled={!notifyPrefs.enabled}
+                        onCheckedChange={(on) => onNotifyKind(kind, on)}
+                      />
+                    </SetPrefRow>
+                  )
+                })}
+              </div>
+            </div>
+
+            <h4 className="set-sub-title">完成提示音</h4>
+            <div className="set-acct-card">
+              <div className="set-acct-card-body">
+                <SetPrefRow
+                  label="提示音"
+                  desc="智能体回合结束时播放。可在此选择预设并预览。"
+                >
+                  <div className="set-actions">
+                    <select
+                      className="set-select"
+                      onChange={(e) => {
+                        const id = Number(e.target.value)
+                        setCompletionVariant(id)
+                        setCompletionSoundVariantId(id)
+                        previewCompletionSound(id)
+                      }}
+                      value={completionVariant}
+                    >
+                      {COMPLETION_SOUND_VARIANTS.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="set-btn"
+                      onClick={() => previewCompletionSound(completionVariant)}
+                      type="button"
+                    >
+                      预览
+                    </button>
+                  </div>
+                </SetPrefRow>
+              </div>
+            </div>
+
             <div className="set-actions">
               <button className="set-btn" onClick={onNotifyTest} type="button">
                 发送测试通知
@@ -3140,59 +3135,7 @@ export function SettingsOverlay({
                 </span>
               )}
             </div>
-          </section>
-          )}
-
-          {/* ── 通知 · 声音子页（hermes notifications-settings 的 sounds
-              子页移植，2026-10-24）：静音开关 + 完成音 15 变体选择 +
-              预览（WebAudio 合成器逐字移植，lib/completion-sound.ts）。 ── */}
-          {activeSection === 'notifications' && activeSubView === 'sounds' && (
-          <section className="set-section">
-            <h4 className="set-sub-title">声音</h4>
-            <label className="set-row">
-              <span className="set-row-provider">静音应用声音</span>
-              <input
-                checked={soundMuted}
-                onChange={(e) => {
-                  setHapticsMutedPref(e.target.checked)
-                  setSoundMuted(e.target.checked)
-                }}
-                type="checkbox"
-              />
-            </label>
-            <h4 className="set-sub-title">完成音</h4>
-            <p className="set-hint">
-              回合完成时的提示音（hermes 同款 15 个预设，WebAudio 合成）。
-              预览绕过静音开关——静音只影响回合完成时的实际播放。
-            </p>
-            <label className="set-row">
-              <span className="set-row-provider">提示音</span>
-              <select
-                className="set-select"
-                onChange={(e) => {
-                  const id = Number(e.target.value)
-                  setCompletionVariant(id)
-                  setCompletionSoundVariantId(id)
-                  previewCompletionSound(id)
-                }}
-                value={completionVariant}
-              >
-                {COMPLETION_SOUND_VARIANTS.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="set-actions">
-              <button
-                className="set-btn"
-                onClick={() => previewCompletionSound(completionVariant)}
-                type="button"
-              >
-                预览
-              </button>
-            </div>
+            <p className="set-hint">完成提醒仅在 Mirach 处于后台时触发。</p>
           </section>
           )}
 
@@ -3601,9 +3544,11 @@ export function SettingsOverlay({
 
           {/* ── 核心连接（基础设置 / 核心连接）：hermes gateway-settings 的
               完整复刻（src/app/settings/gateway-settings.tsx，2026-10-24
-              子代理移植）——四张连接模式卡（云/远程/SSH 按实态禁用）+
-              本地面板（端点/token/复制）+ 诊断行。hermes 的远程/云/SSH
-              模式深绑它的网关后端，未实现——卡面如实禁用。
+              子代理移植）——四张连接模式卡（远程/云/SSH 读连接注册表实态：
+              有连接可跳「连接」页管理，无连接置灰指向同一入口）+ 本地面板
+              （端点/token/复制）+ 诊断行。连接注册表的数据面 =
+              pi_connections.rs + pi_gateway.rs + pi_ssh.rs（2026-11-22 与本页
+              对齐；此前这里把远程/云/SSH 写成"单机未实现"，已纠正）。
               下半段「引擎网络」= rpi settings.json 的 HTTP 面（2026-11-14
               补齐）：rpi 建会话时读取（session::build 的 saved_settings
               段），改动对下一个会话生效。 ── */}
@@ -3722,6 +3667,63 @@ export function SettingsOverlay({
                         placeholder="30000 或 disabled"
                       />
                     </SetField>
+
+                    <h4 className="set-sub-title">终端执行</h4>
+                    <p className="set-hint">
+                      rpi-tools 执行 bash 时使用的 shell 与每条命令前缀（从
+                      「技能与工具」迁入；那页已改为纯本地开关）。未设置 =
+                      自动发现 shell，环境变量 RPI_BASH_PATH 可覆盖发现结果。
+                    </p>
+                    <SetField
+                      name="Shell 路径"
+                      note="自定义 shell 可执行文件（如 Git Bash / PowerShell 的绝对路径）；留空 = 自动发现。"
+                    >
+                      <SetTextDraftField
+                        {...numDraftFor('shellPath')}
+                        committed={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_SHELL_PATH),
+                          ).committed
+                        }
+                        expect="字符串"
+                        invalidRaw={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_SHELL_PATH),
+                          ).invalidRaw
+                        }
+                        onReject={(msg) => rejectExtra('connection', msg)}
+                        onWrite={(v) =>
+                          writeKey('connection', null, K_SHELL_PATH, v)
+                        }
+                        parse={parsePlainText}
+                        placeholder="C:\\Program Files\\Git\\bin\\bash.exe"
+                      />
+                    </SetField>
+                    <SetField
+                      name="Shell 命令前缀"
+                      note="每条 bash 命令执行前拼接的脚本片段（如 shopt -s expand_aliases）；留空 = 无前缀。"
+                    >
+                      <SetTextDraftField
+                        {...numDraftFor('shellCommandPrefix')}
+                        committed={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_SHELL_COMMAND_PREFIX),
+                          ).committed
+                        }
+                        expect="字符串"
+                        invalidRaw={
+                          textFieldView(
+                            readField(settingsParsed.doc, null, K_SHELL_COMMAND_PREFIX),
+                          ).invalidRaw
+                        }
+                        onReject={(msg) => rejectExtra('connection', msg)}
+                        onWrite={(v) =>
+                          writeKey('connection', null, K_SHELL_COMMAND_PREFIX, v)
+                        }
+                        parse={parsePlainText}
+                        placeholder="shopt -s expand_aliases"
+                      />
+                    </SetField>
                     {extraFeedback.connection.error !== null && (
                       <div className="set-err">{extraFeedback.connection.error}</div>
                     )}
@@ -3739,7 +3741,6 @@ export function SettingsOverlay({
                签名至 Mirach + 套餐与账单（打开控制台）+ 会话卡（退出登录 /
                清除应用数据 + 二次确认）。上游的「偏好」卡按用户定稿移到
                常规节（语言 / 时区）。 ── */}
-          {activeSection === 'account' && <AccountSettings />}
 
           {/* ── 个性（基础设置 / 个性）：openhuman PersonaPanel 的完整移植
                （src/app/settings/persona-settings.tsx，2026-10-26）——
@@ -3747,6 +3748,8 @@ export function SettingsOverlay({
                + 单一保存条。SOUL.md 落 ~/.pi/agent/SOUL.md，建会话时注入
                append_system_prompt。 ── */}
           {activeSection === 'persona' && <PersonaSettings />}
+          {activeSection === 'appearance' && <AppearanceSettings />}
+          {activeSection === 'avatar' && <AvatarSettings />}
 
           {/* ── 语音（基础设置 / 语音）：GPT-Live 双工语音的配置面
               （2026-11-12，moss live 桥接层）——引擎模式 / OpenAI key
@@ -3755,12 +3758,22 @@ export function SettingsOverlay({
                pi_voice_live_status。 ── */}
           {activeSection === 'voice' && <VoiceSettings />}
 
+          {/* ── 行为与工具（Agent 控制 / 行为与工具）：ZCode 设置页
+              `agentBehavior` 节的完整移植（2026-11-22，逐行文案照抄
+              zh-CN.ts:3572-3723）。两枚显示开关真实接线
+              （conversation-display-store → 消息流渲染）；无引擎数据面的
+              行按「引擎固定限制」同规禁用 + 「宿主实况」说明。 ── */}
+          {activeSection === 'agent-behavior' && <AgentBehaviorSettings />}
+
           {/* ── 使用统计（安全与数据 / 使用统计）：ZCode AppUsagePanel 的移植
                （src/app/settings/usage-settings.tsx，2026-10-26）——
                概览条 + 52 周热力图 + 按天趋势 + 按模型占比，数据 = 本地
                pi 会话聚合（pi_usage_snapshot）。ZCode 的 Coding Plan tab
                读云端订阅额度，宿主没有 → 不移植（页面底部如实说明）。 ── */}
-          {activeSection === 'usage-stats' && <UsageSettings />}
+          {(activeSection === 'usage-stats' ||
+            (activeSection === 'sessions' && activeSubView === 'usage-stats')) && (
+            <UsageSettings />
+          )}
 
           {/* ── 常规（基础设置 / 常规）：openhuman 账户页「偏好」卡的移植
                （用户 2026-10-25 定稿：偏好卡不要，语言与时区搬到这里）。
@@ -3979,7 +3992,7 @@ export function SettingsOverlay({
                         max={U32_MAX}
                         onReject={(msg) => rejectNum('retry', msg)}
                         onWrite={(v) => writeRetryKey(K_MAX_RETRIES, v)}
-                        placeholder="默认 3"
+                        placeholder="默认 10"
                         read={readField(settingsParsed.doc, 'retry', K_MAX_RETRIES)}
                       />
                     ) : (
@@ -4031,41 +4044,6 @@ export function SettingsOverlay({
               <span className="set-saved">{extraFeedback.sessions.saved}</span>
             )}
 
-            {/* ── 引擎固定限制（只读：rpi 编译期常量，无运行期配置面） ── */}
-            <h4 className="set-sub-title">引擎固定限制</h4>
-            <div className="set-acct-card">
-              <div className="set-acct-card-body">
-                <SetPrefRow
-                  disabled
-                  label="终端输出上限"
-                  desc="rpi-tools 的 bash 输出截断常量（truncate.rs DEFAULT_MAX_BYTES），引擎编译期固定。"
-                >
-                  <span className="set-code">50 KB（51200 字节）</span>
-                </SetPrefRow>
-                <SetPrefRow
-                  disabled
-                  label="文件分页上限"
-                  desc="read 工具的 head 截断常量（DEFAULT_MAX_LINES）。"
-                >
-                  <span className="set-code">2000 行</span>
-                </SetPrefRow>
-                <SetPrefRow
-                  disabled
-                  label="行长度上限"
-                  desc="grep 匹配行截断常量（GREP_MAX_LINE_LENGTH，与 ZCode 默认 2000 不同）。"
-                >
-                  <span className="set-code">500 字符</span>
-                </SetPrefRow>
-                <SetPrefRow
-                  disabled
-                  label="检查点上限"
-                  desc="无文件检查点原语；会话检查点（rpi-checkpoints）无数量上限。"
-                >
-                  <span className="set-code">不适用</span>
-                </SetPrefRow>
-              </div>
-            </div>
-
             {appPrefsError !== null && (
               <div className="set-err">{appPrefsError}</div>
             )}
@@ -4076,7 +4054,8 @@ export function SettingsOverlay({
           )}
 
           {/* ── 插件贡献页（插件集成组，2026-11-07）：render 来自
-              settings.page 贡献（mirach-connections / mirach-pkg）。 ── */}
+              settings.page 贡献（当前无 bundled 插件注册——「连接」页
+              已删除，连接注册表内嵌在「核心连接」页）。 ── */}
           {activeSection.startsWith('plugin:') &&
             usePluginContributions()['settings.page']
               .filter((c) => c.id === activeSection)

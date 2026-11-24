@@ -77,11 +77,15 @@ export const GLASS_SUPPORTED =
  * Whether the setting is worth showing at all. Linux has neither half —
  * `setOpacity` is a documented no-op and there is no native material — so
  * Settings hides the row rather than offering a lever that does nothing.
+ *
+ * 宿主（Tauri）没有 Electron 的 `translucencySupported` / `setTranslucency`
+ * 桥；窗口按 tauri.conf 的不透明壳运行。这里必须如实返回 false：假报
+ * Windows 可用会让外观页出现两个拖了没反应的滑杆（规矩 12：不放假入口）。
  */
 export const TRANSLUCENCY_SUPPORTED =
   typeof window !== 'undefined' && typeof window.hermesDesktop?.translucencySupported === 'boolean'
     ? window.hermesDesktop.translucencySupported
-    : isMacPlatform() || isWindowsPlatform()
+    : false
 
 /** Windows collapses the frost ladder — see `glassMaterialsFor`. */
 export const GLASS_IS_WINDOWS = GLASS_SUPPORTED && !isMacPlatform()

@@ -56,6 +56,12 @@ pub struct AppPrefs {
     pub max_agent_steps: u32,
     /// 上次打开的会话文件绝对路径（启动恢复用）。None = 无历史。
     pub last_session_path: Option<String>,
+    /// 自动归档旧会话（ZCode `taskAutoArchiveEnabled`）：开启后调度器按
+    /// 「最后更新早于保留时长」把非置顶/非当前会话写入归档表。
+    pub task_auto_archive_enabled: bool,
+    /// 归档保留时长（天，ZCode `taskAutoArchiveOlderThanDays`；UI 档位
+    /// 3/7/14/30，服务端语义只要求 ≥1）。
+    pub task_auto_archive_older_than_days: u32,
 }
 
 impl Default for AppPrefs {
@@ -68,6 +74,8 @@ impl Default for AppPrefs {
             open_links_externally: false,
             max_agent_steps: 100,
             last_session_path: None,
+            task_auto_archive_enabled: false,
+            task_auto_archive_older_than_days: 30,
         }
     }
 }
@@ -226,6 +234,15 @@ fn merge_patch(current: &AppPrefs, patch: &serde_json::Value) -> Result<AppPrefs
         return Err(format!(
             "最大智能体步数 {} 超出范围（0 = 不设上限，或 1..=100000）",
             next.max_agent_steps
+        ));
+    }
+    // 自动归档保留时长：必须 ≥1 天（0 = 关闭语义由 enabled 开关承担；
+    // 上限 3650 天防手改出荒谬值）。
+    if next.task_auto_archive_older_than_days == 0 || next.task_auto_archive_older_than_days > 3650
+    {
+        return Err(format!(
+            "归档保留时长 {} 天超出范围（1..=3650）",
+            next.task_auto_archive_older_than_days
         ));
     }
     Ok(next)

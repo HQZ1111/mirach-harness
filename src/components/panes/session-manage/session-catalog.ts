@@ -275,6 +275,8 @@ export interface SessionsIndexSession {
   messageCount: number
   /** Unix 毫秒（与 pi_list_sessions.lastModifiedMs 同源）。 */
   lastModified: number
+  /** header.createdAt 的 Unix 毫秒（0 = 旧会话文件没有创建时间）。 */
+  createdAt: number
   parentSessionId: string | null
   /** 显式 sessionProjects 优先，否则按 cwd 落在项目根内推断；null = 无归属。 */
   projectId: string | null
@@ -352,6 +354,9 @@ export interface SessionCatalogState {
   setPinnedOrder(ids: readonly string[]): void
   setManualOrder(map: Readonly<Record<string, number>>): void
   toggleArchive(id: string): void
+  /** 显式归档/取消归档（自动归档调度器用：并发窗口里 toggle 会把刚归档
+   *  的会话再切回来；显式值幂等）。 */
+  setArchived(id: string, archived: boolean): void
   ackSession(id: string, messageCount: number): void
   markSessionUnread(id: string): void
   ackAll(rows: readonly UnreadRowInput[]): void
@@ -824,6 +829,15 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
     const next = get().archived.includes(id)
       ? get().archived.filter((x) => x !== id)
       : [...get().archived, id]
+    set({ archived: next })
+    persist({ ...get(), archived: next })
+  },
+  setArchived: (id, archived) => {
+    const has = get().archived.includes(id)
+    if (has === archived) return
+    const next = archived
+      ? [...get().archived, id]
+      : get().archived.filter((x) => x !== id)
     set({ archived: next })
     persist({ ...get(), archived: next })
   },

@@ -56,8 +56,12 @@ token 存 OS keyring），可省掉宿主写 headers 这一层；非阻塞。
   `cancelled`+meta 落盘 ✓；fixture 过期 Running → `indeterminate`
   （"driver restarted while the task was running"）→ take-once 清空 ✓。
 
-**仍缺（引擎后续可选项）**：router(auto) / lead 路由的一次廉价模型调用
-（宿主当前按 bounded 收尾）——与租约无关。
+**~~仍缺（引擎后续可选项）~~ 已收口（2026-11-19/20）**：router(auto) 已接
+（宿主前端 `routeCanonicalRoom` 一次廉价模型调用 → `room.routed`，实机）；
+lead 路由在宿主 Rust 决策层移植（`hosted_rooms/lead.rs` + `plan.rs`/
+`decision_engine` 的 `lead_routing` 任务，`groups_plan` 按设置发轮），
+前端走通用成员轮——**未单独实机验证**（见 `docs/bots-port-gaps.md` §8 表）。
+与租约无关。
 
 ## 4. 会话回收事件 `session.reclaimed`
 
@@ -122,8 +126,11 @@ rpi 是单机单引擎、单 profile。宿主 `groups_dispatch` 对 peer 方法�
   `groups.peer.register/revoke`（pinned catalog 校验 + room-links 持久化）、
   canonical driver 远端成员全 RPC 走对端 WS、roster peer 行形状；实机（插件自身
   `createGroupAcrossConnections`）1 本机+2 远端建房、全员 seat、双远端回复、
-  settled。**仍缺**：lending 侧（本机对外 **RoomLink HTTP 服务端** +
-  `groups.peer.invite`——本机无对外网关监听，invite 明确报错不伪造）。
+  settled。~~**仍缺**：lending 侧~~ **✅ 已接（2026-11-19）**：本机对外
+  **hermes 兼容 RoomLink 服务端**全量落地（WS `groups.peer.invite/register/
+  revoke` + `/v1/room-members/*` + `/v1/runs` 全族 + `groups.changed` 扇出，
+  `pi_gateway_peer.rs` + `pi_peer.rs` + `hosted_rooms/grants.rs`），按 hermes
+  客户端语义 E2E 全绿（见 `AGENTS.md`「hermes peer lending wire」）。
 
 ## PR 待办（给 `github.com/bigfish1913/pi-rust`）
 

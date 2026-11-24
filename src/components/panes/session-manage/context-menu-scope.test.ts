@@ -46,9 +46,17 @@ describe('resolveContextMenuScope', () => {
   })
 
   it('机器人行根（data-roster-key，2026-11-07 移植）→ owned', () => {
-    // 行根右键自管（bots-pane.tsx 的 onContextMenu 开行菜单）——全局监听早退
+    // 行根右键自管（bot-row.tsx 的 Radix ContextMenu 开行菜单）——全局监听早退
     expect(
       resolveContextMenuScope(stubElMatching(['[data-roster-key]', CONTEXT_MENU_OWNER_SELECTOR])),
+    ).toBe('owned')
+  })
+
+  it('机器人分组行根（data-bots-menu-row，2026-11-20 修正）→ owned', () => {
+    // 分组行没有 data-roster-key（键是群名不是 bot 名），漏登记会让全局
+    // 窗口动词菜单抢走右键——hermes 的分组行右键是「打开群聊 / 解散」。
+    expect(
+      resolveContextMenuScope(stubElMatching(['[data-bots-menu-row]', CONTEXT_MENU_OWNER_SELECTOR])),
     ).toBe('owned')
   })
 

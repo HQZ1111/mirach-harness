@@ -3,29 +3,35 @@
 //! + `packages/contracts/src/tools/target.ts` 逐条照抄；状态机住在 rpi-goal，
 //! 宿主只负责触发与模型裁判）。
 //!
-//! **状态真源 = rpi-goal 插件**（vendored fork，`G:\mirach-plugins\rpi-goal`）：
-//! 它的 `goal-state` 条目现在自带 ZCode 形状的 `status`
-//! （active / paused / verifying / verified / notSatisfied→active + 结论 /
-//! failed）、`iterations[]`、`verifications[]`。宿主通过插件的内部命令面驱动
-//! 校验边界：
+//! **状态真源 = rpi-goal 插件**（vendored fork，`G:\mirach-plugins\rpi-goal`，
+//! 已升级到上游 v2 模块化状态机）：插件状态词表 =
+//! `active / verifying / paused / blocked / waiting / usage_limited /
+//! budget_limited / complete`（ZCode 六态是它的子集；宿主面板把 `complete`
+//! 映射为「已完成」）。宿主通过插件的内部命令面驱动校验边界：
 //!
-//! 1. 一次 run 收尾（`AgentEvent::AgentEnd`）→ 闸门（当前会话 / goal
+//! 0. **上台即武装**（`install_live`）：`/goal _verify-enable on` 让插件的
+//!    续跑 worker 在 run 收尾时等待宿主裁决，而不是自己盲目续跑；
+//! 1. 一次 run 收尾（`AgentEvent::AgentEnd`；本引擎不发 `AgentSettled`，
+//!    插件 vendored 版把 settle 挂到 AgentEnd 上）→ 闸门（当前会话 / goal
 //!    `active` / 后台作业不在跑 / 单槽在途，照上游 `verifyBeforeFirstContinue`）；
-//! 2. `"/goal" "_verify-start {items:[…]}"` → 插件开新迭代行、status →
+//! 2. `"/goal" "_verify-start [{items}]"` → 插件开新迭代行、status →
 //!    `verifying`（面板「目标校验中」）；
 //! 3. 宿主用 rpi 的 side-question 原语跑无工具单轮裁判
 //!    （`RuntimeActionHost::side_question` → `create_side_question`：独立会话、
 //!    64KB 文本摘录；摘录不含工具输入/结果，所以问句里带本轮 todo 快照）；
 //! 4. `"_verify-result {outcome, reason, nextAction}"` → 插件落结论并执行
-//!    ZCode 的后续语义：pass → `verified`（终态可见，不归档）；notSatisfied →
-//!    保持 `active` 并用 **model-only 自定义消息**自动续跑（nextAction）；
-//!    failed → `failed`；请求失败/超时 → 宿主发 `cancelled` → 插件置 `paused`
-//!    （上游 cancel 语义）。坏 JSON = fail-open `pass` + 保留 reason（上游
-//!    `failOpen…` 原语义，防止裁判链路故障把已交付目标卡死）。
+//!    ZCode 的后续语义：pass → `complete`（终态可见，不归档）；notSatisfied →
+//!    保持 `active` 且把 verdict 写进下一次续跑提示词，由插件 worker 发送；
+//!    failed → `paused` + cause `verification_failed`；请求失败/超时 → 宿主发
+//!    `cancelled` → `paused` + cause `verification_cancelled`（上游 cancel
+//!    语义）。坏 JSON = fail-open `pass` + 保留 reason（上游 `failOpen…`
+//!    原语义，防止裁判链路故障把已交付目标卡死）。
 //!
 //! **孤儿校验修复**：会话在 `verifying` 期间被切走/应用退出，状态会留在会话
 //! 分支里。会话每次上台（`install_live`）跑一次修复：goal 仍是 `verifying`
-//! 且本进程没有对应在途校验 → 发 `cancelled`（回 `paused`）。
+//! 且本进程没有对应在途校验 → 发 `cancelled`（回 `paused`）。插件自身还有
+//! 兜底：边界 5 分钟无人应答 → `verification_timeout` 停止。宿主进程内另有
+//! 150s 上限，到期主动发 `cancelled`。
 //!
 //! **为什么模型调用在宿主**：rpi 的模型原语（runtime action 24/25
 //! ChildAgent / SideQuestion）只挂在工具/命令的 invocation bridge 上，
@@ -439,6 +445,49 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Arm the plugin-side completion bridge (once per session install; the flag is
+/// persisted and idempotent). A session without rpi-goal just logs — the goal
+/// system is absent, which is not an error.
+///
+/// **回执核验（2026-11-20 实锤加固）**：`/goal` 对不认识的动词走「速记 start」
+/// 兜底——官方 goal 插件（无 `_verify-enable`）会把这条武装命令变成一个
+/// objective 为 `_verify-enable on` 的**假目标**并开始烧轮次（实机出现过，
+/// 与"CPU 温度降到 20 度"残留目标同类）。武装回执必须是确认性的（v2 fork
+/// 的回执含 `verification`/`_verify` 字样）；看到「Goal started」即假目标，
+/// 立刻归档止损并红印到日志。
+pub(crate) fn arm_goal_verification(shared: &crate::pi_session::EngineShared) {
+    let reply = match crate::pi_session::run_goal_command(shared, "/goal", "_verify-enable on") {
+        Ok(reply) => reply,
+        Err(error) => {
+            eprintln!("[goal-verify] 未武装完成校验：{error}");
+            return;
+        }
+    };
+    let text = reply
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let lowered = text.to_lowercase();
+    if lowered.contains("goal started") || lowered.contains("🎯 goal started") {
+        // The plugin did not recognize the verb and shorthand-started a bogus
+        // goal. Archive it immediately so it cannot burn turns, and say so —
+        // this host must never leave a fabricated goal running silently.
+        eprintln!(
+            "[goal-verify] 武装命令被 goal 插件当成了速记 start（插件无 _verify-enable）：已归档假目标"
+        );
+        if let Err(error) = crate::pi_session::run_goal_command(shared, "/goal", "stop") {
+            eprintln!("[goal-verify] 假目标归档失败：{error}");
+        }
+        return;
+    }
+    if !lowered.contains("_verify") && !lowered.contains("verification") {
+        eprintln!(
+            "[goal-verify] 武装回执不含校验确认，插件可能不支持完成校验：{text}"
+        );
+    }
+}
+
 /// 一次 run 收尾后的目标校验周期（非阻塞：由调用方 `rt.spawn`）。
 ///
 /// 闸门（照 ZCode）：会话不是当前会话 / goal 非 `active` / 有后台作业在跑 /
@@ -465,7 +514,8 @@ pub(crate) async fn run_verification(
         return Ok(());
     };
     if goal.status != "active" {
-        // verifying（另一路在跑）/ verified / failed / paused 都不再校验。
+        // verifying（另一路在跑）/ paused / blocked / waiting / usage_limited /
+        // budget_limited / complete 都不再开新边界。
         return Ok(());
     }
     if background_running(latest_custom(&harness, BACKGROUND_TASKS_ENTRY).await?.as_ref()) {
@@ -537,7 +587,7 @@ async fn verify_cycle(
         "/goal",
         &format!(
             "_verify-start {}",
-            json!({"items": items})
+            json!(items)
         ),
     )
     .map_err(|e| format!("校验开始失败: {e}"))?;

@@ -491,23 +491,30 @@ const IMAGE_MIME_ALLOWLIST: &[&str] = &["image/png", "image/jpeg", "image/webp",
 
 /// 解析并校验 POST body 的 images 字段（缺省/Null = 无图；形状错/MIME
 /// 越界/空 data = Err，调用方转 400）。
+/// 图片条目校验（POST images[] 与 `pi_steer` 的 images 共用）：空 data /
+/// 白名单外 MIME = Err（调用方转 400 / IPC Err，不静默丢）。
+pub(crate) fn validate_images(images: &[AguiImage]) -> Result<(), String> {
+    for img in images {
+        if img.data.is_empty() {
+            return Err("images[].data must be non-empty base64".into());
+        }
+        if !IMAGE_MIME_ALLOWLIST.contains(&img.mime_type.as_str()) {
+            return Err(format!(
+                "unsupported image mimeType {:?} (allowed: png/jpeg/webp/gif)",
+                img.mime_type
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_images(body: &serde_json::Value) -> Result<Vec<AguiImage>, String> {
     match body.get("images") {
         None | Some(serde_json::Value::Null) => Ok(vec![]),
         Some(v) => {
             let images: Vec<AguiImage> = serde_json::from_value(v.clone())
                 .map_err(|e| format!("images parse failed: {e}"))?;
-            for img in &images {
-                if img.data.is_empty() {
-                    return Err("images[].data must be non-empty base64".into());
-                }
-                if !IMAGE_MIME_ALLOWLIST.contains(&img.mime_type.as_str()) {
-                    return Err(format!(
-                        "unsupported image mimeType {:?} (allowed: png/jpeg/webp/gif)",
-                        img.mime_type
-                    ));
-                }
-            }
+            validate_images(&images)?;
             Ok(images)
         }
     }

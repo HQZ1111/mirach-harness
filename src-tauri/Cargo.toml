@@ -5,16 +5,16 @@ description = "Mirach harness — layout testbed Tauri shell"
 edition = "2021"
 
 [build-dependencies]
-tauri-build = { version = "3.0.0-alpha.3", features = [] }
+tauri-build = { version = "3.0.0-alpha.4", features = [] }
 
 [dependencies]
-tauri-plugin-dialog = "3.0.0-alpha.3"
+tauri-plugin-dialog = "3.0.0-alpha.4"
 # features 与主工程一致（unstable），最大化复用 cargo 缓存
-tauri = { version = "3.0.0-alpha.4", features = ["unstable", "tray-icon"] }
+tauri = { version = "3.0.0-alpha.6", features = ["unstable", "tray-icon"] }
 # v3 alpha：webview 后端外置成 runtime crate——Builder 必须显式选运行时
 # （默认 DynRuntime 无属性即 RuntimeNotConfigured）。后端 = 官方 wry
 # （Windows 上即 WebView2）。
-tauri-runtime-wry = "3.0.0-alpha.4"
+tauri-runtime-wry = "3.0.0-alpha.6"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
 # 宿主侧托管群聊（hosted_rooms）：事件日志 + 9 张表。版本与 rpi 同源

@@ -21,6 +21,8 @@
 import type { ReactNode } from 'react'
 import type { DockviewApi } from 'dockview-react'
 
+import { CHAT_MIN_WIDTH } from './rail-metrics'
+
 export interface PluginWorkspaceOptions {
   title?: string
   render?: () => ReactNode
@@ -93,6 +95,7 @@ export function openPluginWorkspace(id: string, options: PluginWorkspaceOptions 
       id,
       component: 'plugin-workspace',
       title,
+      minimumWidth: CHAT_MIN_WIDTH,
       params: { workspaceId: id },
       ...(workspaceDropPosition(a) ? { position: workspaceDropPosition(a) } : {}),
     })

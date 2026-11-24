@@ -212,7 +212,7 @@ export const VoiceLiveButton: FC = () => {
     <button
       aria-label={sessionUp ? '结束语音会话' : '开始语音会话'}
       className={cn(
-        'pointer-events-auto flex size-7 shrink-0 items-center justify-center rounded-[4px] transition-colors',
+        'pointer-events-auto flex size-8 shrink-0 items-center justify-center rounded-[4px] transition-colors',
         sessionUp
           ? 'text-rose-600 dark:text-rose-400'
           : 'text-muted-foreground hover:text-foreground',
@@ -227,7 +227,7 @@ export const VoiceLiveButton: FC = () => {
       }
       type="button"
     >
-      {sessionUp ? <PhoneOffIcon className="size-[18px]" /> : <PhoneIcon className="size-[18px]" />}
+      {sessionUp ? <PhoneOffIcon className="size-[20px]" /> : <PhoneIcon className="size-[20px]" />}
     </button>
   )
 }

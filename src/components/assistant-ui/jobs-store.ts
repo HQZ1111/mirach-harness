@@ -17,6 +17,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { createStore, useStore } from 'zustand'
 
+import { dispatchNativeNotification } from '@/lib/native-notify'
+
 /** rpi-background-tasks 的作业状态词表（插件 `STATUS_*` 逐字）。 */
 export type JobStatus = 'running' | 'completed' | 'failed' | 'interrupted' | 'cancelled'
 
@@ -107,15 +109,44 @@ interface JobsBridgeState {
   resetProjection: () => void
 }
 
+// 作业状态迁移记忆：running → settled 的下降沿派发一次 OS 通知。
+const lastJobStatuses = new Map<string, JobStatus>()
+
+function notifySettledJobs(next: readonly JobSnapshot[]): void {
+  for (const job of next) {
+    const previous = lastJobStatuses.get(job.id)
+    if (previous === 'running' && job.status !== 'running') {
+      dispatchNativeNotification({
+        kind: 'backgroundDone',
+        title: job.status === 'completed' ? '后台任务已完成' : '后台任务已结束',
+        body: job.label ?? job.command ?? job.id,
+        tag: job.id,
+        global: true,
+      })
+    }
+    lastJobStatuses.set(job.id, job.status)
+  }
+  if (lastJobStatuses.size > 200) {
+    for (const [id, status] of lastJobStatuses) {
+      if (status !== 'running') lastJobStatuses.delete(id)
+    }
+  }
+}
+
+function publishJobs(set: (partial: Partial<JobsBridgeState>) => void, jobs: JobSnapshot[]): void {
+  notifySettledJobs(jobs)
+  set({ jobs })
+}
+
 export const jobsBridge = createStore<JobsBridgeState>((set) => ({
   jobs: [],
   refresh: async () => {
     try {
       const raw = await invoke<unknown>('pi_job_list')
-      set({ jobs: parseJobs(raw) })
+      publishJobs(set, parseJobs(raw))
     } catch (e) {
       console.error('[jobs] 后台任务清单拉取失败——清投影', e)
-      set({ jobs: [] })
+      publishJobs(set, [])
     }
   },
   applyJob: (raw) => {
@@ -124,7 +155,9 @@ export const jobsBridge = createStore<JobsBridgeState>((set) => ({
     set((s) => {
       const byId = new Map(s.jobs.map((j) => [j.id, j]))
       for (const j of parsed) byId.set(j.id, j)
-      return { jobs: [...byId.values()] }
+      const next = [...byId.values()]
+      notifySettledJobs(next)
+      return { jobs: next }
     })
   },
   resetProjection: () => set({ jobs: [] }),

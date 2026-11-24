@@ -467,7 +467,7 @@ function RegenerateButton({
       disabled={isRegenerating}
       data-slot="image-regenerate"
       aria-label="Regenerate image"
-      className="hover:bg-muted inline-flex size-7 items-center justify-center rounded disabled:opacity-50"
+      className="hover:bg-(--hover-wash) inline-flex size-7 items-center justify-center rounded disabled:opacity-50"
     >
       <RefreshCwIcon
         className={cn("size-4", isRegenerating && "animate-spin")}
@@ -487,7 +487,7 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
         onClick={() => downloadImagePart(part)}
         data-slot="image-download"
         aria-label="Download image"
-        className="hover:bg-muted inline-flex size-7 items-center justify-center rounded"
+        className="hover:bg-(--hover-wash) inline-flex size-7 items-center justify-center rounded"
       >
         <DownloadIcon className="size-[var(--size-icon-lg)]" />
       </button>
@@ -498,7 +498,7 @@ function ImageActions({ part, onRegenerate, className }: ImageActionsProps) {
         }}
         data-slot="image-copy"
         aria-label="Copy image"
-        className="hover:bg-muted inline-flex size-7 items-center justify-center rounded"
+        className="hover:bg-(--hover-wash) inline-flex size-7 items-center justify-center rounded"
       >
         <CopyIcon className="size-[var(--size-icon-lg)]" />
       </button>

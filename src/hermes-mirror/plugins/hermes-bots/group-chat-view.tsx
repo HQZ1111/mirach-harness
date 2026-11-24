@@ -16,6 +16,7 @@ import {
   Button,
   cn,
   Codicon,
+  ComposerAttachButton,
   ConfirmDialog,
   CopyButton,
   Dialog,
@@ -81,6 +82,7 @@ import {
   $groupClarify,
   $groupNeedsYou,
   groupThreadOf,
+  persistGroupChatRooms,
   rememberGroupChatTombstone,
   scheduleGroupChatServerSync,
   setGroupChatHoldDetection,
@@ -93,7 +95,7 @@ import { focusComposerEnd, GroupClarifyCard, GroupImageControls, GroupMentionInp
 import type { GroupRoomPrompt } from './group-chat-parts'
 import { GroupMemberPicker } from './group-chat-view-members'
 import { compressGroupMemberHistory } from './group-compress'
-import { gatewayGroupEngine, type GatewayGroupEngine, stickyGroupEngine } from './group-engine'
+import { gatewayGroupEngine, type GatewayGroupEngine } from './group-engine'
 import { sweepExternalGroupWrites } from './group-external-writes'
 import { GroupHoldStatus } from './group-hold-status'
 import {
@@ -125,7 +127,7 @@ import { clearGroupClarify, renameGroupClarify } from './group-turns'
 import { botsText, useBots } from './i18n'
 import { displayName, slugifyProfileName } from './labels'
 import { botRosterMeta, groupTranscriptSpeaker, groupTranscriptSpeakerMeta, setBotsWorkspaceOwner } from './routing'
-import { bumpBotOpenGeneration, getPluginCtx, ID } from './shared'
+import { bumpBotOpenGeneration, ID } from './shared'
 import type { Attachment, BotMeta, GroupChat, GroupMember, GroupMessage, RosterRow } from './types'
 
 const Streamdown = typeof sdk === 'undefined' ? undefined : sdk.Streamdown
@@ -220,29 +222,7 @@ export async function disbandGroupChat(group: string, members: RosterRow[]) {
 
   // Persist the room map WITHOUT the disbanded room so it can't come back
   // on the next window load.
-  try {
-    const durable: Record<string, GroupChat> = {}
-
-    for (const [name, room] of Object.entries($groupChats.get())) {
-      if (name !== group && Array.isArray(room.log)) {
-        durable[name] = {
-          log: room.log,
-          watermarks: room.watermarks,
-          sessions: room.sessions || {},
-          sessionOwners: room.sessionOwners || {},
-          members: Array.isArray(room.members) ? room.members : [],
-          roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
-          ...stickyGroupEngine(room),
-          image: room.image || null,
-          syncRevision: Math.max(0, Number(room.syncRevision || 0))
-        }
-      }
-    }
-
-    await Promise.resolve(getPluginCtx()?.storage?.set?.('group-chats', durable))
-  } catch {
-    /* storage unavailable — the atom reset above still empties the room */
-  }
+  await persistGroupChatRooms($groupChats.get())
 
   scheduleGroupChatServerSync($groupChats.get(), {
     allowEmpty: true,
@@ -1405,16 +1385,11 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
 
   const attachButton = (thread: null | string) => (
     <Tip label={b.group.attachHint}>
-      <Button
+      {/* 主输入框同款附件钮（2026-11-23：群聊输入区与主输入框同一套组件） */}
+      <ComposerAttachButton
         aria-label={b.group.attachHint}
-        className="shrink-0 text-(--ui-text-tertiary) hover:text-foreground"
         onClick={() => void pickGroupAttachments().then(picked => addImages(thread, picked))}
-        size="sm"
-        type="button"
-        variant="ghost"
-      >
-        <Codicon name="attach" />
-      </Button>
+      />
     </Tip>
   )
 

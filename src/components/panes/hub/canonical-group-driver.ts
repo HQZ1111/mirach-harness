@@ -25,10 +25,15 @@
  * ## 与 hermes 的已知差距（如实标注，不假装）
  *
  * - 没有 driver 租约/fencing/indeterminate 恢复：应用重启 = 在途轮次丢失
- *   （重启后 `startCanonicalGroupDriver` 会把仍有待办讨论的房间重新驱动）。
- * - router（routing=auto）与 lead 路由不调模型：遇到 `route` 计划会把房间
- *   按 bounded 收尾（reason_code `router_unsupported`）。
- * - retry/discard（Rust 侧要求 driver 租约）暂不可用；approvals 不桥接。
+ *   （重启后 `startCanonicalGroupDriver` 会把仍有待办讨论的房间重新驱动；
+ *   引擎侧 task_lease 已接，driver 层消费面未接租约交接）。
+ * - lead 路由（routing=lead）走通用成员轮：`groups_plan` 会把 lead 路由
+ *   turn 当普通任务发（prompt 带 lead 指令），lead 的点名回复落日志后由
+ *   决策引擎接力选人——与上游"路由答案永不广播"同机制；未单独实机验证。
+ *   router(auto) 已实现（`routeCanonicalRoom`，一次廉价模型调用 →
+ *   `room.routed`；失败按 bounded 收尾 `router_unsupported`）。
+ * - 窗格（并列窗格）内 ask/审批卡不渲染：ApprovalCards/AskCards 是主会话
+ *   单例订阅，后端注册表只扫前台邮箱——窗格里触发交互工具会等超时。
  */
 
 // ── wire 形状 ───────────────────────────────────────────────────────────────
@@ -120,6 +125,9 @@ export interface CanonicalDriverStatus {
 const runs = new Map<string, RoomRun>()
 const listeners = new Set<() => void>()
 let booted = false
+/** bots 插件关闭时置 true：kick/start 不再驱动房间；在途 run 由
+ *  stopCanonicalGroupDriver 逐个 cancel。 */
+let driverDisabled = false
 
 /** 本次应用内失败的任务（canonical Retry 用）：task_id → 任务坐标 + prompt。 */
 const failedTasks = new Map<string, { task: PlannedTask; member: RoomMember; discussionId: string }>()
@@ -193,6 +201,28 @@ async function memberRoute(profile: string): Promise<null | { route: unknown }> 
     console.error('[canonical-driver] 解析成员路由失败', e)
     throw e
   }
+  return null
+}
+
+/**
+ * hermes `member_roster` / `refuse_unseatable` 的宿主对偶（2026-11-23）：
+ * 群聊成员记录独立于机器人名册——profile 被删除后，房间仍保留成员行，
+ * 但**不能再把该 profile 拉起来**（`ensure_profile_dirs` 会重建目录，
+ * 等于让已删 bot 复活）。远端 peer 成员走路由，不查本地名册。返回非空
+ * 字符串 = 本轮必须失败（`member_unavailable`，可见）。
+ */
+async function memberUnavailableReason(member: RoomMember): Promise<null | string> {
+  if (!member.profile) return '房间成员缺少 profile'
+  if (member.target?.kind === 'peer') return null
+  const remote = await memberRoute(member.profile)
+  if (remote) return null
+
+  const { botsStore } = await import('@/components/panes/hub/bots-store')
+  if (!botsStore.getState().bots.length) botsStore.getState().load()
+  if (!botsStore.getState().bots.some((bot) => bot.name === member.profile)) {
+    return `机器人「${member.profile}」已不在机器人名册（profile 已删除）`
+  }
+
   return null
 }
 
@@ -323,13 +353,16 @@ const PASS_RE = /^\(?\s*pass\s*\)?\.?$/i
 type TurnOutcome =
   | { kind: 'replied'; text: string }
   | { kind: 'passed' }
-  | { kind: 'failed'; error: string }
+  | { kind: 'failed'; error: string; reasonCode?: string }
 
 async function runMemberTurn(
   run: RoomRun,
   task: PlannedTask,
   member: RoomMember,
 ): Promise<TurnOutcome> {
+  const unavailable = await memberUnavailableReason(member)
+  if (unavailable) return { kind: 'failed', error: unavailable, reasonCode: 'member_unavailable' }
+
   const sessionId = await ensureMemberSession(run.roomId, member.profile)
   run.sessionId = sessionId
 
@@ -604,7 +637,7 @@ async function executeMemberTask(
       ...coordinates(task, discussionId),
       seen_through_seq: task.seen_through_seq,
       error: outcome.error,
-      reason_code: 'turn_failed',
+      reason_code: outcome.reasonCode ?? 'turn_failed',
     })
   }
   return 'done'
@@ -706,6 +739,7 @@ async function driveRoom(roomId: string): Promise<void> {
 
 /** 房间有新意图时踢一次驱动（幂等：已在跑就忽略）。 */
 export function kickCanonicalRoom(roomId: string): void {
+  if (driverDisabled) return
   void driveRoom(roomId)
 }
 
@@ -792,6 +826,7 @@ export async function discardCanonicalTask(
  */export async function startCanonicalGroupDriver(): Promise<void> {
   if (booted) return
   booted = true
+  driverDisabled = false
   try {
     const list = await invoke<{ rooms?: { room_id?: string; disbanded_at?: unknown }[] }>('groups_dispatch', {
       method: 'groups.list',
@@ -812,4 +847,11 @@ export async function discardCanonicalTask(
   } catch (e) {
     console.error('[canonical-driver] 启动恢复扫描失败', e)
   }
+}
+
+/** bots 插件关闭：停止恢复扫描的后续驱动，并取消在途成员轮次。 */
+export function stopCanonicalGroupDriver(): void {
+  driverDisabled = true
+  booted = false
+  for (const roomId of [...runs.keys()]) void stopCanonicalRoom(roomId)
 }

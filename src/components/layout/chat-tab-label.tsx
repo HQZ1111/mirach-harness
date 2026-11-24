@@ -15,6 +15,7 @@ import {
   sessionDisplayName,
   sessionProjectCwd,
 } from '@/components/panes/session-manage/session-catalog';
+import { botDisplayName, botsStore } from '@/components/panes/hub/bots-store';
 import { VoiceLiveButton } from '@/components/assistant-ui/voice-live-panel';
 import { ChatHistoryButton } from '@/components/layout/chat-history-button';
 
@@ -23,17 +24,26 @@ export function ChatTabLabel(): React.ReactElement | null {
     s.activeId ? s.entries[s.activeId] : undefined,
   );
   const pendingCwd = useStore(sessionCatalog, (s) => s.pendingCwd);
-  const title = sessionDisplayName(entry);
+  // bot canonical chat 的**真名**固定 "Bot Chat"（引擎/registry 身份），
+  // 但对话区下行要显示"会话名"：手动重命名过就显示自定义名；否则与普通
+  // 会话同款优先派生标题（首条用户消息），尚未说过话时显示机器人名。
+  // 2026-11-23 用户："下面是会话名，现在会话名变成 bot chat 了"。
+  const botChat = entry
+    ? botsStore.getState().bots.find((b) => b.chatSessionId === entry.id)
+    : undefined;
+  const customName =
+    entry?.piName && entry.piName !== 'Bot Chat' ? entry.piName : undefined;
+  const title = botChat
+    ? customName ?? entry?.derivedTitle ?? botDisplayName(botChat)
+    : sessionDisplayName(entry);
   const cwd = sessionProjectCwd(entry, pendingCwd);
   // 未选工作区（新会话 pendingCwd=null / 会话无 cwd）→ WORK SPACE 占位
   // （用户定稿 2026-10-03）。
   const workspace = cwd != null ? workspaceGroupLabel(cwd) : 'WORK SPACE';
   return (
     <div className="chat-tab-label" data-slot="chat-tab-label">
-      {/* 行 1 = 工作区名 + 右上角动作组（2026-11-15 用户定稿"语音钮放右上角，
-          图标换成语音通话的，右边再放聊天记录，和微信一样"）。动作组
-          margin-left:auto 贴右端；工作区名吃剩余宽度、超出省略——不再被
-          按钮挤成 "Admin…"。 */}
+      {/* 行 1 = 工作区名（2026-11-22 用户："语音和聊天按钮往下移动，和会话
+          名字的底部对齐，再放大一点"——动作组从工作区行挪到会话名行）。 */}
       <div className="chat-tab-label__row" data-slot="chat-tab-label-row">
         <span
           className="chat-tab-label__workspace"
@@ -42,16 +52,22 @@ export function ChatTabLabel(): React.ReactElement | null {
         >
           {workspace}
         </span>
+      </div>
+      {/* 行 2 = 会话名 + 右侧动作组（底对齐）。title 悬停看全名：
+          pointer-events 需在 span 上放行（锚层整体 none——见 flexlayout.css
+          的 __session 规则） */}
+      <div
+        className="chat-tab-label__row chat-tab-label__row--session"
+        data-slot="chat-tab-label-session-row"
+      >
+        <span className="chat-tab-label__session" data-session={title} title={title}>
+          {title || '\u00a0'}
+        </span>
         <div className="chat-tab-label__actions" data-slot="chat-tab-label-actions">
           <VoiceLiveButton />
           <ChatHistoryButton />
         </div>
       </div>
-      {/* title 悬停看全名：pointer-events 需在 span 上放行（锚层整体
-          none——见 flexlayout.css 的 __session 规则） */}
-      <span className="chat-tab-label__session" data-session={title} title={title}>
-        {title || '\u00a0'}
-      </span>
     </div>
   );
 }

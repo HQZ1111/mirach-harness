@@ -12,10 +12,6 @@
 //   cmdk 菜单的键盘可用性依赖它把焦点送进输入框）。
 
 import {
-  animate,
-  type MotionValue,
-  useMotionValue,
-  useMotionValueEvent,
   useReducedMotion,
 } from "motion/react";
 import {
@@ -36,12 +32,7 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import {
-  buildGooGeometry,
-  GooSurface,
-} from "@/components/motion/goo-layer";
 import { usePopoverPortalPosition } from "@/components/motion/popover-position";
-import { POPOVER_GOO, POPOVER_GOO_CLOSE, POPOVER_GOO_OPEN } from "@/lib/ease";
 import { useDismiss } from "@/lib/hooks/use-dismiss";
 import {
   type HoverGesture,
@@ -54,17 +45,7 @@ type Side = "top" | "bottom";
 type Align = "start" | "center" | "end";
 type TriggerMode = "click" | "hover";
 
-// This morph needs less bounce than layout motion: too much overshoot makes
-// the liquid neck balloon past the final panel edges.
-// GOO_*_SPRING 已收拢到 tokens.css「spring 组」（2026-10-16 令牌统一）——
-// 原本地常量删除，import 自 @/lib/ease（数值唯一源头）。
-const GOO_OPEN_SPRING = POPOVER_GOO_OPEN;
-const GOO_CLOSE_SPRING = POPOVER_GOO_CLOSE;
 const HOVER_CLOSE_DELAY = 120;
-
-// 几何 / clip / goo 渲染已整体抽到 `goo-layer.tsx`（2026-10-26 归拢为一个
-// 动效实现——右键菜单与侧栏菜单同源）。本文件只保留"锚点式"独有的部分：
-// 触发钮测量、side/align 反推面板偏移、视口翻转与水平钳位。
 
 // `onPointerEnter`/`onPointerLeave` rather than the mouse pair: a tap fires
 // compatibility mouseenter/mouseleave that carry no pointerType at all, and
@@ -98,12 +79,8 @@ interface PopoverContextValue {
   align: Align;
   gap: number;
   panelRadius: number;
-  gooStrength: number;
-  goo: boolean;
   reduce: boolean;
-  gooId: string;
   contentId: string;
-  progress: MotionValue<number>;
   triggerRef: React.MutableRefObject<HTMLElement | null>;
   contentRef: React.MutableRefObject<HTMLDivElement | null>;
 }
@@ -125,27 +102,17 @@ export interface PopoverProps {
   onOpenChange?: (open: boolean) => void;
   /** How the popover is summoned. Default "click". */
   trigger?: TriggerMode;
-  /** Which side of the trigger the panel oozes out of. Default "bottom". */
+  /** Which side of the trigger the panel opens on. Default "bottom". */
   side?: Side;
   /** Alignment along the trigger's edge. Default "center". */
   align?: Align;
-  /** Gap between trigger and panel, in px — the length of the gooey neck. Default 14. */
+  /** Gap between trigger and panel, in px. Default 14. */
   sideOffset?: number;
   /** Corner radius of the open panel, in px. Default 16. */
   panelRadius?: number;
-  /** Blur radius feeding the goo filter — higher melts more. Default 8. */
+  /** 保留 prop（历史 goo 滤镜参数，2026-11-22 起无效果）。 */
   gooStrength?: number;
-  /**
-   * 是否做液滴粘性合并。
-   *
-   * **默认值 = 令牌 `--beui-popover-goo`（ease.ts 的 POPOVER_GOO）**，调用点
-   * 不该传这个 prop（2026-11-01 用户："调用点没传，直接在令牌中统一开关
-   * 不行吗"）。理由：散在 15 个调用点的布尔参数就是"有的有脖子有的没有"
-   * 的成因——一个令牌管全部，改观感只改 tokens.css。
-   *
-   * 关掉时面板是独立的圆角矩形 + 投影，触发钮与面板之间没有脖子，按钮
-   * 也不会被投影。
-   */
+  /** 保留 prop（历史 goo 粘性合并开关，2026-11-22 起无效果）。 */
   goo?: boolean;
   className?: string;
 }
@@ -161,18 +128,16 @@ export function Popover({
   sideOffset = 14,
   panelRadius = 16,
   gooStrength = 8,
-  goo = POPOVER_GOO,
+  goo = false,
   className,
 }: PopoverProps) {
   const reduce = useReducedMotion() ?? false;
-  const gooId = useId().replace(/:/g, "");
   const contentId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rootHover = useHoverGesture();
-  const progress = useMotionValue(defaultOpen ? 1 : 0);
 
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
   const controlled = controlledOpen !== undefined;
@@ -206,19 +171,6 @@ export function Popover({
   const toggle = useCallback(() => setOpen(!open), [setOpen, open]);
 
   useEffect(() => () => cancelClose(), [cancelClose]);
-
-  useEffect(() => {
-    const animation = animate(
-      progress,
-      open ? 1 : 0,
-      reduce
-        ? { duration: 0 }
-        : open
-          ? GOO_OPEN_SPRING
-          : GOO_CLOSE_SPRING,
-    );
-    return () => animation.stop();
-  }, [open, progress, reduce]);
 
   // The panel is a `role="dialog"` and goes inert the moment it closes, so
   // focus cannot be left sitting inside it: Escape hands it back to the
@@ -255,12 +207,8 @@ export function Popover({
       align,
       gap: sideOffset,
       panelRadius,
-      gooStrength,
-      goo,
       reduce,
-      gooId,
       contentId,
-      progress,
       triggerRef,
       contentRef,
     }),
@@ -275,12 +223,8 @@ export function Popover({
       align,
       sideOffset,
       panelRadius,
-      gooStrength,
-      goo,
       reduce,
-      gooId,
       contentId,
-      progress,
     ],
   );
 
@@ -424,12 +368,6 @@ export const PopoverTrigger = forwardRef<HTMLElement, PopoverTriggerProps>(
   },
 );
 
-const ALIGN_ORIGIN: Record<Align, string> = {
-  start: "left",
-  center: "center",
-  end: "right",
-};
-
 export interface PopoverContentProps
   extends Omit<ComponentPropsWithoutRef<"div">, "children"> {
   children: ReactNode;
@@ -451,13 +389,8 @@ export function PopoverContent({
     side,
     align,
     gap,
-    panelRadius,
-    gooStrength,
-    goo,
     reduce,
-    gooId,
     contentId,
-    progress,
     triggerRef,
     contentRef,
     open,
@@ -525,34 +458,6 @@ export function PopoverContent({
       ? (layout?.trigger.height ?? 0) + gap
       : -(gap + (layout?.content.height ?? 0));
 
-  const geo = useMemo(
-    () =>
-      buildGooGeometry(
-        layout?.trigger.width ?? 0,
-        layout?.trigger.height ?? 0,
-        panelOffsetX,
-        panelOffsetY,
-        layout?.content.width ?? 0,
-        layout?.content.height ?? 0,
-        panelRadius,
-      ),
-    [layout, panelOffsetX, panelOffsetY, panelRadius],
-  );
-
-  // While closed, the layer still paints its copy of the trigger pill, and the
-  // cutout's antialiased edge leaves a faint rim around the real trigger. It
-  // matches the page, but shows as hairlines over any dimmed backdrop below
-  // the layer. Hide it once the close has settled, and show it again in the
-  // render that opens.
-  const [closedAtRest, setClosedAtRest] = useState(
-    () => !open && progress.get() === 0,
-  );
-  if (open && closedAtRest) setClosedAtRest(false);
-  const handleAnimationComplete = useCallback(() => {
-    if (!open && progress.get() === 0) setClosedAtRest(true);
-  }, [open, progress]);
-  useMotionValueEvent(progress, "animationComplete", handleAnimationComplete);
-
   const hoverHandlers =
     triggerMode === "hover"
       ? makeHoverHandlers(panelHover, openHover, scheduleClose)
@@ -560,57 +465,58 @@ export function PopoverContent({
 
   // harness 扩展：水平钳位——面板超出视口左右缘时整体平移补偿
   // （beUI 原版无碰撞处理；对位 Radix 的 shift 行为）。
-  // 坐标：wrapper translate 到 trigger.left+clampX；面板相对 wrapper 的
-  // 左偏移 = geo.left + geo.panel.x（buildGooGeometry 里 left=min(0,px)、
-  // panel.x=px-left，两项之和恒 = px——分 px≥0/px<0 两种情形均在案）。
-  const clampX = (() => {
-    if (!layout) return 0;
-    const preferred = layout.trigger.left + geo.left + geo.panel.x;
-    const maxX = window.innerWidth - layout.content.width - gutter;
-    return Math.max(gutter, Math.min(preferred, maxX)) - preferred;
-  })();
+  const preferredLeft = layout ? layout.trigger.left + panelOffsetX : 0;
+  const clampX = layout
+    ? Math.max(
+        gutter,
+        Math.min(preferredLeft, window.innerWidth - layout.content.width - gutter),
+      ) - preferredLeft
+    : 0;
 
   // Match the server and first client render, then attach the portal after
   // hydration. This preserves SSR without regenerating the page on the client.
   if (!portalReady) return null;
 
-  // goo 表面（SVG 粘性滤镜 + 形变）已抽到 goo-layer.tsx —— 与右键菜单
-  // 共用同一份实现（2026-10-26 用户："所有的弹窗效果归拢成一个"）。
+  // **必须 portal 到 body**（2026-11-15）：面板是 `position: fixed` +
+  // 视口坐标（usePopoverPortalPosition 用 getBoundingClientRect）。留作
+  // 内联节点时，任何带 layout containment 的祖先（composer 的
+  // `@container/composer` 就是）都会成为 fixed 的包含块 → 整个面板按
+  // "卡片左上角 + 视口坐标"偏移，弹层飞到别处。外部点击检测本来就按
+  // "面板在 portal、两棵树都参与"写的（见 ignoreContent 上方注释）。
   //
-  // **必须 portal 到 body**（2026-11-15）：GooSurface 根是
-  // `position: fixed` + 视口坐标（usePopoverPortalPosition 用
-  // getBoundingClientRect，origin 也是视口系）。留作内联节点时，任何带
-  // layout containment 的祖先（composer 的 `@container/composer` 就是）
-  // 都会成为 fixed 的包含块 → 整个面板按"卡片左上角 + 视口坐标"偏移，
-  // 弹层飞到别处。外部点击检测本来就按"面板在 portal、两棵树都参与"写的
-  // （见 ignoreContent 上方注释），portal 是原设计。
+  // 动效 = 默认弹层效果（tw-animate 的 fade+zoom），不再是自绘 goo 形变
+  // （2026-11-22 用户："这个弹窗效果组件就不要了，换成默认的弹窗效果"）。
+  // 关闭时保留挂载但 visibility:hidden——测量内容尺寸要用它（零尺寸会让
+  // align/side 反推全错）。
   return createPortal(
-    <GooSurface
-      clampX={clampX}
-      contentClassName={cn(
-        "w-max max-w-[min(92vw,20rem)] p-4 text-popover-foreground outline-none",
+    <div
+      data-state={open ? "open" : "closed"}
+      {...hoverHandlers}
+      {...rest}
+      aria-hidden={!open}
+      className={cn(
+        "fixed z-[9999] w-max max-w-[min(92vw,20rem)] rounded-xl bg-popover p-4 text-popover-foreground shadow-[0_8px_24px_rgba(0,0,0,0.14)] outline-none",
+        // 进场只在"已定位"的这一帧开始：否则动画会在 layout 测量前起跑，
+      // 可见第一帧已是动画中段，看起来像弹层先出现再抖一下。
+        open && layout && !reduce && "animate-in fade-in-0 zoom-in-95",
         className,
       )}
-      contentId={contentId}
-      contentProps={{
-        role: "dialog",
-        ...hoverHandlers,
-        ...rest,
+      id={contentId}
+      ref={contentRef}
+      role="dialog"
+      style={{
+        left: preferredLeft + clampX,
+        top: layout ? layout.trigger.top + panelOffsetY : 0,
+        // 从锚点方向长出来（不是从面板中心缩放）——向上弹的模型选择器
+        // 若以中心为原点，缩放过程会把上缘推上去，观感就是"打开后抖一下"。
+        transformOrigin: `${align === "start" ? "left" : align === "end" ? "right" : "center"} ${
+          resolvedSide === "bottom" ? "top" : "bottom"
+        }`,
+        visibility: open && layout ? "visible" : "hidden",
       }}
-      contentRef={contentRef}
-      filterId={gooId}
-      geo={geo}
-      goo={goo}
-      gooStrength={gooStrength}
-      interactive={open}
-      origin={{ left: layout?.trigger.left ?? 0, top: layout?.trigger.top ?? 0 }}
-      progress={progress}
-      reduce={reduce}
-      transformOrigin={`${ALIGN_ORIGIN[align]} ${side === "bottom" ? "top" : "bottom"}`}
-      visible={Boolean(layout) && !closedAtRest}
     >
       {children}
-    </GooSurface>,
+    </div>,
     document.body,
   );
 }

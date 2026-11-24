@@ -97,13 +97,13 @@ export interface StatusPanelGitModel {
   removed: number
 }
 
-/** rpi-goal 的 Goal（`goal-state` 条目 data.active）+ `goal-iterations` 的
- *  迭代并集（ZCode `GoalState` 的宿主对偶）。
+/** rpi-goal 的 Goal（`goal-state` 条目 data.active）+ 迭代/校验数组
+ *  （ZCode `GoalState` 的宿主对偶）。
  *
- *  status 词表 = ZCode 六态：插件原生只发 active / paused / complete
- *  （complete 映射为 verified——ZCode 的"已验证完成"）；verifying /
- *  notSatisfied / failed 为引擎校验器面，rpi 无此子系统，真实数据里不会
- *  出现（解析层接受，UI 按到场渲染，不造假）。 */
+ *  status 词表 = ZCode 六态（active/paused/verifying/verified/notSatisfied/
+ *  failed）加上 rpi-goal v2 的停止词（blocked / waiting / usage_limited /
+ *  budget_limited）。插件 v2 用 `complete` 表示完成（映射为 verified），
+ *  `verifying` 就是状态本身；每个词都由插件真发，解析层不认识才丢弃。 */
 export type StatusPanelGoalStatus =
   | 'active'
   | 'paused'
@@ -111,6 +111,10 @@ export type StatusPanelGoalStatus =
   | 'verified'
   | 'notSatisfied'
   | 'failed'
+  | 'blocked'
+  | 'waiting'
+  | 'usageLimited'
+  | 'budgetLimited'
 
 export interface StatusPanelGoalItem {
   id: string
@@ -124,7 +128,7 @@ export interface StatusPanelGoalIteration {
   updatedAt: number | null
 }
 
-export type StatusPanelGoalVerificationOutcome = 'pass' | 'notSatisfied' | 'failed'
+export type StatusPanelGoalVerificationOutcome = 'pass' | 'notSatisfied' | 'failed' | 'cancelled'
 
 export interface StatusPanelGoalVerification {
   iteration: number
@@ -200,20 +204,33 @@ export interface StatusPanelModel {
 
 // ── goal ────────────────────────────────────────────────────────────
 
-/** 插件原生三态 → ZCode 六态（complete = 上游 verified 的宿主对偶）。 */
+/** 插件原生词 → ZCode 词（complete = 上游 verified 的宿主对偶；v2 的
+ *  blocked/waiting/usage_limited/budget_limited 各自保留，不硬折成 paused）。 */
 const GOAL_STATUS_MAP: Record<string, StatusPanelGoalStatus> = {
   active: 'active',
   paused: 'paused',
   complete: 'verified',
-  // ZCode 校验器面：rpi 无此子系统，但解析层接受（真到场就真渲染）。
   verifying: 'verifying',
   verified: 'verified',
   notSatisfied: 'notSatisfied',
   failed: 'failed',
+  blocked: 'blocked',
+  waiting: 'waiting',
+  usage_limited: 'usageLimited',
+  budget_limited: 'budgetLimited',
+}
+
+/** 结论词归一：宿主发 camelCase，插件持久化 snake_case。 */
+const GOAL_VERIFICATION_OUTCOME_MAP: Record<string, StatusPanelGoalVerificationOutcome> = {
+  pass: 'pass',
+  notSatisfied: 'notSatisfied',
+  not_satisfied: 'notSatisfied',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  canceled: 'cancelled',
 }
 
 const GOAL_ITEM_STATUSES = new Set(['pending', 'inProgress', 'completed'])
-const GOAL_VERIFICATION_OUTCOMES = new Set(['pass', 'notSatisfied', 'failed'])
 
 function parseGoalIterations(value: unknown): StatusPanelGoalIteration[] {
   if (value === undefined || value === null) return []
@@ -281,14 +298,16 @@ function parseGoalVerifications(value: unknown): StatusPanelGoalVerification[] {
       typeof row.iteration === 'number' && Number.isInteger(row.iteration) && row.iteration >= 1
         ? row.iteration
         : null
-    const outcome = typeof row.outcome === 'string' ? row.outcome : ''
-    if (iteration === null || !GOAL_VERIFICATION_OUTCOMES.has(outcome)) {
+    const outcome = GOAL_VERIFICATION_OUTCOME_MAP[
+      typeof row.outcome === 'string' ? row.outcome : ''
+    ]
+    if (iteration === null || outcome === undefined) {
       console.error('[status-panel] goal verification 条目损坏——丢弃该条', row)
       continue
     }
     rows.push({
       iteration,
-      outcome: outcome as StatusPanelGoalVerificationOutcome,
+      outcome,
       at: typeof row.at === 'number' && Number.isFinite(row.at) ? row.at : null,
       ...(typeof row.reason === 'string' && row.reason !== '' ? { reason: row.reason } : {}),
       ...(typeof row.nextAction === 'string' && row.nextAction !== ''
@@ -345,7 +364,16 @@ export function parseGoalState(raw: unknown): StatusPanelGoalModel | null {
     deadlineMs: numOrNull(goal.deadlineMs),
     iterations: parseGoalIterations(goal.iterations),
     verifications: parseGoalVerifications(goal.verifications),
-    verifying: parseGoalVerifying(goal.verifying),
+    // v1 宿主写 `verifying` 对象；rpi-goal v2 把边界写进 status/verifyIteration。
+    // 两条来源归一，UI 的"在途行 spinner"共用一份读取。
+    verifying: (() => {
+      const legacy = parseGoalVerifying(goal.verifying)
+      if (legacy !== null) return legacy
+      if (status !== 'verifying') return null
+      const iteration = numOrNull(goal.verifyIteration)
+      if (iteration === null || !Number.isInteger(iteration) || iteration < 1) return null
+      return { iteration, startedAt: numOrNull(goal.verifyStartedAt) }
+    })(),
   }
 }
 

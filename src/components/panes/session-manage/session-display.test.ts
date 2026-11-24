@@ -164,4 +164,31 @@ describe('buildSessionDisplay：project 分组 × created 排序', () => {
     // 同一今天桶内 created 降序 → x2 前
     expect(display.rows.map((r) => (r.kind === 'session' ? r.id : '|'))).toEqual(['x2', 'x1'])
   })
+
+  it('fork 谱系：分支行挂在可见父行下一层；父行不在场则回顶层', () => {
+    const nowMs = 10_000_000
+    const metasWithLineage: SessionRowMeta[] = [
+      { id: 'parent', lastActiveMs: nowMs, title: 'parent' },
+      { id: 'child', lastActiveMs: nowMs, title: 'child', parentSessionId: 'parent' },
+      { id: 'orphan', lastActiveMs: nowMs, title: 'orphan', parentSessionId: 'absent' },
+    ]
+    const depthOf = (display: ReturnType<typeof buildSessionDisplay>, id: string) => {
+      const row = display.rows.find((r) => r.kind === 'session' && r.id === id)
+      return row && row.kind === 'session' ? (row.depth ?? 0) : -1
+    }
+    const display = buildSessionDisplay(metasWithLineage, [], {}, {}, { nowMs })
+    expect(depthOf(display, 'parent')).toBe(0)
+    expect(depthOf(display, 'child')).toBe(1)
+    expect(depthOf(display, 'orphan')).toBe(0)
+
+    // 父行被归档/过滤掉时分支行不再缩进（不悬空）。
+    const withoutParent = buildSessionDisplay(
+      metasWithLineage.filter((m) => m.id !== 'parent'),
+      [],
+      {},
+      {},
+      { nowMs },
+    )
+    expect(depthOf(withoutParent, 'child')).toBe(0)
+  })
 })

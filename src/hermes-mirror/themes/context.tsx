@@ -13,6 +13,7 @@ import { ensureContrast, mix, parseColor } from '@/hermes-mirror/shared/color'
 import { useStore } from '@nanostores/react'
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
+import { logoFilterFor } from '@/lib/logo-tint'
 import { $registryVersion } from '@/hermes-shim/contrib/registry'
 import { matchesQuery, useMediaQuery } from '@/hermes-mirror/hooks/use-media-query'
 import { persistString, persistStringRecord, storedString, storedStringRecord } from '@/hermes-mirror/lib/storage'
@@ -52,24 +53,38 @@ const LAST_PROFILE_KEY = 'hermes-desktop-active-profile-v1'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
+/** 2026-11-24 用户："去掉默认，再次点击取消选择主题，恢复之前没加主题
+ *  系统时候的样子"。这个哨兵皮肤不渲染任何主题，只保留 tokens.css 的
+ *  宿主基础令牌；它不出现在画廊里，点击已选主题时写入它。 */
+export const HOST_THEME_NONE = '__host__'
+
+/** applyTheme 曾经写过的根内联变量，退出主题时逐个 removeProperty。 */
+const APPLIED_THEME_PROPS = new Set<string>()
+
 const INJECTED_FONT_URLS = new Set<string>()
 
 const resolveMode = (mode: ThemeMode, systemDark = matchesQuery('(prefers-color-scheme: dark)')): 'light' | 'dark' =>
   mode === 'system' ? (systemDark ? 'dark' : 'light') : mode
 
 const normalizeSkin = (name: string | null): string =>
-  name && resolveTheme(name) && !RETIRED_SKINS.has(name) ? name : DEFAULT_SKIN_NAME
+  name === HOST_THEME_NONE
+    ? HOST_THEME_NONE
+    : name === DEFAULT_SKIN_NAME
+      ? // "默认"不再是一个可选皮肤：旧存档里的 nous 迁到无主题基础外观。
+        HOST_THEME_NONE
+      : name && resolveTheme(name) && !RETIRED_SKINS.has(name)
+        ? name
+        : HOST_THEME_NONE
 
 /**
- * A stored mode, or `system` when there isn't one.
+ * A stored mode, or `light` when there isn't one.
  *
- * A fresh profile follows the OS. Defaulting to `light` meant someone whose
- * desktop is dark got a white window on first launch and had to go find the
- * setting — and with per-appearance translucency it also handed them light's
- * much heavier tint, tuned for a bright desktop they don't have.
+ * 宿主历史只有浅色壳（此前 boot paint 固定 light）；外观页接上明暗切换后，
+ * 全新安装的默认必须保持既有观感——否则 OS 暗色用户第一次启动就整窗变黑，
+ * 而用户从未选过暗色。需要跟随系统时在「外观 → 主题」里显式选「跟随系统」。
  */
 const normalizeMode = (value: string | null): ThemeMode =>
-  value === 'light' || value === 'dark' || value === 'system' ? value : 'system'
+  value === 'light' || value === 'dark' || value === 'system' ? value : 'light'
 
 // ─── Per-profile appearance persistence ─────────────────────────────────────
 // Skin and mode are each stored per profile. "default" isn't a real profile —
@@ -133,7 +148,7 @@ const BOOT_PROFILE_KEY = typeof window === 'undefined' ? 'default' : (localDispl
 // for the rest of the session — it paints as soon as the registry can resolve it.
 const storedSkin = (profile: string): string =>
   skinPref.stored(profile) ??
-  (profile === BOOT_PROFILE_KEY ? (localDisplaySkinName ?? DEFAULT_SKIN_NAME) : DEFAULT_SKIN_NAME)
+  (profile === BOOT_PROFILE_KEY ? (localDisplaySkinName ?? HOST_THEME_NONE) : HOST_THEME_NONE)
 
 /** The live profile's committed theme: what the ThemeProvider paints without a preview. */
 export const committedTheme = (): DesktopTheme =>
@@ -304,9 +319,160 @@ function applyTypographyKnobs(root: HTMLElement, typo: Partial<DesktopThemeTypog
     const value = typo[key]
 
     if (value) {
+      APPLIED_THEME_PROPS.add(cssVar)
       root.style.setProperty(cssVar, value)
     } else {
       root.style.removeProperty(cssVar)
+    }
+  }
+}
+
+/** 外观 → 主题色（空 = 跟随皮肤 primary）。主题上下文直接读存档，避免
+ *  context ⇄ appearance store 的循环依赖。 */
+function accentOverride(): string {
+  try {
+    const raw = window.localStorage.getItem('mirach:appearance.v1')
+    if (!raw) return ''
+    const parsed = JSON.parse(raw) as { accentColor?: unknown }
+    return typeof parsed.accentColor === 'string' ? parsed.accentColor.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/** 外观 → 文字颜色（空 = 跟随皮肤 foreground）。同样从存档直读，避免循环依赖。 */
+function textColorOverride(): string {
+  try {
+    const raw = window.localStorage.getItem('mirach:appearance.v1')
+    if (!raw) return ''
+    const parsed = JSON.parse(raw) as { textColor?: unknown }
+    return typeof parsed.textColor === 'string' ? parsed.textColor.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 把 hermes 皮肤色映射到宿主壳令牌（2026-11-23 用户："默认的所有主题都没
+ * 生效"）。ThemeProvider 原本只写 `--dt-*`/`--theme-*`，宿主自定义的
+ * `--text/--surface/--brand/...` 仍是编译期浅色，所以换皮肤看起来没反应。
+ * 这里每次 applyTheme 都把宿主语义令牌同步成同一套颜色；hover/选中统一
+ * 为主题色浅蓝（8%/14% 透明度），标志/页签/发送钮用主题色（或用户选的
+ * 自定义主题色）。
+ */
+function applyHostTheme(root: HTMLElement, c: DesktopThemeColors, isDark: boolean) {
+  const accent = accentOverride()
+  const brand = accent || c.primary
+  const mix = (color: string, percent: number, base = 'transparent') =>
+    `color-mix(in srgb, ${color} ${percent}%, ${base})`
+  const set = (name: string, value: string | undefined | null) => {
+    if (value) {
+      APPLIED_THEME_PROPS.add(name)
+      root.style.setProperty(name, value)
+    }
+  }
+
+  set('--brand', brand)
+  set('--logo-text-color', brand)
+  set('--h2-color', brand)
+  set('--tab-text-active', brand)
+  set('--tab-accent', brand)
+  set('--fl-accent', brand)
+  set('--width-handle-glow', brand)
+  const logoFilter = logoFilterFor(brand)
+  set('--logo-hue-rotate', logoFilter.hueRotate)
+  set('--logo-saturate', logoFilter.saturate)
+
+  set('--text', c.foreground)
+  set('--text-2', c.mutedForeground)
+  set('--text-3', mix(c.mutedForeground, 80, c.background))
+  set('--text-4', mix(c.mutedForeground, 60, c.background))
+  set('--h1-color', c.foreground)
+  set('--h3-color', c.foreground)
+
+  set('--surface-base', c.card)
+  set('--surface-shell-base', c.sidebarBackground ?? c.background)
+  set('--background', c.background)
+  set('--foreground', c.foreground)
+  set('--card', c.card)
+  set('--card-foreground', c.cardForeground)
+  set('--popover', c.popover)
+  set('--popover-foreground', c.popoverForeground)
+  set('--primary', brand)
+  set('--primary-foreground', c.primaryForeground)
+  set('--secondary', c.secondary)
+  set('--secondary-foreground', c.secondaryForeground)
+  set('--muted', c.muted)
+  set('--muted-foreground', c.mutedForeground)
+  set('--accent', isDark ? '#1e3a5f' : '#eff6ff')
+  set('--accent-foreground', c.foreground)
+  set('--border', c.border)
+  set('--input', c.input ?? c.border)
+  set('--ring', brand)
+  set('--sidebar', c.sidebarBackground ?? c.background)
+  set('--sidebar-foreground', c.foreground)
+  set('--sidebar-primary', brand)
+  set('--sidebar-primary-foreground', c.primaryForeground)
+  set('--sidebar-accent', mix(brand, 10, c.background))
+  set('--sidebar-accent-foreground', c.foreground)
+  set('--sidebar-border', c.sidebarBorder ?? c.border)
+  set('--sidebar-ring', brand)
+
+  set('--stroke', c.border)
+  set('--stroke-soft', mix(c.border, 68))
+  set('--scale-gray-a1', mix(c.foreground, 3))
+  set('--scale-gray-a2', mix(c.foreground, 5))
+  set('--scale-gray-a3', mix(c.foreground, 8))
+  set('--scale-gray-a4', mix(c.foreground, 12))
+  set('--scale-gray-a5', mix(c.foreground, 18))
+  set('--scale-gray-a6', mix(c.foreground, 24))
+
+  set('--tab-text', c.foreground)
+  set('--tab-active-bg', c.card)
+  set('--tab-hover-bg', 'var(--hover-wash)')
+  set('--tab-separator', mix(c.foreground, 10))
+  set('--tab-dot-color', c.mutedForeground)
+  set('--tab-accent-wash', 'var(--select-wash)')
+
+  set('--code-bg', c.muted)
+  set('--code-border', c.border)
+  set('--term-bg', c.background)
+  set('--term-fg', c.foreground)
+  set('--term-cursor', c.foreground)
+  set('--term-cursor-accent', c.background)
+  set('--term-white', c.foreground)
+  set('--term-black', c.mutedForeground)
+
+  // 宿主/镜像共用的 --ui-* 别名（弹层、列表、bot 页）。
+  set('--ui-bg-quinary', 'var(--hover-wash)')
+  set('--ui-bg-quaternary', mix(c.foreground, 5))
+  set('--ui-bg-tertiary', mix(c.foreground, 3))
+  set('--ui-row-active-background', 'var(--select-wash)')
+  set('--ui-row-hover-background', 'var(--hover-wash)')
+  set('--ui-text-primary', c.foreground)
+  set('--ui-text-secondary', c.mutedForeground)
+  set('--ui-text-tertiary', mix(c.mutedForeground, 80, c.background))
+  set('--ui-text-quaternary', mix(c.mutedForeground, 60, c.background))
+  set('--ui-stroke-secondary', c.border)
+  set('--ui-stroke-tertiary', mix(c.border, 68))
+  set('--ui-control-hover-background', 'var(--hover-wash)')
+  set('--ui-control-active-background', 'var(--select-wash)')
+  set('--ui-chat-surface-background', c.card)
+  set('--ui-chat-bubble-background', c.card)
+  set('--ui-sidebar-surface-background', c.sidebarBackground ?? c.card)
+  set('--ui-editor-surface-background', c.card)
+  set('--ui-chat-bubble-opaque-background', c.card)
+  set('--theme-mix-chrome', isDark ? '74%' : '92%')
+  set('--theme-mix-card', isDark ? '38%' : '22%')
+  set('--theme-mix-elevated', isDark ? '46%' : '28%')
+  set('--theme-mix-bubble', isDark ? '46%' : '0%')
+
+  // 外观 → 文字颜色：用户明确选了颜色时覆盖皮肤的主文字（次级文字仍用
+  // 皮肤弱化层级）。空 = 不覆盖，上面已经写了主题自己的值。
+  const text = textColorOverride()
+  if (text) {
+    for (const name of ['--text', '--foreground', '--ui-text-primary', '--tab-text', '--h1-color', '--h3-color']) {
+      root.style.setProperty(name, text)
     }
   }
 }
@@ -386,10 +552,12 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark', chatFontFamily 
   }
 
   for (const [k, v] of Object.entries({ ...seeds, ...mixesFor(isDark), ...palette })) {
+    APPLIED_THEME_PROPS.add(k)
     root.style.setProperty(k, v)
   }
 
   applyTypographyKnobs(root, typo)
+  applyHostTheme(root, c, isDark)
 
   const chromeBg = chromeBackground(c.background, isDark)
 
@@ -441,6 +609,38 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark', chatFontFamily 
   }
 }
 
+/**
+ * 退出主题系统：把 applyTheme 写过的根内联变量全部撤回，只留下
+ * tokens.css 的宿主基础外观（2026-11-24 用户："恢复之前没加主题系统时候
+ * 的样子"）。明暗仍按 mode 走宿主已有的 `.dark` 令牌；随后通知外观偏好
+ * 层重新应用字号/主题色/文字色/背景，避免把用户自选项一起清掉。
+ */
+function applyHostBase(mode: 'light' | 'dark') {
+  if (typeof document === 'undefined') return
+  const root = document.documentElement
+  for (const name of APPLIED_THEME_PROPS) root.style.removeProperty(name)
+  APPLIED_THEME_PROPS.clear()
+  root.style.setProperty('color-scheme', mode)
+  root.classList.toggle('dark', mode === 'dark')
+  delete root.dataset.hermesTheme
+  root.dataset.hermesMode = mode
+  document.getElementById('hermes-desktop-custom-css')?.remove()
+  setAppearance(mode)
+
+  const bg = mode === 'dark' ? '#111114' : '#e9eeef'
+  window.hermesDesktop?.setTitleBarTheme?.({ background: bg, foreground: mode === 'dark' ? '#f4f4f5' : '#000000' })
+  try {
+    window.localStorage.setItem('hermes-boot-background', bg)
+    window.localStorage.setItem('hermes-boot-color-scheme', mode)
+  } catch {
+    // localStorage 不可用时只影响下一帧预涂色，不影响当前外观。
+  }
+
+  // appearance-prefs 在该模块加载时已注册监听；启动阶段它尚未加载时，
+  // 之后自己的 applyPrefs 会补上。
+  window.dispatchEvent(new Event('mirach:appearance-reapply'))
+}
+
 // Pin Electron's nativeTheme to the app's mode so the NATIVE window chrome
 // (macOS vibrancy material, titlebar, pre-paint background) matches the app
 // theme instead of the OS appearance. An explicit light/dark pick is forced;
@@ -451,13 +651,21 @@ const syncNativeTheme = (pref: ThemeMode, rendered: 'light' | 'dark') =>
 // Boot-time paint to avoid a flash before <ThemeProvider> mounts. Use the last
 // active profile's appearance so a non-default profile relaunch paints its own
 // skin + light/dark mode.
+//
+// 2026-11-23：宿主补齐了 `.dark` 令牌（tokens.css），主题层不再固定 light；
+// 这里按已保存的 mode 解析（system 跟随 OS），与 <ThemeProvider> 运行时一致。
 if (typeof window !== 'undefined') {
   const profile = BOOT_PROFILE_KEY
-  const pref = modePref.resolve(profile)
-  const resolved = resolveMode(pref)
-  const theme = deriveTheme(normalizeSkin(storedSkin(profile)), resolved)
-  applyTheme(theme, resolved)
-  syncNativeTheme(pref, renderedModeFor(theme.colors, resolved))
+  const storedMode = modePref.resolve(profile)
+  const resolved = storedMode === 'system' ? (matchesQuery('(prefers-color-scheme: dark)') ? 'dark' : 'light') : storedMode
+  const bootSkin = normalizeSkin(storedSkin(profile))
+  if (bootSkin === HOST_THEME_NONE) {
+    applyHostBase(resolved)
+  } else {
+    const theme = deriveTheme(bootSkin, resolved)
+    applyTheme(theme, resolved)
+    syncNativeTheme(storedMode, renderedModeFor(theme.colors, resolved))
+  }
 }
 
 // ─── Context ────────────────────────────────────────────────────────────────
@@ -491,7 +699,7 @@ const SKIN_LIST = BUILTIN_THEME_LIST.map(({ name, label, description }) => ({ na
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: nousTheme,
-  themeName: DEFAULT_SKIN_NAME,
+  themeName: HOST_THEME_NONE,
   mode: 'light',
   resolvedMode: 'light',
   renderedMode: 'light',
@@ -589,14 +797,16 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const paintedName = preview ? preview.name : committedName
   const paintedMode = preview ? preview.mode : resolvedMode
 
+  const isHostBase = paintedName === HOST_THEME_NONE
+
   const activeTheme = useMemo(
-    () => deriveTheme(paintedName, paintedMode),
+    () => (isHostBase ? nousTheme : deriveTheme(paintedName, paintedMode)),
     // deriveTheme resolves its seed through the merged registry, so the theme
     // stores are its reactivity too — an in-place palette edit of the ACTIVE
     // skin (live theme authoring) must repaint, not just a name switch. The
     // backend CSS store matters the same way for built-in-named user skins.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [paintedName, paintedMode, userThemes, backendThemes, backendCustomCSS, registryVersion]
+    [isHostBase, paintedName, paintedMode, userThemes, backendThemes, backendCustomCSS, registryVersion]
   )
 
   // Unsaved accent preview (dev picker, onboarding accent card). `null` returns
@@ -606,20 +816,28 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // Painted from the same theme persistAccent saves, so committing the accent changes nothing on screen.
   const paintedTheme = useMemo(
     () =>
-      accentOverride === null
-        ? activeTheme
-        : deriveFrom(accentedTheme(resolveTheme(paintedName) ?? nousTheme, accentOverride), paintedMode),
-    [activeTheme, accentOverride, paintedName, paintedMode]
+      isHostBase
+        ? nousTheme
+        : accentOverride === null
+          ? activeTheme
+          : deriveFrom(accentedTheme(resolveTheme(paintedName) ?? nousTheme, accentOverride), paintedMode),
+    [activeTheme, accentOverride, isHostBase, paintedName, paintedMode]
   )
 
   // What actually gets painted (matches the `.dark` class applyTheme toggles).
-  const renderedMode = useMemo(() => renderedModeFor(paintedTheme.colors, paintedMode), [paintedTheme, paintedMode])
+  const renderedMode = useMemo(
+    () => (isHostBase ? paintedMode : renderedModeFor(paintedTheme.colors, paintedMode)),
+    [isHostBase, paintedTheme, paintedMode],
+  )
 
   // The chat face rides on the theme paint: the config-backed family is layered
   // in front of the theme's own stack, so an empty value is exactly the theme.
   const chatFontFamily = useStore($chatFontFamily)
 
-  useEffect(() => applyTheme(paintedTheme, paintedMode, chatFontFamily), [paintedTheme, paintedMode, chatFontFamily])
+  useEffect(() => {
+    if (isHostBase) applyHostBase(paintedMode)
+    else applyTheme(paintedTheme, paintedMode, chatFontFamily)
+  }, [isHostBase, paintedTheme, paintedMode, chatFontFamily])
 
   // Keep the native window appearance pinned to the app theme (vibrancy
   // material, titlebar, new-window pre-paint background).

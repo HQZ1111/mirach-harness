@@ -357,19 +357,15 @@
   }
 }
 
-/* ── 对话框动效（2026-10-26；菜单类已改由 beui goo 承担）─────────────
-   用户："所有的弹窗效果归拢成一个"（2026-10-26 定稿）。归拢后分工：
+/* ── 对话框动效（2026-10-26；菜单类 2026-11-22 起用默认 fade+zoom）─────
+   用户 2026-11-22："这个弹窗效果组件就不要了，换成默认的弹窗效果"——
+   goo（液滴粘性合并 / GooSurface）整体退役，context-menu.tsx 与
+   popover.tsx 改用 tw-animate 的 `animate-in fade-in-0 zoom-in-95`
+   （默认弹层效果，与全树其它 animate-in 同源）。
 
-   - **菜单 / popover / 右键**（有锚点的弹层）：走
-     `components/motion/goo-layer.tsx` 的 GooSurface —— SVG 粘性滤镜 +
-     从锚点形变展开，弹簧曲线读 `--beui-spring-goo-*`。模型选择器、
-     全局右键菜单、侧栏选项、会话行 ⋯/右键、文件树行、标签条 + 全部同一份。
-   - **模态对话框**（居中、无锚点）：仍是 Radix Dialog + 下面的关键帧。
-     goo 的语义是"从某处长出来"，居中对话框没有那个"某处"，套上去反而怪。
-
-   **不要在这里给菜单加 animation**：菜单元素由 GooSurface 用 motion 的
-   clip-path 动画驱动，再叠一层 CSS keyframes 会把形变覆盖成缩放淡入
-   （这正是归拢前"三种效果"的成因）。 */
+   - **菜单 / popover / 右键**（有锚点的弹层）：portal 到 body 的 fixed
+     面板 + tw-animate 默认进出场；几何只剩 side/align/视口钳位。
+   - **模态对话框**（居中、无锚点）：仍是 Radix Dialog + 下面的关键帧。 */
 @keyframes beui-dialog-in {
   from {
     opacity: 0;

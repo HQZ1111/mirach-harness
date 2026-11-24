@@ -61,7 +61,7 @@ const monthVariants = {
 };
 
 const iconClass =
-  "inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30";
+  "inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-(--hover-wash) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-30";
 
 /** State shared by built-in parts and custom date range controls. */
 export function useDateRangePicker() {
@@ -252,7 +252,7 @@ export function DateRangePickerHeader({
           disabled={disabled}
           onClick={() => openChoices("months")}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-semibold transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40",
+            "inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-semibold transition-colors hover:bg-(--hover-wash) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40",
             view === "years" && "hidden",
           )}
         >
@@ -274,7 +274,7 @@ export function DateRangePickerHeader({
           aria-controls={view === "years" ? choicesId : undefined}
           disabled={disabled}
           onClick={() => openChoices("years")}
-          className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium tabular-nums text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium tabular-nums text-muted-foreground transition-colors hover:bg-(--hover-wash) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
         >
           {view === "years" ? `${yearPage}–${yearPageEnd}` : year}
           <ChevronDown
@@ -555,7 +555,7 @@ export function DateRangePickerGrid({
                                     : canHover &&
                                         !unavailable(date) &&
                                         !inRange &&
-                                        "hover:bg-muted",
+                                        "hover:bg-(--hover-wash)",
                                   date === today &&
                                     !endpoint &&
                                     "font-semibold after:absolute after:bottom-1 after:size-0.75 after:rounded-full after:bg-current",
@@ -616,7 +616,7 @@ export function DateRangePickerClear({
       aria-label={props["aria-label"] ?? "Clear date range"}
       disabled={disabled || ctx.disabled || !ctx.value}
       className={cn(
-        "rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30",
+        "rounded-md px-1.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-(--hover-wash) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-30",
         className,
       )}
       onClick={(event) => {
@@ -711,7 +711,7 @@ export function DateRangePickerPreset({
         "rounded-lg px-3 py-1.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40",
         selected
           ? "bg-foreground text-background"
-          : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+          : "bg-muted/60 text-muted-foreground hover:bg-(--hover-wash) hover:text-foreground",
         className,
       )}
       onClick={(event) => {
@@ -767,7 +767,7 @@ export function DateRangePickerTrigger({
         disabled={disabled || ctx.disabled}
         aria-label={props["aria-label"] ?? `${ctx.label}: ${summary}`}
         className={cn(
-          "inline-flex h-9 w-fit max-w-full items-center gap-2 rounded-xl border border-border bg-background px-3 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40",
+          "inline-flex h-9 w-fit max-w-full items-center gap-2 rounded-xl border border-border bg-background px-3 text-[13px] font-medium text-foreground transition-colors hover:bg-(--hover-wash) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40",
           className,
         )}
       >
@@ -986,7 +986,7 @@ function CalendarChoices({
             "flex h-13 items-center justify-center rounded-xl px-1 text-[13px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-25",
             choice.id === selected
               ? "bg-foreground font-medium text-background"
-              : "bg-muted/40 hover:bg-muted",
+              : "bg-muted/40 hover:bg-(--hover-wash)",
           )}
         >
           {choice.label}

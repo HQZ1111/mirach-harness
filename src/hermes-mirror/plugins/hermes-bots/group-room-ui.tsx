@@ -9,11 +9,10 @@ import {
   Button,
   cn,
   Codicon,
-  composerInputBacking,
-  composerSurfaceRing,
+  ComposerBar,
+  ComposerSend,
   GHOST_ICON_BTN,
   GlyphSpinner,
-  PRIMARY_ICON_BTN,
   relativeTime,
   Tip,
   useI18n
@@ -206,9 +205,9 @@ export function RoomMessage({ actions, author, avatar, badge, children, isUser =
 
 /** A one-line notice in the transcript (a failed turn, Stop), on the message rows' left edge. */
 export function RoomNoticeRow({ avatar, children, kind }: { avatar?: ReactNode; children: ReactNode; kind: string }) {
-  return <div className="flex min-w-0 items-center gap-3 py-1" data-room-notice={kind}>
+  return <div className="flex min-w-0 items-center gap-3 overflow-hidden py-1" data-room-notice={kind}>
     <div className={cn(AVATAR_COLUMN, 'flex justify-end')}>{avatar}</div>
-    <div className="flex min-w-0 flex-1 items-center gap-2 text-xs">{children}</div>
+    <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden text-xs">{children}</div>
   </div>
 }
 
@@ -308,35 +307,35 @@ export function AvatarStack({ avatars, max = 4 }: { avatars: { key: string; node
   </span>
 }
 
-/** The main composer's surface around a plugin input: ring, fill, ghost attach on the left,
- *  the round primary send on the right. Enter sends (the input owns that). `attach` renders
- *  straight into the surface grid: its parts pick `ROOM_COMPOSER_AREAS` (the attach button,
- *  the pending-file chips). */
+/** The main composer's surface around a plugin input. 2026-11-23: this is the
+ *  HOST's actual `ComposerBar` + `ComposerSend` (same components as the session
+ *  composer), not a lookalike — the room input must feel identical to "my input
+ *  box". `attach` renders straight into the surface grid: its parts pick
+ *  `ROOM_COMPOSER_AREAS` (the attach button, the pending-file chips). */
 export function RoomComposer({ above, attach, canSend, children, onSubmit, sendLabel, status, ...form }: {
   above?: ReactNode; attach?: ReactNode; canSend: boolean; children: ReactNode; onSubmit: () => void; sendLabel: string
   /** The room's slim status strip (round, who works), docked on the surface's top edge. */
   status?: ReactNode
 } & Omit<ComponentProps<'form'>, 'onSubmit'>) {
   return <form {...form} className={cn('pb-3 pt-1', form.className)} onSubmit={(event: FormEvent) => { event.preventDefault(); onSubmit() }}>
+    {/* 轮次状态（已结束/进行中）在输入卡**上面**——用户 2026-11-23：
+        "群聊的输入框里面有个已结束，这个提示应该在输入框的上面"。 */}
     {status}
-    <div className={cn('relative isolate rounded-2xl', composerSurfaceRing)} data-slot="room-composer-surface">
-      <div aria-hidden className={composerInputBacking} />
-      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-end gap-x-(--composer-control-gap) gap-y-1 px-(--composer-surface-pad-x) py-(--composer-surface-pad-y) [grid-template-areas:'reply_reply_reply''files_files_files''attach_input_send']">
-        {above && <div className="min-w-0 [grid-area:reply]">{above}</div>}
+    <ComposerBar>
+      {above ? <div className="min-w-0">{above}</div> : null}
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-2 [grid-template-areas:'files_files_files''input_input_input''attach_._send']">
         {attach}
         <div className="min-w-0 [grid-area:input]">{children}</div>
         <Tip label={sendLabel}>
-          <Button aria-label={sendLabel} className={cn(PRIMARY_ICON_BTN, 'mb-1 [grid-area:send]')} disabled={!canSend} type="submit">
-            <Codicon name="arrow-up" size="0.875rem" />
-          </Button>
+          <ComposerSend aria-label={sendLabel} className="[grid-area:send]" disabled={!canSend} idle={!canSend} streaming={false} type="submit" />
         </Tip>
       </div>
-    </div>
+    </ComposerBar>
   </form>
 }
 
 /** Where an attachment control sits inside a `RoomComposer` surface. */
-export const ROOM_COMPOSER_AREAS = { button: 'mb-1 [grid-area:attach]', files: 'min-w-0 [grid-area:files]' } as const
+export const ROOM_COMPOSER_AREAS = { button: '[grid-area:attach]', files: 'min-w-0 [grid-area:files]' } as const
 
 /** The ghost `+` the main composer uses for attachments. */
 export function RoomAttachButton({ disabled, label, onClick }: { disabled?: boolean; label: string; onClick: () => void }) {
@@ -357,6 +356,8 @@ export function RoomReplyChip({ cancelLabel, label, onCancel, quote }: { cancelL
   </div>
 }
 
-/** Borderless input inside a `RoomComposer` surface (the surface owns the ring). */
+/** Borderless input inside a `RoomComposer` surface — same geometry as the main
+ *  composer's textarea (host `ComposerPrimitive.Input`): 40px min height, 14px
+ *  text, no padding, no border. */
 export const ROOM_COMPOSER_INPUT_CLASS =
-  `${ROOM_TEXT_SCALE} !border-transparent !bg-transparent !shadow-none min-h-(--composer-input-min-height) px-1 py-1 text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) placeholder:text-(--ui-text-tertiary)`
+  `${ROOM_TEXT_SCALE} !border-transparent !bg-transparent !shadow-none max-h-40 min-h-(--composer-input-min-height) w-full resize-none p-0 text-[length:var(--conversation-text-font-size)] leading-[20px] outline-none placeholder:text-(--text-4)`

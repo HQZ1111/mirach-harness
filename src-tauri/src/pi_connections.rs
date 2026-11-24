@@ -151,6 +151,11 @@ fn local_only_registry() -> ConnectionRegistry {
     }
 }
 
+/// 供数据同步 / 设备列表读取的只读快照（调用方**不得**把 token 带出 Rust）。
+pub(crate) fn registry_snapshot() -> Vec<RegistryConnection> {
+    read_registry().connections
+}
+
 fn write_registry(registry: &ConnectionRegistry) -> Result<(), String> {
     let path = connections_path();
     if let Some(parent) = path.parent() {

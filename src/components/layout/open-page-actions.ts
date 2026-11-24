@@ -20,7 +20,7 @@ import {
   terminalProjectName,
 } from '@/components/panes/terminal/terminal-tabs'
 import { columnFlagsOf, rootPanelsGroup, setPanelsHidden } from './dockview-column-ops'
-import { RAIL_MIN_WIDTH } from './rail-metrics'
+import { RAIL_MAX_WIDTH, RAIL_MIN_WIDTH } from './rail-metrics'
 
 export const OPEN_KIND_PANEL: Record<OpenPageKind, { id: string; component: string; title: string }> = {
   files: { id: 'files', component: 'files', title: '文件树' },
@@ -68,6 +68,7 @@ export function openPagePanel(a: DockviewApi, kind: OpenPageKind): void {
     a.addPanel({
       ...target,
       minimumWidth: RAIL_MIN_WIDTH,
+      maximumWidth: RAIL_MAX_WIDTH,
       params: { region: 'panels' },
       position: panelsDropPosition(a),
     })
@@ -111,6 +112,7 @@ export function openTerminalPanel(a: DockviewApi): void {
       component: OPEN_KIND_PANEL.terminal.component,
       title,
       minimumWidth: RAIL_MIN_WIDTH,
+      maximumWidth: RAIL_MAX_WIDTH,
       // 终端内容保持挂载（PTY 保活）——面板不可见时只 hidden，不卸载
       renderer: 'always',
       // cwd 进 params：布局存档恢复时按同一个工作目录重开（不能恢复时

@@ -29,7 +29,7 @@
  * set 原语，用宿主 CSS 令牌的任意值类拼装；无 shadcn 导入）。
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { appDataDir } from '@tauri-apps/api/path'
 import {
@@ -42,6 +42,7 @@ import {
 } from 'lucide-react'
 
 import { inTauri } from '@/lib/tauri-window'
+import { ConnectionsRegistrySection } from '@/contrib/mirach-connections/connections-registry'
 
 /** 连接模式（hermes 同名联合类型原样保留——宿主只可能停在 'local'）。 */
 export type GatewayMode = 'local' | 'remote' | 'cloud' | 'ssh'
@@ -51,6 +52,13 @@ interface AguiEndpoint {
   port: number
   token: string
   version: string
+}
+
+/** 连接注册表行（`pi_connections_list` 的投影；token 永不在 wire 里）。 */
+interface RegistryConnectionRow {
+  id: string
+  kind: GatewayMode
+  label: string
 }
 
 /** 模式卡定义（GATEWAY_MODES 的条目）。 */
@@ -66,7 +74,7 @@ export interface GatewayModeDef {
 }
 
 /** 置灰卡的统一原因（宿主本地单机、无网关后端——如实说明，不假装可切换）。 */
-const UNAVAILABLE_HINT = '宿主是本地单机形态——该模式需要网关后端，未实现'
+const UNAVAILABLE_HINT = '暂无该类型连接——在下方「连接注册表」里添加远程网关 / 云 / SSH 设备（本窗口仍使用本机引擎）'
 
 /**
  * 四张模式卡（顺序同 hermes：local / cloud / remote / ssh）。
@@ -136,7 +144,7 @@ const G = {
   endpointTitle: 'AG-UI 端点',
   hideToken: '隐藏 token',
   intro:
-    '应用默认会启动自己的本地网关（随应用启动，绑定 127.0.0.1 随机端口）。hermes 的远程网关 / Hermes Cloud / SSH 模式需要网关后端——宿主是本地单机形态，这些模式未实现（下方卡片置灰）。',
+    '应用默认会启动自己的本地网关（随应用启动，绑定 127.0.0.1 随机端口），当前窗口固定使用它。远程网关 / Hermes Cloud / SSH 由本页下方「连接注册表」承载（网关 WS RPC + ssh -N -L 隧道），供机器人跨网关与数据同步使用；这里显示它们的配置状态。',
   listenAddr: '监听地址',
   loading: '加载中…',
   logsCopied: (dir: string) => `已复制应用数据目录路径：${dir}`,
@@ -234,9 +242,25 @@ function ModeCard({
  * 网关连接设置（本地单机形态）。宿主导航只有「核心连接」一项，无子页。
  */
 export function GatewaySettings() {
-  // 连接模式：宿主固定 local。state 形状与 hermes 一致（其余三卡 disabled，
-  // 永远无法选中；点 local 卡 = 选中已是当前的模式，与 hermes 同为无操作）。
+  // 连接模式：主窗口引擎固定 local（远程连接是注册表条目，供跨网关/数据同步用）。
   const [mode, setMode] = useState<GatewayMode>('local')
+  // 连接注册表嵌在本页底部（hermes gateway-settings 同样内嵌 ConnectionsRegistrySection）。
+  const registryRef = useRef<HTMLDivElement | null>(null)
+  const scrollToRegistry = () => {
+    registryRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  // 模式卡 → 连接注册表的添加表单（hermes 的"选模式即进入配置"）。
+  const [addKind, setAddKind] = useState<GatewayMode>('remote')
+  const [openEditorSignal, setOpenEditorSignal] = useState(0)
+  const openAdd = (kind: GatewayMode) => {
+    setAddKind(kind)
+    setOpenEditorSignal((n) => n + 1)
+    scrollToRegistry()
+  }
+
+  // 连接注册表（远程/云/SSH 真状态；null = 加载中）。
+  const [connections, setConnections] = useState<RegistryConnectionRow[] | null>(null)
+  const [connectionsError, setConnectionsError] = useState<string | null>(null)
 
   // AG-UI 端点（null = 载入中，可见状态；错误红条 + console.error，不静默）
   const [endpoint, setEndpoint] = useState<AguiEndpoint | null>(null)
@@ -265,6 +289,25 @@ export function GatewaySettings() {
         if (!cancelled) setEndpointError(describeIpcError(e))
       }
     })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 连接注册表（远程/云/SSH 的真实配置；失败红显，不按"没有"处理）。
+  useEffect(() => {
+    let cancelled = false
+    void invoke<{ connections?: RegistryConnectionRow[] }>('pi_connections_list')
+      .then((registry) => {
+        if (!cancelled) {
+          setConnections(registry.connections ?? [])
+          setConnectionsError(null)
+        }
+      })
+      .catch((e: unknown) => {
+        console.error('[gateway] 连接注册表读取失败', e)
+        if (!cancelled) setConnectionsError(describeIpcError(e))
+      })
     return () => {
       cancelled = true
     }
@@ -330,22 +373,70 @@ export function GatewaySettings() {
         <p className="set-hint">{G.intro}</p>
       </div>
 
-      {/* 连接模式四卡（hermes 原样：local 常亮可点、其余置灰 + hint） */}
+      {/* 连接模式四卡：本机 = 当前窗口引擎；远程/云/SSH = 连接注册表里的真实条目
+          （有则显示数量与名称并跳「连接」页，无则置灰并指向同一入口）。 */}
       <div>
         <h4 className="set-sub-title">{G.modeTitle}</h4>
         <div className="mt-2 grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">
-          {GATEWAY_MODES.map((m) => (
-            <ModeCard
-              active={mode === m.id}
-              description={m.description}
-              disabled={m.disabled}
-              hint={m.hint}
-              icon={m.icon}
-              key={m.id}
-              onSelect={() => setMode(m.id)}
-              title={m.title}
-            />
-          ))}
+          {GATEWAY_MODES.map((m) => {
+            if (m.id === 'local') {
+              return (
+                <ModeCard
+                  active
+                  description="本机引擎随应用启动（127.0.0.1 随机端口）——当前窗口固定使用本机网关。"
+                  icon={m.icon}
+                  key={m.id}
+                  onSelect={() => setMode('local')}
+                  title={m.title}
+                />
+              )
+            }
+            const rows = (connections ?? []).filter((row) => row.kind === m.id)
+            const configured = rows.length > 0
+            return (
+              <ModeCard
+                active={false}
+                description={
+                  configured
+                    ? `已配置 ${rows.length} 个：${rows.map((row) => row.label).join('、')}`
+                    : m.description
+                }
+                // 未配置也允许点击：直接打开该 kind 的添加表单（hermes 的
+                // 选模式 → 填表语义）；只有登记表还在加载时禁用。
+                disabled={connections === null}
+                hint={
+                  configured
+                    ? '在下方「连接注册表」管理该连接；数据同步页可把 MCP 配置推送到这些设备'
+                    : '点击后跳到下方「连接注册表」并打开添加表单'
+                }
+                icon={m.icon}
+                key={m.id}
+                onSelect={() =>
+                  configured ? scrollToRegistry() : openAdd(m.id)
+                }
+                title={m.title}
+              />
+            )
+          })}
+        </div>
+        {connectionsError !== null && <div className="set-err">{connectionsError}</div>}
+        <p className="set-hint" style={{ marginTop: 8 }}>
+          本宿主的主窗口始终使用本机引擎；远程网关 / 云 / SSH 连接供跨网关机器人、
+          花名册分组与数据同步使用。hermes 的「保存并重连」（把桌面外壳切到远端
+          backend）未移植——它需要整套远端 backend 模式，宿主没有这条链路。
+          凭据一律写入 OS 凭据管理器，没有明文 token 模式。
+        </p>
+        <div className="set-actions" style={{ justifyContent: 'space-between', marginTop: 8 }}>
+          <span className="set-row-source">
+            {connections === null
+              ? '正在读取连接注册表…'
+              : `连接注册表：远程 ${connections.filter((row) => row.kind === 'remote').length} · 云 ${
+                  connections.filter((row) => row.kind === 'cloud').length
+                } · SSH ${connections.filter((row) => row.kind === 'ssh').length}`}
+          </span>
+          <button className="set-btn" onClick={scrollToRegistry} style={{ whiteSpace: 'nowrap' }} type="button">
+            管理连接
+          </button>
         </div>
       </div>
 
@@ -416,6 +507,21 @@ export function GatewaySettings() {
       </div>
       {logsCopied !== null && <span className="set-saved">{logsCopied}</span>}
       {logsCopyError !== null && <div className="set-err">{logsCopyError}</div>}
+
+      {/* 连接注册表（hermes gateway-settings 同样内嵌 ConnectionsRegistrySection）：
+          远程网关 / 云 / SSH 的增删改、凭据写入 OS 凭据管理器、测试连接与设为主要。 */}
+      <div ref={registryRef}>
+        <h4 className="set-sub-title">连接注册表</h4>
+        <p className="set-hint">
+          远程网关 / Hermes Cloud / SSH 设备都在这里增删改；「测试」对 remote/cloud
+          真连网关等 `gateway.ready`，SSH 先起 `ssh -N -L` 隧道再探活。凭据写入
+          OS 凭据管理器，界面只显示派生态。
+        </p>
+        <ConnectionsRegistrySection
+          initialKind={addKind}
+          openEditorSignal={openEditorSignal}
+        />
+      </div>
     </section>
   )
 }

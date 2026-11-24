@@ -95,6 +95,15 @@ export const EASE_DRAWER = readEase('--beui-ease-drawer', [0.32, 0.72, 0, 1] as 
 /** CSS string form of EASE_OUT for inline style transitions.（令牌同源值） */
 export const EASE_OUT_CSS = 'cubic-bezier(0.16, 1, 0.3, 1)'
 
+/**
+ * 滑动指示块（hover pill / 选中块）的位移曲线。
+ *
+ * `EASE_OUT_CSS` 是 expo（前 60ms 吃掉 80% 距离），40–50px 的列表行位移
+ * 看起来接近瞬跳；这里用更平缓的 easeOutCubic + 260ms，用户才看得出
+ * "从上一行滑过来"。2026-11-23 用户实报"没有滑动的效果了"。
+ */
+export const SLIDE_EASE_CSS = 'cubic-bezier(0.22, 0.61, 0.36, 1)'
+
 /** Press feedback on buttons and other tappable surfaces. */
 export const SPRING_PRESS = springOf('press', { stiffness: 500, damping: 30, mass: 0.6 })
 
@@ -124,43 +133,9 @@ export const SPRING_TABS = springOf('tabs', { stiffness: 245, damping: 36, mass:
 /** Toast 堆叠（layout/进出） */
 export const SPRING_TOAST_STACK = springOf('toast', { stiffness: 420, damping: 34, mass: 0.75 })
 
-/** Popover goo（过量 bounce 会让液滴脖子胀出面板边缘） */
-export const POPOVER_GOO_OPEN = visualSpringOf('goo-open', { dur: 0.3, bounce: 0.15 })
-export const POPOVER_GOO_CLOSE = visualSpringOf('goo-close', { dur: 0.21, bounce: 0.15 })
-
-/**
- * 弹层液滴粘性合并（goo）**总开关**——`Popover` / `ContextMenu` / `GooSurface`
- * 的 `goo` 默认值全部取它，调用点不许传（用户 2026-11-01："调用点没传，
- * 直接在令牌中统一开关不行吗"）。
- *
- * 读 `--beui-popover-goo`（tokens.css，唯一源头）：0 = 关（默认，无脖子、
- * 按钮不被投影），1 = 开（beui 原设计）。无 DOM（node 测试）回退 `false`
- * ——与令牌默认值一致，不是静默降级。
- */
-const readGooSwitch = (): boolean => {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return false
-  try {
-    const raw = getComputedStyle(document.documentElement)
-      .getPropertyValue('--beui-popover-goo')
-      .trim()
-    if (!raw) {
-      console.error(
-        '[ease] 令牌 --beui-popover-goo 未定义——回退 false（tokens.css 是否先于本模块求值？）',
-      )
-      return false
-    }
-    const n = Number.parseFloat(raw)
-    if (!Number.isFinite(n)) {
-      console.error('[ease] 令牌 --beui-popover-goo 不是数值——回退 false', raw)
-      return false
-    }
-    return n !== 0
-  } catch {
-    return false
-  }
-}
-
-export const POPOVER_GOO = readGooSwitch()
+// goo（液滴粘性合并）相关的 POPOVER_GOO* 导出随 goo-layer.tsx 一起删除
+// （2026-11-22 用户："这个弹窗效果组件就不要了，换成默认的弹窗效果"）：
+// 菜单/popover 现在走 tw-animate 的默认 fade+zoom。
 
 /** Select 展开（visualDuration 式） */
 export const SELECT_OPEN = visualSpringOf('unfold', { dur: 0.2, bounce: 0.12 })

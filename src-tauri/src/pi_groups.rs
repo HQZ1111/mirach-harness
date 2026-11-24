@@ -78,29 +78,11 @@ pub fn groups_dispatch(
 ) -> Result<Value, String> {
     use tauri::Emitter;
     let params = params.unwrap_or_else(|| json!({}));
-    let ctx = local_actor();
+    let result = rpc_dispatch(&method, &params);
 
-    // 1) 校验（能力 / profile / 参数集）
-    let supplied = controls::validate_dispatch(&method, &params, &ctx)
-        .map_err(|refusal| format!("{refusal:?}"))?;
-
-    // 2) 分派
-    let result = match controls::dispatch_target(&method) {
-        controls::DispatchTarget::Profiles => groups_profiles_list(&supplied),
-        // 2026-11-18：authority 侧的 peer 成员台账真落地（Desktop 驱动模式）；
-        // 本机作为 lending 网关的 invite/RoomLink 仍需对外 HTTP 服务端，不伪造。
-        controls::DispatchTarget::Peers => match method.as_str() {
-            "groups.peer.register" | "groups.peer.revoke" => dispatch_peer(&method, &supplied),
-            _ => Err(format!(
-                "{method}: 跨网关 peer 通道未接通（本机不提供 RoomLink 服务端；authority 侧 register/revoke 已支持）"
-            )),
-        },
-        controls::DispatchTarget::Group => dispatch_group(&method, &supplied),
-    };
-
-    // 3) `groups.changed` 生产者（hermes 网关 change_watcher 的同款推送）：
-    //    变更类方法成功后广播 room_id，workspace 的 push 分支即刷（此前恒
-    //    依赖 2s 轮询）。只对**成功**的变更发；读取类不发。
+    // `groups.changed` 生产者（hermes 网关 change_watcher 的同款推送）：
+    // 变更类方法成功后广播 room_id，workspace 的 push 分支即刷（此前恒
+    // 依赖 2s 轮询）。只对**成功**的变更发；读取类不发。
     let is_mutation = matches!(
         method.as_str(),
         "groups.create"
@@ -123,6 +105,51 @@ pub fn groups_dispatch(
         let _ = app.emit("mirach:plugin:groups:changed", json!({ "room_id": room_id }));
     }
 
+    result
+}
+
+/// 校验 + 分派的纯入口（WS 群聊方法与 IPC 共用同一套语义，不重复校验）。
+pub(crate) fn rpc_dispatch(method: &str, params: &Value) -> Result<Value, String> {
+    if params.as_object().is_none() {
+        return Err("invalid_params".to_owned());
+    }
+    let ctx = local_actor();
+
+    // 1) 校验（能力 / profile / 参数集）
+    let supplied = controls::validate_dispatch(method, params, &ctx)
+        .map_err(|refusal| format!("{refusal:?}"))?;
+
+    // 2) 分派
+    let result = match controls::dispatch_target(method) {
+        controls::DispatchTarget::Profiles => groups_profiles_list(&supplied),
+        // authority 侧的 peer 成员台账真落地（Desktop 驱动模式）。
+        controls::DispatchTarget::Peers => match method {
+            "groups.peer.register" | "groups.peer.revoke" => dispatch_peer(method, &supplied),
+            _ => Err(format!("{method}: 未知的 peer 方法")),
+        },
+        controls::DispatchTarget::Group => dispatch_group(method, &supplied),
+    };
+    // 变更成功后向外广播 groups.changed（IPC 与 peer WS 共用同一入口）。
+    let is_mutation = matches!(
+        method,
+        "groups.create"
+            | "groups.rename"
+            | "groups.disband"
+            | "groups.send"
+            | "groups.context"
+            | "groups.stop"
+            | "groups.continue"
+            | "groups.retry"
+            | "groups.discard"
+            | "groups.driver_append"
+    ) || method.starts_with("groups.attachment.");
+    if result.is_ok() && is_mutation {
+        let room_id = params
+            .get("room_id")
+            .or_else(|| params.get("event").and_then(|event| event.get("room_id")))
+            .and_then(Value::as_str);
+        crate::pi_gateway_peer::notify_groups_changed(room_id);
+    }
     result
 }
 
@@ -255,6 +282,77 @@ fn dispatch_peer(method: &str, params: &serde_json::Map<String, Value>) -> Resul
                 return Err("groups.peer.register: target_profile 与成员 profile 不一致".into());
             }
 
+            // 上游 `_probe`：注册前对目标发一次 live capabilities 探测，
+            // 校验可达、catalog 一致、scope 一致（grant 只在那一刻有效）。
+            // 阻塞客户端必须离开 tokio worker 线程（runtime 内 block_on 会 panic）。
+            let endpoint = format!(
+                "{}/v1/room-members/capabilities",
+                target_url.trim_end_matches('/')
+            );
+            let grant_for_probe = grant.clone();
+            let (status, text) = std::thread::spawn(move || -> Result<(u16, String), String> {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| format!("groups.peer.register: peer client: {e}"))?;
+                let response = client
+                    .get(&endpoint)
+                    .header("Authorization", format!("HermesRoom {grant_for_probe}"))
+                    .send()
+                    .map_err(|e| format!("groups.peer.register: peer_unreachable ({e})"))?;
+                let status = response.status().as_u16();
+                let text = response.text().unwrap_or_default();
+                Ok((status, text))
+            })
+            .join()
+            .map_err(|_| "groups.peer.register: peer probe panicked".to_string())??;
+            if !(200..300).contains(&status) {
+                let code = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("error")
+                            .and_then(|error| error.get("code"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default();
+                return Err(match code.as_str() {
+                    "invalid_room_grant" => "groups.peer.register: invalid_room_grant".into(),
+                    "room_reauthorization_required" => {
+                        "groups.peer.register: room_reauthorization_required".into()
+                    }
+                    _ => format!("groups.peer.register: peer_unreachable (HTTP {status})"),
+                });
+            }
+            let probe: Value = serde_json::from_str(&text)
+                .map_err(|e| format!("groups.peer.register: peer 响应不是 JSON: {e}"))?;
+            let expected_epoch = room.authority_epoch;
+            let local_install = crate::pi_groups::installation_id();
+            let probe_matches = probe.get("room_id").and_then(Value::as_str) == Some(room_id.as_str())
+                && probe.get("member_id").and_then(Value::as_str) == Some(member_id.as_str())
+                // 上游 `expected_scope`：home_install_id 是本机（home）的 authority id，
+                // authority_gateway_id/epoch 对齐房间的 authority（同一台机器时为同值）。
+                && probe.get("home_install_id").and_then(Value::as_str)
+                    == Some(local_install.as_str())
+                && probe.get("authority_gateway_id").and_then(Value::as_str)
+                    == Some(room.authority_gateway_id.as_str())
+                && probe.get("authority_epoch").and_then(Value::as_i64) == Some(expected_epoch)
+                && probe.get("target_profile").and_then(Value::as_str) == Some(target_profile.as_str())
+                && probe
+                    .get("catalog")
+                    .and_then(|catalog| catalog.get("installation_id"))
+                    .and_then(Value::as_str)
+                    == Some(installation_id)
+                && probe
+                    .get("catalog")
+                    .and_then(|catalog| catalog.get("catalog_digest"))
+                    .and_then(Value::as_str)
+                    == Some(digest);
+            if !probe_matches {
+                return Err("groups.peer.register: peer_target_mismatch".into());
+            }
+
             let _guard = room_links_guard();
             let mut links = read_room_links()?;
             links.retain(|row| {
@@ -278,7 +376,8 @@ fn dispatch_peer(method: &str, params: &serde_json::Map<String, Value>) -> Resul
             write_room_links(&links)?;
             Ok(json!({
                 "registered": true,
-                "mode": "desktop",
+                // 上游 `groups.peer.register` 回执：mode 是 link mode（direct），不是平台名。
+                "mode": "direct",
                 "transport_security": if scheme == "https" { "tls" } else { "loopback" },
                 "target_install_id": installation_id,
                 "target_profile": target_profile,
@@ -382,9 +481,31 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
                 None,
             )
             .map_err(|e| e.to_string())?;
+            // `driver_status.peer_routes`：Desktop 的 peer 成员状态投影（上游
+            // `peerMemberStates` 读它判"未加入 / ready / 需重授权"）。
+            let peer_routes: Vec<Value> = read_room_links()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|row| {
+                    row.get("room_id").and_then(Value::as_str) == Some(room.room_id.as_str())
+                })
+                .map(|row| {
+                    let status = match row.get("status").and_then(Value::as_str) {
+                        Some("registered") | Some("ready") => "ready",
+                        Some("needs_reauthorization") => "needs_reauthorization",
+                        Some("unavailable") => "unavailable",
+                        _ => "missing",
+                    };
+                    json!({
+                        "member_id": row.get("member_id").cloned().unwrap_or(Value::Null),
+                        "status": status,
+                    })
+                })
+                .collect();
             Ok(json!({
                 "room": room_json(&room),
                 "context": context.to_json(),
+                "driver_status": { "peer_routes": peer_routes },
                 // `groups.changed` 推送已接（groups_dispatch 变更成功后广播）；
                 // workspace 的 push 分支据此即时刷新，2s 轮询退为兜底。
                 "change_events": true,

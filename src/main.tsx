@@ -1,6 +1,9 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
+// 必须先于主题/translucency 模块求值：装上窗口透明桥（见文件头）。
+import './lib/translucency-host'
+
 // ── 样式必须**先于** app 图求值导入（2026-10-16 实锤）──
 // ESM 按 import 序深度优先求值：CSS import 在前 → vite 先注入 <style>，
 // 之后的 ease.ts（模块顶层 getComputedStyle 读 --beui-spring-* 令牌）
@@ -34,6 +37,8 @@ import './styles/base.css'
 import './styles/flexlayout.css'
 import './styles/panes.css'
 import './styles/overlays.css'
+// 外观页的氛围层（底部波浪动效），在 tailwind 之前导入。
+import './styles/appearance.css'
 // 全局原语（hermes 可抄件）：滚动条/弹窗阴影/z 层令牌——tailwind 之前，
 // 其工具类仍可覆盖
 import './styles/ui-primitives.css'
@@ -43,6 +48,10 @@ import './styles/tailwind.css'
 
 import { inTauri } from './lib/tauri-window'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { ThemeProvider } from './hermes-mirror/themes/context'
+import { GlobalBackdrop } from './components/backdrop'
+// 外观偏好必须在根组件挂载前应用（缩放 / 字体 / 字号跨窗口一致）。
+import './lib/appearance-prefs'
 
 /**
  * 窗口分派（2026-10-23 起真正生效）。
@@ -137,7 +146,9 @@ if (isSettingsWindow) {
     .then(({ SettingsWindowRoot }) => {
       createRoot(rootEl).render(
         <StrictMode>
-          <SettingsWindowRoot />
+          <ThemeProvider>
+            <SettingsWindowRoot />
+          </ThemeProvider>
         </StrictMode>,
       )
       clearBootRetry()
@@ -177,10 +188,13 @@ if (isSettingsWindow) {
 
     createRoot(rootEl).render(
       <StrictMode>
-        <App />
-        {/* app 右键菜单（唯一右键菜单）+ 命令面板/设置浮层开关（app 根挂载，
-            树外——详情见 app-context-menu.tsx 文件头） */}
-        <AppContextMenu />
+        <ThemeProvider>
+          <GlobalBackdrop />
+          <App />
+          {/* app 右键菜单（唯一右键菜单）+ 命令面板/设置浮层开关（app 根挂载，
+              树外——详情见 app-context-menu.tsx 文件头） */}
+          <AppContextMenu />
+        </ThemeProvider>
       </StrictMode>,
     )
     clearBootRetry()

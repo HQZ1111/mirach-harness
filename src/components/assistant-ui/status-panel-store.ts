@@ -35,13 +35,27 @@ interface StatusPanelState {
   /** 面板组件**在场**（挂载 = 有活动会话且非 draft）——面板组件写入。
    *  mini 胶囊在场也算在场（顶部余隙的判定依据）。 */
   readonly mounted: boolean
+  /** composer 徽标的展开请求（ZCode handleOpenRunningBackgroundWorks 对偶）：
+   *  面板组件消费一次后由面板清空。`sections` = 要展开的分区；面板本体
+   *  只在「请求非空且 nonce 变化」时应用，避免徽标连点重复置位。 */
+  readonly expandRequest: {
+    readonly terminal: boolean
+    readonly agent: boolean
+    readonly workflow: boolean
+    readonly nonce: number
+  } | null
   setOverride(variant: StatusPanelVariant | null): void
   setMounted(mounted: boolean): void
+  requestExpandSections(sections: { terminal: boolean; agent: boolean; workflow: boolean }): void
+  consumeExpandRequest(): void
 }
+
+let expandNonce = 0
 
 export const statusPanelStore = createStore<StatusPanelState>((set) => ({
   override: readOverride(),
   mounted: false,
+  expandRequest: null,
   setOverride: (variant) => {
     try {
       if (variant === null) window.localStorage.removeItem(KEY)
@@ -53,6 +67,10 @@ export const statusPanelStore = createStore<StatusPanelState>((set) => ({
   },
   setMounted: (mounted) =>
     set((s) => (s.mounted === mounted ? s : { mounted })),
+  requestExpandSections: (sections) =>
+    set({ expandRequest: { ...sections, nonce: ++expandNonce } }),
+  consumeExpandRequest: () =>
+    set((s) => (s.expandRequest === null ? s : { expandRequest: null })),
 }))
 
 /**

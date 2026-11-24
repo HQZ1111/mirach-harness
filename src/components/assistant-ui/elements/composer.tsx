@@ -139,8 +139,9 @@ export function ComposerBar({
            paper 新增的 shadow-sm，保持输入框与去描边前逐像素一致。 */
         "border-border/60 border-[0.5px] shadow-none",
         /* 2026-11-15 按真实 ZCode 渲染器实测：radius 32 / padding 12 /
-           gap 12 / border 0.5px（旧值 20/10/8/1 是 hermes kit 口径）。 */
-        "flex w-full flex-col gap-[12px] rounded-[32px] p-[12px] transition-colors",
+           gap 12 / border 0.5px（旧值 20/10/8/1 是 hermes kit 口径）。
+           2026-11-23 用户定稿：输入框圆角改 20（其余 padding/gap 不动）。 */
+        "flex w-full flex-col gap-[12px] rounded-[20px] p-[12px] transition-colors",
         dragActive && "bg-blue-500/[0.04] dark:bg-blue-500/10",
         className,
       )}
@@ -659,7 +660,7 @@ export function ComposerSend({
       className={cn(
         "pressable-sm grid size-[28px] shrink-0 place-items-center rounded-full",
         streaming || !idle
-          ? inkButton
+          ? "bg-(--brand) text-(--on-brand) transition-[opacity,scale] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:opacity-90 active:scale-[0.96] motion-reduce:transition-none"
           : "bg-foreground/[0.06] text-foreground/30 dark:bg-foreground/[0.09] transition-colors",
         className,
       )}

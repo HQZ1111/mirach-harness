@@ -30,7 +30,12 @@ export interface SessionListEntry {
 }
 
 export type SessionListRow =
-  | { readonly kind: 'session'; readonly id: string }
+  | {
+      readonly kind: 'session'
+      readonly id: string
+      /** fork 谱系缩进层级（父会话可见时的挂载深度；0/缺省 = 顶层行）。 */
+      readonly depth?: number
+    }
   | {
       readonly kind: 'divider'
       readonly key: string

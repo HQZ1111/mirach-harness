@@ -8,13 +8,14 @@
  * （test 用注册表 URL + keyring token 真连网关等 gateway.ready）；ssh =
  * 无隧道实现，test 返回 stub:true 红显（不装作连通）。
  */
-import { useEffect, useMemo, useState, type FC } from 'react'
+import { useEffect, useMemo, useRef, useState, type FC } from 'react'
 import { CloudIcon, MonitorIcon, GlobeIcon, TerminalIcon, PencilIcon, TrashIcon, PlusIcon, PlugZapIcon, CheckIcon, Loader2Icon } from 'lucide-react'
 import { invoke } from '@tauri-apps/api/core'
 import { cn } from '@/lib/utils'
 import { useBotsStore } from '@/components/panes/hub/bots-store'
 import { useStore } from 'zustand'
 import { botsPanelStore, toggleBotsPanel } from '@/components/panes/hub/bots-panel-actions'
+import { useBotsFeatureDesired } from '@/plugins/bots-gate'
 
 type ConnectionKind = 'cloud' | 'local' | 'remote' | 'ssh'
 
@@ -71,9 +72,9 @@ interface EditorState {
   clearToken: boolean
 }
 
-const emptyEditor = (): EditorState => ({
+const emptyEditor = (kind: ConnectionKind = 'remote'): EditorState => ({
   id: null,
-  kind: 'remote',
+  kind,
   label: '',
   url: '',
   host: '',
@@ -117,7 +118,12 @@ function dupeError(e: EditorState, registry: ConnectionRegistry | null): null | 
   return null
 }
 
-export const ConnectionsRegistrySection: FC = () => {
+export const ConnectionsRegistrySection: FC<{
+  /** 从「核心连接」的模式卡直接进入添加表单时预选的 kind。 */
+  initialKind?: ConnectionKind
+  /** 每次自增 = 打开添加表单（卡片点击信号）。 */
+  openEditorSignal?: number
+}> = ({ initialKind = 'remote', openEditorSignal = 0 }) => {
   const [registry, setRegistry] = useState<ConnectionRegistry | null>(null)
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -138,6 +144,15 @@ export const ConnectionsRegistrySection: FC = () => {
       .catch((e) => console.error('[connections] peer 服务信息读取失败', e))
   }, [])
 
+  // 核心连接的模式卡 → 直接打开对应 kind 的添加表单（hermes 的选择模式即
+  // 进入配置语义）。信号自增才触发，避免每次父级渲染重开表单。
+  const lastOpenSignal = useRef(0)
+  useEffect(() => {
+    if (openEditorSignal <= lastOpenSignal.current) return
+    lastOpenSignal.current = openEditorSignal
+    setEditor(emptyEditor(initialKind))
+  }, [initialKind, openEditorSignal])
+
   const copy = (label: string, value: string) => {
     void navigator.clipboard
       ?.writeText(value)
@@ -149,6 +164,7 @@ export const ConnectionsRegistrySection: FC = () => {
   }
 
   const openBots = useStore(botsPanelStore, (s) => s.open)
+  const botsEnabled = useBotsFeatureDesired()
 
   const doTest = async (id: string) => {
     setTestingId(id)
@@ -596,13 +612,15 @@ export const ConnectionsRegistrySection: FC = () => {
         </div>
       )}
 
-      <div className="text-muted-foreground/80 text-xs">
-        「{openBots ? '收起' : '打开'}机器人」弹出栏后，花名册按连接分组。远端连接配好 URL 与 token
-        后点「测试」会真连网关（等 gateway.ready）；SSH 连接会先起 `ssh -N -L` 隧道再探。
-        <button className="ml-1 underline" onClick={toggleBotsPanel} type="button">
-          {openBots ? '收起机器人栏' : '打开机器人栏'}
-        </button>
-      </div>
+      {botsEnabled ? (
+        <div className="text-muted-foreground/80 text-xs">
+          「{openBots ? '收起' : '打开'}机器人」弹出栏后，花名册按连接分组。远端连接配好 URL 与 token
+          后点「测试」会真连网关（等 gateway.ready）；SSH 连接会先起 `ssh -N -L` 隧道再探。
+          <button className="ml-1 underline" onClick={toggleBotsPanel} type="button">
+            {openBots ? '收起机器人栏' : '打开机器人栏'}
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }

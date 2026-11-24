@@ -254,15 +254,9 @@ function ModelSelectorRoot({
 
   return (
     <ModelSelectorContext.Provider value={contextValue}>
-      {/* goo 根属性承载 方位/对齐/间距（beUI API；content 侧不再接受）
-          
-          **液滴粘性合并（goo）由令牌统一控制**（2026-11-01 用户："调用点
-          没传，直接在令牌中统一开关不行吗"）。默认关（tokens.css 的
-          `--beui-popover-goo: 0`）：面板 = 独立圆角矩形 + 投影，触发钮
-          （输入框下方的模型胶囊）不画副本、不被投影、也没有脖子。
-
-          此前这里手写关掉 goo 的 prop，标签总览/加号弹窗各写一遍——散在
-          调用点的布尔参数正是"有的有脖子有的没有"的成因，已全部删除。 */}
+      {/* 方位/对齐/间距（beUI API；content 侧不再接受）。
+          goo 已退役（2026-11-22）：弹层 = 默认 fade+zoom 的独立圆角矩形
+          + 投影，触发钮（输入框下方的模型胶囊）不再有副本/脖子/投影。 */}
       <Popover
         align={align ?? "start"}
         open={open ?? false}
@@ -806,7 +800,7 @@ function ModelSelectorEffort({
             key={option.id}
             value={option.id}
             className={cn(
-              "focus-visible:ring-ring/50 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer rounded-md px-2 py-1 text-xs transition-colors outline-none focus-visible:ring-1",
+              "focus-visible:ring-ring/50 text-muted-foreground hover:bg-(--hover-wash) hover:text-foreground cursor-pointer rounded-md px-2 py-1 text-xs transition-colors outline-none focus-visible:ring-1",
               "data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground data-[state=checked]:font-medium",
             )}
           >

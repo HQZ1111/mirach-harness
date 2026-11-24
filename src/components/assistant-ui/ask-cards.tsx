@@ -10,8 +10,9 @@
  * **未用官方 `ElicitationForm`**：它的 `fields` 是静态展示（value 是字符串，
  * 没有选择交互），无法承载真实作答——用它只能看不能答（等于假 UI）。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
+import { dispatchNativeNotification } from '@/lib/native-notify'
 import { askBridge, useAskBridge, type AskQuestion, type PendingAsk } from './ask-bridge'
 
 const cardClass = 'rounded-(--composer-radius) bg-(--surface) p-3 shadow-sm'
@@ -175,6 +176,7 @@ function AskCard({ item }: { item: PendingAsk }) {
 
 export function AskCards() {
   const { pending } = useAskBridge()
+  const notifiedRef = useRef<Set<string>>(new Set())
   // rpi 的 ask_user 是插件 runtime action（不进 AgentEvent 流），SSE 上没有
   // ask_request 信号——卡片数据以 Rust 邮箱投影为真相，挂载即拉一次 +
   // 轮询（run 被工具调用卡住时用户必须看到问题卡）。无会话时命令返回
@@ -186,6 +188,19 @@ export function AskCards() {
     }, 1000)
     return () => window.clearInterval(timer)
   }, [])
+  // 新提问 = 需要人：窗口失焦时弹 OS 通知（同一条提问只提醒一次）。
+  useEffect(() => {
+    const fresh = pending.filter((item) => !notifiedRef.current.has(item.id))
+    if (fresh.length === 0) return
+    for (const item of fresh) notifiedRef.current.add(item.id)
+    const first = fresh[0]!.request.questions[0]?.question ?? '助手需要你的回答'
+    dispatchNativeNotification({
+      kind: 'input',
+      title: '助手需要你的回答',
+      body: first.slice(0, 160),
+      tag: fresh[0]!.id,
+    })
+  }, [pending])
   if (pending.length === 0) return null
   return (
     <div className="mb-3 flex flex-col gap-2">

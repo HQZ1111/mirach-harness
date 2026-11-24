@@ -7,6 +7,7 @@ import type { useBots } from './i18n'
 import type { deriveRosterPresentation, deriveRosterRows } from './roster-pane-derivation'
 import type { rosterSectionRenderers } from './roster-pane-sections'
 import type { rosterGatewayOptions } from './roster-sections'
+import { RosterActivePill } from './roster-active-pill'
 import type { RosterRow } from './types'
 
 interface RosterContentProps {
@@ -127,7 +128,10 @@ export function renderRosterContent({
           />
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-slot="bots-roster">
+        <div className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain" data-slot="bots-roster">
+          {/* 选中底滑动块（2026-11-23）：唯一一条底在 [data-roster-active]
+              行之间滑动；行自身不再画静态选中底。 */}
+          <RosterActivePill />
           <div className="grid w-full min-w-0 gap-0.5 px-1.5 pb-2">
             {showGatewaySections
               ? [

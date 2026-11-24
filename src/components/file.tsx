@@ -20,9 +20,9 @@ const fileVariants = cva(
     variants: {
       variant: {
         // 去描边（用户 2026-10-14 全局去描边：卡片不留描边线）
-        outline: "hover:bg-muted/50",
-        ghost: "hover:bg-muted/50",
-        muted: "bg-muted/50 hover:bg-muted/70",
+        outline: "hover:bg-(--hover-wash)",
+        ghost: "hover:bg-(--hover-wash)",
+        muted: "bg-muted/50 hover:bg-(--hover-wash)",
       },
       size: {
         sm: "px-2.5 py-1.5 text-xs",

@@ -402,8 +402,40 @@ export function buildSessionDisplay(
   // 折叠键 = 分隔线桶 key（'today'/'yesterday'/'this-week'/'m-2026-8'… 或
   // 工作区 'w:<cwd>'）；未标名头部（第一条分隔线之前）永不折叠。
   const visible = hideCollapsedGroupRows(ordered, (key) => !isHidden(collapsed, key))
+  // fork 谱系缩进：只沿**本次可见**的父行链走；父行被归档/筛掉则回顶层。
+  const depths = branchDepths(visible, byId)
+  const rows = visible.map((row) =>
+    row.kind === 'session' && (depths.get(row.id) ?? 0) > 0
+      ? { ...row, depth: depths.get(row.id) }
+      : row,
+  )
 
-  return { pinnedIds, rows: visible, allUnpinnedIds }
+  return { pinnedIds, rows, allUnpinnedIds }
+}
+
+/** 分支会话在侧栏的缩进层级（hermes session-branch-tree 的 branch stem 对偶）：
+ * 沿 `parentSessionId` 链在可见行集合内回溯；`seen` 与封顶 8 防环。 */
+function branchDepths(
+  rows: readonly SessionListRow[],
+  metas: ReadonlyMap<string, SessionRowMeta>,
+): Map<string, number> {
+  const visible = new Set(
+    rows.filter((r): r is Extract<SessionListRow, { kind: 'session' }> => r.kind === 'session').map((r) => r.id),
+  )
+  const depth = new Map<string, number>()
+  for (const id of visible) {
+    let current = metas.get(id)?.parentSessionId
+    let level = 0
+    const seen = new Set<string>([id])
+    while (current !== undefined && visible.has(current) && !seen.has(current) && level < 8) {
+      seen.add(current)
+      level += 1
+      current = metas.get(current)?.parentSessionId
+    }
+    depth.set(id, level)
+  }
+
+  return depth
 }
 
 /** 标题匹配（客户端子串；pi 无服务端 FTS——hermes searchSessions 那半

@@ -47,10 +47,8 @@ export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
   if (regionOfGroup(props.group) !== 'panels') return null
 
   return (
-    // **液滴粘性合并（goo）由令牌统一控制**（2026-11-01 用户："调用点没传，
-    // 直接在令牌中统一开关不行吗"）。默认关（tokens.css 的
-    // `--beui-popover-goo: 0`）：28×28 图标钮 + 大面板的组合不做粘性合并
-    // （否则有脖子、按钮也被投影）。调用点不再传 `goo`。
+    // goo 已退役（2026-11-22）：面板 = 默认 fade+zoom 的独立圆角矩形 +
+    // 投影，触发钮不再有副本/脖子/阴影。
     <ContextMenu align="start" anchor="trigger" side="bottom" sideOffset={6}>
       {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——用户点名
           "悬停显示的窗口动画"；与 win-dot 同款）。**嵌套序 = Tooltip 在外、

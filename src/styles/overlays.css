@@ -216,7 +216,10 @@
   font-size: var(--font-body);
   font-weight: var(--weight-semibold);
   height: 48px;
-  padding: 0 var(--space-stack-sm);
+  /* 2026-11-24 用户："左栏的设置文字……没有和内容的文字左对齐"。
+     左栏正文的第一行是组标题（.set-nav 8 + 组容器 px-1 4 + 组标题 px-2 8
+     = 20px）；「设置」原先只有 12px，两行差 8px。对齐到组标题的 20px。 */
+  padding: 0 20px;
   user-select: none;
 }
 
@@ -226,11 +229,19 @@
    横跨右栏的"顶栏"边。层次由标题字重承担。 */
 .set-inset-head {
   align-items: center;
+  /* 2026-11-24 用户："右边的标题栏也给个卡片"。原先标题裸在内容区底色上，
+     与下方岛卡不是同一结构；现在它自己就是一张卡（同 --surface / 描边 /
+     --radius-panel-lg），左右内距 16 = 下方卡的内距，标题与卡内正文同一条
+     左基线（182 + 1 描边 + 16 = 199）。 */
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-panel-lg);
   display: flex;
   flex-shrink: 0;
   gap: var(--space-inline);
   height: 48px;
   justify-content: space-between;
+  padding: 0 16px;
 }
 
 .set-inset-title {
@@ -291,13 +302,28 @@
    家族规则，改动只影响它自己，不会与设置页的 motion 版混用。 */
 .set-nav {
   /* 背景与右分隔线已上移到 .set-rail（左栏整块，含头）——本层只负责
-     滚动与内距。内距 = beui AnimatedSidebarContent 的 px-2 py-2（8px）。 */
+     滚动与内距。内距 = beui AnimatedSidebarContent 的 px-2 py-2（8px）。
+     position: relative = 跨组滑动悬停块（.set-nav-hover-pill）的定位参照；
+     abs 子元素随内容滚动 → JS 的 top 公式含 scrollTop（与
+     SessionListHoverPill 同款）。 */
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 8px;
+  position: relative;
+}
+
+/* 跨组滑动悬停块（设置页左栏，2026-11-23）：组头与子项共用一条。
+   纯视觉层：不接事件（行按钮自己处理点击/焦点）；z-index 0 让后续
+   relative 行绘制在它上面。 */
+.set-nav-hover-pill {
+  background: var(--hover-wash);
+  border-radius: var(--radius-surface);
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
 }
 
 /* ── 颜色接回 mirach 令牌（2026-10-23）──────────────────────────────
@@ -425,6 +451,9 @@
   font-size: var(--font-caption);
   line-height: 1.5;
   padding: 4px 0;
+  /* 跨组滑动悬停块（.set-nav-hover-pill）在导航容器层；行必须 relative
+     才会绘制在它上面（与组头按钮同款）。 */
+  position: relative;
   text-align: left;
   width: 100%;
 }
@@ -458,6 +487,19 @@
   width: 48px;
 }
 
+/* hermes About：BrandMark 64px 居中英雄区（2026-11-24 完整移植）。 */
+.set-about-hero--center {
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px 0 8px;
+  text-align: center;
+}
+
+.set-about-logo--lg {
+  height: 64px;
+  width: 64px;
+}
+
 .set-about-name {
   font-size: var(--font-title);
   font-weight: var(--weight-semibold);
@@ -485,13 +527,27 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 0 20px;
+  /* 底部不再留 20px：.set-content 自己已有 --pane-edge(10) 的下内距，
+     卡片底边才能与左栏岛的底边齐平（2026-11-24 用户："和左栏对齐"）。 */
+  padding: 12px 0 0;
 }
 
 .set-section {
   display: flex;
   flex-direction: column;
-  gap: var(--space-inline);
+  gap: var(--settings-section-gap);
+}
+
+/* 内容卡撑满：即使页面只有一项，卡也要吃掉滚动区剩余高度，底边贴到
+   与左栏岛同一条线（2026-11-24 用户："哪怕只有一项，高度也要撑满整个
+   页面"）。多段页面里只有最后一张卡伸展，前面的卡保持内容高度。 */
+.set-scroll > .set-section {
+  flex: 1 0 auto;
+}
+
+/* 最后一张卡（后面可能还有测试按钮/说明，所以不能用 :last-child）伸展。 */
+.set-section > .set-acct-card:not(:has(~ .set-acct-card)) {
+  flex: 1 0 auto;
 }
 
 /* 节标题 sticky：滚动时钉在内容区顶（负 margin 让底色铺满滚动行宽，
@@ -509,7 +565,7 @@
 
 .set-section-title {
   color: var(--text);
-  font-size: var(--font-body);
+  font-size: var(--settings-section-title-size);
   font-weight: var(--weight-semibold);
   margin: 0;
 }
@@ -520,10 +576,44 @@
    是"一个面板里的第二块"，不是新面板（sticky 节头才是面板级分隔）。 */
 .set-sub-title {
   color: var(--text-2);
-  font-size: var(--font-sm);
+  font-size: var(--settings-section-title-size);
   font-weight: var(--weight-semibold);
   letter-spacing: 0.02em;
-  margin: var(--space-stack-sm) 0 0;
+  margin: 8px 0 0;
+}
+
+.set-section > .set-sub-title:first-child {
+  margin-top: 0;
+}
+
+/* 岛式分组：标题必须在卡片里（2026-11-24 用户："岛屿式的标题在卡片里"）。
+   结构上 h4 仍是 section 的直接子级；视觉上把它和紧随的白卡拼成同一张
+   卡——标题占上圆角，卡片去上边框/上圆角，负 margin 抵消 flex gap。 */
+.set-section > .set-sub-title:has(+ .set-acct-card),
+.set-section > .set-sub-title:has(+ .set-hint + .set-acct-card) {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-bottom: 0;
+  border-radius: var(--radius-panel-lg) var(--radius-panel-lg) 0 0;
+  padding: 14px 16px 2px;
+  position: relative;
+  z-index: 1;
+}
+
+.set-section > .set-sub-title + .set-acct-card,
+.set-section > .set-sub-title + .set-hint + .set-acct-card {
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  margin-top: calc(-1 * var(--settings-section-gap));
+}
+
+.set-section > .set-sub-title:has(+ .set-hint + .set-acct-card) + .set-hint {
+  background: var(--surface);
+  border-left: 1px solid var(--stroke-soft);
+  border-right: 1px solid var(--stroke-soft);
+  margin-top: calc(-1 * var(--settings-section-gap));
+  padding: 2px 16px 10px;
 }
 
 /* 占位节面板（未接线的 16 项）：明确说"没有数据面"，不造假控件。
@@ -629,6 +719,261 @@
   flex-direction: column;
 }
 
+/* 设置页 · 数据与统计表格（2026-11-22，ZCode 项目管理/归档管理 的网格行：
+   表头 + 分栏行；列宽由各页 gridTemplateColumns 内联给出）。 */
+.set-table {
+  border-bottom: 1px solid var(--stroke-soft);
+  display: flex;
+  flex-direction: column;
+}
+
+.set-table-head {
+  align-items: center;
+  border-bottom: 1px solid var(--stroke-soft);
+  color: var(--text-4);
+  display: grid;
+  font-size: var(--font-caption);
+  gap: 4px 12px;
+  padding: 6px 4px;
+}
+
+.set-table-row {
+  align-items: center;
+  border-top: 1px solid var(--stroke-soft);
+  display: grid;
+  gap: 4px 12px;
+  padding: 8px 4px;
+}
+
+.set-table-row:first-of-type { border-top: 0; }
+
+.set-table-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-table-sub {
+  color: var(--text-4);
+  font-size: var(--font-caption);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 项目管理表（ZCode PROJECT_MANAGEMENT_GRID）：窄屏折成
+   勾选 / 项目 / 操作 三列，设备/会话/最近活动进入项目名下的元信息行。 */
+.set-project-table-head,
+.set-project-table-row {
+  grid-template-columns: 1rem minmax(0, 1fr) 1.5rem;
+}
+
+@media (min-width: 768px) {
+  .set-project-table-head,
+  .set-project-table-row {
+    grid-template-columns: var(--project-grid);
+  }
+}
+
+.set-project-col-md {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .set-project-col-md {
+    display: block;
+  }
+}
+
+.set-project-only-mobile {
+  display: inline;
+}
+
+.set-project-only-md {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .set-project-only-mobile {
+    display: none;
+  }
+
+  .set-project-only-md {
+    display: inline;
+  }
+}
+
+.set-project-mobile-meta {
+  align-items: center;
+  color: var(--text-4);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--font-caption);
+  gap: 2px 6px;
+  margin-top: 2px;
+}
+
+@media (min-width: 768px) {
+  .set-project-mobile-meta {
+    display: none;
+  }
+}
+
+.set-project-roots-tag {
+  background: var(--hover-wash);
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-4);
+  cursor: pointer;
+  font-size: var(--font-caption);
+  height: 16px;
+  line-height: 16px;
+  margin-left: 6px;
+  padding: 0 6px;
+  vertical-align: middle;
+}
+
+.set-project-roots-tag:hover {
+  color: var(--text-2);
+}
+
+.set-removed-head {
+  align-items: center;
+  gap: 8px;
+}
+
+.set-removed-table {
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-control);
+  display: flex;
+  flex-direction: column;
+  margin-top: 12px;
+  padding: 0 16px;
+}
+
+.set-removed-row {
+  align-items: center;
+  border-top: 1px solid var(--stroke-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 0;
+}
+
+.set-removed-row:first-child {
+  border-top: 0;
+}
+
+.set-removed-text {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .set-removed-text {
+    flex-basis: auto;
+  }
+}
+
+.set-removed-when {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (min-width: 640px) {
+  .set-removed-when {
+    min-width: 8rem;
+    text-align: right;
+  }
+}
+
+.set-removed-row > .set-btn {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* 归档管理（ZCode ArchiveManagement 筛选三列 + ArchiveGroupCard 行）。 */
+.set-archive-filters {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 640px) {
+  .set-archive-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .set-archive-filters > :first-child {
+    grid-column: span 2;
+  }
+}
+
+@media (min-width: 1024px) {
+  .set-archive-filters {
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 13rem);
+  }
+
+  .set-archive-filters > :first-child {
+    grid-column: auto;
+  }
+}
+
+.set-archive-group-head {
+  align-items: center;
+  gap: 8px;
+}
+
+.set-archive-rows {
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-control);
+  display: flex;
+  flex-direction: column;
+  margin-top: 12px;
+  padding: 0 16px;
+}
+
+.set-archive-row {
+  align-items: center;
+  border-top: 1px solid var(--stroke-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 0;
+}
+
+.set-archive-row:first-child {
+  border-top: 0;
+}
+
+.set-archive-text {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+@media (min-width: 640px) {
+  .set-archive-text {
+    flex-basis: auto;
+  }
+}
+
+.set-archive-title {
+  color: var(--text);
+  font-size: var(--font-sm);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .set-row {
   align-items: baseline;
   border-top: 1px solid var(--stroke-soft);
@@ -691,6 +1036,27 @@
   padding: 8px 10px;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 带操作钮的错误条（ZCode 警告条：图标 + 文本 + 重试/关闭）。 */
+.set-err-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  word-break: normal;
+}
+
+/* 破坏性主按钮（ZCode destructive-surface：淡红底 + 红字）。 */
+.set-btn-destructive {
+  background: color-mix(in srgb, var(--destructive) 12%, transparent);
+  border-color: transparent;
+  color: var(--destructive);
+}
+
+.set-btn-destructive:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--destructive) 20%, transparent);
+  border-color: transparent;
+  color: var(--destructive);
 }
 
 /* 保存成功反馈（可见，非假装成功） */
@@ -800,6 +1166,36 @@
   overflow: hidden;
 }
 
+/* 设置内容区（右侧）保持岛式：每个 section 是一张白卡，卡内字段仍以
+   分隔线分组。统一圆角/内距/字号，避免不同页面各自一套。 */
+.set-content .set-acct-card {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-panel-lg);
+  overflow: hidden;
+}
+
+/* 没有用 set-acct-card 的页面（模型默认、会话、安全、通知等）把整节包成
+   一张岛卡：标题和字段都在卡内，不再出现"标题浮在内容上方"的裸页。 */
+.set-card--window > .set-content .set-section:not(:has(.set-acct-card)) {
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-panel-lg);
+  padding: 16px;
+}
+
+.set-content .set-acct-card-body > * + * {
+  border-top: 1px solid var(--stroke-soft);
+}
+
+.set-content .set-acct-card-head {
+  padding: 16px 16px 0;
+}
+
+.set-content .set-acct-profile-row {
+  padding: 12px 16px;
+}
+
 /* 上游 Card title：12px 半粗、弱色、卡内 16px 上内距。 */
 .set-acct-card-head {
   color: var(--text-4);
@@ -821,19 +1217,33 @@
   padding: 12px 16px;
 }
 
+.set-content .set-acct-field {
+  padding: var(--settings-row-pad-y) 16px;
+}
+
+/* Tailwind 的 rem 字号在宿主 15px 根字号下会变成 13.125/11.25px，
+   与设置页的 14/12 令牌不一致。内容区统一收口到设置页字号。 */
+.set-content .text-sm {
+  font-size: var(--settings-label-size);
+}
+
+.set-content .text-xs {
+  font-size: var(--settings-desc-size);
+}
+
 .set-acct-field-text { min-width: 0; flex: 1 1 auto; }
 
 .set-acct-field-label {
   color: var(--text);
   display: block;
-  font-size: var(--font-sm);
+  font-size: var(--settings-label-size);
   font-weight: var(--weight-semibold);
 }
 
 .set-acct-field-desc {
   color: var(--text-4);
-  font-size: var(--font-caption);
-  line-height: 1.6;
+  font-size: var(--settings-desc-size);
+  line-height: 1.5;
   margin: 2px 0 0;
 }
 
@@ -962,6 +1372,21 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* 形象页也只有一张卡时撑满到左栏底边（同 .set-section 的规则）。 */
+.set-scroll > .set-persona {
+  flex: 1 0 auto;
+}
+
+.set-persona > .set-persona-card:not(:has(~ .set-persona-card)) {
+  flex: 1 0 auto;
+}
+
+/* 有些页面（使用统计）根节点直接就是一张 .set-persona-card，没有
+   .set-persona 包裹层——同样撑满。 */
+.set-scroll > .set-persona-card {
+  flex: 1 0 auto;
 }
 
 .set-persona-card {
@@ -1271,7 +1696,17 @@
 .set-usage-heatmap-cell {
   aspect-ratio: 1;
   border-radius: 2px;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
   width: 100%;
+}
+
+.set-usage-heatmap-cell:hover {
+  box-shadow: inset 0 0 0 1px var(--stroke);
+  transform: scale(1.1);
+}
+
+.set-usage-heatmap-col--column-hover:hover .set-usage-heatmap-cell {
+  box-shadow: inset 0 0 0 1px var(--stroke);
 }
 
 .set-usage-heatmap-cell--l0 { background: var(--hover-wash); }
@@ -1279,6 +1714,26 @@
 .set-usage-heatmap-cell--l2 { background: color-mix(in srgb, var(--fl-accent) 45%, transparent); }
 .set-usage-heatmap-cell--l3 { background: color-mix(in srgb, var(--fl-accent) 70%, transparent); }
 .set-usage-heatmap-cell--l4 { background: var(--fl-accent); }
+
+.set-usage-heatmap-cell--filled {
+  box-shadow: inset 0 0 0 1px var(--stroke);
+}
+
+.set-usage-heatmap-tooltip {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-control);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  color: var(--text-2);
+  font-size: var(--font-sm);
+  max-width: 220px;
+  padding: 7px 10px;
+  pointer-events: none;
+  position: fixed;
+  white-space: pre-line;
+  word-break: break-word;
+  z-index: 20;
+}
 
 .set-usage-heatmap-months {
   display: grid;
@@ -1329,6 +1784,133 @@
 }
 
 .set-usage-trend-dot { fill: var(--fl-accent); }
+
+.set-usage-trend-chart { position: relative; }
+
+.set-usage-trend-cursor {
+  stroke: var(--text-4);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.set-usage-trend-grid {
+  stroke: var(--stroke-soft);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.set-usage-trend-tooltip {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-control);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  font-size: var(--font-sm);
+  gap: 3px;
+  max-width: 280px;
+  min-width: 190px;
+  padding: 8px 10px;
+  pointer-events: none;
+  position: absolute;
+  top: 4px;
+  z-index: 6;
+}
+
+.set-usage-trend-tooltip-title {
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+  margin-bottom: 2px;
+}
+
+.set-usage-trend-tooltip-row {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.set-usage-trend-tooltip-dot {
+  border-radius: 2px;
+  flex-shrink: 0;
+  height: 8px;
+  width: 8px;
+}
+
+.set-usage-trend-tooltip-name {
+  color: var(--text-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-usage-trend-tooltip-value {
+  font-family: Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.set-usage-trend-tooltip-empty {
+  color: var(--text-4);
+}
+
+.set-usage-donut-segment {
+  cursor: default;
+}
+
+.set-usage-donut-tooltip {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-control);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  font-size: var(--font-sm);
+  gap: 3px;
+  max-width: 240px;
+  min-width: 150px;
+  padding: 8px 10px;
+  pointer-events: none;
+  position: absolute;
+  z-index: 6;
+}
+
+.set-usage-donut-tooltip-title {
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.set-usage-donut-tooltip-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.set-usage-donut-tooltip-value {
+  font-family: Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.set-usage-donut-tooltip-share {
+  color: var(--text-4);
+  font-family: Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .set-usage-trend-tooltip {
+    max-width: 220px;
+    min-width: 160px;
+  }
+}
 
 .set-usage-trend-axis {
   color: var(--text-4);

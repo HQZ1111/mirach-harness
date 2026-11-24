@@ -81,3 +81,13 @@ export function syncBotsPanelOpen(): void {
   if (!a) return
   botsPanelStore.getState().setOpen(a.getPanel(BOTS_PANEL_ID) !== undefined)
 }
+
+/** 关闭机器人栏（插件停用/启动 gate 关闭时调用）。 */
+export function closeBotsPanel(): void {
+  const a = apiOf()
+  if (!a) return
+  for (const id of [BOTS_PANEL_ID, 'routines']) {
+    const panel = a.getPanel(id)
+    if (panel) a.removePanel(panel)
+  }
+}

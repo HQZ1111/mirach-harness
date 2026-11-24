@@ -32,7 +32,7 @@ pub const PROTOCOL_VERSION: i64 = 2;
 pub const MAX_TOKEN_BYTES: usize = 16 * 1024;
 pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
 pub const MAX_DISPATCH_GRANT_TTL_SECONDS: f64 = 24.0 * 60.0 * 60.0;
-pub const MAX_STATUS_GRANT_TTL_SECONDS: f64 = 30.0 * 24.0 * 60.0;
+pub const MAX_STATUS_GRANT_TTL_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 pub const MAX_REPLICA_EVENT_BYTES: i64 = 256 * 1024 * 1024;
 
 const GRANT_SCOPE: &[&str] = &[
@@ -522,6 +522,50 @@ pub fn now_secs() -> f64 {
         .map_or(0.0, |d| d.as_secs_f64())
 }
 
+/// 本进程的网关代际（gateway.ready 的 `replay_epoch`；桌面端重连据此重置水位）。
+pub fn peer_replay_epoch() -> i64 {
+    static EPOCH: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |d| d.as_millis() as i64)
+    })
+}
+
+/// `groups.changed` 广播扇出（上游 change_watcher 的宿主对偶）。
+///
+/// 语义：房间日志或状态有任何移动就发一帧，载荷只带移动的 room_ids，
+/// 打开其它房间的视图不必重读；`broadcast_id` = 进程代际 + 计数器。
+fn groups_changed_tx() -> &'static tokio::sync::broadcast::Sender<Value> {
+    static TX: std::sync::OnceLock<tokio::sync::broadcast::Sender<Value>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| tokio::sync::broadcast::channel(64).0)
+}
+
+pub(crate) fn subscribe_groups_changed() -> tokio::sync::broadcast::Receiver<Value> {
+    groups_changed_tx().subscribe()
+}
+
+pub(crate) fn notify_groups_changed(room_id: Option<&str>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let sequence = COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut payload = json!({
+        "broadcast_id": format!("{}:{}", peer_replay_epoch(), sequence),
+    });
+    if let Some(room_id) = room_id {
+        payload["room_ids"] = json!([room_id]);
+    }
+    let _ = groups_changed_tx().send(json!({
+        "jsonrpc": "2.0",
+        "method": "event",
+        "params": {
+            "type": "groups.changed",
+            "payload": payload,
+        },
+    }));
+}
+
 /// 上游 `issue_room_grant` 的完整形态：权限集与 status 界线都由调用方给出。
 #[allow(clippy::too_many_arguments)]
 pub fn issue_room_grant_full(
@@ -631,7 +675,7 @@ pub fn issue_invitation(
         return Err("invalid_params".into());
     }
     let status_ttl = param_number(params, "status_ttl_seconds").unwrap_or(ttl);
-    if status_ttl < ttl || status_ttl > 30.0 * 24.0 * 60.0 * 60.0 {
+    if status_ttl < ttl || status_ttl > MAX_STATUS_GRANT_TTL_SECONDS {
         return Err("invalid_params".into());
     }
     let policy = execution_policy_for(profile);
@@ -1012,6 +1056,37 @@ mod tests {
             issue_invitation(&conn, TEST_SECRET, "install:b", "default", &invite_params(), &unavailable, 1000.0)
                 .unwrap_err(),
             "room_link_unavailable"
+        );
+    }
+
+    #[test]
+    fn invitation_honors_full_status_horizon() {
+        // hermes Desktop `seatPeer` 的边界值：ttl = 24h（MAX_DISPATCH）+
+        // status_ttl = 30d（MAX_STATUS，HORIZON）。曾因常量少乘 60 而拒绝（2026-11-19 E2E 抓到）。
+        let conn = crate::hosted_rooms::store::open_in_memory().unwrap();
+        let mut params = invite_params();
+        params.insert("ttl_seconds".into(), json!(24 * 60 * 60));
+        params.insert("status_ttl_seconds".into(), json!(30 * 24 * 60 * 60));
+        let invitation = issue_invitation(
+            &conn, TEST_SECRET, "install:b", "default", &params, &endpoint(), 1000.0,
+        )
+        .unwrap();
+        let claims = decode_room_grant(
+            TEST_SECRET,
+            invitation["grant"].as_str().unwrap(),
+            "status",
+            1100.0,
+        )
+        .unwrap();
+        assert_eq!(claims["expires_at"], json!(1000.0 + 24.0 * 60.0 * 60.0));
+        assert_eq!(claims["status_expires_at"], json!(1000.0 + 30.0 * 24.0 * 60.0 * 60.0));
+        // 超出 30 天硬顶一个数量级也不放行
+        let mut params = invite_params();
+        params.insert("status_ttl_seconds".into(), json!(30 * 24 * 60 * 60 + 1));
+        assert_eq!(
+            issue_invitation(&conn, TEST_SECRET, "install:b", "default", &params, &endpoint(), 1000.0)
+                .unwrap_err(),
+            "invalid_params"
         );
     }
 

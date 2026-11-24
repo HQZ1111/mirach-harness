@@ -1,4 +1,4 @@
-import { Button, cn, Codicon, GHOST_ICON_BTN, randomUuid, Tip } from '@hermes/plugin-sdk'
+import { Button, cn, Codicon, ComposerAttachButton, randomUuid, Tip } from '@hermes/plugin-sdk'
 import { type Ref, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 
 import { downloadCanonicalAttachment } from './canonical-attachment-download'
@@ -132,9 +132,13 @@ export function CanonicalGroupAttachments({ binding, attachments, onChange, onUp
       if (file) {void upload([file])}
       e.currentTarget.value = '' }} ref={input} type="file" />
     <Tip label={labels.attachFiles}>
-      <Button aria-label={labels.attachFiles} className={cn(GHOST_ICON_BTN, ROOM_COMPOSER_AREAS.button)} disabled={disabled || busy} onClick={() => input.current?.click()} size="icon" type="button" variant="ghost">
-        <Codicon name="add" size="0.875rem" />
-      </Button>
+      {/* 主输入框同款附件钮（2026-11-23：群聊输入区与主输入框同一套组件） */}
+      <ComposerAttachButton
+        aria-label={labels.attachFiles}
+        className={ROOM_COMPOSER_AREAS.button}
+        disabled={disabled || busy}
+        onClick={() => input.current?.click()}
+      />
     </Tip></>}
     {chips}
   </>

@@ -112,11 +112,9 @@
   height: var(--logo-strip-h);
   justify-content: space-between;
   overflow: hidden;
-  /* 左缘对齐三栏内容线（--rail-gutter = 卡片内容线到卡片边缘）；
-     2026-10-19 起不再有"贴边再加 20px"的变体——卡片四周恒为 10，
-     内容线恒为 20。 */
   padding: var(--logo-leading-pad) var(--rail-gutter) calc(var(--strip-pad-bottom) - 1px);
   pointer-events: none;
+  position: relative;
   text-align: left;
 }
 
@@ -141,8 +139,14 @@
   width: 100%;
 }
 
-/* 名字吃掉按钮之外的全部宽度（右上角动作组 = 语音通话 + 聊天记录两枚
-   size-6 钮 + 间隙 ≈ 52），超宽省略。flex-basis 0 让省略只发生在空间
+/* 会话名行（2026-11-22 用户："语音和聊天按钮往下移动，和会话名字的底部
+   对齐"）：动作组与会话名同一行、底对齐。 */
+.chat-tab-label__row--session {
+  align-items: flex-end;
+}
+
+/* 名字吃掉按钮之外的全部宽度（右侧动作组 = 语音通话 + 聊天记录两枚
+   size-8 钮 + 间隙），超宽省略。flex-basis 0 让省略只发生在空间
    不足时，不会把名字硬砍到一半。 */
 .chat-tab-label__workspace {
   color: var(--chat-tab-workspace-color);
@@ -155,7 +159,7 @@
      剩余空间重分配影响，transform 不参与布局、位移确定）。 */
   transform: translateY(var(--chat-workspace-nudge));
   flex: 1 1 0;
-  max-width: calc(100% - 64px);
+  max-width: calc(100% - 80px);
   min-width: 0;
   overflow: hidden;
   pointer-events: auto; /* 容器整体 none——放行悬停 title（全名） */
@@ -163,17 +167,22 @@
   white-space: nowrap;
 }
 
-/* 右上角动作组（2026-11-15 用户定稿："语音钮放右上角，图标换成语音通话的，
-   右边再放聊天记录，和微信一样"）。margin-left:auto 贴右端；整组与工作区名
-   同一视觉基线（工作区名有 --chat-workspace-nudge 的下移，动作组同步位移，
-   否则会"浮在名字上方"）。 */
+/* 右侧动作组（2026-11-15 定稿"语音钮 + 聊天记录，和微信一样"；2026-11-22
+   用户："往下移动，和会话名字的底部对齐，再放大一点"）。绝对定位与会话名
+   同行底对齐，不参与两行的 space-between 布局；translateY 同步
+   --chat-session-nudge（会话名自身的胶囊中线对齐，勿动），+3px 是图标
+   可见底缘的像素级校正：实测（2026-11-22 截图，DPI 96）裸同步 nudge 时
+   图标墨迹底 69 而会话名字形底（基线）72，差 3px 不齐；补 3px 后两者
+   齐平。改这个值时用截图复测，别只看布局盒。 */
 .chat-tab-label__actions {
   align-items: center;
+  bottom: calc(var(--strip-pad-bottom) - 1px);
   display: flex;
   flex: none;
   gap: 4px;
-  margin-left: auto;
-  transform: translateY(var(--chat-workspace-nudge));
+  position: absolute;
+  right: var(--rail-gutter);
+  transform: translateY(calc(var(--chat-session-nudge) + 3px));
 }
 
 .chat-tab-label__actions > * {
@@ -305,13 +314,19 @@
    多个标签（open-page-actions.ts::openTerminalPanel）。 */
 
 .term-pane {
-  background: var(--surface);
+  /* 普通态用主题的 --term-bg；背景图开启时把底色让给组容器（55% 透出），
+     否则会多叠一层白。xterm viewport 由 allowTransparency 始终透出本层。 */
+  background: var(--term-bg);
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   padding: 0.75rem;
   position: relative;
+}
+
+html[data-mirach-backdrop-ready] .term-pane {
+  background: transparent;
 }
 
 /* 终端体：hostEl 容器命令式管理（React 不掺和） */

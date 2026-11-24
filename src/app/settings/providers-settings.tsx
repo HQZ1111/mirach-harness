@@ -1179,7 +1179,8 @@ function CustomEndpointsView() {
               </div>
             </div>
 
-            <div className="set-actions">
+            {/* 按钮统一靠右（2026-11-24 用户："按钮都在右边"）。 */}
+            <div className="set-actions" style={{ justifyContent: 'flex-end' }}>
               {/* 测试：pi_endpoint_validate（pi 的 http client，与提供方
                   请求同一栈）——GET {base}/models + Bearer，结果如实内联。 */}
               <button

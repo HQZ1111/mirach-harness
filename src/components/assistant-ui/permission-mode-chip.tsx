@@ -1,71 +1,53 @@
 "use client";
 
 /**
- * Composer 模式芯片（ZCode `切换模式` 的宿主投影，两态版）。
+ * Composer 模式芯片（dsh 计划模式 / 完全访问的宿主移植，2026-11-23）。
  *
- * 只保留引擎真有的两个状态：
- * - **计划模式**：`rpi-plan-mode` 计划态。进入后插件只放行 `read` / `bash` /
- *   `docs` / `plan_mode_complete`，write/edit 的工具调用被 before_tool_call
- *   否决（注意：**bash 不是只读沙箱**，README 原话）。
- * - **完全访问**：不带计划态，工具按正常能力执行。
+ * 只有两个模式，且**会话级**：
+ * - **计划模式**：rpi-plan-mode 计划态（会话条目 + 每个 harness 一份插件
+ *   实例）；`/plan start|exit`。计划期间只放行 read / bash / docs /
+ *   plan_mode_complete。插件收窄工具目录是下一次 run 才换的快照，
+ *   `ApprovalMode::Planning` 会话 pin 让**进行中的 run** 也立即拦截
+ *   write/edit（read/bash 照常）。
+ * - **完全访问**：引擎 `ApprovalMode::Yolo` 的**会话 pin**（approval_gate
+ *   `set_session_mode`；宿主持久化到 `~/.rpi/agent/approval-modes.json`）。
+ *   打开时二次确认；关闭回 `always-ask`。
  *
- * 切换 = 执行扩展命令 `/plan start` / `/plan exit`（pi_run_command，与
- * rpi-cli RPC 的 execute_command 同一 handler 契约）。不需要改引擎。
+ * 两者互斥：进入计划会先把该会话的审批退回 always-ask；开启完全访问会先
+ * 退出计划态。默认（都未开）= always-ask。
  *
- * 若启动参数带 RPI_PERMISSION_GATE=1，bash/write/edit 仍会逐次确认——菜单
- * 底部如实标注，不把它伪装成"完全访问"。
+ * 会话 id：composer 的 `threadId` = pi 会话 id（runtime.tsx 注释同源）。
+ * 已存在的会话（ULID）直接按 id 读写 pin；New Chat 的本地线程 id 不传，
+ * 宿主把选择暂存为 pending，等第一份主会话创建时消费。
  */
 import { useCallback, useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { CheckIcon, ChevronDownIcon, ShieldAlertIcon } from 'lucide-react'
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ClipboardListIcon,
+  ShieldAlertIcon,
+  ShieldIcon,
+} from 'lucide-react'
 
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/motion/popover'
+import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { cn } from '@/lib/utils'
 
 interface ModeState {
   /** 'planning' | 'off' */
   planMode?: string
-  /** 运行时审批模式：always-ask / write / yolo（rpi-cli approval_gate） */
+  /** 会话级审批模式：always-ask / write / yolo / planning（计划态内部 pin） */
   approvalMode?: string
   /** rpi-permission-gate 是否在启动期启用（env RPI_PERMISSION_GATE） */
   permissionGate?: boolean
 }
 
 type ApprovalId = 'always-ask' | 'write' | 'yolo'
-type ModeId = 'plan' | 'full'
 
-const MODES: { id: ModeId; label: string; description: string }[] = [
-  {
-    id: 'plan',
-    label: '计划模式',
-    description: '编辑前先出计划；只放行 read / bash / docs。',
-  },
-  {
-    id: 'full',
-    label: '正常执行',
-    description: '退出计划态；审批按下方策略。',
-  },
-]
-
-const APPROVALS: { id: ApprovalId; label: string; description: string }[] = [
-  {
-    id: 'always-ask',
-    label: '默认',
-    description: '每次变更/命令前询问（只读工具直接放行）。',
-  },
-  {
-    id: 'write',
-    label: '文件内修改',
-    description: '写文件自动批准；命令仍需确认。',
-  },
-  {
-    id: 'yolo',
-    label: '完全访问',
-    description: '不逐次询问（硬策略闸仍生效）。',
-  },
-]
-
-const APPROVAL_STORAGE_KEY = 'mirach:approval-mode'
+/** pi 会话 id：UUID（v7 带连字符，如 01a2047a-00cd-…）或历史 ULID。 */
+const PI_SESSION_ID =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9A-HJKMNP-TV-Z]{26})$/i
 
 export function PermissionModeChip({
   className,
@@ -73,22 +55,27 @@ export function PermissionModeChip({
   running,
 }: {
   className?: string
-  /** 会话切换时重读（计划态是会话级的；New Chat 后必须回到 off） */
+  /** 会话切换时重读（审批 pin / 计划态都是会话级） */
   threadId?: string | undefined
   /** run 结束后重读（plan_mode_complete 会自己退出计划态） */
   running?: boolean | undefined
 }) {
   const [state, setState] = useState<ModeState | null>(null)
   const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState<ModeId | null>(null)
-  const [approvalBusy, setApprovalBusy] = useState<ApprovalId | null>(null)
+  const [planBusy, setPlanBusy] = useState(false)
+  const [approvalBusy, setApprovalBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [acknowledged, setAcknowledged] = useState(false)
+
+  const sessionId =
+    threadId !== undefined && PI_SESSION_ID.test(threadId) ? threadId : null
 
   const refresh = useCallback(() => {
-    invoke<ModeState>('pi_mode_state')
+    invoke<ModeState>('pi_mode_state', { sessionId })
       .then(setState)
       .catch((e) => console.error('[mode] pi_mode_state 读取失败', e))
-  }, [])
+  }, [sessionId])
 
   useEffect(() => {
     refresh()
@@ -98,179 +85,236 @@ export function PermissionModeChip({
     if (!running) refresh()
   }, [refresh, running])
 
+  // 轻轮询：计划模式可能在 `plan_mode_complete` 后自行退出，浏览器侧
+  // 没有事件面；2s 一次与旧 mode-store 同节奏（也兜住外部会话切换）。
+  useEffect(() => {
+    const timer = window.setInterval(refresh, 2000)
+    return () => window.clearInterval(timer)
+  }, [refresh])
+
   const currentApproval: ApprovalId =
-    state?.approvalMode === 'always-ask' || state?.approvalMode === 'write'
-      ? state.approvalMode
-      : 'yolo'
+    state?.approvalMode === 'yolo'
+      ? 'yolo'
+      : state?.approvalMode === 'write'
+        ? 'write'
+        : 'always-ask'
   const currentPlan = state?.planMode === 'planning'
-  const currentLabel = currentPlan
-    ? '计划模式'
-    : (APPROVALS.find((m) => m.id === currentApproval)?.label ?? '完全访问')
+  // 计划态下宿主 pin 是 planning（引擎确定性拦截变更工具），UI 两个模式
+  // 互斥——计划显示为计划，不把"完全访问"也打勾。
+  const fullAccess = !currentPlan && currentApproval === 'yolo'
+  const label = currentPlan ? '计划模式' : fullAccess ? '完全访问' : '默认'
 
-  const selectApproval = (id: ApprovalId) => {
-    if (id === currentApproval) {
-      setOpen(false)
-      return
-    }
-    setApprovalBusy(id)
+  /** 写该会话的审批 pin（Yolo 即完全访问；always-ask 为默认）。 */
+  const applyApproval = useCallback(
+    async (mode: ApprovalId) => {
+      await invoke('pi_set_approval_mode', { mode, sessionId })
+      refresh()
+    },
+    [refresh, sessionId],
+  )
+
+  const runPlan = useCallback(
+    async (action: 'start' | 'exit') => {
+      await invoke('pi_set_plan_mode', { enabled: action === 'start', sessionId })
+      refresh()
+    },
+    [refresh, sessionId],
+  )
+
+  /** 计划模式开关（互斥：进入前把 full access 退回默认审批）。 */
+  const togglePlan = async () => {
+    if (planBusy) return
+    setPlanBusy(true)
     setError(null)
-    invoke<unknown>('pi_set_approval_mode', { mode: id })
-      .then(() => {
-        try {
-          localStorage.setItem(APPROVAL_STORAGE_KEY, id)
-        } catch {
-          /* 偏好持久化失败不阻断本次切换（下次启动回默认，console 无敏感信息） */
-        }
-        refresh()
-        setOpen(false)
-      })
-      .catch((e) => {
-        const message = e instanceof Error ? e.message : String(e)
-        setError(message)
-        console.error('[mode] pi_set_approval_mode 失败', e)
-      })
-      .finally(() => setApprovalBusy(null))
+    try {
+      if (currentPlan) {
+        await runPlan('exit')
+      } else {
+        // 互斥由宿主落：主会话进计划会把该会话审批退回 always-ask；
+        // 并列窗格保持 yolo（窗格没有审批卡渲染面）。
+        await runPlan('start')
+      }
+      setOpen(false)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      setError(message)
+      console.error('[mode] 计划模式切换失败', e)
+    } finally {
+      setPlanBusy(false)
+    }
   }
 
-  const current: ModeId = currentPlan ? 'plan' : 'full'
-
-  const select = (id: ModeId) => {
-    if (id === current) {
-      setOpen(false)
-      return
-    }
-    setBusy(id)
-    setError(null)
-    const args = id === 'plan' ? 'start' : 'exit'
-    invoke<unknown>('pi_run_command', { command: '/plan', args })
-      .then(() => {
-        refresh()
+  /** 完全访问开关（互斥：开启前先退出计划态；关闭即回 always-ask）。 */
+  const toggleFullAccess = async () => {
+    if (approvalBusy) return
+    if (fullAccess) {
+      setApprovalBusy(true)
+      setError(null)
+      try {
+        await applyApproval('always-ask')
         setOpen(false)
-      })
-      .catch((e) => {
+      } catch (e) {
         const message = e instanceof Error ? e.message : String(e)
         setError(message)
-        console.error(`[mode] /plan ${args} 失败`, e)
-      })
-      .finally(() => setBusy(null))
+        console.error('[mode] 关闭完全访问失败', e)
+      } finally {
+        setApprovalBusy(false)
+      }
+      return
+    }
+    setOpen(false)
+    setAcknowledged(false)
+    setConfirmOpen(true)
   }
+
+  const confirmFullAccess = async () => {
+    setApprovalBusy(true)
+    try {
+      if (currentPlan) await runPlan('exit')
+      await applyApproval('yolo')
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
+
+  const TriggerIcon = currentPlan
+    ? ClipboardListIcon
+    : fullAccess
+      ? ShieldAlertIcon
+      : ShieldIcon
 
   return (
-    <Popover
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next)
-        if (next) {
-          setError(null)
-          refresh()
-        }
-      }}
-      align="start"
-      side="top"
-      sideOffset={8}
-    >
-      <PopoverTrigger>
-        <button
-          type="button"
-          aria-label="切换模式"
-          aria-haspopup="menu"
-          title={currentLabel}
-          className={cn(
-            // ZCode 实测（9444）：28 高、圆角 8、14px 字、px-2、图标 16。
-            'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground flex h-[28px] shrink-0 items-center gap-1.5 rounded-[8px] px-2 text-[14px] transition-colors',
-            // 窄卡片（ZCode ChatModeSwitchControl / V4ComposerModeSwitch 同款）：
-            // 文字与下拉箭头一起收掉，触发器收成 28×28 正方形、只留盾牌图标。
-            // 断点 = 卡片自身宽度 36rem（ZCode 的 @xl/composer），不是窗口宽度。
-            '@max-xl/composer:size-[28px] @max-xl/composer:justify-center @max-xl/composer:gap-0 @max-xl/composer:px-0',
-            className,
-          )}
-        >
-          <ShieldAlertIcon className="size-[16px] shrink-0" />
-          <span className="whitespace-nowrap @max-xl/composer:hidden">{currentLabel}</span>
-          <ChevronDownIcon className="size-[12px] shrink-0 opacity-50 @max-xl/composer:hidden" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        role="menu"
-        aria-label="切换模式"
-        className="bg-popover text-popover-foreground w-80 rounded-xl p-1.5 shadow-(--shadow-pop)"
+    <>
+      <Popover
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next)
+          if (next) {
+            setError(null)
+            refresh()
+          }
+        }}
+        align="start"
+        side="top"
+        sideOffset={8}
       >
-        {MODES.map((mode) => {
-          const active = mode.id === current
-          const running = busy === mode.id
-          return (
-            <button
-              key={mode.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={active}
-              disabled={busy !== null}
-              onClick={() => select(mode.id)}
-              className={cn(
-                'hover:bg-foreground/[0.06] flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors disabled:opacity-60',
-                active && 'bg-foreground/[0.06]',
-              )}
-            >
-              <span className="mt-[2px] flex size-4 shrink-0 items-center justify-center">
-                {active ? <CheckIcon className="size-[14px]" /> : null}
+        <PopoverTrigger>
+          <button
+            type="button"
+            aria-label="切换模式"
+            aria-haspopup="menu"
+            title={label}
+            className={cn(
+              // ZCode 实测（9444）：28 高、圆角 8、14px 字、px-2、图标 16。
+              'text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground flex h-[28px] shrink-0 items-center gap-1.5 rounded-[8px] px-2 text-[14px] transition-colors',
+              // 窄卡片：文字与箭头一起收掉，只留图标。
+              '@max-xl/composer:size-[28px] @max-xl/composer:justify-center @max-xl/composer:gap-0 @max-xl/composer:px-0',
+              currentPlan && 'text-(--ui-accent)',
+              className,
+            )}
+          >
+            <TriggerIcon className="size-[16px] shrink-0" />
+            <span className="whitespace-nowrap @max-xl/composer:hidden">{label}</span>
+            <ChevronDownIcon className="size-[12px] shrink-0 opacity-50 @max-xl/composer:hidden" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          role="menu"
+          aria-label="切换模式"
+          className="bg-popover text-popover-foreground w-80 rounded-xl p-1.5 shadow-(--shadow-pop)"
+        >
+          <button
+            key="plan"
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={currentPlan}
+            disabled={planBusy || approvalBusy}
+            onClick={() => void togglePlan()}
+            className={cn(
+              'hover:bg-foreground/[0.06] flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors disabled:opacity-60',
+              currentPlan && 'bg-foreground/[0.06]',
+            )}
+          >
+            <span className="mt-[2px] flex size-4 shrink-0 items-center justify-center">
+              {currentPlan ? <CheckIcon className="size-[14px]" /> : null}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[13px] leading-[19px] font-medium">
+                计划模式
+                {planBusy ? <span className="text-muted-foreground"> · 切换中…</span> : null}
               </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[13px] leading-[19px] font-medium">
-                  {mode.label}
-                  {running ? <span className="text-muted-foreground"> · 切换中…</span> : null}
-                </span>
-                <span className="text-muted-foreground block text-[12px] leading-[17px]">
-                  {mode.description}
-                </span>
+              <span className="text-muted-foreground block text-[12px] leading-[17px]">
+                编辑前先出计划；只放行 read / bash / docs。
               </span>
-            </button>
-          )
-        })}
-        <div className="bg-foreground/[0.06] mx-2 my-1 h-px" role="separator" />
-        <div className="text-muted-foreground/70 px-2 pt-1 pb-0.5 text-[11px] font-medium">审批策略</div>
-        {APPROVALS.map((approval) => {
-          const active = approval.id === currentApproval
-          const switching = approvalBusy === approval.id
-          return (
-            <button
-              key={approval.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={active}
-              disabled={approvalBusy !== null}
-              onClick={() => selectApproval(approval.id)}
-              className={cn(
-                'hover:bg-foreground/[0.06] flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors disabled:opacity-60',
-                active && 'bg-foreground/[0.06]',
-              )}
-            >
-              <span className="mt-[2px] flex size-4 shrink-0 items-center justify-center">
-                {active ? <CheckIcon className="size-[14px]" /> : null}
+            </span>
+          </button>
+
+          <button
+            key="full"
+            type="button"
+            role="menuitemcheckbox"
+            aria-checked={fullAccess}
+            disabled={planBusy || approvalBusy}
+            onClick={() => void toggleFullAccess()}
+            className={cn(
+              'hover:bg-foreground/[0.06] flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors disabled:opacity-60',
+              fullAccess && 'bg-foreground/[0.06]',
+            )}
+          >
+            <span className="mt-[2px] flex size-4 shrink-0 items-center justify-center">
+              {fullAccess ? <CheckIcon className="size-[14px]" /> : null}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[13px] leading-[19px] font-medium">
+                完全访问
+                {approvalBusy ? <span className="text-muted-foreground"> · 切换中…</span> : null}
               </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[13px] leading-[19px] font-medium">
-                  {approval.label}
-                  {switching ? <span className="text-muted-foreground"> · 切换中…</span> : null}
-                </span>
-                <span className="text-muted-foreground block text-[12px] leading-[17px]">
-                  {approval.description}
-                </span>
+              <span className="text-muted-foreground block text-[12px] leading-[17px]">
+                不逐次询问（硬策略闸仍生效）。
               </span>
-            </button>
-          )
-        })}
-        {error !== null ? (
-          <p className="mt-1 border-t px-2 pt-2 text-[11px] leading-[15px] text-red-500">
-            {error}
+            </span>
+          </button>
+
+          {error !== null ? (
+            <p className="mt-1 border-t px-2 pt-2 text-[11px] leading-[15px] text-red-500">
+              {error}
+            </p>
+          ) : null}
+          <p className="text-muted-foreground/60 mt-1 border-t px-2 pt-2 text-[11px] leading-[15px]">
+            两个模式都是会话级：切到别的会话不受影响。计划态下 write/edit 会被引擎拦截
+            （进行中的轮次也生效）；两个都关闭 = 默认逐次确认。
+            {state?.permissionGate
+              ? '当前启动带 RPI_PERMISSION_GATE=1：bash/write/edit 仍逐次确认。'
+              : ''}
           </p>
-        ) : null}
-        <p className="text-muted-foreground/60 mt-1 border-t px-2 pt-2 text-[11px] leading-[15px]">
-          计划态下 write/edit 会被扩展拒绝；bash 不受只读沙箱限制。
-          {state?.permissionGate
-            ? '当前启动带 RPI_PERMISSION_GATE=1：bash/write/edit 仍逐次确认。'
-            : ''}
-        </p>
-      </PopoverContent>
-    </Popover>
+        </PopoverContent>
+      </Popover>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onClose={() => {
+          setConfirmOpen(false)
+          setAcknowledged(false)
+        }}
+        onConfirm={confirmFullAccess}
+        title="确认启用完全访问？"
+        description="启用后该会话的智能体将减少确认步骤，并可直接执行更多操作，包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。"
+        confirmLabel="启用完全访问"
+        cancelLabel="取消"
+        destructive
+        dismissOnConfirm
+        confirmDisabled={!acknowledged}
+      >
+        <label className="flex cursor-pointer items-start gap-2 text-[13px] leading-[19px]">
+          <input
+            checked={acknowledged}
+            className="mt-[2px] size-4 shrink-0 accent-current"
+            onChange={(event) => setAcknowledged(event.target.checked)}
+            type="checkbox"
+          />
+          <span>我已了解风险，并愿意继续</span>
+        </label>
+      </ConfirmDialog>
+    </>
   )
 }

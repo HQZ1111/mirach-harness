@@ -30,6 +30,10 @@ export interface AppPrefs {
   maxAgentSteps: number
   /** 上次打开的会话文件绝对路径（启动恢复用）。 */
   lastSessionPath: string | null
+  /** 自动归档旧会话（ZCode `taskAutoArchiveEnabled`）。 */
+  taskAutoArchiveEnabled: boolean
+  /** 归档保留时长（天；UI 档位 3/7/14/30）。 */
+  taskAutoArchiveOlderThanDays: number
 }
 
 let cache: AppPrefs | null = null

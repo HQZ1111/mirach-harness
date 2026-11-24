@@ -183,7 +183,7 @@ pub fn pi_voice_moss_open(app: tauri::AppHandle) -> Result<Value, String> {
                 let ws = match tokio_tungstenite::connect_async(request).await {
                     Ok((ws, _resp)) => ws,
                     Err(e) => {
-                        emit(&app_cl, "moss-live://closed", json!({"handle": handle_id, "reason": format!("WSS 连接失败: {e}")}));
+                        emit(&app_cl, "moss-live://closed", json!({"handle": handle_id, "reason": format!("WSS 连接失败: {}", describe_handshake_error(&e))}));
                         sessions_mut().remove(&handle_id);
                         return;
                     }
@@ -247,6 +247,45 @@ pub fn pi_voice_moss_open(app: tauri::AppHandle) -> Result<Value, String> {
 fn http_header_value(v: &str) -> Result<tokio_tungstenite::tungstenite::http::HeaderValue, String> {
     tokio_tungstenite::tungstenite::http::HeaderValue::from_str(v)
         .map_err(|e| format!("头构造失败: {e}"))
+}
+
+/// 握手失败的可读描述：tungstenite 的 Display 只有 `HTTP error: 402 Payment
+/// Required`，不含 vendor 的响应体——而计费/鉴权类拒绝的**原因全在 body 里**
+/// （实测 402 body = `insufficient_credits`，403 body = `iam api key auth
+/// failed`）。能解出 OpenAI 风格错误体就附在括号里，解不出原样返回。
+fn describe_handshake_error(e: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    if let WsError::Http(resp) = e {
+        let detail = resp
+            .body()
+            .as_ref()
+            .map(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(bytes)
+                    .ok()
+                    .and_then(|v| {
+                        let err = v.get("error")?;
+                        let code = err.get("code").and_then(|c| c.as_str()).unwrap_or("");
+                        let message = err.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                        if code.is_empty() && message.is_empty() {
+                            None
+                        } else if code.is_empty() {
+                            Some(message.to_owned())
+                        } else {
+                            Some(format!("{code}: {message}"))
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        let text = String::from_utf8_lossy(bytes);
+                        text.trim().chars().take(200).collect::<String>()
+                    })
+            })
+            .unwrap_or_default();
+        if detail.is_empty() {
+            return e.to_string();
+        }
+        return format!("{e}（{detail}）");
+    }
+    e.to_string()
 }
 
 fn send_to(handle: u32, msg: OutMsg) -> Result<(), String> {
@@ -323,5 +362,27 @@ mod tests {
             "wss://api.mosi.cn/?model=m1"
         );
         assert_eq!(normalize_base_url("wss://api.mosi.cn/"), "wss://api.mosi.cn/");
+    }
+
+    #[test]
+    fn handshake_error_includes_vendor_body() {
+        use super::describe_handshake_error;
+        use tokio_tungstenite::tungstenite::Error as WsError;
+        // 2026-11-19 实测体：402 insufficient_credits（余额）/ 403 iam auth（key 错）——
+        // 只报 "HTTP error: 402" 用户看不出是计费问题；body 必须进 reason。
+        let resp = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(402)
+            .body(Some(
+                b"{\"error\":{\"message\":\"billing error\",\"type\":\"billing_error\",\"param\":null,\"code\":\"insufficient_credits\"}}".to_vec(),
+            ))
+            .unwrap();
+        let text = describe_handshake_error(&WsError::Http(Box::new(resp)));
+        assert!(text.contains("402"), "{text}");
+        assert!(text.contains("insufficient_credits"), "{text}");
+        // 非 HTTP 错误原样透传
+        assert_eq!(
+            describe_handshake_error(&WsError::ConnectionClosed),
+            "Connection closed normally"
+        );
     }
 }

@@ -61,6 +61,7 @@ import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
+import { conversationDisplayStore } from './conversation-display-store'
 import { timelineMarkerBridge } from './timeline-marker-store'
 import { dispatchToolDetails } from './tool-sidecar'
 import { askBridge } from './ask-bridge'
@@ -82,6 +83,13 @@ import {
   workspaceSessionIndex,
   type SessionPathResolution,
 } from '@/components/panes/session-manage/workspace-session-registry'
+import {
+  ensureProjectForWorkspace,
+  ensureWorkspaceProjects,
+} from '@/components/panes/session-manage/workspace-projects'
+
+/** 启动补登记「工作区 = 项目」只跑一次（新工作区在建会话前同步登记）。 */
+let workspaceProjectsBackfilled = false
 import { sidebarViewStore } from '@/components/panes/session-manage/sidebar-view'
 import { mainViewStore } from '@/components/panes/main-view-store'
 import { fsList } from '@/lib/fs'
@@ -96,6 +104,11 @@ import {
 } from '@/components/panes/session-manage/session-tab-bridge'
 import { setSessionListRefresher } from '@/components/panes/session-manage/session-refresh-bridge'
 import { botsStore, botDisplayName } from '@/components/panes/hub/bots-store'
+import {
+  profileStore,
+  setActiveProfileLocal,
+  setProfileSwitcher,
+} from '@/components/panes/session-manage/active-profile-bridge'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -398,9 +411,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     // includeDeleted=true：软删项目的名字仍要能解析（归属映射保留）。
     const before = sessionCatalog.getState()
     if (!before.projectsLoaded && before.projectsError === null) {
-      void before.loadProjects(true).catch((e) =>
-        console.error('[pi] 项目注册表读取失败（pi_projects_list）', e),
-      )
+      try {
+        await before.loadProjects(true)
+      } catch (e) {
+        console.error('[pi] 项目注册表读取失败（pi_projects_list）', e)
+      }
     }
     // 双源并行：pi_list_sessions（旧形状，启动 cwd 的会话根，侧栏既有基线）
     // + pi_sessions_index（跨工作区/项目根，带 projectId 与诊断）。
@@ -421,6 +436,21 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         '[pi] 跨根会话索引读取失败（pi_sessions_index）——跨工作区会话暂不可见',
         indexResult.reason,
       )
+    }
+    // 工作区 = 项目：首次刷新时把历史会话的 cwd 补登记到项目注册表，再
+    // 重跑一次索引拿到 projectId（否则侧栏分组/项目页仍按「无项目」显示）。
+    if (index !== null && !workspaceProjectsBackfilled) {
+      workspaceProjectsBackfilled = true
+      try {
+        const created = await ensureWorkspaceProjects(index.sessions)
+        if (created > 0) {
+          await sessionCatalog.getState().loadProjects(true)
+          index = await invoke<SessionsIndexResult>('pi_sessions_index')
+          indexError = null
+        }
+      } catch (e) {
+        console.error('[pi] 工作区项目补登记失败（项目页可能仍为空）', e)
+      }
     }
     sessionCatalog.getState().applySessionIndex(index, indexError)
     if (baseResult.status === 'rejected') {
@@ -465,7 +495,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     }
     const withWorkspace = mergeWorkspaceSessionRows(
       baseRows,
-      Object.values(workspaceSessionIndex.getState().entries),
+      // 环境隔离：登记表按创建时的活动 profile 归属——具名环境只并入
+      // 自己名下的跨工作区会话，本体环境只并入 profile 为空的旧记录。
+      Object.values(workspaceSessionIndex.getState().entries).filter(
+        (record) => (record.profile ?? null) === profileStore.getState().profile,
+      ),
     )
     // 跨根合并：同 id 由索引覆盖（含 projectId/谱系），索引独有行追加。
     // custom 断言回 aui 的行形状（SessionCatalogRow.custom 是结构化子集，
@@ -480,19 +514,25 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           : { custom: row.custom as Record<string, unknown> }),
       }),
     )
-    // bot 常驻会话（canonical "Bot Chat"）的显示名 = per-bot：所有 bot 的
-    // 会话 pi 侧同名 "Bot Chat"，页签/标题全是同名——切换了也看不出"切到
-    // 哪个 bot 了"（2026-11-21 用户"bot 本身好像并没有切换"）。显示名
-    // = bot 显示名 · Bot Chat（侧栏行本体被 botChatPaths 隐藏，只有页签
-    // 标题/会话标题读它）。registry 匹配按会话真名不受影响。
+    // bot 常驻会话（canonical "Bot Chat"）的**显示名**：会话真名固定是
+    // "Bot Chat"（引擎落盘 + registry 身份不动），但对话区标题（ChatTabLabel
+    // 下行）与页签读 catalog 显示名——直接显示 "Bot Chat" 既不是会话名也
+    // 无法区分 bot（2026-11-23 用户："下面是会话名，现在会话名变成 bot chat
+    // 了"）。显示层与普通会话同款：优先派生标题（首条用户消息），还没有
+    // 派生标题时回落到机器人显示名（新 bot 会话）。
     const botChatNames = new Map<string, string>()
     for (const b of botsStore.getState().bots) {
-      if (b.chatSessionId) botChatNames.set(b.chatSessionId, `${botDisplayName(b)} · Bot Chat`)
+      if (b.chatSessionId) botChatNames.set(b.chatSessionId, botDisplayName(b))
     }
     if (botChatNames.size > 0) {
+      const priorEntries = sessionCatalog.getState().entries
       for (const row of rows) {
-        const label = botChatNames.get(row.id)
-        if (label) row.title = label
+        const botLabel = botChatNames.get(row.id)
+        if (!botLabel) continue
+        // 规范名 "Bot Chat" 才换成显示名；用户手动重命名过（pi name 不是
+        // "Bot Chat"）必须尊重原名，不能被显示层覆盖。
+        if (row.title && row.title !== 'Bot Chat') continue
+        row.title = priorEntries[row.id]?.derivedTitle || botLabel
       }
     }
     // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
@@ -582,7 +622,20 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           const source = e.target as EventSource
           connectionBridge.getState().setDisconnected(source.readyState === EventSource.CLOSED)
         }
-        // 会话列表 + 当前线程 id（threadId 与 pi sessionId 同源）
+        // 会话列表 + 当前线程 id（threadId 与 pi sessionId 同源）。
+        // 环境隔离（hermes profile 对偶）：先把上次活动环境应用到引擎，再
+        // 首刷目录——否则具名环境的会话（独立 home/sessions）一条都列不到。
+        try {
+          const applied = await invoke<null | string>('pi_profile_set_active', {
+            profile: profileStore.getState().profile,
+          })
+          setActiveProfileLocal(applied ?? null)
+        } catch (e) {
+          console.error('[profile] 启动环境恢复失败——按本体环境列出会话', e)
+          // UI 真相跟随引擎：按钮/菜单口径与列表同源，不装作已切过去。
+          setActiveProfileLocal(null)
+        }
+        if (cancelled) return
         await refreshThreads()
         if (cancelled) return
         try {
@@ -868,6 +921,52 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     costBridge.getState().resetSession(sessionId)
     void timelineMarkerBridge.getState().refresh(sessionId)
   }, [])
+
+  /** 切换活动环境（hermes Desktop「配置档案」选择的对偶；2026-11-22）。
+   *
+   *  引擎侧 `pi_profile_set_active` 只改活动 home/会话根；「离开当前会话、
+   *  按新环境重扫目录」属于 UI 面，在这里做：停掉在途 run（prompt 持锁）
+   *  → 丢活动会话柄（flush 落盘，不删文件）→ 轮次机 RESET → 侧栏与
+   *  会话域桥重扫。重复选择当前环境 = 无操作（hermes selectProfile
+   *  同语义：re-tap 不打断正在看的会话）。失败向上返回 false。 */
+  const switchProfile = useCallback(
+    async (profile: null | string): Promise<boolean> => {
+      const target = profile === '' ? null : (profile ?? null)
+      if (profileStore.getState().profile === target) return true
+      try {
+        const applied = await invoke<null | string>('pi_profile_set_active', { profile: target })
+        setActiveProfileLocal(applied ?? null)
+      } catch (e) {
+        console.error('[profile] 环境切换失败——保持原环境', e)
+        return false
+      }
+      try {
+        if (actorRef.getSnapshot().matches('streaming')) await invoke('pi_interrupt')
+        await invoke('pi_discard_session')
+      } catch (e) {
+        // 会话拆除失败不阻断环境切换（环境真相已改），但必须可见。
+        console.error('[profile] 离开当前会话失败（侧栏仍会按新环境重扫）', e)
+      }
+      actorRef.send({ type: 'RESET' })
+      resetTranscriptTail()
+      setCurrentThreadId(null)
+      sessionCatalog.getState().setActive(null)
+      resetSessionScopedBridges(null)
+      try {
+        await refreshThreads()
+      } catch (e) {
+        console.error('[profile] 环境切换后会话目录刷新失败（侧栏保持旧列表）', e)
+      }
+      branchBridge.getState().requestRefresh()
+      return true
+    },
+    [actorRef, refreshThreads, resetSessionScopedBridges],
+  )
+
+  useEffect(() => {
+    setProfileSwitcher(switchProfile)
+    return () => setProfileSwitcher(null)
+  }, [switchProfile])
 
   /** fork 执行（「从此分支探索」）：守卫 → fork 点 index 映射 →
    * pi_fork_session → 采纳新会话（HYDRATE 重水合——switchToThread 同款
@@ -1163,6 +1262,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           fail('当前会话无法中断——未新建工作区会话')
           return
         }
+        // ZCode 选文件夹 = 新建项目：先落项目注册表（同根复用/回收站恢复），
+        // 再建会话；失败则整个请求失败（不留下「有会话无项目」）。
+        await ensureProjectForWorkspace(cwd)
+        await sessionCatalog.getState().loadProjects(true)
         await invoke('pi_new_session', { cwd })
         const st = await invoke<{ sessionId: string | null; messageCount?: unknown }>(
           'pi_get_state',
@@ -1174,7 +1277,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         }
         let resolution: SessionPathResolution = { root: '', path: null, reason: '未定位' }
         try {
-          resolution = await resolveSessionPath(cwd, st.sessionId)
+          // 环境隔离下 pi_list_sessions 只扫活动环境的会话根，具名环境里
+          // 任意 cwd 的新会话都在其中；本体环境仍可能扫不到别的 cwd，退回
+          // 按 cwd 推路径（既有行为）。
+          const sessions = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
+          const hit = (sessions ?? []).find((s) => s.id === st.sessionId)
+          resolution = hit
+            ? { root: '', path: hit.path }
+            : await resolveSessionPath(cwd, st.sessionId)
         } catch (e) {
           console.error(`[pi] 工作区会话文件定位失败（${cwd} / ${st.sessionId}）`, e)
         }
@@ -1188,6 +1298,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           id: st.sessionId,
           cwd,
           ...(resolution.path ? { path: resolution.path } : {}),
+          profile: profileStore.getState().profile,
           messageCount:
             typeof st.messageCount === 'number' && Number.isFinite(st.messageCount)
               ? st.messageCount
@@ -1776,7 +1887,37 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         // 查询失败不吞：记录后按 actor 状态判断；真正的 busy 由 RUN_ERROR 可见
         console.error('[pi] lane_busy 查询失败——按 actor 状态判断', e)
       }
-      if (laneBusy || actorRef.getSnapshot().matches('streaming')) {
+      const streaming = actorRef.getSnapshot().matches('streaming')
+      if (laneBusy || streaming) {
+        // 交互行为 = 引导（ZCode「引导至下一轮工具调用后运行」）：把消息注入
+        // 当前活跃 run 的 steer 队列（pi_steer → AgentLane::steer，引擎在
+        // 下一次工具调用批后注入）。仅 **真活跃 run**（streaming + laneBusy）
+        // 时走此路；收尾窗口/断流残留（lane 忙但 UI 已 idle）没有可注入的
+        // run，仍按队列处理（下面的重试 drain 覆盖该窗口）。
+        if (conversationDisplayStore.getState().interactionBehavior === 'guide' && streaming && laneBusy) {
+          try {
+            await invoke('pi_steer', {
+              text: submission,
+              ...(plan.images.length > 0 ? { images: plan.images } : {}),
+            })
+          } catch (e) {
+            console.error('[pi] steer 注入失败', e)
+            // 消息未发送：MessageNotSentError 让 assistant-ui 回填草稿与附件
+            throw new MessageNotSentError(
+              `[pi] 引导注入失败：${e instanceof Error ? e.message : String(e)}`,
+            )
+          }
+          // steer 已入引擎队列：乐观用户消息进本轮投影（引擎注入后落成会话条目）
+          actorRef.send({
+            type: 'USER_SUBMIT',
+            text,
+            messageId: `user-${Date.now()}`,
+            ...(plan.imageDataUrls.length > 0 ? { images: plan.imageDataUrls } : {}),
+            ...(plan.files.length > 0 ? { files: plan.files } : {}),
+          })
+          void refreshThreads()
+          return
+        }
         sessionQueue.getState().enqueue({
           id: `queued-${++queuedSeq}`,
           text,
@@ -1788,7 +1929,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         })
         // lane 忙但 **UI 已 idle**（收尾窗口/断流残留）：没有 run 收尾事件
         // 会来触发 drain，必须自己排一次重试——否则排队消息永远不发出。
-        if (laneBusy && !actorRef.getSnapshot().matches('streaming')) {
+        if (laneBusy && !streaming) {
           if (drainRetryRef.current === null) {
             drainRetryRef.current = window.setTimeout(() => {
               drainRetryRef.current = null

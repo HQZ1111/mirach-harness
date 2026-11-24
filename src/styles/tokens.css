@@ -32,7 +32,8 @@
 :root {
   color-scheme: light;
   /* ── 全局字体（HarmonyOS Sans SC webfont，main.tsx 载入） ── */
-  --font-family: 'HarmonyOS Sans SC', 'HarmonyOS Sans', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-family-default: 'HarmonyOS Sans SC', 'HarmonyOS Sans', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-family: var(--font-family-default);
   font-family: var(--font-family);
   font-size: 15px;
 
@@ -50,7 +51,7 @@
   --text-3: #8f8f9c;
   --text-4: #a0a0ac;
   --h1-color: #303030;
-  --h2-color: #006fff;
+  --h2-color: var(--brand);
   --h3-color: #040415;
   /* ── 灰阶 alpha 刻度（2026-10-16 阶段 6：把散落的 rgba(0,0,0,α) 收拢）──
      现状实测：规则文件里手写了 α = 0.03/0.04/0.05/0.06/0.07/0.08/0.10/
@@ -67,7 +68,7 @@
   /* 语义别名（既有名保留 → 消费方零改动；此处只把值改指刻度） */
   --stroke: var(--scale-gray-a4);             /* 常规描边（原 0.10） */
   --stroke-soft: var(--scale-gray-a3);        /* 弱分隔线（原 0.06） */
-  --hover-wash: var(--scale-gray-a2);         /* 悬停洗底（原 0.07） */
+  --hover-wash: #f1f4f8;                        /* 统一低饱和浅蓝灰悬停（不随主题色） */
   /* 列表选中洗底（2026-10-23 用户："选项的高亮颜色不对，不要做好几种样式，
      只要一种，全部从令牌中调用"）。
 
@@ -79,8 +80,11 @@
 
      取 a4(0.12)：比悬停 a2(0.05) 明显深一档，白底上 ≈ #e0e0e0，与
      `--stroke`(a4) 同重量级——选中行读作"压实的块"，不是"描了一圈边"。 */
-  --select-wash: var(--scale-gray-a4);
-  --surface: #ffffff;
+  --select-wash: #e3eaf2;                       /* 统一低饱和浅蓝灰选中 */
+  --surface-base: #ffffff;
+  --surface-shell-base: #e9eeef;
+  --surface: var(--surface-base);
+  --surface-shell: var(--surface-shell-base);
   /* 品牌色块上的文字（2026-10-18 收口）：页签选中/悬停的胶囊是品牌色底，
      白字此前在 flexlayout.css 里写了两次裸 #fff。 */
   --on-brand: #ffffff;
@@ -111,8 +115,16 @@
   --ui-stroke-secondary: var(--stroke);
   --ui-stroke-tertiary: var(--stroke-soft);
   --ui-control-active-background: var(--hover-wash);
+  /* hermes 镜像组件的通用 hover 底（bot 行/群行/工具条按钮/回复 chip）。
+     宿主此前漏了这个别名 → `hover:bg-(--chrome-action-hover)` 解析成透明，
+     整个 bots 插件的悬停反馈都是空的。上游值 = control-hover 同源。 */
+  --chrome-action-hover: var(--ui-control-hover-background);
   --ui-chat-surface-background: var(--surface);
   --ui-chat-bubble-background: var(--surface);   /* catalog 卡片底 */
+  /* 用户消息气泡：外观 →「消息气泡」只减少填充占比，描边始终保留
+     （hermes styles.css:468 同款公式）。 */
+  --dt-user-bubble: color-mix(in srgb, var(--muted) var(--user-bubble-keep, 100%), transparent);
+  --dt-user-bubble-border: var(--ui-stroke-tertiary);
   --ui-text-primary: var(--text);                /* catalog 主文字 */
   --ui-sidebar-surface-background: var(--surface);
   --ui-editor-surface-background: var(--surface);
@@ -138,7 +150,7 @@
 
   /* ── 标题层级 ─────────────────────────────────────────────── */
   --h1-size: 25px;  --h1-weight: 700;  --h1-color: #303030;
-  --h2-size: 20px;  --h2-weight: 400;  --h2-color: #006fff;
+  --h2-size: 20px;  --h2-weight: 400;  --h2-color: var(--brand);
   --h3-size: 18px;  --h3-weight: 400;  --h3-color: #040415;
   --body-size: 15px; --body-weight: 400;
   --sub-size: 15px;  --sub-color: #5a5a5a;
@@ -149,7 +161,7 @@
   --logo-text-size: 32px;                     /* MIRACH 文字 32 */
   --logo-text-weight: 900;                    /* black */
   --logo-text-tracking: 2px;                  /* 字间距 2 */
-  --logo-text-color: #006fff;                 /* 品牌色 */
+  --logo-text-color: var(--brand);             /* 跟随主题色 */
   --logo-strip-h: 75px;                       /* 页签条总高（顶带分栏；标题栏同源
                                    ——2026-10-19 用户：85 → 75） */
   --strip-pad-bottom: 7px;                    /* 页签行离条底边距（视觉 10px：字形底隙 3px 补偿后；用户定稿 15→下移 5px；所有栏统一） */
@@ -174,11 +186,11 @@
   --tab-pad-x: 10px;                          /* 横向页签左右 */
   --tab-pad-y: 8px;                           /* hermes py-2（轨道页签上下） */
   --tab-text: #242424;                        /* 未选中（用户定稿） */
-  --tab-text-active: #006fff;                 /* 选中 = 品牌色 */
+  --tab-text-active: var(--brand);             /* 选中 = 主题色 */
   --tab-active-bg: var(--surface);            /* hermes 编辑器表面 */
   --tab-accent: var(--brand);
   --tab-accent-wash: rgba(0, 111, 255, 0.14); /* hermes TAB_SELECTED 14% */
-  --tab-hover-bg: var(--scale-gray-a2);       /* hermes hover darken（原 0.06） */
+  --tab-hover-bg: var(--hover-wash);          /* 统一浅蓝悬停 */
   --tab-separator: var(--scale-gray-a3);      /* hermes --ui-stroke-quaternary 系（原 0.07） */
   --tab-dot-size: 5px;                        /* 横向多页签之间的分隔圆点（用户 2026-09-27） */
   --tab-dot-color: #bfc3cc;                   /* 圆点色 */
@@ -449,7 +461,7 @@
   --left-rail-view-size: 12px;                /* 顶带当前视图指示字号 */
   --left-rail-view-color: var(--text-3);      /* 指示文字色 */
   --left-rail-view-active-color: var(--brand);/* 机器人视图指示色 */
-  --logo-word-btn-hover-color: color-mix(in srgb, #006fff 70%, transparent); /* Mirach 文字 hover 色（品牌色淡化——用户 2026-10-06：不再黑） */
+  --logo-word-btn-hover-color: color-mix(in srgb, var(--brand) 70%, transparent); /* Mirach 文字 hover/在场态：跟随主题色淡化 */
   --logo-word-btn-active-opacity: 0.55;       /* Mirach 文字按压透明度 */
 }
 
@@ -488,27 +500,13 @@
   --beui-spring-toast-s: 420;    --beui-spring-toast-d: 34;    --beui-spring-toast-m: 0.75;
   --beui-spring-loupe-s: 520;    --beui-spring-loupe-d: 24;    --beui-spring-loupe-m: 0.6;  /* 放大镜升起 */
 
-  /* ── 弹层液滴粘性合并（goo）总开关（2026-11-01 用户定稿）──
-     用户："调用点没传，直接在令牌中统一开关不行吗"。
-
-     **这是唯一开关**：`Popover` / `ContextMenu` / `GooSurface` 的 `goo`
-     默认值全部来自本变量（ease.ts 的 POPOVER_GOO），**调用点不许传
-     `goo`**——散在 15 个调用点的布尔参数就是"有的有脖子有的没有"的成因。
-
-     0 = 关（默认）：面板是独立圆角矩形 + 投影，与触发钮之间**没有液滴
-     脖子**，按钮也不会被投影。1 = 开：beui 原设计的粘性合并。
-
-     为什么默认关：beui 的 goo 是通用组件的设计语言（预览页 PopoverPreview
-     就是这效果），但宿主全是"28×28 图标钮 + 288 宽大面板"这种尺寸悬殊的
-     组合，6px 间隙会被滤镜拉成一条明显的脖子；且 drop-shadow 作用在合并
-     形状上 → 按钮也被投了一层影。视觉上是噪声，不是设计。 */
-  --beui-popover-goo: 0;
+  /* goo（液滴粘性合并）令牌随 goo-layer.tsx 一起删除（2026-11-22 用户：
+     "这个弹窗效果组件就不要了，换成默认的弹窗效果"）——弹层改走
+     tw-animate 的默认 fade+zoom，不再有 --beui-popover-goo 开关。 */
 
   /* Spring（duration 式：--dur 秒 + --bounce；ease.ts visualOf/durSpringOf 读取。
      2026-10-16 令牌统一新增——goo/morph/unfold/accordion 四组组件弹簧原散落
      在各 vendored 组件内，现全部收拢于此，组件改 import ease.ts） */
-  --beui-spring-goo-open-dur: 0.3;    --beui-spring-goo-open-bounce: 0.15;
-  --beui-spring-goo-close-dur: 0.21;  --beui-spring-goo-close-bounce: 0.15;
   --beui-spring-unfold-dur: 0.2;      --beui-spring-unfold-bounce: 0.12;
   --beui-spring-morph-dur: 0.26;      --beui-spring-morph-bounce: 0;
   --beui-spring-accordion-row-dur: 0.55;     --beui-spring-accordion-row-bounce: 0.38;
@@ -561,7 +559,10 @@
      根字号 15px 下 11.5rem = 172.5px 会产出半像素；原 rem 只是按 16px
      根字号写的名义值，折算后取整。 */
   --dialog-w: 840px;                                /* 原 56rem */
-  --dialog-nav-w: 172px;                            /* 原 11.5rem，左侧导航列 */
+  /* 2026-11-24 用户："设置页的左栏宽度大一点，密码与安全文字没显示完"。
+     hermes 的 OverlaySplitLayout 是 13rem（宿主 15px 根字号下 195px），
+     原 172px 装不下「密码与登录」+ 图标 + 子级箭头。 */
+  --dialog-nav-w: 200px;
   --dialog-inset-x: 64px;                           /* 原 4rem，左右安全边 */
   --dialog-inset-y: 96px;                           /* 原 6rem，上下安全边 */
   --dialog-nav-item-w: 168px;                       /* 原 11rem，弹层内列表列宽 */
@@ -676,7 +677,7 @@
        .dv-view   padding = 8/2     = 4
      两者相加 10 = 窗边档；相邻两栏的 .dv-view 相加 8 = 栏间档。
      **卡片圆角与内缩无同心关系**：25 是用户选定的纯视觉值。 */
-  --surface-shell: #e9eeef;                   /* 外壳底色（用户 2026-10-19 定稿：取旧调色层
+  --surface-shell: var(--surface-shell-base); /* 外壳底色（用户 2026-10-19 定稿：取旧调色层
                                                  的源色 #E9EEEF 实色——不是叠白后的
                                                  #f6f8f9。白卡之间的底色带要能读出来。
                                                  调色层本身已于 2026-10-21 删除，
@@ -825,6 +826,14 @@
   --font-body-lg: var(--scale-font-lg);
   --font-title: var(--scale-font-title);
 
+  /* 设置页语义字号（2026-11-24 统一）：不跟聊天文字缩放，左导航 / 右内容
+     同一档。label 14 / 描述 12 / 节标题 14，行高统一 1.5。 */
+  --settings-label-size: 14px;
+  --settings-desc-size: 12px;
+  --settings-section-title-size: 14px;
+  --settings-row-pad-y: 12px;
+  --settings-section-gap: 16px;
+
   /* 图标钮语义 —— **盒子档位**（命中区；图标尺寸见 --size-icon-glyph*）。
      2026-10-26 用户："圆太小了，不好点中" + "给个空白的间隙，可点击的区域
      不是大了吗" → 盒子统一放大，图标保持原视觉尺寸，差值就是命中余量。 */
@@ -834,3 +843,108 @@
   --size-icon-btn-xl: 36px;                      /* 36（图标 20） */
 }
 
+/* ============================================================
+ * 暗色外壳（2026-11-23，设置 → 外观 → 主题）
+ *
+ * 宿主此前只有浅色令牌；外观页把 hermes 的 light/dark/system 模式接进来后，
+ * 用这一块把宿主自己的语义令牌整体翻到暗色。:root:root.dark 的 specificity
+ * 高于 tailwind.css 的 :root（后者在 main.tsx 里更晚导入），所以
+ * --background/--foreground 等 shadcn 令牌也能被覆盖。颜色值取 hermes 的
+ * nous 暗色调色板（背景 #141416、卡片 #1b1b1f、正文 #f2f2f4）。
+ * ============================================================ */
+:root:root.dark {
+  color-scheme: dark;
+
+  --text: #f2f2f4;
+  --text-2: #b9b9c2;
+  --text-3: #8d8d99;
+  --text-4: #6f6f7a;
+  --h1-color: #f2f2f4;
+  --h2-color: #4d9aff;
+  --h3-color: #e7e7ea;
+
+  --scale-gray-a1: rgba(255, 255, 255, 0.035);
+  --scale-gray-a2: rgba(255, 255, 255, 0.06);
+  --scale-gray-a3: rgba(255, 255, 255, 0.09);
+  --scale-gray-a4: rgba(255, 255, 255, 0.14);
+  --scale-gray-a5: rgba(255, 255, 255, 0.20);
+  --scale-gray-a6: rgba(255, 255, 255, 0.26);
+  --stroke: var(--scale-gray-a4);
+  --stroke-soft: var(--scale-gray-a3);
+  --hover-wash: rgba(148, 163, 184, 0.12);
+  --select-wash: rgba(148, 163, 184, 0.18);
+
+  --surface-base: #1b1b1f;
+  --surface-shell-base: #111114;
+  --on-brand: #ffffff;
+  --shadow-pane: 0 1px 3px rgba(0, 0, 0, 0.45), 0 6px 16px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --overlay-mask: rgba(0, 0, 0, 0.58);
+
+  /* tailwind.css / shadcn 令牌（暗色等价） */
+  --background: #141417;
+  --foreground: #f2f2f4;
+  --card: #1b1b1f;
+  --card-foreground: #f2f2f4;
+  --popover: #202024;
+  --popover-foreground: #f2f2f4;
+  --primary: #4d9aff;
+  --primary-foreground: #0b0b0f;
+  --secondary: #26262b;
+  --secondary-foreground: #f2f2f4;
+  --muted: #26262b;
+  --muted-foreground: #a7a7b2;
+  --accent: #26262b;
+  --accent-foreground: #f2f2f4;
+  --destructive: #ff6467;
+  --border: var(--stroke);
+  --input: var(--stroke);
+  --ring: #4d9aff;
+  --sidebar: #17171b;
+  --sidebar-foreground: #f2f2f4;
+  --sidebar-primary: #4d9aff;
+  --sidebar-primary-foreground: #0b0b0f;
+  --sidebar-accent: #26262b;
+  --sidebar-accent-foreground: #f2f2f4;
+  --sidebar-border: var(--stroke);
+  --sidebar-ring: #4d9aff;
+
+  /* 页签 / 代码 / 终端 / logo */
+  --tab-text: #d6d6de;
+  --tab-text-active: #6ea8ff;
+  --tab-active-bg: var(--surface);
+  --tab-hover-bg: var(--hover-wash);
+  --tab-separator: var(--scale-gray-a3);
+  --tab-dot-color: #5c5c66;
+  --tab-accent-wash: rgba(77, 154, 255, 0.18);
+  --code-bg: #17171b;
+  --code-border: var(--stroke-soft);
+  --term-bg: #141417;
+  --term-fg: #e8e8ec;
+  --term-cursor: #e8e8ec;
+  --term-cursor-accent: #141417;
+  --term-black: #a3a3a3;
+  --term-white: #d4d4d8;
+  --term-bright-black: #737373;
+  --term-bright-white: #fafafa;
+  --logo-text-color: #4d9aff;
+
+  /* 镜像层 --ui-* 语义别名直接指向暗色宿主令牌 */
+  --ui-bg-quinary: var(--hover-wash);
+  --ui-bg-quaternary: var(--scale-gray-a2);
+  --ui-bg-tertiary: var(--scale-gray-a1);
+  --ui-row-active-background: var(--select-wash);
+  --ui-row-hover-background: var(--hover-wash);
+  --ui-text-primary: var(--text);
+  --ui-text-secondary: var(--text-2);
+  --ui-text-tertiary: var(--text-3);
+  --ui-text-quaternary: var(--text-4);
+  --ui-stroke-secondary: var(--stroke);
+  --ui-stroke-tertiary: var(--stroke-soft);
+  --ui-control-hover-background: var(--hover-wash);
+  --ui-control-active-background: var(--select-wash);
+  --ui-chat-surface-background: var(--surface);
+  --ui-chat-bubble-background: var(--surface);
+  --ui-sidebar-surface-background: var(--surface);
+  --ui-editor-surface-background: var(--surface);
+}

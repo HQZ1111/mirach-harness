@@ -28,6 +28,7 @@ import {
   pluginActive,
   publishPlugin,
 } from '@/hermes-shim/contrib/plugins-store'
+import { setBotsRuntimeLoaded } from '@/plugins/bots-gate'
 
 /** 与上游 `HermesPlugin` 的结构子集（只取内置启动需要的字段）。 */
 interface BundledPlugin {
@@ -57,7 +58,28 @@ function disposeOf(entry: LoadedBundled): void {
   entry.disposers.length = 0
 }
 
-async function registerBundled(plugin: BundledPlugin): Promise<void> {
+/** 插件停用时的宿主配套清理（bots：停掉群聊后台驱动）。 */
+function deactivateExtras(id: string): void {
+  if (id !== 'hermes-bots') return
+  setBotsRuntimeLoaded(false)
+  void import('@/components/panes/hub/bots-panel-actions')
+    .then((actions) => actions.closeBotsPanel())
+    .catch((e) => console.error('[plugins] 关闭机器人栏失败', e))
+  void import('@/components/panes/hub/canonical-group-driver')
+    .then((driver) => driver.stopCanonicalGroupDriver())
+    .catch((e) => console.error('[plugins] 停止 canonical 群聊驱动失败', e))
+}
+
+/** bots 插件启用后的宿主配套启动（群聊恢复扫描）。 */
+function activateExtras(id: string): void {
+  if (id !== 'hermes-bots') return
+  setBotsRuntimeLoaded(true)
+  void import('@/components/panes/hub/canonical-group-driver')
+    .then((driver) => driver.startCanonicalGroupDriver())
+    .catch((e) => console.error('[canonical-driver] 启动失败', e))
+}
+
+async function registerBundled(plugin: BundledPlugin): Promise<boolean> {
   const existing = loaded.get(plugin.id)
   if (existing) disposeOf(existing)
 
@@ -75,14 +97,19 @@ async function registerBundled(plugin: BundledPlugin): Promise<void> {
         ...(plugin.description !== undefined ? { description: plugin.description } : {}),
       },
       {
-        activate: () => registerBundled(plugin),
+        activate: () => {
+          void registerBundled(plugin).then((ok) => {
+            if (ok) activateExtras(plugin.id)
+          })
+        },
         deactivate: () => {
           disposeOf(loaded.get(plugin.id) ?? entry)
           patchPlugin(plugin.id, { status: 'disabled' })
+          deactivateExtras(plugin.id)
         },
       },
     )
-    return
+    return false
   }
 
   try {
@@ -97,13 +124,19 @@ async function registerBundled(plugin: BundledPlugin): Promise<void> {
         ...(plugin.description !== undefined ? { description: plugin.description } : {}),
       },
       {
-        activate: () => registerBundled(plugin),
+        activate: () => {
+          void registerBundled(plugin).then((ok) => {
+            if (ok) activateExtras(plugin.id)
+          })
+        },
         deactivate: () => {
           disposeOf(loaded.get(plugin.id) ?? entry)
           patchPlugin(plugin.id, { status: 'disabled' })
+          deactivateExtras(plugin.id)
         },
       },
     )
+    return true
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
     console.error(`[plugins] 内置插件 ${plugin.id} 注册失败`, e)
@@ -115,6 +148,7 @@ async function registerBundled(plugin: BundledPlugin): Promise<void> {
       error: message,
       ...(plugin.description !== undefined ? { description: plugin.description } : {}),
     })
+    return false
   }
 }
 
@@ -126,12 +160,10 @@ export async function startBundledPlugins(): Promise<void> {
     const mod = (await import('@/hermes-mirror/plugins/hermes-bots/plugin')) as {
       default: BundledPlugin
     }
-    await registerBundled(mod.default)
-    // canonical 群聊驱动的启动恢复扫描（应用重启后在途讨论重新驱动）；
-    // 驱动本身不依赖插件注册，但它只服务 bots 面，放这里一处启动。
-    void import('@/components/panes/hub/canonical-group-driver')
-      .then((driver) => driver.startCanonicalGroupDriver())
-      .catch((e) => console.error('[canonical-driver] 启动失败', e))
+    const registered = await registerBundled(mod.default)
+    // canonical 群聊驱动只服务 bots 面：插件被禁用/注册失败时不得启动
+    // （否则"关闭插件"后后台仍会驱动房间）。
+    if (registered) activateExtras('hermes-bots')
     // MCP OAuth token 启动刷新（10 分钟内到期的全部换新；失败清单 console 可见）。
     void import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke<{ failed?: { name?: string; error?: string }[] }>('pi_mcp_oauth_refresh_all'))
@@ -141,7 +173,7 @@ export async function startBundledPlugins(): Promise<void> {
         }
       })
       .catch((e) => console.error('[mcp-oauth] 启动刷新失败', e))
-    if (import.meta.env.DEV) {
+    if (registered && import.meta.env.DEV) {
       // E2E 调试句柄（`__dvApi` 同惯例）：Bot Mode 的选择/焦点/名册原子。
       // 只在 DEV 暴露；CDP 探针用它核对 UI 背后的真实 store 值，不猜 DOM。
       // 动态 import 与插件同一模块实例（同一 vite 模块图，无 ?t= 变体）。

@@ -58,6 +58,10 @@ struct BotRunState {
     last_status: Option<String>,
     /// 最近一轮的最终 assistant 文本（peer `/v1/runs` 的 `output`）。
     last_output: Option<String>,
+    /// 终局计数器（每次轮次收尾 +1，与 running=false / last_status 同临界区写入）。
+    /// peer run monitor 用「seq 变了」判定**本次**轮次已收尾——冷启动窗口里
+    /// running 仍是 false，不能拿来当终局信号（2026-11-19 E2E 实测假 interrupted）。
+    last_turn_seq: u64,
     /// 引擎任务租约（rpi-harness task_lease）：轮次身份 + fencing token。
     current_task: Option<CurrentTask>,
     /// 任务身份代际（每次提交 +1；fencing/重试都用它）。
@@ -200,6 +204,47 @@ fn find_session(session_id: &str) -> Option<Arc<BotSession>> {
         .map(Arc::clone)
 }
 
+/// 该会话是否已装进 bot 泳道（peer `/v1/runs` 的 session_id 复用判定）。
+pub(crate) fn pi_bot_has_session(session_id: &str) -> bool {
+    find_session(session_id).is_some()
+}
+
+/// peer clarify 回执：一题一次性回灌（题目 id 缺省取第一个问题）。
+pub(crate) fn pi_bot_answer_clarify(
+    session_id: &str,
+    request_id: &str,
+    answer: &str,
+) -> Result<usize, String> {
+    let Some(session) = find_session(session_id) else {
+        return Err(format!("bot 会话 {session_id} 不在泳道注册表"));
+    };
+    let (resolved_id, question_id) = {
+        let asks = session.asks.lock().expect("bot asks poisoned");
+        let id = if request_id.trim().is_empty() {
+            asks.keys().next().cloned()
+        } else {
+            Some(request_id.trim().to_owned())
+        };
+        let id = id.ok_or_else(|| "没有挂起的 clarify 请求".to_string())?;
+        let row = asks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| format!("没有挂起的 clarify 请求 {id}"))?;
+        let question_id = row["request"]["questions"][0]["id"]
+            .as_str()
+            .unwrap_or("q0")
+            .to_owned();
+        (id, question_id)
+    };
+    pi_bot_clarify_lock(
+        Some(session_id.to_owned()),
+        resolved_id,
+        question_id,
+        Some(answer.to_owned()),
+    )?;
+    Ok(1)
+}
+
 /// 取会话；不在注册表时按 `path` 懒装配（应用重启后群成员会话仍可用——
 /// 插件持久化的是 stored id，第一次提交时按 id 找路径重开）。
 fn ensure_session(
@@ -221,6 +266,9 @@ fn ensure_session(
     }
     let cwd = pi_session::workspace_from_session_path(path_ref)
         .unwrap_or_else(pi_session::default_workspace);
+    // 环境隔离：成员会话属于它自己的 profile home（hermes profile 的
+    // sessions 目录对偶；config.profile 为 None/ default = 本体）。
+    let session_dir = crate::pi_profiles::ensure_profile_dirs(config.profile.as_deref())?;
     let built = pi_session::build_harness_impl(
         &lane().rt,
         &cwd,
@@ -228,6 +276,7 @@ fn ensure_session(
         config.provider.as_deref(),
         config.model_id.as_deref(),
         config.extension_filter.as_deref(),
+        session_dir.as_deref(),
     )?;
     if built.id != session_id {
         return Err(format!(
@@ -436,6 +485,8 @@ pub fn pi_bot_create_session(
         extension_filter,
     };
     // 先建（未命名）→ 设置人格/工具 → 命名（set_name 是 fact 条目）。
+    // 环境隔离：新成员会话落其 profile home 的 sessions 目录。
+    let session_dir = crate::pi_profiles::ensure_profile_dirs(config.profile.as_deref())?;
     let built = pi_session::build_harness_impl(
         &lane().rt,
         &cwd,
@@ -443,6 +494,7 @@ pub fn pi_bot_create_session(
         provider.as_deref(),
         model_id.as_deref(),
         config.extension_filter.as_deref(),
+        session_dir.as_deref(),
     )?;
     let session = make_session(built, &config);
     apply_config(&session, &config)?;
@@ -690,6 +742,7 @@ fn spawn_turn(
                         Some(terminal_output)
                     };
                     state.current_task = None;
+                    state.last_turn_seq = state.last_turn_seq.saturating_add(1);
                 }
                 let payload = json!({
                     "session_id": session_for_thread.id,
@@ -718,6 +771,7 @@ fn spawn_turn(
             state.running = false;
             state.current_task = None;
             state.last_error = Some(format!("bot 轮次线程启动失败: {e}"));
+            state.last_turn_seq = state.last_turn_seq.saturating_add(1);
             format!("bot 轮次线程启动失败: {e}")
         })?;
     Ok(())
@@ -772,6 +826,8 @@ pub fn pi_bot_state(session_id: String) -> Result<Value, String> {
         "pending_approval": pending_approval(&session),
         "last_status": state.last_status.clone(),
         "last_output": state.last_output.clone(),
+        // 终局计数器：peer monitor 据此判定「本次」轮次收尾（见 BotRunState 注释）。
+        "last_turn_seq": state.last_turn_seq,
         // 引擎任务租约快照（canonical driver 用 task 身份做 fencing/重试）。
         "task": state.current_task.as_ref().map(|task| json!({
             "task_id": task.task_id,

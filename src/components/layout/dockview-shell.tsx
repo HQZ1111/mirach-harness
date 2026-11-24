@@ -28,19 +28,24 @@ import {
   type SerializedDockview,
 } from 'dockview-react'
 import { useCallback, useEffect, useRef } from 'react'
+import { LogicalSize } from '@tauri-apps/api/window'
 
 import { Titlebar } from '@/app/shell/titlebar'
+import { BottomWave } from '@/components/bottom-wave'
 import { ResizeHandles } from './resize-handles'
 import { GlobalKeybinds } from './global-keybinds'
 import { inTauri, appWindow } from '@/lib/tauri-window'
+import { WINDOW_MIN_W } from '@/lib/window-metrics'
+import { readFileBrowserOpen, subscribeFileBrowser, writeFileBrowserOpen } from '@/lib/file-browser-pref'
 import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { LeftRailPane } from '@/components/panes/left-rail-pane'
-import { BotsPane } from '@/components/panes/bots-pane'
 import { PluginPane } from '@/components/panes/plugin-pane'
+import { botsFeatureDesiredNow, useBotsFeatureEnabled } from '@/plugins/bots-gate'
 import { PluginWorkspacePane } from '@/components/panes/plugin-workspace-pane'
 import { pruneOrphanWorkspacePanels, workspacePanelClosed } from '@/components/layout/plugin-workspaces'
 import { registry } from '@/hermes-shim/contrib/registry'
 import { BOTS_PANEL_ID, botsPanelStore } from '@/components/panes/hub/bots-panel-actions'
+import { botDisplayName, botsStore } from '@/components/panes/hub/bots-store'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
@@ -62,6 +67,7 @@ import { isTerminalPanelId } from '@/components/panes/terminal/terminal-tabs'
 import { OpenPage, type OpenPageKind } from '@/components/panes/open-page'
 import { sessionCatalog, sessionDisplayName } from '@/components/panes/session-manage/session-catalog'
 import {
+  setSessionColumnOpener,
   setSessionTabOpener,
   type SessionTabDropPosition,
 } from '@/components/panes/session-manage/session-tab-bridge'
@@ -123,10 +129,67 @@ const loadLayout = (): SerializedDockview | null => {
 
 const saveLayout = (json: SerializedDockview): void => {
   try {
+    // 结构性拒绝：旗标说「左栏/面板栏在场」而存档里没有对应 region 的
+    // panel = 加载/卸载中途的半成品树。2026-11-24 实测：HMR 重载期间
+    // 旧实例可能把只剩左栏+主栏的临时树写成正式存档，之后每次启动都丢栏。
+    const flags = columnFlagsOf()
+    const hasRegion = (region: string): boolean =>
+      Object.values(json.panels ?? {}).some(
+        (p) => (p as { params?: { region?: string } }).params?.region === region,
+      )
+    if (!flags.leftHidden && !hasRegion('left')) {
+      console.error('[dv-shell] 左栏旗标未隐藏但布局无左栏——拒绝落盘')
+      return
+    }
+    if (!flags.panelsHidden && !hasRegion('panels')) {
+      console.error('[dv-shell] 面板栏旗标未隐藏但布局无面板——拒绝落盘')
+      return
+    }
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(json))
   } catch (e) {
     console.error('[dv-shell] 布局存档写入失败', e)
   }
+}
+
+/**
+ * 窗口跟列数走（2026-11-24 用户："左右分栏"）：把 routines 拉到面板栏
+ * 右侧 = 第五列，1280 窗口装不下就会从右边裁掉。这里按**每列组的最小宽**
+ * 求和（上下堆叠的组按 x 去重，只算一次），窗口不够就长窗；同时把 Tauri
+ * 的最小内宽抬到同一值，用户之后往回拖也拖不出裁切。
+ *
+ * 只改窗口，不动 dockview 布局；最大化时只更新最小宽（屏幕装不下无解，
+ * 不能强行 setSize 把窗口从最大化踢出来）。IPC 失败必须可见。
+ */
+let lastRequiredMinWidth = 0
+const ensureWindowFitsColumns = (a: DockviewApi): void => {
+  if (!inTauri || !appWindow) return
+  const cols = new Map<number, number>()
+  for (const g of a.groups) {
+    if (Math.round(g.width) <= 0) continue
+    const rect = (g as unknown as { element?: HTMLElement }).element?.getBoundingClientRect()
+    if (!rect) continue
+    const x = Math.round(rect.left)
+    // 上下堆叠的组左缘可能差 1px（边框/缩放），按 ±2px 归到同一列。
+    const key = [...cols.keys()].find((k) => Math.abs(k - x) <= 2) ?? x
+    cols.set(key, Math.max(cols.get(key) ?? 0, Math.round(g.minimumWidth)))
+  }
+  if (cols.size < 2) return
+  const required = [...cols.values()].reduce((sum, w) => sum + w, 0) + (cols.size - 1) * 4 + 20
+  const baseMin = WINDOW_MIN_W
+  const minWidth = Math.max(baseMin, Math.ceil(required))
+  if (minWidth === lastRequiredMinWidth) return
+  lastRequiredMinWidth = minWidth
+  void (async () => {
+    try {
+      const maximized = await appWindow.isMaximized()
+      await appWindow.setMinSize(new LogicalSize(minWidth, 600))
+      if (!maximized && Math.ceil(window.innerWidth) < minWidth) {
+        await appWindow.setSize(new LogicalSize(minWidth + 24, window.innerHeight))
+      }
+    } catch (e) {
+      console.error('[dv-shell] 窗口适配列宽失败', e)
+    }
+  })()
 }
 
 // ── 打开页三按钮落点（预览 = HermesPreviewPane；检查占位 = review） ─────────
@@ -160,6 +223,10 @@ const OpenTabHeader = (props: IDockviewPanelHeaderProps) => (
  * onReady 会再调一次。
  */
 let routinesPaneSync: (() => void) | null = null
+/** 本次进程里是否见过 routines 贡献注册。启动早期插件还没注册时
+ *  `wanted=false` 不能当成「贡献被注销」——否则会把存档里带分栏的
+ *  routines 面板摘掉，插件加载后再以普通标签重建，用户分栏被毁。 */
+let routinesContributionSeen = false
 
 /**
  * 主栏标签条可见性（hermes `resolveTabStripVisible` 的 auto 规则宿主版）：
@@ -179,6 +246,14 @@ function syncChatGroupStrip(a: DockviewApi): void {
   const extras = group.panels.filter((panel) => !CHAT_STRIP_ANCHORS.has(panel.id))
   const want = extras.length > 0 ? '' : 'none'
   if (strip.style.display !== want) strip.style.display = want
+}
+
+/** bots 插件贡献窗格：插件未启用/未加载时**不渲染**（没有原生替身）。
+ *  注册失败由设置页插件记录标 error；这里保持空窗格而不是画第二套精简 UI。 */
+function GatedBotsPluginPane({ contributionId }: { contributionId: string }) {
+  const enabled = useBotsFeatureEnabled()
+  if (!enabled) return null
+  return <PluginPane contributionId={contributionId} />
 }
 
 export function DockviewShell() {
@@ -246,6 +321,7 @@ export function DockviewShell() {
       if (layoutResetInProgress()) return
       const panel = a.getPanel(panelId)
       if (!panel || panel.id === 'open') return
+      if (panelId === 'files') writeFileBrowserOpen(true)
       if (panel.params?.region !== 'panels') return
       const open = a.getPanel('open')
       if (open && open.group === panel.group) {
@@ -269,6 +345,7 @@ export function DockviewShell() {
       if (layoutResetInProgress()) return
       const removed = /* 移除前 region 已不可考——用 id 判面板栏域 */ panelId === 'open' || panelId === 'files' || isTerminalPanelId(panelId) || panelId.startsWith('preview')
       if (!removed) return
+      if (panelId === 'files') writeFileBrowserOpen(false)
       // **ZCode 语义**（2026-11-01 用户："只有一个标签的时候是关闭是会关闭
       // 面板栏的"）：面板列不再有实签 = 关闭面板栏，锚不复活。'open' 自身
       // 被关（标签总览的 ✕）同样走这条——2026-11-01 实锤：早退分支漏记账，
@@ -328,6 +405,61 @@ export function DockviewShell() {
     return () => setSessionTabOpener(null)
   }, [])
 
+  // ── 新栏开会话（2026-11-20 用户："「在新标签页中打开机器人聊天」改成打开
+  //   一个新栏"）——插件 `host.openSession(id, {intent:'tab'})` 的门。恒向右
+  //   分栏（主 workspace 右侧），不抢主会话；已开 = 置前。会话栏渲染
+  //   SessionThreadPane（自持独立运行时；引擎侧 = side 柄，见 agui.rs）。 ──
+  useEffect(() => {
+    setSessionColumnOpener(
+      (storedSessionId, options) => {
+        const a = apiRef.current
+        if (!a) {
+          console.error('[dv-shell] 布局 api 不在场——会话新栏放弃')
+          return
+        }
+        const id = `session-${storedSessionId}`
+        const existing = a.getPanel(id)
+        if (existing) {
+          existing.api.setActive()
+          return
+        }
+        // 该会话就是主会话：主 workspace 已在屏显示它，不另开重复栏。
+        if (sessionCatalog.getState().activeId === storedSessionId) {
+          a.getPanel('workspace')?.api.setActive()
+          return
+        }
+        const entry = sessionCatalog.getState().entries[storedSessionId]
+        const title = options?.title?.trim() || sessionDisplayName(entry) || '会话'
+        // 参照 sheet：主 workspace 不在场（极端布局）→ 任一 chat 区面板 →
+        // 不指定（dockview 落到当前活动组，错误不静默：console.error 可见）。
+        const reference =
+          a.getPanel('workspace') ?? a.panels.find((p) => p.params?.region === 'chat')
+        if (!reference) {
+          console.error('[dv-shell] 找不到 chat 区参照面板——会话新栏落到当前组')
+        }
+        a.addPanel({
+          id,
+          component: 'session',
+          title,
+          minimumWidth: CHAT_MIN_WIDTH,
+          params: { region: 'chat', threadId: storedSessionId, tabName: title },
+          position: reference
+            ? { referencePanel: reference.id, direction: 'right' }
+            : undefined,
+        })
+      },
+      (storedSessionId) => {
+        const a = apiRef.current
+        if (!a) return false
+        const panel = a.getPanel(`session-${storedSessionId}`)
+        if (!panel) return false
+        panel.api.setActive()
+        return true
+      },
+    )
+    return () => setSessionColumnOpener(null)
+  }, [])
+
   // ── 文件预览链（preview-opener）：单实例 preview 面板，filePath 进 params ──
   useEffect(() => {
     setPreviewOpener((filePath, fileName) => {
@@ -347,6 +479,7 @@ export function DockviewShell() {
         component: 'preview',
         title: fileName || '预览',
         minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels', filePath },
         position: panelsDropPosition(a),
       })
@@ -378,6 +511,7 @@ export function DockviewShell() {
             ? `子代理 · ${payload.name}`
             : '子代理',
         minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels', payload },
         position: panelsDropPosition(a),
       })
@@ -407,6 +541,7 @@ export function DockviewShell() {
         component: 'plan-detail',
         title: payload.title ?? '会话计划',
         minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels', payload },
         position: panelsDropPosition(a),
       })
@@ -434,6 +569,7 @@ export function DockviewShell() {
         component: 'agent-directory',
         title: '已结束的智能体',
         minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels' },
         position: panelsDropPosition(a),
       })
@@ -464,6 +600,7 @@ export function DockviewShell() {
         component: 'workflow-run',
         title: runId === undefined ? '工作流实例' : (payload.title ?? '工作流实例'),
         minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels', payload },
         position: panelsDropPosition(a),
       })
@@ -485,6 +622,7 @@ export function DockviewShell() {
       const a = apiRef.current
       if (!a) return
       const wanted = registry.getArea('panes').some((c) => c.id === 'hermes-bots:routines')
+      if (wanted) routinesContributionSeen = true
       const panel = a.getPanel('routines')
       if (wanted && !panel) {
         try {
@@ -492,13 +630,26 @@ export function DockviewShell() {
             id: 'routines',
             component: 'routines',
             title: '定时任务',
-            position: { referencePanel: 'workspace', direction: 'right' },
-            initialWidth: 320,
+            minimumWidth: RAIL_MIN_WIDTH,
+            maximumWidth: RAIL_MAX_WIDTH,
+            // 插件例程是面板栏的一个标签，不是第五列（此前挂在 workspace
+            // 右侧新建列，窗口一窄就被挤成 100px 并被窗口边缘裁掉）。
+            params: { region: 'panels' },
+            position: panelsDropPosition(a),
           })
         } catch (e) {
           console.error('[plugins] 例程面板创建失败', e)
         }
-      } else if (!wanted && panel) {
+      } else if (
+        !wanted &&
+        panel &&
+        (routinesContributionSeen || !botsFeatureDesiredNow()) &&
+        a.panels.some((p) => p.id === panel.id)
+      ) {
+        // getPanel 可能拿到已 dispose 的陈旧引用（HMR 拆卸 / 面板刚被关），
+        // 直接 removePanel 会抛 "resource already disposed"——先核对活动列表。
+        // **启动早期 `wanted=false` 但贡献还没注册过时不能摘**：那会把用户
+        // 存档里的 routines 分栏当标签重建成普通标签（2026-11-24 实锤）。
         try {
           a.removePanel(panel)
         } catch (e) {
@@ -562,12 +713,12 @@ export function DockviewShell() {
 
   const components = {
     leftrail: () => <LeftRailPane />,
-    // 机器人弹出栏：hermes bots 插件（bundled）的窗格贡献若已注册就用它
-    // （完整 Bot Mode：花名册/群聊/例程）；插件未加载/被禁用时回落到宿主
-    // 原生移植版 BotsPane（2026-11-07 完整移植）。两条面都是真 UI。
-    bots: () => <PluginPane contributionId="hermes-bots:pane" fallback={<BotsPane />} />,
+    // 机器人弹出栏：**只有 hermes-bots 插件**（bundled，完整 Bot Mode）。
+    // 插件禁用/注册失败 = 功能关闭（不渲染宿主精简替身——那会让"关插件"
+    // 关不干净，且与插件的完整实现形成第二套语义）。
+    bots: () => <GatedBotsPluginPane contributionId="hermes-bots:pane" />,
     // 例程（bots 插件的 routines 贡献，Bot Mode 会话在屏时注册）。
-    routines: () => <PluginPane contributionId="hermes-bots:routines" />,
+    routines: () => <GatedBotsPluginPane contributionId="hermes-bots:routines" />,
     // 主区工作台（2026-10-26）：聊天 / 技能与工具 视图开关（hermes 的
     // `/skills` 顶级路由语义——SkillsPage 替换对话区，`App.tsx:166`）。
     workspace: () => <MainWorkspacePane />,
@@ -793,6 +944,7 @@ export function DockviewShell() {
           } catch (e) {
             console.error('[dv-shell] 布局持久化失败', e)
           }
+          ensureWindowFitsColumns(a)
         }, 250)
       })
       hydratingRef.current = true
@@ -803,6 +955,12 @@ export function DockviewShell() {
         // 孤儿面板在这里剪掉；必须在 hydrate 窗口内、React 挂载前关（组件
         // 自己 close 会撞上 fromJSON 恢复过程抛 "invalid operation"）。
         pruneOrphanWorkspacePanels(a)
+        // bots 插件被用户关闭：布局存档里的机器人栏一并移除（否则会留下
+        // 一个没有功能的空面板；重新启用后从 Mirach 按钮重新打开）。
+        if (!botsFeatureDesiredNow()) {
+          const botsPanel = a.getPanel(BOTS_PANEL_ID)
+          if (botsPanel) a.removePanel(botsPanel)
+        }
         // 终端面板**保持挂载**（`renderer: 'always'`）——旧存档里的终端面板
         // 没有这个标记，恢复时补写：切到别的标签/收起侧栏时终端不卸载、
         // PTY 不中断（ZCode side pane terminal 的 keepalive 语义）。
@@ -821,6 +979,24 @@ export function DockviewShell() {
         // 修法 = 恢复后无条件覆写。这样 title 是**代码的常量**，与存档解耦；
         // 下次持久化自然写回新值。
         a.getPanel('open')?.api.setTitle(OPEN_PANEL_TITLE)
+        // Bot Chat 页签标题改写（2026-11-23 用户："下面是会话名，现在会话名
+        // 变成 bot chat 了"）：旧存档里是宿主自加的 `Bot Chat · <机器人>`
+        // （或旧版 `机器人 · Bot Chat`），现在标题以该 bot 的会话名（机器人
+        // 显示名）为准。会话真名仍是 "Bot Chat"（registry 身份不动）。
+        for (const p of a.panels) {
+          const oldTitle = p.title ?? ''
+          const isOldBotTitle =
+            oldTitle.startsWith('Bot Chat · ') || oldTitle.endsWith(' · Bot Chat')
+          if (!isOldBotTitle) continue
+          const threadId = typeof p.params?.threadId === 'string' ? p.params.threadId : ''
+          const bot = threadId
+            ? botsStore.getState().bots.find((b) => b.chatSessionId === threadId)
+            : undefined
+          const entry = threadId ? sessionCatalog.getState().entries[threadId] : undefined
+          p.api.setTitle(
+            entry ? sessionDisplayName(entry) : bot ? botDisplayName(bot) : 'Bot Chat',
+          )
+        }
         // 两轨宽度**按绝对值**钉回（2026-10-22）：dockview 存档按比例记宽，
         // 恢复时如果窗口尺寸和存的时候不同（用户拖过窗口 / 换屏），300 会
         // 按比例缩成 270 之类——与"默认 300"冲突。所以无论出厂还是存档，
@@ -840,12 +1016,33 @@ export function DockviewShell() {
       // boot 自愈（旗标 vs 实际树；列序对齐）。**关动画**：boot 期按旗标
       // 补藏/对齐是恢复既有形态，不是用户点动作——首帧看到"栏滑出去"是
       // 假象（2026-10-18 收放动画接入时同改）。
+      let migrated = false
       withoutColumnMorph(() => {
-        normalizeColumns()
+        migrated = normalizeColumns()
         // 面板列缺席但旗标未藏（normalizeColumns 收敛过旗标）→ 一致性兜底：
         // 打开页锚重建（隐藏语义交给菜单动词，boot 只保证锚在场）
         restoreOpenAnchor(a)
       })
+      // **只有真的做了旧档迁移才在 boot 落盘**（2026-11-24 实锤：无条件
+      // 落盘会把加载中途的临时树固化成正式布局——一次 HMR 重载把好布局写成
+      // 只剩左右两栏）。normalizeColumns 返回是否 move 过 routines。
+      if (migrated) {
+        setTimeout(() => {
+          try {
+            const json = a.toJSON() as SerializedDockview
+            if (!json.panels || Object.keys(json.panels).length === 0) {
+              console.error('[dv-shell] boot 布局为空——拒绝落盘')
+              return
+            }
+            saveLayout(json)
+            persistFlagsColOrder(a)
+          } catch (e) {
+            console.error('[dv-shell] boot 布局落盘失败', e)
+          }
+        }, 150)
+      }
+      // 窗口适配每次启动都要跑：恢复出来的五列可能比存档窗口宽。
+      setTimeout(() => ensureWindowFitsColumns(a), 300)
     },
     [handlePanelAdded, handlePanelRemoved, restoreOpenAnchor],
   )
@@ -872,7 +1069,38 @@ export function DockviewShell() {
     }
   }, [])
 
-  // ── 窗口拖动（M1 漏迁后从 flex-layout 原样回迁，2026-10-14）──────────────
+  // 外观 →「文件浏览器」：设置窗写镜像，主窗在这里开/关 `files` 面板；
+  // 面板自身增删也回写镜像（标题栏切换、存档恢复都一致）。
+  useEffect(() => {
+    const apply = (open: boolean) => {
+      const a = apiRef.current
+      if (!a) return
+      const panel = a.getPanel('files')
+      if (open && !panel) {
+        openPagePanel(a, 'files')
+      } else if (!open && panel) {
+        a.removePanel(panel)
+      }
+    }
+    let tries = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const start = () => {
+      if (!apiRef.current && tries < 40) {
+        tries += 1
+        timer = setTimeout(start, 100)
+        return
+      }
+      apply(readFileBrowserOpen())
+    }
+    start()
+    const stop = subscribeFileBrowser(apply)
+    return () => {
+      if (timer) clearTimeout(timer)
+      stop()
+    }
+  }, [])
+
+
   // window 捕获段按命中面分派：顶带（--logo-strip-h=75）内非交互面拖窗口、
   // 双击最大化；绝不改用绝对定位盖层——盖层会截胡顶带内页签 pointerdown
   //（2026-09-29 定稿）。
@@ -928,6 +1156,10 @@ export function DockviewShell() {
   return (
     <AssistantRuntime>
       <div className="app-shell">
+        {/* 底部氛围层（2026-11-24 用户："不能挡文字和各种组件"）：
+            挂在 app-shell 内、app-main 之下（z-index 0 / app-main z-index 1），
+            只在栏间空隙和半透明栏面后可见，不再覆盖消息、会话行或输入框。 */}
+        <BottomWave />
         {/* 全局快捷键派发器（2026-10-24 设置页「键盘快捷键」移植）：
             必须挂在 AssistantRuntime 内——session.new 要 aui 上下文。 */}
         <GlobalKeybinds />

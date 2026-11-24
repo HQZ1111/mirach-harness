@@ -35,6 +35,7 @@
 //!     "name": "自定义会话名" | null,
 //!     "messageCount": 42,
 //!     "lastModified": 1760000000000,
+//!     "createdAt": 1760000000000,
 //!     "parentSessionId": "01a1..." | null,
 //!     "projectId": "proj-uuid" | null,
 //!     "sourceRoot": "C:\\work\\proj\\.rpi\\sessions",
@@ -51,6 +52,7 @@
 //! ```
 //!
 //! `lastModified` 是 Unix 毫秒（与 `pi_list_sessions.lastModifiedMs` 同源）；
+//! `createdAt` 来自 header 的 `createdAt`（旧 header 缺省 0，前端按「未知」处理）；
 //! `name`/`parentSessionId`/`projectId` 缺省为 null（前端可直接 `??`）。
 //! `sourceRoot` / `source` 是诊断字段：前端可以不做展示。
 //!
@@ -112,6 +114,8 @@ pub struct SessionRecord {
     pub message_count: u64,
     /// Unix 毫秒。
     pub last_modified: u64,
+    /// header.createdAt 的 Unix 毫秒（0 = 旧 header 没写创建时间）。
+    pub created_at: u64,
     pub parent_session_id: Option<String>,
     /// 由命令层按 sessionProjects / cwd 归属推断后填入。
     pub project_id: Option<String>,
@@ -133,6 +137,8 @@ pub struct IndexScan {
 pub struct SessionHeader {
     pub id: String,
     pub cwd: String,
+    /// header.createdAt 的 Unix 毫秒；旧文件缺失时 0（不伪造创建时间）。
+    pub created_at: u64,
     pub parent_session_id: Option<String>,
 }
 
@@ -173,9 +179,11 @@ pub fn read_session_header(path: &Path) -> Result<SessionHeader, String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let created_at = value.get("createdAt").and_then(|v| v.as_u64()).unwrap_or(0);
     Ok(SessionHeader {
         id: id.to_owned(),
         cwd: cwd.to_owned(),
+        created_at,
         parent_session_id: parent,
     })
 }

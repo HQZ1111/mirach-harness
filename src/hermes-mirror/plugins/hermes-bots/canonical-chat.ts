@@ -14,7 +14,6 @@ import type { SessionListRow } from '@hermes/plugin-sdk'
 
 import { $botMeta, botMetaKey, botOwner, persistBotMetaSnapshot } from './data'
 import { botsText } from './i18n'
-import { displayName } from './labels'
 import { backendTargetProfile, botConnectionRoute, botRosterMeta, botWorkspaceOwnerKey, requestForBot } from './routing'
 import type { RpcErrorLike } from './routing'
 import { getPluginCtx } from './shared'
@@ -50,21 +49,6 @@ export const PROFILE_SESSION_LIST_LIMIT = 200
  *  recognize canonical-titled tabs without restating the literal. */
 export const CANONICAL_CHAT_TITLE = 'Bot Chat'
 
-/** 会话页签标题（**per-bot**）：宿主单命名空间下所有 bot 的会话同名
- *  "Bot Chat"，页签无法区分"到底切到哪个 bot 了"（2026-11-21 用户观感
- *  "bot 本身并没有切换"的来源之一）。页签标签带 bot 显示名；registry
- *  匹配按会话标题（"Bot Chat"）不受影响——只改页签标签。 */
-function botChatTabTitle(bot: { name?: string } | null): string {
-  let label = ''
-  try {
-    label = displayName(bot ?? {})
-  } catch {
-    label = ''
-  }
-  const trimmed = label.trim()
-  return trimmed ? `${CANONICAL_CHAT_TITLE} · ${trimmed}` : CANONICAL_CHAT_TITLE
-}
-
 /** A `session.list` row as the registry lookup reads it. CanonicalSession
  *  models the roster's `canonical_session` field, which carries no
  *  `message_count` — the listing row does. `readonly` because the count is
@@ -77,14 +61,10 @@ interface CanonicalChatRow extends CanonicalSession {
 }
 
 /** A Bot Chat tile left on an old compression segment: titled as the canonical
- *  chat but keyed to none of the lineage ids the owner currently resolves to.
- *  页签标题是 per-bot 的（`${显示名} · Bot Chat`，2026-11-21）——旧页签仍是裸
- *  "Bot Chat"，两种都要认。 */
+ *  chat but keyed to none of the lineage ids the owner currently resolves to. */
 export const isStaleBotChatTile =
   (canonicalIds: readonly string[]) => (tile: { storedSessionId: string; workspaceTabTitle?: string }) =>
-    (tile.workspaceTabTitle === CANONICAL_CHAT_TITLE ||
-      (tile.workspaceTabTitle ?? '').endsWith(' · ' + CANONICAL_CHAT_TITLE)) &&
-    !canonicalIds.includes(String(tile.storedSessionId))
+    tile.workspaceTabTitle === CANONICAL_CHAT_TITLE && !canonicalIds.includes(String(tile.storedSessionId))
 
 /** Should the open wait for a painted transcript? The paintable row count
  *  decides when the gateway reports it; the denormalized total is the only
@@ -209,7 +189,7 @@ async function openStoredBotChat(
     workspaceMode: 'bots',
     workspaceOwnerKey: ownerKey,
     retryHydrationTimeoutOnce: true,
-    tabTitle: botChatTabTitle(bot)
+    tabTitle: CANONICAL_CHAT_TITLE
   })
 
   return storedId
@@ -517,7 +497,7 @@ export function createCanonicalChat(
       keepAllProfilesScope: route ? true : false,
       workspaceMode: 'bots',
       workspaceOwnerKey: botWorkspaceOwnerKey(bot),
-      tabTitle: botChatTabTitle(bot)
+      tabTitle: CANONICAL_CHAT_TITLE
     })
 
   if (inflight) {

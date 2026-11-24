@@ -6,14 +6,16 @@
  * - 其他 method（select/input/notify…）：MVP 显示 method + payload，
  *   只提供取消——真实 payload 形状出现后按需补全，不做猜测 UI。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 
+import { dispatchNativeNotification } from '@/lib/native-notify'
 import { approvalBridge, useApprovalBridge } from './approval-bridge'
 
 export function ApprovalCards() {
   const { pending } = useApprovalBridge()
   const [busyId, setBusyId] = useState<string | null>(null)
+  const notifiedRef = useRef<Set<string>>(new Set())
 
   // rpi 的审批请求是插件 runtime action（不进 AgentEvent 流），SSE 上没有
   // extension_ui_request 信号——挂载即拉一次 + 轮询（工具调用在审批前
@@ -28,6 +30,21 @@ export function ApprovalCards() {
     const timer = window.setInterval(refresh, 1000)
     return () => window.clearInterval(timer)
   }, [])
+
+  // 新审批 = 需要人：窗口失焦时弹 OS 通知（同一条请求只提醒一次）。
+  useEffect(() => {
+    const fresh = pending.filter((req) => !notifiedRef.current.has(req.id))
+    if (fresh.length === 0) return
+    for (const req of fresh) notifiedRef.current.add(req.id)
+    const head = fresh[0]!
+    const detail = typeof head.payload === 'string' ? head.payload : JSON.stringify(head.payload)
+    dispatchNativeNotification({
+      kind: 'approval',
+      title: '扩展审批请求',
+      body: `${head.method}${head.extensionId ? ` · ${head.extensionId}` : ''}${detail ? ` — ${detail.slice(0, 120)}` : ''}`,
+      tag: head.id,
+    })
+  }, [pending])
 
   if (pending.length === 0) return null
 

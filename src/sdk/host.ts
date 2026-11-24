@@ -664,16 +664,47 @@ export const host = {
   /** 当前活跃的 gateway 实例（宿主无 gateway 对象，返回 null）。 */
   getGateway: (): null => null,
 
-  /** 打开一个已存储的会话（宿主走 runtime 的会话切换桥）。 */
-  openSession: async (storedSessionId: string, _options?: unknown): Promise<void> => {
-    const { openStoredSessionBridge } = await import(
-      '@/components/panes/session-manage/session-tab-bridge'
-    )
-    openStoredSessionBridge(storedSessionId)
+  /** 打开一个已存储的会话。
+   *
+   *  - 默认（`in-place`/`main`）：若该会话已作为**独立会话栏**在屏（插件
+   *    `intent:'tab'` 开出的栏），先置前它——hermes 的「已在屏就 front」
+   *    语义；否则走 runtime 的主会话切换桥。
+   *  - `intent:'tab'`：**向右分出一个新栏**（hermes「在新标签页中打开机器人
+   *    聊天」/「Open recent session」的宿主对偶），不抢主 workspace。
+   *
+   * **不切环境**（hermes `planPluginOpenSession` 的 `keepAllProfilesScope`
+   * 缺省语义：插件打开是导航，不是 workspace/profile 切换；`refreshInPlace`
+   * 的后台 resume 更不能动环境）。会话按自身路径打开——引擎的活动环境只
+   * 决定新会话落点与列表扫描根，不影响打开既有文件。 */
+  openSession: async (storedSessionId: string, options?: unknown): Promise<void> => {
+    const opts = (options ?? null) as { intent?: unknown; tabTitle?: unknown } | null
+    const bridge = await import('@/components/panes/session-manage/session-tab-bridge')
+
+    if (opts?.intent === 'tab') {
+      const title = typeof opts.tabTitle === 'string' ? opts.tabTitle.trim() : ''
+      bridge.openSessionColumnBridge(storedSessionId, {
+        ...(title ? { title } : {}),
+      })
+
+      return
+    }
+
+    if (bridge.focusSessionColumnBridge(storedSessionId)) {
+      return
+    }
+
+    bridge.openStoredSessionBridge(storedSessionId)
   },
 
   /** 新建聊天。`profile` 在上游是 route 描述符或 profile 名——宿主按 bot 名
-   *  解析（有 bot 预设就带人格/模型开一条新会话，否则普通新会话）。 */
+   *  解析（有 bot 预设就带人格/模型开一条新会话，否则普通新会话）。
+   *  `workspaceMode:'bots'`（hermes「与此机器人开新聊天」）→ 新会话开在
+   *  **主区右侧新栏**，不抢当前主会话；普通新会话仍走主会话切换。
+   *
+   *  **环境归属走会话落点，不切工作区**（hermes plugin-open 的
+   *  dialWithoutSwitching 语义）：profile 名随 `session.create` 传下去，
+   *  新会话落该 profile 的 home；引擎的活动环境保持用户所选，侧栏不因
+   *  一次 bot 操作被整体换源。 */
   newChat: (profile?: null | string | { profile?: string; targetProfile?: string }, options: Record<string, unknown> = {}): void => {
     const name =
       typeof profile === 'string'
@@ -683,13 +714,20 @@ export const host = {
       try {
         const { dispatchHostRequest } = await import('./host-rpc')
         const created = await dispatchHostRequest<{ stored_session_id: string }>('session.create', {
-          profile: name || 'default',
+          // 空 = 当前活动环境（普通新聊天）；'default' = 本体；具名 = 该环境。
+          profile: name,
           title: typeof options.tabTitle === 'string' ? options.tabTitle : '',
         })
-        const { openStoredSessionBridge } = await import(
-          '@/components/panes/session-manage/session-tab-bridge'
-        )
-        openStoredSessionBridge(created.stored_session_id)
+        const bridge = await import('@/components/panes/session-manage/session-tab-bridge')
+        if (options.workspaceMode === 'bots') {
+          const title =
+            typeof options.tabTitle === 'string' && options.tabTitle.trim()
+              ? options.tabTitle.trim()
+              : name
+          bridge.openSessionColumnBridge(created.stored_session_id, title ? { title } : {})
+        } else {
+          bridge.openStoredSessionBridge(created.stored_session_id)
+        }
       } catch (e) {
         console.error('[host] newChat 失败', e)
       }
@@ -856,28 +894,41 @@ export const host = {
   /**
    * 删除机器人（profile-ops.deleteBot 的入口；参数是 route 对象或名字）。
    *
-   * 宿主对偶 = 删掉 bots-store 预设（与 `cli.exec profile delete` 同一底层
-   * 操作）。此前显式抛"插件不可删"——那是初版的错误假设：花名册行删除是
-   * bots 的核心动作，抛出会让插件侧删除恒失败（2026-11-18 审计实锤修）。
+   * 宿主对偶 = hermes `profiles.delete`：**先删 profile home（磁盘）**，
+   * 再删 bots-store 预设与插件本地缓存（`host-rpc.deleteBotProfile`，
+   * 2026-11-23）。此前只删预设——磁盘目录残留，群聊成员还能把已删 bot
+   * 重新拉起（`ensure_profile_dirs` 会重建目录）。删除失败原样抛出，
+   * 注册表不动。
    */
   deleteProfile: async (profile: unknown): Promise<void> => {
+    const route =
+      profile && typeof profile === 'object'
+        ? (profile as { connectionId?: unknown; mode?: unknown; profile?: unknown; targetProfile?: unknown })
+        : null
     const name =
       typeof profile === 'string'
         ? profile
-        : profile && typeof profile === 'object'
-          ? String(
-              (profile as { targetProfile?: unknown }).targetProfile ??
-                (profile as { profile?: unknown }).profile ??
-                '',
-            )
+        : route
+          ? String(route.targetProfile ?? route.profile ?? '')
           : ''
     const trimmed = name.trim()
     if (!trimmed) throw new Error('host.deleteProfile: 缺少 profile 名')
-    const { botsStore } = await import('@/components/panes/hub/bots-store')
-    if (!botsStore.getState().bots.length) botsStore.getState().load()
-    const bot = botsStore.getState().bots.find((row) => row.name === trimmed)
-    if (!bot) throw new Error(`host.deleteProfile: 找不到机器人「${trimmed}」`)
-    botsStore.getState().remove(trimmed)
+
+    // 远端 source-scoped 行：只能删对端网关上的 profile，绝不能拿同名去删
+    // 本机目录（2026-11-23；上游走 Electron 拦截的 REST delete）。
+    if (route?.mode === 'remote' && typeof route.connectionId === 'string' && route.connectionId && route.connectionId !== 'local') {
+      await remoteInvoke(
+        route.connectionId,
+        remoteRosterCache.get(route.connectionId)?.url,
+        'profiles.delete',
+        { profile: trimmed },
+        30_000,
+      )
+      return
+    }
+
+    const { deleteBotProfile } = await import('./host-rpc')
+    await deleteBotProfile(trimmed)
   },
   /** 清理遗留 profile 偏好（宿主无跨设备遗留态）。 */
   dropLeftoverProfilePrefs: (_args: unknown): void => {},

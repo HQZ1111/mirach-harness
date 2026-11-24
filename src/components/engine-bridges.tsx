@@ -16,7 +16,16 @@
 import { useEffect, useState } from 'react'
 import { createStore, useStore } from 'zustand'
 
-import { botBySession, findBotByName, runBotTurn, waitUntilIdle } from '@/lib/bot-delivery'
+import {
+  botBySession,
+  findBotByName,
+  runBotTurn,
+  trackDeliveryFailed,
+  trackDeliverySettled,
+  trackDeliveryStart,
+  trackDeliveryState,
+  waitUntilIdle,
+} from '@/lib/bot-delivery'
 import { dispatchHostRequest } from '@/sdk/host-rpc'
 
 interface ApprovalItem {
@@ -73,29 +82,47 @@ async function deliverAgentMessage(payload: AgentMessagePayload): Promise<void> 
     .join('\n')
   const body = `Message from 🤖 ${sourceName} (@${sourceName}): ${text}${extras ? `\n\n${extras}` : ''}`
 
-  // 目标会话在 bot 泳道打开（同一 canonical 会话文件，历史保留）。
-  await dispatchHostRequest('session.resume', {
-    session_id: target.chatSessionId,
-    profile: target.name,
-    omit_messages: true,
+  // 未收尾投递清单（hermes `bot_delivery.list`）：本机投递由前端跑轮，
+  // 状态只在这里可证——queued → claimed → working → settle/failed。
+  trackDeliveryStart({
+    id: payload.id,
+    fromProfile: sourceName,
+    target: target.name,
+    targetHandle: target.name,
+    message: text,
   })
-  await waitUntilIdle(dispatchHostRequest, target.chatSessionId, target.name, Date.now() + 120_000)
-  const reply = await runBotTurn(dispatchHostRequest, target.chatSessionId, target.name, body)
 
-  if (payload.expects_reply !== false && reply && payload.source_session_id && source) {
-    // 回信送进发送者会话；发送者可能在跑，等它空闲再投。
-    await waitUntilIdle(
-      dispatchHostRequest,
-      payload.source_session_id,
-      source.name,
-      Date.now() + 300_000,
-    )
-    const replyBody = `Message from 🤖 ${target.name} (@${target.name}): ${reply}`
-    await dispatchHostRequest('prompt.submit', {
-      session_id: payload.source_session_id,
-      text: replyBody,
-      profile: source.name,
+  try {
+    // 目标会话在 bot 泳道打开（同一 canonical 会话文件，历史保留）。
+    await dispatchHostRequest('session.resume', {
+      session_id: target.chatSessionId,
+      profile: target.name,
+      omit_messages: true,
     })
+    trackDeliveryState(payload.id, 'claimed')
+    await waitUntilIdle(dispatchHostRequest, target.chatSessionId, target.name, Date.now() + 120_000)
+    trackDeliveryState(payload.id, 'working')
+    const reply = await runBotTurn(dispatchHostRequest, target.chatSessionId, target.name, body)
+    trackDeliverySettled(payload.id)
+
+    if (payload.expects_reply !== false && reply && payload.source_session_id && source) {
+      // 回信送进发送者会话；发送者可能在跑，等它空闲再投。
+      await waitUntilIdle(
+        dispatchHostRequest,
+        payload.source_session_id,
+        source.name,
+        Date.now() + 300_000,
+      )
+      const replyBody = `Message from 🤖 ${target.name} (@${target.name}): ${reply}`
+      await dispatchHostRequest('prompt.submit', {
+        session_id: payload.source_session_id,
+        text: replyBody,
+        profile: source.name,
+      })
+    }
+  } catch (error) {
+    trackDeliveryFailed(payload.id, error instanceof Error ? error.message : String(error))
+    throw error
   }
 }
 
@@ -163,6 +190,7 @@ async function waitForRelayReply(
     }
     timer = window.setTimeout(() => {
       console.error(`[engine-bridge] relay 回执超时（${envelopeId}）——发送者不被唤醒`)
+      trackDeliveryFailed(envelopeId, 'relay 回执超时（30 分钟）', 'delivery_timeout')
       finish()
     }, 1_800_000)
     void listen<{ id: string; reply?: string; error?: string; reason?: string }>(
@@ -174,6 +202,7 @@ async function waitForRelayReply(
         const reason = String(event.payload.reason ?? '').trim()
         finish()
         if (errorText || !replyText) {
+          trackDeliveryFailed(envelopeId, errorText || reason || '(空回信)', reason || 'unknown')
           console.error(
             '[engine-bridge] relay 回执为错误',
             envelopeId,
@@ -181,6 +210,7 @@ async function waitForRelayReply(
           )
           return
         }
+        trackDeliverySettled(envelopeId)
         void (async () => {
           try {
             await waitUntilIdle(
@@ -261,17 +291,9 @@ export function EngineBridges() {
   useEffect(() => {
     let disposed = false
     const unsubs: (() => void)[] = []
-    // 应用启动即恢复用户上次的审批策略（Rust 默认 Yolo；前端偏好优先）。
-    try {
-      const stored = localStorage.getItem('mirach:approval-mode')
-      if (stored === 'always-ask' || stored === 'write' || stored === 'yolo') {
-        void invoke('pi_set_approval_mode', { mode: stored }).catch((e) =>
-          console.error('[engine-bridge] 恢复审批模式失败', e),
-        )
-      }
-    } catch {
-      /* 偏好读取失败 = 保持默认；不阻断启动 */
-    }
+    // 审批模式是**会话级**（宿主 approval_modes.rs + 引擎 session_mode）：
+    // 启动不再恢复全局 localStorage 偏好——默认 always-ask，full access 由
+    // 当前会话的 pin 决定。旧键 `mirach:approval-mode` 不再读取。
     void (async () => {
       const { listen } = await import('@tauri-apps/api/event')
       const offMessage = await listen<AgentMessagePayload>('mirach://agent-message', (event) => {
@@ -320,6 +342,16 @@ export function EngineBridges() {
               fromHandle: sourceName,
               message: `Message from 🤖 ${sourceName} (@${sourceName}): ${text}${extras ? `\n\n${extras}` : ''}`,
             })
+            // 只有真正有 waiter 的远端投递才进清单（否则没人能证明它 settle）。
+            if (payload.expects_reply !== false && source?.chatSessionId) {
+              trackDeliveryStart({
+                id: envelope.id,
+                fromProfile: sourceName,
+                target: remote.targetProfile ?? remote.profile,
+                targetHandle: remote.handle ?? remote.profile,
+                message: text,
+              })
+            }
             await invoke('pi_agent_message_ack', {
               id: payload.id,
               ok: true,

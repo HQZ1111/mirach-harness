@@ -42,6 +42,10 @@ export interface WorkspaceSessionRecord {
   messageCount: number
   createdAtMs: number
   lastModifiedMs: number
+  /** 环境归属（2026-11-22 环境隔离）：创建时的活动 profile，null/缺省
+   *  = 本体环境。侧栏按当前活动环境过滤本表——具名环境不得看见本体
+   *  会话，反之亦然。 */
+  profile?: null | string
 }
 
 /** 上游编码：`--<cwd 去一个前导分隔符、/ \ : 换 ->--`。 */
@@ -182,6 +186,9 @@ const parseRecord = (value: unknown): WorkspaceSessionRecord | null => {
     messageCount: isFiniteNumber(raw.messageCount) ? raw.messageCount : 0,
     createdAtMs: isFiniteNumber(raw.createdAtMs) ? raw.createdAtMs : 0,
     lastModifiedMs: isFiniteNumber(raw.lastModifiedMs) ? raw.lastModifiedMs : 0,
+    ...(typeof raw.profile === 'string' && raw.profile.length > 0
+      ? { profile: raw.profile }
+      : {}),
   }
 }
 

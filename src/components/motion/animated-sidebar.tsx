@@ -47,10 +47,13 @@ import {
   type HTMLAttributes,
   type ReactNode,
   useContext,
+  useEffect,
   useId,
+  useRef,
+  useState,
 } from "react";
 import { SharedLayoutBg } from "@/components/motion/shared-layout-bg";
-import { EASE_OUT, SPRING_LAYOUT, SPRING_PRESS } from "@/lib/ease";
+import { EASE_OUT, SLIDE_EASE_CSS, SPRING_LAYOUT, SPRING_PRESS } from "@/lib/ease";
 import { cn } from "@/lib/utils";
 
 /** 子选项面板的进出场（上游 SUBMENU_TRANSITION 原值）。 */
@@ -214,14 +217,46 @@ export const AnimatedSidebarGroupContent = forwardRef<
  * 一组菜单项。**每组一个**（上游同构）——悬停 pill 的 `layoutId` 由
  * SharedLayoutBg 内部 `useId` 生成，天然按组隔离；选中 pill 则走外层
  * provider 的共享 `layoutId`，跨组滑动。
+ *
+ * `sharedHover={false}`（设置页左栏，2026-11-23 用户："子项没有滑动效果"）：
+ * 不注入 SharedLayoutBg 的**每组一份**悬停 pill，改由导航容器层的
+ * `AnimatedSidebarHoverPill` 统一承担——这样组头与子项（子项在父项 li
+ * 内部，SharedLayoutBg 的 clone 注入够不到）能共用同一条滑动块。
  */
+export interface AnimatedSidebarMenuProps
+  extends HTMLAttributes<HTMLUListElement> {
+  /** true = 上游语义（每组一条 SharedLayoutBg 悬停 pill）。 */
+  sharedHover?: boolean;
+}
+
 export const AnimatedSidebarMenu = forwardRef<
   HTMLUListElement,
-  HTMLAttributes<HTMLUListElement>
+  AnimatedSidebarMenuProps
 >(function AnimatedSidebarMenu(
-  { children, className, ...props },
+  { children, className, sharedHover = true, ...props },
   forwardedRef,
 ) {
+  const menuClassName = cn(
+    "flex w-full min-w-0 list-none flex-col gap-0.5",
+    className,
+  );
+
+  if (!sharedHover) {
+    // 仍用 motion.ul + layoutRoot：子项的 layout="position" 补间需要同一
+    // 个布局坐标系，否则滚动过的导航里换项会带着滚动偏移"发飘"。
+    return (
+      <motion.ul
+        {...(props as HTMLMotionProps<"ul">)}
+        ref={forwardedRef}
+        layoutRoot
+        data-slot="sidebar-menu"
+        className={menuClassName}
+      >
+        {children}
+      </motion.ul>
+    );
+  }
+
   return (
     <SharedLayoutBg
       {...props}
@@ -234,12 +269,202 @@ export const AnimatedSidebarMenu = forwardRef<
       pillClassName="rounded-xl bg-[var(--hover-wash)]"
       pillContainerClassName="inset-y-auto top-0 h-9"
       data-slot="sidebar-menu"
-      className={cn("flex w-full min-w-0 list-none flex-col gap-0.5", className)}
+      className={menuClassName}
     >
       {children}
     </SharedLayoutBg>
   );
 });
+
+/**
+ * 导航容器层的跨组滑动悬停块（设置页左栏专用，2026-11-23）。
+ *
+ * 与 `SharedLayoutBg` 的悬停 pill 的差别：后者挂在每个 `<ul>` 上、只认
+ * 直接子项；设置页的「可展开组头」的 li 里还嵌着子项列表，子项永远拿不到
+ * 滑动块（用户："设置页的选项不能折叠，子项没有滑动效果"）。本组件挂在
+ * `nav` 滚动容器上，按 `[data-sidebar-row]` 现测矩形——组头、子项、跨组
+ * 移动共用同一条 pill。
+ *
+ * 坐标系同 `SessionListHoverPill`：abs 子元素随内容滚动，top 要加
+ * `scrollTop`；行宽/行高现测（组头 36px、子项 ~22px）。
+ * **纯视觉层**：不动点击/键盘；键盘 focusin 也驱动（a11y 不回退）。
+ */
+export function AnimatedSidebarHoverPill() {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [state, setState] = useState({
+    top: 0,
+    left: 0,
+    width: 0,
+    height: 36,
+    visible: false,
+  });
+  const shownRef = useRef(false);
+  const [sliding, setSliding] = useState(false);
+  const rowRef = useRef<HTMLElement | null>(null);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    const root = el?.parentElement ?? null;
+    if (!root) return;
+
+    const hide = () => {
+      rowRef.current = null;
+      shownRef.current = false;
+      setState((s) => (s.visible ? { ...s, visible: false } : s));
+    };
+
+    /** 组标题/空态上的暂停：只淡出，不清 shownRef——跨组移动仍走滑动过渡。 */
+    const suspend = () => {
+      rowRef.current = null;
+      setState((s) => (s.visible ? { ...s, visible: false } : s));
+    };
+
+    const place = (row: HTMLElement) => {
+      rowRef.current = row;
+      const rootRect = root.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      const next = {
+        top: Math.round(rowRect.top - rootRect.top + root.scrollTop),
+        left: Math.round(rowRect.left - rootRect.left),
+        width: Math.round(rowRect.width),
+        height: Math.round(rowRect.height),
+        visible: true,
+      };
+      setState((s) =>
+        s.visible &&
+        s.top === next.top &&
+        s.left === next.left &&
+        s.width === next.width &&
+        s.height === next.height
+          ? s
+          : next,
+      );
+      setSliding(shownRef.current);
+      shownRef.current = true;
+    };
+
+    const hideIfDetached = () => {
+      const row = rowRef.current;
+      if (row === null) return;
+      if (!root.contains(row)) hide();
+    };
+
+    const handleTarget = (target: HTMLElement | null) => {
+      const row = target?.closest(
+        "[data-sidebar-row]",
+      ) as HTMLElement | null;
+      if (row !== null && root.contains(row)) {
+        place(row);
+        return;
+      }
+      // 组标题/空态行不是选项面：淡出（不能把上一项的 pill 留在组头上），
+      // 但保留 shownRef——跨组到下一项时仍要滑动，而不是重新淡入。
+      if (target?.closest("[data-slot='sidebar-group-label'], .set-nav-empty")) {
+        suspend();
+        return;
+      }
+      hideIfDetached();
+    };
+
+    const onOver = (e: Event) => {
+      const pe = e as PointerEvent;
+      pointerRef.current = { x: pe.clientX, y: pe.clientY };
+      handleTarget(e.target as HTMLElement | null);
+    };
+    const onMove = (e: Event) => {
+      const pe = e as PointerEvent;
+      pointerRef.current = { x: pe.clientX, y: pe.clientY };
+    };
+    const onLeave = () => hide();
+    const onFocusIn = (e: Event) => {
+      handleTarget(e.target as HTMLElement | null);
+    };
+    let blurTimer = 0;
+    const onFocusOut = () => {
+      // 焦点移到导航外才收；行间 Tab 会紧接着发 focusin 重新定位。
+      blurTimer = window.setTimeout(() => {
+        if (!root.contains(document.activeElement)) hide();
+      }, 0);
+    };
+
+    let raf = 0;
+    const resync = () => {
+      if (raf !== 0) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const row = rowRef.current;
+        if (row === null) return;
+        if (!root.contains(row)) {
+          hide();
+          return;
+        }
+        place(row);
+      });
+    };
+    const observer = new MutationObserver(resync);
+    observer.observe(root, { childList: true, subtree: true });
+
+    // 滚动重测独立排帧：不能和 resync 共用一个 raf（DOM 变更的 rAF 在
+    // 途时若直接 return，滚轮只会发一次 scroll 事件，pill 就停在已滚出
+    // 视口的旧行上——2026-11-23 实机踩中）。
+    let scrollRaf = 0;
+    const onScroll = () => {
+      if (scrollRaf !== 0 || pointerRef.current === null) return;
+      const { x, y } = pointerRef.current;
+      scrollRaf = requestAnimationFrame(() => {
+        scrollRaf = 0;
+        const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+        if (hit === null || !root.contains(hit)) return;
+        const row = hit.closest("[data-sidebar-row]") as HTMLElement | null;
+        // 滚动后指针可能落在行间隙/组标题/子菜单的 padding 上：此时旧行
+        // 可能已滚出视口，必须收起，不能按"间隙不动作"留在旧坐标。
+        if (row === null || !root.contains(row)) {
+          hide();
+          return;
+        }
+        place(row);
+      });
+    };
+
+    root.addEventListener("pointerover", onOver);
+    root.addEventListener("pointermove", onMove);
+    root.addEventListener("pointerleave", onLeave);
+    root.addEventListener("focusin", onFocusIn);
+    root.addEventListener("focusout", onFocusOut);
+    root.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      observer.disconnect();
+      if (raf !== 0) cancelAnimationFrame(raf);
+      if (scrollRaf !== 0) cancelAnimationFrame(scrollRaf);
+      if (blurTimer !== 0) window.clearTimeout(blurTimer);
+      root.removeEventListener("pointerover", onOver);
+      root.removeEventListener("pointermove", onMove);
+      root.removeEventListener("pointerleave", onLeave);
+      root.removeEventListener("focusin", onFocusIn);
+      root.removeEventListener("focusout", onFocusOut);
+      root.removeEventListener("scroll", onScroll);
+    };
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      aria-hidden="true"
+      className="set-nav-hover-pill"
+      style={{
+        top: state.top,
+        left: state.left,
+        width: state.width,
+        height: state.height,
+        opacity: state.visible ? 1 : 0,
+        transition: sliding
+          ? `top 260ms ${SLIDE_EASE_CSS}, left 200ms ${SLIDE_EASE_CSS}, width 200ms ${SLIDE_EASE_CSS}, height 200ms ${SLIDE_EASE_CSS}, opacity 120ms ${SLIDE_EASE_CSS}`
+          : `opacity 120ms ${SLIDE_EASE_CSS}`,
+      }}
+    />
+  );
+}
 
 export const AnimatedSidebarMenuItem = forwardRef<
   HTMLLIElement,
@@ -365,7 +590,7 @@ export function AnimatedSidebarMenuSubButton({
 
   const interactiveClassName = cn(
     "flex min-h-8 w-full min-w-0 items-center gap-2 rounded-lg px-2 text-left text-xs outline-none",
-    "text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+    "text-muted-foreground transition-colors hover:bg-(--hover-wash) hover:text-foreground",
     "focus-visible:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring",
     isActive && "bg-muted/70 text-foreground",
     disabled && "cursor-not-allowed opacity-40",
@@ -419,6 +644,8 @@ export interface AnimatedSidebarMenuButtonProps {
   sectionId?: string;
   /** 本地扩展：roving tabindex（只有选中节进 Tab 序列）。 */
   tabIndex?: number;
+  /** 本地扩展：外部滑动悬停块的行标记（`AnimatedSidebarHoverPill` 认）。 */
+  sidebarRow?: boolean;
 }
 
 export function AnimatedSidebarMenuButton({
@@ -435,6 +662,7 @@ export function AnimatedSidebarMenuButton({
   className,
   sectionId,
   tabIndex,
+  sidebarRow = false,
 }: AnimatedSidebarMenuButtonProps) {
   const context = useAnimatedSidebarMenu();
   const textLabel = typeof children === "string" ? children : undefined;
@@ -504,6 +732,7 @@ export function AnimatedSidebarMenuButton({
     "aria-expanded": ariaExpanded,
     "aria-label": textLabel,
     "data-section-id": sectionId,
+    "data-sidebar-row": sidebarRow ? "" : undefined,
     tabIndex: disabled ? -1 : tabIndex,
   };
 

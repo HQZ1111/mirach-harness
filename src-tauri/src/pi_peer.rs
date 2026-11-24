@@ -27,16 +27,20 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::stream::Stream;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 const TOKEN_SERVICE: &str = "mirach.peer";
 const TOKEN_ENTRY: &str = "token";
 const DEFAULT_PORT: u16 = 9731;
+/// peer run monitor 的上限：会话/轮次超过它就如实收口 failed（不空转）。
+const PEER_RUN_MONITOR_CAP_SECONDS: f64 = 30.0 * 60.0;
 
 pub struct PeerServer {
     app: AppHandle,
@@ -57,6 +61,40 @@ struct PeerConn {
 fn peer_conns() -> &'static Mutex<HashMap<String, PeerConn>> {
     static CELL: OnceLock<Mutex<HashMap<String, PeerConn>>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 进程内在跑的 peer run（lender 面）。台账里的活态记录只有在这里才可信：
+/// 不在集合 = 本进程从未/不再持有该 run（重启前留下的 running 记录 → interrupted）。
+fn active_peer_runs() -> &'static Mutex<std::collections::HashSet<String>> {
+    static CELL: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+fn mark_run_active(run_id: &str) {
+    if let Ok(mut set) = active_peer_runs().lock() {
+        set.insert(run_id.to_owned());
+    }
+}
+
+fn clear_run_active(run_id: &str) {
+    if let Ok(mut set) = active_peer_runs().lock() {
+        set.remove(run_id);
+    }
+}
+
+fn run_is_active(run_id: &str) -> bool {
+    active_peer_runs()
+        .lock()
+        .map(|set| set.contains(run_id))
+        .unwrap_or(false)
+}
+
+/// 会话的终局计数器（`pi_bot_state` 的 `last_turn_seq`；未注册会话 = 0）。
+fn bot_turn_seq(session_id: &str) -> u64 {
+    crate::pi_bot::pi_bot_state(session_id.to_owned())
+        .ok()
+        .and_then(|value| value.get("last_turn_seq").and_then(Value::as_u64))
+        .unwrap_or(0)
 }
 
 fn load_or_create_token() -> Result<String, String> {
@@ -145,8 +183,10 @@ fn router(server: Arc<PeerServer>) -> Router {
         .route("/v1/room-members/runs/close", post(peer_room_run_close))
         .route("/v1/runs", post(peer_run_admit))
         .route("/v1/runs/{run_id}", get(peer_run_state))
+        .route("/v1/runs/{run_id}/events", get(peer_run_events))
         .route("/v1/runs/{run_id}/stop", post(peer_run_stop))
         .route("/v1/runs/{run_id}/approval", post(peer_run_approval))
+        .route("/v1/runs/{run_id}/clarify", post(peer_run_clarify))
         .route("/v1/runs/{run_id}/steer", post(peer_run_steer))
         .route("/v1/runs/{run_id}/resolve-unknown", post(peer_run_resolve_unknown))
         .with_state(server)
@@ -911,6 +951,19 @@ fn hermes_room_claims(headers: &HeaderMap, permission: &str) -> Result<Value, Re
     Ok(claims)
 }
 
+/// 运行台账 scope：房间 grant → 房间 scope；宿主 Bearer（API-key 面）→ 本机 API scope。
+fn peer_run_scope(headers: &HeaderMap, permission: &str, server: &PeerServer) -> Result<String, Response> {
+    if !hermes_grant_token(headers).is_empty() {
+        let claims = hermes_room_claims(headers, permission)?;
+        return crate::pi_gateway_peer::room_run_scope(&claims)
+            .ok_or_else(|| hermes_error(StatusCode::NOT_FOUND, "run_not_found", "Run not found"));
+    }
+    if authorized(headers, server) {
+        return Ok(sha256_hex(server.token.as_bytes()));
+    }
+    Err(hermes_invalid_grant())
+}
+
 /// 上游 `_handle_room_member_invitation`：API-key 面签一份短时 grant 并登记 reservation。
 async fn peer_room_invitation(
     State(server): State<Arc<PeerServer>>,
@@ -1255,7 +1308,15 @@ async fn peer_run_admit(
     };
     let token = hermes_grant_token(&headers);
     if token.is_empty() {
-        return hermes_invalid_grant();
+        // 上游 API-key 面：Bearer 宿主令牌 + 普通 input（房间字段必须走 grant）。
+        if !authorized(&headers, &server) {
+            return hermes_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_api_key",
+                "Invalid API key provided.",
+            );
+        }
+        return peer_run_admit_plain(server, headers, body).await;
     }
     let claims = match crate::pi_gateway_peer::decode_room_grant(&secret, &token, "dispatch", now_secs()) {
         Ok(claims) => claims,
@@ -1392,6 +1453,10 @@ async fn peer_run_admit(
         Err(message) => return hermes_error(StatusCode::SERVICE_UNAVAILABLE, "run_store_unavailable", &message),
     }
     let prompt_text = dispatch.prompt.clone();
+    // 提交前的终局计数：monitor 只看「seq 变了」判本次轮次收尾（冷启动窗口
+    // running 仍为 false，不能当终局信号——2026-11-19 E2E 实测假 interrupted）。
+    let pre_seq = bot_turn_seq(&session_id);
+    mark_run_active(&run_id);
     if let Err(message) = crate::pi_bot::pi_bot_prompt(
         server.app.clone(),
         session_id.clone(),
@@ -1405,13 +1470,174 @@ async fn peer_run_admit(
         Some(dispatch.target_profile.clone()),
         None,
     ) {
+        clear_run_active(&run_id);
         status["status"] = json!("failed");
         status["error"] = json!(message);
         status["updated_at"] = json!(now_secs());
         let _ = crate::pi_peer_runs::update_status(&store, &run_id, &status);
         return hermes_error(StatusCode::INTERNAL_SERVER_ERROR, "run_start_failed", &message);
     }
-    spawn_peer_run_monitor(run_id.clone(), session_id, scope);
+    spawn_peer_run_monitor(run_id.clone(), session_id, scope, pre_seq);
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"run_id": run_id, "status": "started", "replayed": false})),
+    )
+        .into_response()
+}
+
+/// 上游 API-key 的普通 runs 面：Bearer 宿主令牌 + input（房间字段必须走 grant）。
+async fn peer_run_admit_plain(server: Arc<PeerServer>, headers: HeaderMap, body: Value) -> Response {
+    let Some(params) = body.as_object() else {
+        return hermes_error(StatusCode::BAD_REQUEST, "invalid_request_error", "Invalid JSON");
+    };
+    if params
+        .keys()
+        .any(|key| key == "hosted_room_dispatch" || key == "_room_execution_policy")
+    {
+        return hermes_error(
+            StatusCode::FORBIDDEN,
+            "room_grant_required",
+            "hosted_room_dispatch and _room_execution_policy require a room grant.",
+        );
+    }
+    let prompt = match params.get("input") {
+        Some(Value::String(text)) => text.trim().to_owned(),
+        Some(Value::Array(items)) => items
+            .last()
+            .and_then(|message| message.get("content").and_then(Value::as_str))
+            .unwrap_or("")
+            .trim()
+            .to_owned(),
+        _ => String::new(),
+    };
+    if prompt.is_empty() {
+        return hermes_error(StatusCode::BAD_REQUEST, "invalid_request_error", "Missing 'input' field");
+    }
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if !idempotency_key.is_empty()
+        && (idempotency_key.len() > 255
+            || !idempotency_key
+                .bytes()
+                .all(|byte| (33..=126).contains(&byte)))
+    {
+        return hermes_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_idempotency_key",
+            "Idempotency-Key must be 1-255 visible ASCII characters",
+        );
+    }
+    let session_id = match text_param(params, "session_id") {
+        Some(id) if crate::pi_bot::pi_bot_has_session(&id) => id,
+        Some(id) => {
+            return hermes_error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                &format!("Session not found: {id}"),
+            )
+        }
+        None => match session_create(params) {
+            Ok(created) => created
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            Err(message) => {
+                return hermes_error(StatusCode::INTERNAL_SERVER_ERROR, "session_create_failed", &message)
+            }
+        },
+    };
+    if session_id.is_empty() {
+        return hermes_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session_create_failed",
+            "session id missing",
+        );
+    }
+    let run_id = format!("run_{}", uuid::Uuid::new_v4().simple());
+    let scope = sha256_hex(server.token.as_bytes());
+    let fingerprint = dispatch_fingerprint(&body);
+    let store = match crate::pi_peer_runs::open() {
+        Ok(store) => store,
+        Err(message) => return hermes_error(StatusCode::SERVICE_UNAVAILABLE, "run_store_unavailable", &message),
+    };
+    if !idempotency_key.is_empty() {
+        let (outcome, record) =
+            match crate::pi_peer_runs::lookup(&store, &scope, &idempotency_key, &fingerprint) {
+                Ok(result) => result,
+                Err(message) => {
+                    return hermes_error(StatusCode::SERVICE_UNAVAILABLE, "run_store_unavailable", &message)
+                }
+            };
+        if outcome == "conflict" {
+            return hermes_error(
+                StatusCode::CONFLICT,
+                "idempotency_key_conflict",
+                "Idempotency-Key was already used with a different request payload",
+            );
+        }
+        if outcome == "reused" {
+            if let Some(record) = record {
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "run_id": record.get("run_id").cloned().unwrap_or(Value::Null),
+                        "status": record
+                            .get("status")
+                            .and_then(|status| status.get("status"))
+                            .cloned()
+                            .unwrap_or(json!("queued")),
+                        "replayed": true,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let store_key = if idempotency_key.is_empty() {
+        format!("api:{run_id}")
+    } else {
+        idempotency_key.clone()
+    };
+    let mut status = json!({
+        "object": "hermes.run",
+        "run_id": run_id,
+        "status": "queued",
+        "session_id": session_id,
+        "created_at": now_secs(),
+        "updated_at": now_secs(),
+    });
+    if let Err(message) = crate::pi_peer_runs::reserve(&store, &scope, &store_key, &fingerprint, &run_id, &status)
+    {
+        return hermes_error(StatusCode::SERVICE_UNAVAILABLE, "run_store_unavailable", &message);
+    }
+    let pre_seq = bot_turn_seq(&session_id);
+    mark_run_active(&run_id);
+    if let Err(message) = crate::pi_bot::pi_bot_prompt(
+        server.app.clone(),
+        session_id.clone(),
+        prompt,
+        None,
+        None,
+        text_param(params, "system_prompt"),
+        text_param(params, "provider"),
+        text_param(params, "model_id"),
+        None,
+        text_param(params, "profile"),
+        None,
+    ) {
+        clear_run_active(&run_id);
+        status["status"] = json!("failed");
+        status["error"] = json!(message);
+        status["updated_at"] = json!(now_secs());
+        let _ = crate::pi_peer_runs::update_status(&store, &run_id, &status);
+        return hermes_error(StatusCode::INTERNAL_SERVER_ERROR, "run_start_failed", &message);
+    }
+    spawn_peer_run_monitor(run_id.clone(), session_id, scope, pre_seq);
     (
         StatusCode::ACCEPTED,
         Json(json!({"run_id": run_id, "status": "started", "replayed": false})),
@@ -1420,7 +1646,11 @@ async fn peer_run_admit(
 }
 
 /// 轮次结束把 durable 状态收口（上游 `_execute_run` 的 finally 语义）。
-fn spawn_peer_run_monitor(run_id: String, session_id: String, scope: String) {
+///
+/// 终局信号 = `pi_bot_state.last_turn_seq` 相对提交前 `pre_seq` 的**变化**
+/// （与 running=false 同一临界区写入）。不能用 `running == false` 判终局：
+/// 冷启动窗口里 running 仍是 false，会误写终局（2026-11-19 E2E 实测）。
+fn spawn_peer_run_monitor(run_id: String, session_id: String, scope: String, pre_seq: u64) {
     std::thread::Builder::new()
         .name(format!("mirach-peer-{run_id}"))
         .stack_size(512 * 1024)
@@ -1434,50 +1664,74 @@ fn spawn_peer_run_monitor(run_id: String, session_id: String, scope: String) {
                     let _ = crate::pi_peer_runs::update_status(&conn, &run_id, &record);
                 }
             }
+            let deadline = now_secs() + PEER_RUN_MONITOR_CAP_SECONDS;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 let state = crate::pi_bot::pi_bot_state(session_id.clone()).unwrap_or(Value::Null);
-                if state.get("running").and_then(Value::as_bool) == Some(true) {
-                    continue;
+                let seq = state
+                    .get("last_turn_seq")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if seq > pre_seq {
+                    break;
                 }
-                let outcome = state
-                    .get("last_status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed")
-                    .to_owned();
-                let mut record = json!({
-                    "object": "hermes.run",
-                    "run_id": run_id,
-                    "status": outcome,
-                    "updated_at": now_secs(),
-                });
-                match outcome.as_str() {
-                    "completed" => {
-                        record["completed"] = json!(true);
-                        record["partial"] = json!(false);
-                        record["interrupted"] = json!(false);
-                        record["output"] = state.get("last_output").cloned().unwrap_or(json!(""));
+                if now_secs() > deadline {
+                    // 会话（或轮次）在时限内没有收尾：如实收口，不猜终局。
+                    let record = json!({
+                        "object": "hermes.run",
+                        "run_id": run_id,
+                        "status": "failed",
+                        "updated_at": now_secs(),
+                        "completed": false,
+                        "partial": false,
+                        "interrupted": false,
+                        "error": "agent run did not settle before the monitor deadline",
+                    });
+                    if let Ok(conn) = crate::pi_peer_runs::open() {
+                        let _ = crate::pi_peer_runs::update_status(&conn, &run_id, &record);
                     }
-                    "cancelled" => {
-                        record["completed"] = json!(false);
-                        record["partial"] = json!(false);
-                        record["interrupted"] = json!(true);
-                    }
-                    _ => {
-                        record["completed"] = json!(false);
-                        record["partial"] = json!(false);
-                        record["interrupted"] = json!(false);
-                        record["error"] = state
-                            .get("last_error")
-                            .cloned()
-                            .unwrap_or(json!("agent run failed"));
-                    }
+                    clear_run_active(&run_id);
+                    return;
                 }
-                if let Ok(conn) = crate::pi_peer_runs::open() {
-                    let _ = crate::pi_peer_runs::update_status(&conn, &run_id, &record);
-                }
-                break;
             }
+            let state = crate::pi_bot::pi_bot_state(session_id.clone()).unwrap_or(Value::Null);
+            let outcome = state
+                .get("last_status")
+                .and_then(Value::as_str)
+                .unwrap_or("failed")
+                .to_owned();
+            let mut record = json!({
+                "object": "hermes.run",
+                "run_id": run_id,
+                "status": outcome,
+                "updated_at": now_secs(),
+            });
+            match outcome.as_str() {
+                "completed" => {
+                    record["completed"] = json!(true);
+                    record["partial"] = json!(false);
+                    record["interrupted"] = json!(false);
+                    record["output"] = state.get("last_output").cloned().unwrap_or(json!(""));
+                }
+                "cancelled" => {
+                    record["completed"] = json!(false);
+                    record["partial"] = json!(false);
+                    record["interrupted"] = json!(true);
+                }
+                _ => {
+                    record["completed"] = json!(false);
+                    record["partial"] = json!(false);
+                    record["interrupted"] = json!(false);
+                    record["error"] = state
+                        .get("last_error")
+                        .cloned()
+                        .unwrap_or(json!("agent run failed"));
+                }
+            }
+            if let Ok(conn) = crate::pi_peer_runs::open() {
+                let _ = crate::pi_peer_runs::update_status(&conn, &run_id, &record);
+            }
+            clear_run_active(&run_id);
         })
         .ok();
 }
@@ -1493,37 +1747,47 @@ fn peer_run_record(scope: &str, run_id: &str) -> Result<Option<Value>, Response>
     crate::pi_peer_runs::status_for_run(&conn, scope, run_id.trim())
         .map_err(|_| hermes_error(StatusCode::INTERNAL_SERVER_ERROR, "run_store_unavailable", "Run store is unavailable."))
 }
-
-/// 上游 `_request_owns_run`：运行台账按认证 scope 隔离。
-fn owns_run_scope(claims: &Value, scope: &str) -> bool {
-    crate::pi_gateway_peer::room_run_scope(claims).as_deref() == Some(scope)
+async fn peer_run_state(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>) -> Response {
+    let scope = match peer_run_scope(&headers, "status", &server) {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    match resolve_run_status(&scope, &run_id) {
+        Ok(Some(record)) => Json(record).into_response(),
+        Ok(None) => hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}")),
+        Err(response) => response,
+    }
 }
 
-/// 上游 `GET /v1/runs/{id}`：可轮询状态（含等待审批的 prompt 投影）。
-async fn peer_run_state(headers: HeaderMap, Path(run_id): Path<String>) -> Response {
-    let claims = match hermes_room_claims(&headers, "status") {
-        Ok(claims) => claims,
-        Err(response) => return response,
-    };
-    let Some(scope) = crate::pi_gateway_peer::room_run_scope(&claims) else {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    };
-    let Some(mut record) = (match peer_run_record(&scope, &run_id) {
+/// GET / SSE 共用的状态投影：活态按 bot 泳道实时状态合并，重启丢状态按 interrupted 收口。
+fn resolve_run_status(scope: &str, run_id: &str) -> Result<Option<Value>, Response> {
+    let Some(mut record) = (match peer_run_record(scope, run_id) {
         Ok(record) => record,
-        Err(response) => return response,
+        Err(response) => return Err(response),
     }) else {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
+        return Ok(None);
     };
-    if !owns_run_scope(&claims, &scope) {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    }
     let status = record.get("status").and_then(Value::as_str).unwrap_or("").to_owned();
     let terminal = matches!(status.as_str(), "completed" | "failed" | "cancelled" | "interrupted");
     let session_id = record.get("session_id").and_then(Value::as_str).unwrap_or("").to_owned();
     if terminal || session_id.is_empty() {
-        return Json(record).into_response();
+        return Ok(Some(record));
     }
-    let bot = crate::pi_bot::pi_bot_state(session_id.clone()).unwrap_or(Value::Null);
+    // 本进程没在跑它 = 重启前留下的活态记录（monitor 随进程消失，永远不会收口）。
+    // **不能**用「bot 泳道此刻不在 running」当重启证据：提交后到轮次真正开跑
+    // 之间有一个冷启动窗口，running 仍是 false（2026-11-19 E2E 实测假 interrupted）。
+    if !run_is_active(run_id) {
+        record["status"] = json!("interrupted");
+        record["error"] = json!("The gateway restarted before this run settled.");
+        record["last_event"] = json!("run.interrupted");
+        record["updated_at"] = json!(now_secs());
+        if let Ok(conn) = crate::pi_peer_runs::open() {
+            let _ = crate::pi_peer_runs::update_status(&conn, run_id, &record);
+        }
+        return Ok(Some(record));
+    }
+    // 在跑：按泳道实时状态上浮 waiting_for_approval / running（cold 窗口保持原态）。
+    let bot = crate::pi_bot::pi_bot_state(session_id).unwrap_or(Value::Null);
     let running = bot.get("running").and_then(Value::as_bool).unwrap_or(false);
     if running {
         let approval = bot.get("pending_approval").cloned().unwrap_or(Value::Null);
@@ -1534,39 +1798,120 @@ async fn peer_run_state(headers: HeaderMap, Path(run_id): Path<String>) -> Respo
             record["status"] = json!("running");
         }
         record["updated_at"] = json!(now_secs());
-        return Json(record).into_response();
     }
-    // 会话已不在跑且台账仍是活态 = 网关重启丢了进程内状态（上游 interrupted 语义）。
-    record["status"] = json!("interrupted");
-    record["error"] = json!("The gateway restarted before this run settled.");
-    record["last_event"] = json!("run.interrupted");
-    record["updated_at"] = json!(now_secs());
-    if let Ok(conn) = crate::pi_peer_runs::open() {
-        let _ = crate::pi_peer_runs::update_status(&conn, &run_id, &record);
-    }
-    Json(record).into_response()
+    Ok(Some(record))
 }
 
-async fn peer_run_stop(headers: HeaderMap, Path(run_id): Path<String>) -> Response {
-    let claims = match hermes_room_claims(&headers, "stop") {
-        Ok(claims) => claims,
+/// 上游 `GET /v1/runs/{id}/events` 的对偶：轮询状态变化的事件流。
+///
+/// 宿主没有 hermes 的 agent 回调背压流，事件按 durable 状态迁移生成：
+/// 状态变化发 `run.status`；终局发 `run.<status>` 后关闭。SSE 帧带 `id` 序号，
+/// 与上游 `_api_server._sse_frame` 同形。
+async fn peer_run_events(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>) -> Response {
+    let scope = match peer_run_scope(&headers, "status", &server) {
+        Ok(scope) => scope,
         Err(response) => return response,
     };
-    let Some(scope) = crate::pi_gateway_peer::room_run_scope(&claims) else {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
+    let stream = futures_util::stream::unfold(
+        (run_id, scope, -1_i64, String::new(), false),
+        |(run_id, scope, seq, last, done)| async move {
+            if done {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let current = match resolve_run_status(&scope, &run_id) {
+                Ok(Some(record)) => record,
+                Ok(None) => {
+                    let event = Event::default()
+                        .event("run_not_found")
+                        .data(json!({"run_id": run_id}).to_string());
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(event),
+                        (run_id, scope, seq + 1, last, true),
+                    ));
+                }
+                Err(_) => return None,
+            };
+            let status = current
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let terminal = matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            );
+            let next_seq = seq + 1;
+            if status == last {
+                let event = Event::default().comment("keepalive");
+                return Some((
+                    Ok::<_, std::convert::Infallible>(event),
+                    (run_id, scope, seq, last, false),
+                ));
+            }
+            let event = if terminal {
+                Event::default()
+                    .id(next_seq.to_string())
+                    .event(format!("run.{status}"))
+                    .data(
+                        json!({
+                            "event": format!("run.{status}"),
+                            "run_id": run_id,
+                            "timestamp": now_secs(),
+                            "status": status,
+                            "output": current.get("output").cloned().unwrap_or(Value::Null),
+                            "error": current.get("error").cloned().unwrap_or(Value::Null),
+                        })
+                        .to_string(),
+                    )
+            } else {
+                Event::default()
+                    .id(next_seq.to_string())
+                    .event("run.status")
+                    .data(
+                        json!({
+                            "event": "run.status",
+                            "run_id": run_id,
+                            "timestamp": now_secs(),
+                            "status": status,
+                            "approval": current.get("approval").cloned().unwrap_or(Value::Null),
+                        })
+                        .to_string(),
+                    )
+            };
+            Some((
+                Ok::<_, std::convert::Infallible>(event),
+                (run_id, scope, next_seq, status, terminal),
+            ))
+        },
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
+async fn peer_run_stop(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>) -> Response {
+    let scope = match peer_run_scope(&headers, "stop", &server) {
+        Ok(scope) => scope,
+        Err(response) => return response,
     };
-    let Some(mut record) = (match peer_run_record(&scope, &run_id) {
-        Ok(record) => record,
+    let Some((stop_scope, mut record)) = (match peer_run_record(&scope, &run_id) {
+        Ok(record) => record.map(|record| (scope, record)),
         Err(response) => return response,
     }) else {
         return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
     };
-    if !owns_run_scope(&claims, &scope) {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    }
     let status = record.get("status").and_then(Value::as_str).unwrap_or("").to_owned();
     if matches!(status.as_str(), "completed" | "failed" | "cancelled" | "interrupted") {
         return Json(record).into_response();
+    }
+    // 本进程没在跑它：按重启收口（resolve 把活态记录判成 interrupted 终局）。
+    if !run_is_active(&run_id) {
+        return match resolve_run_status(&stop_scope, &run_id) {
+            Ok(Some(record)) => Json(record).into_response(),
+            Ok(None) => hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}")),
+            Err(response) => response,
+        };
     }
     let session_id = record.get("session_id").and_then(Value::as_str).unwrap_or("").to_owned();
     if session_id.is_empty() {
@@ -1584,23 +1929,17 @@ async fn peer_run_stop(headers: HeaderMap, Path(run_id): Path<String>) -> Respon
     Json(json!({"run_id": record["run_id"].clone(), "status": "stopping"})).into_response()
 }
 
-async fn peer_run_approval(headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
-    let claims = match hermes_room_claims(&headers, "approve") {
-        Ok(claims) => claims,
+async fn peer_run_approval(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
+    let scope = match peer_run_scope(&headers, "approve", &server) {
+        Ok(scope) => scope,
         Err(response) => return response,
     };
-    let Some(scope) = crate::pi_gateway_peer::room_run_scope(&claims) else {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    };
-    let Some((scope, record)) = (match peer_run_record(&scope, &run_id) {
+    let Some((_scope, record)) = (match peer_run_record(&scope, &run_id) {
         Ok(record) => record.map(|record| (scope, record)),
         Err(response) => return response,
     }) else {
         return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
     };
-    if !owns_run_scope(&claims, &scope) {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    }
     let Some(params) = body.as_object() else {
         return hermes_error(StatusCode::BAD_REQUEST, "invalid_approval", "Approval takes a choice.");
     };
@@ -1628,7 +1967,7 @@ async fn peer_run_approval(headers: HeaderMap, Path(run_id): Path<String>, Json(
         return hermes_error(StatusCode::CONFLICT, "approval_not_pending", "Room approval is no longer pending");
     }
     match crate::pi_bot::pi_bot_approval_respond(session_id, request_id.clone(), choice.to_owned()) {
-        Ok(resolved) => {
+        Ok(value) => {
             if let Ok(conn) = crate::pi_peer_runs::open() {
                 let mut patched = record.clone();
                 patched["status"] = json!("running");
@@ -1641,7 +1980,7 @@ async fn peer_run_approval(headers: HeaderMap, Path(run_id): Path<String>, Json(
                 "run_id": run_id,
                 "request_id": request_id,
                 "choice": choice,
-                "resolved": resolved,
+                "resolved": value.get("resolved").cloned().unwrap_or(json!(1)),
             }))
             .into_response()
         }
@@ -1649,23 +1988,67 @@ async fn peer_run_approval(headers: HeaderMap, Path(run_id): Path<String>, Json(
     }
 }
 
-async fn peer_run_steer(headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
-    let claims = match hermes_room_claims(&headers, "status") {
-        Ok(claims) => claims,
+async fn peer_run_clarify(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
+    let scope = match peer_run_scope(&headers, "approve", &server) {
+        Ok(scope) => scope,
         Err(response) => return response,
     };
-    let Some(scope) = crate::pi_gateway_peer::room_run_scope(&claims) else {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    };
-    let Some((scope, record)) = (match peer_run_record(&scope, &run_id) {
+    let Some((_scope, record)) = (match peer_run_record(&scope, &run_id) {
         Ok(record) => record.map(|record| (scope, record)),
         Err(response) => return response,
     }) else {
         return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
     };
-    if !owns_run_scope(&claims, &scope) {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
+    let Some(params) = body.as_object() else {
+        return hermes_error(StatusCode::BAD_REQUEST, "invalid_params", "Clarify takes answer or choice.");
+    };
+    let answer = ["answer", "choice", "text"]
+        .iter()
+        .find_map(|key| params.get(*key).and_then(Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if answer.is_empty() {
+        return hermes_error(StatusCode::BAD_REQUEST, "invalid_params", "Clarify takes answer or choice.");
     }
+    let request_id = params
+        .get("request_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let session_id = record
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if session_id.is_empty() {
+        return hermes_error(StatusCode::CONFLICT, "clarify_not_pending", "Run has no pending clarification");
+    }
+    let resolved = match crate::pi_bot::pi_bot_answer_clarify(&session_id, &request_id, &answer) {
+        Ok(resolved) => resolved,
+        Err(message) => return hermes_error(StatusCode::CONFLICT, "clarify_not_pending", &message),
+    };
+    if let Ok(conn) = crate::pi_peer_runs::open() {
+        let mut patched = record.clone();
+        patched["status"] = json!("running");
+        patched["last_event"] = json!("clarify.responded");
+        patched["updated_at"] = json!(now_secs());
+        let _ = crate::pi_peer_runs::update_status(&conn, run_id.trim(), &patched);
+    }
+    Json(json!({"run_id": run_id, "resolved": resolved})).into_response()
+}
+
+async fn peer_run_steer(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
+    let scope = match peer_run_scope(&headers, "status", &server) {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let Some((_scope, record)) = (match peer_run_record(&scope, &run_id) {
+        Ok(record) => record.map(|record| (scope, record)),
+        Err(response) => return response,
+    }) else {
+        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
+    };
     let status = record.get("status").and_then(Value::as_str).unwrap_or("");
     let Some(params) = body.as_object() else {
         return hermes_error(StatusCode::BAD_REQUEST, "invalid_steer_input", "Steer takes input, message or text.");
@@ -1714,9 +2097,9 @@ async fn peer_run_steer(headers: HeaderMap, Path(run_id): Path<String>, Json(bod
     }
 }
 
-async fn peer_run_resolve_unknown(headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
-    let claims = match hermes_room_claims(&headers, "stop") {
-        Ok(claims) => claims,
+async fn peer_run_resolve_unknown(State(server): State<Arc<PeerServer>>, headers: HeaderMap, Path(run_id): Path<String>, Json(body): Json<Value>) -> Response {
+    let scope = match peer_run_scope(&headers, "stop", &server) {
+        Ok(scope) => scope,
         Err(response) => return response,
     };
     let Some(params) = body.as_object() else {
@@ -1727,18 +2110,12 @@ async fn peer_run_resolve_unknown(headers: HeaderMap, Path(run_id): Path<String>
     if params.len() != 2 || admission_id != run_id.trim() || generation < 1 {
         return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
     }
-    let Some(scope) = crate::pi_gateway_peer::room_run_scope(&claims) else {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    };
-    let Some((scope, record)) = (match peer_run_record(&scope, &run_id) {
+    let Some((_scope, record)) = (match peer_run_record(&scope, &run_id) {
         Ok(record) => record.map(|record| (scope, record)),
         Err(response) => return response,
     }) else {
         return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
     };
-    if !owns_run_scope(&claims, &scope) {
-        return hermes_error(StatusCode::NOT_FOUND, "run_not_found", &format!("Run not found: {run_id}"));
-    }
     if let Some(session_id) = record.get("session_id").and_then(Value::as_str) {
         let _ = crate::pi_bot::pi_bot_interrupt(session_id.to_owned());
     }
@@ -1772,17 +2149,71 @@ fn peer_gateway_ready() -> Value {
             "type": "gateway.ready",
             "payload": {
                 "skin": Value::Null,
+                // 宿主对外广播 groups.changed（变更成功后扇出），桌面端可据此
+                // 降级自己的轮询；replay_epoch 是进程代际。
                 "change_events": true,
                 "heartbeat": true,
-                "replay_epoch": 1,
+                "replay_epoch": crate::pi_gateway_peer::peer_replay_epoch(),
                 "room_link": crate::pi_gateway_peer::served_room_link(),
             }
         }
     })
 }
 
+fn text_param(params: &Map<String, Value>, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn session_create(params: &Map<String, Value>) -> Result<Value, String> {
+    let title = text_param(params, "title")
+        .or_else(|| text_param(params, "name"))
+        .unwrap_or_else(|| "API session".to_owned());
+    let created = crate::pi_bot::pi_bot_create_session(
+        title,
+        text_param(params, "system_prompt"),
+        text_param(params, "provider"),
+        text_param(params, "model_id"),
+        text_param(params, "cwd"),
+        None,
+        text_param(params, "profile"),
+        params
+            .get("extension_filter")
+            .and_then(Value::as_array)
+            .map(|rows| rows.iter().filter_map(Value::as_str).map(str::to_owned).collect()),
+    )?;
+    Ok(json!({
+        "session_id": created.get("sessionId").cloned().unwrap_or(Value::Null),
+        "path": created.get("path").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn session_prompt(app: &AppHandle, params: &Map<String, Value>) -> Result<Value, String> {
+    let session_id = text_param(params, "session_id")
+        .ok_or_else(|| "prompt.submit: 缺少 session_id".to_owned())?;
+    let text = text_param(params, "text").ok_or_else(|| "prompt.submit: text 为空".to_owned())?;
+    crate::pi_bot::pi_bot_prompt(
+        app.clone(),
+        session_id,
+        text,
+        None,
+        text_param(params, "path"),
+        text_param(params, "system_prompt"),
+        text_param(params, "provider"),
+        text_param(params, "model_id"),
+        None,
+        text_param(params, "profile"),
+        None,
+    )?;
+    Ok(json!({"status": "streaming"}))
+}
+
 /// 一帧请求 → 一帧响应（上游 `tui_gateway.server.dispatch` 的 peer 子集）。
-fn dispatch_peer_rpc(text: &str) -> Option<Value> {
+fn dispatch_peer_rpc(app: &AppHandle, text: &str) -> Option<Value> {
     let Ok(request) = serde_json::from_str::<Value>(text) else {
         return Some(rpc_error(Value::Null, -32700, "parse error"));
     };
@@ -1824,7 +2255,12 @@ fn dispatch_peer_rpc(text: &str) -> Option<Value> {
                     "log_replication", "authority_takeover", "peer_renewal_horizon",
                 ]));
                 map.insert("methods".into(), json!([
-                    "profiles.list", "groups.capabilities", "groups.peer.invite", "groups.peer.revoke",
+                    "profiles.list", "groups.capabilities", "groups.list", "groups.state",
+                    "groups.send", "groups.stop", "groups.continue", "groups.retry",
+                    "groups.discard", "groups.driver_append", "groups.peer.register",
+                    "groups.peer.invite", "groups.peer.revoke",
+                    "session.create", "session.resume", "session.list", "session.interrupt",
+                    "session.compress", "prompt.submit",
                 ]));
             }
             Some(rpc_result(id, capabilities))
@@ -1876,6 +2312,61 @@ fn dispatch_peer_rpc(text: &str) -> Option<Value> {
                 }
             }
         }
+        "session.create" => Some(match session_create(&params) {
+            Ok(value) => rpc_result(id, value),
+            Err(message) => rpc_error(id, 4000, &message),
+        }),
+        "session.resume" => {
+            let Some(session_id) = text_param(&params, "session_id") else {
+                return Some(rpc_error(id, 4000, "session.resume: 缺少 session_id"));
+            };
+            Some(match crate::pi_bot::pi_bot_state(session_id) {
+                Ok(mut value) => {
+                    if let Some(path) = value.get("path").and_then(Value::as_str) {
+                        if let Ok(messages) = transcript_rows(path) {
+                            value["messages"] = messages;
+                        }
+                    }
+                    rpc_result(id, value)
+                }
+                Err(message) => rpc_error(id, 4000, &message),
+            })
+        }
+        "session.list" => {
+            let state = app.state::<std::sync::Arc<crate::agui::AguiState>>();
+            Some(match state.engine.list_sessions() {
+                Ok(value) => rpc_result(id, value),
+                Err(message) => rpc_error(id, 4000, &message),
+            })
+        }
+        "session.interrupt" => {
+            let Some(session_id) = text_param(&params, "session_id") else {
+                return Some(rpc_error(id, 4000, "session.interrupt: 缺少 session_id"));
+            };
+            Some(match crate::pi_bot::pi_bot_interrupt(session_id) {
+                Ok(value) => rpc_result(id, value),
+                Err(message) => rpc_error(id, 4000, &message),
+            })
+        }
+        "session.compress" => {
+            let Some(session_id) = text_param(&params, "session_id") else {
+                return Some(rpc_error(id, 4000, "session.compress: 缺少 session_id"));
+            };
+            Some(match crate::pi_bot::pi_bot_compact(session_id) {
+                Ok(value) => rpc_result(id, value),
+                Err(message) => rpc_error(id, 4000, &message),
+            })
+        }
+        "prompt.submit" => Some(match session_prompt(app, &params) {
+            Ok(value) => rpc_result(id, value),
+            Err(message) => rpc_error(id, 4000, &message),
+        }),
+        other if other.starts_with("groups.") => Some(
+            match crate::pi_groups::rpc_dispatch(other, &Value::Object(params)) {
+                Ok(value) => rpc_result(id, value),
+                Err(message) => rpc_error(id, 4000, &message),
+            },
+        ),
         other => Some(rpc_error(id, -32601, &format!("unknown method: {other}"))),
     }
 }
@@ -1888,25 +2379,45 @@ async fn peer_ws_upgrade(
     if !server.token.is_empty() && query.token.as_deref() != Some(server.token.as_str()) {
         return unauthorized();
     }
-    ws.on_upgrade(move |socket| peer_ws_session(socket))
+    let app = server.app.clone();
+    ws.on_upgrade(move |socket| peer_ws_session(app, socket))
 }
 
-async fn peer_ws_session(mut socket: WebSocket) {
+async fn peer_ws_session(app: AppHandle, mut socket: WebSocket) {
     if socket.send(Message::Text(peer_gateway_ready().to_string().into())).await.is_err() {
         return;
     }
-    while let Some(Ok(message)) = socket.recv().await {
-        match message {
-            Message::Text(text) => {
-                let Some(reply) = dispatch_peer_rpc(text.as_str()) else {
-                    continue;
-                };
-                if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
-                    break;
+    let mut changes = crate::pi_gateway_peer::subscribe_groups_changed();
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(message)) => match message {
+                        Message::Text(text) => {
+                            let Some(reply) = dispatch_peer_rpc(&app, text.as_str()) else {
+                                continue;
+                            };
+                            if socket.send(Message::Text(reply.to_string().into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Close(_) => break,
+                        _ => {}
+                    },
+                    Some(Err(_)) | None => break,
                 }
             }
-            Message::Close(_) => break,
-            _ => {}
+            changed = changes.recv() => {
+                match changed {
+                    Ok(frame) => {
+                        if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
 }

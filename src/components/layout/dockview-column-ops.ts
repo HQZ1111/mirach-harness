@@ -94,6 +94,7 @@ export const factoryLayout = (containerWidth: number, containerHeight: number): 
         title: '打开',
         tabComponent: 'openTab',
         minimumWidth: RAIL_MIN_WIDTH,
+        maximumWidth: RAIL_MAX_WIDTH,
         params: { region: 'panels' },
       },
     },
@@ -180,11 +181,14 @@ const groupsOfRegion = (a: DockviewApi, region: ColRegion): DockviewGroupPanel[]
   a.groups.filter((g) => regionOfGroup(g) === region)
 
 /** 根面板组（唯一，docs §2）：含 open panel 的组；锚缺席回退第一根
- *  panels 语义组。 */
+ *  panels 语义组。**routines 单独成群时不算根**（2026-11-24）：旧存档
+ *  第五列被补了 region 戳之后，若它是组序里第一个 panels 组，boot 迁移
+ *  会把它当成宿主而"不并组"——优先选还含其它面板的组。 */
 export const rootPanelsGroup = (a: DockviewApi): DockviewGroupPanel | undefined => {
   const open = a.getPanel('open')
   if (open) return open.group
-  return groupsOfRegion(a, 'panels')[0]
+  const groups = groupsOfRegion(a, 'panels')
+  return groups.find((g) => g.panels.some((p) => p.id !== 'routines')) ?? groups[0]
 }
 
 /** dockview 序列化的手术视图（严格类型与自建手术不匹配——统一经 unknown
@@ -234,7 +238,10 @@ export const alignVisibleToOrder = (a: DockviewApi): void => {
     }
   }
   // ② 根面板贴 chat 边界
-  if (!flags.panelsHidden) {
+  // **面板栏内有左右分栏（多个 panels 组）时不重排**（2026-11-24）：这里
+  // 只该把"面板栏"整体钉到边，分栏组之间的先后是用户拖出来的；挑其中一个
+  // 组 moveTo 到最右会把另一个组挤到左边，重载后左右顺序翻转。
+  if (!flags.panelsHidden && groupsOfRegion(a, 'panels').length === 1) {
     const root = rootPanelsGroup(a)
     const chatGroups = groupsOfRegion(a, 'chat')
     if (root && chatGroups.length > 0) {
@@ -881,10 +888,76 @@ export const ensurePanelsAnchor = (a: DockviewApi): void => {
  *  views），刷新后隐藏列回到"宽度 0 + 面板级 min 240/max MAX"——宽度对了
  *  但许可还在，于是下一次分栏照样把它摊出宽度（空白卡片）。故无论走哪一
  *  支，收起态都必须落成 0..0 的约束盒。 */
-export const normalizeColumns = (): void => {
+export const normalizeColumns = (): boolean => {
   const a = api()
-  if (!a) return
+  if (!a) return false
+  let migrated = false
   const flags = columnFlagsOf()
+  // 旧存档里 routines 可能是独立的第五列（100px 被窗口裁掉）；它是面板栏
+  // 的标签，启动时并回面板组，避免新插件面板没有列宽约束。
+  // **但面板栏内的上下分栏是用户合法布局**（2026-11-24 用户："把定时任务
+  //  标签拉出在面板栏进行分栏"）：routines 组位于根 branch 的嵌套 branch 内
+  //  = 同列堆叠，不要并回；只有根级直挂 leaf 的旧第五列才迁移。
+  const panelHost = rootPanelsGroup(a)
+  const routines = a.getPanel('routines')
+  // 旧存档的 routines 面板没有 region 戳：独立成组时 regionOfGroup 认不出
+  // 它是面板栏，组级 270–400 约束就补不上。先补戳再并组。
+  if (routines && routines.params?.region !== 'panels') {
+    try {
+      routines.api.updateParameters({ ...(routines.params ?? {}), region: 'panels' })
+    } catch (e) {
+      console.error('[dv-column-ops] routines 区域标记补写失败', e)
+    }
+  }
+  const layout = toLoose(a)
+  const nestedLeafGroups = new Set<string>()
+  const walk = (node: unknown, depth: number): void => {
+    if (!node || typeof node !== 'object') return
+    const n = node as { type?: string; data?: unknown }
+    if (n.type === 'leaf') {
+      const leaf = n.data as { id?: string } | undefined
+      if (depth > 0 && leaf?.id) nestedLeafGroups.add(leaf.id)
+      return
+    }
+    if (Array.isArray(n.data)) n.data.forEach((child) => walk(child, depth + 1))
+  }
+  for (const child of layout.grid.root.data ?? []) walk(child, 0)
+  const stackedInSameColumn = !!routines && nestedLeafGroups.has(routines.group.id)
+  // 旧第五列的识别信号 = 宽度 < 270（历史上被挤成 100px）。用户自己拖出的
+  // 左右分栏是 ≥270 的根级 leaf（2026-11-24 用户："左右分栏"）——不能当成
+  // 旧档并掉，否则一重载就消失。
+  const legacyFifthColumn = !!routines && Math.round(routines.group.width) < RAIL_MIN_WIDTH
+  if (
+    panelHost &&
+    routines &&
+    routines.group.id !== panelHost.id &&
+    !stackedInSameColumn &&
+    legacyFifthColumn
+  ) {
+    try {
+      routines.api.moveTo({ group: panelHost, position: 'center', skipSetActive: true })
+      migrated = true
+    } catch (e) {
+      console.error('[dv-column-ops] routines 面板并回面板栏失败', e)
+    }
+  }
+  // 存档只能恢复 panel 的 minimumWidth/maximumWidth；组级约束不 round-trip。
+  // 启动时按区域统一补一次，否则新标签成为 active 后右栏就没有 270–400 限制。
+  for (const g of a.groups) {
+    const region = regionOfGroup(g)
+    if (!region) continue
+    const write = (g.api as unknown as { setConstraints?: (v: { minimumWidth: number; maximumWidth: number }) => void }).setConstraints
+    if (typeof write !== 'function') continue
+    const bounds =
+      region === 'chat'
+        ? { minimumWidth: CHAT_MIN_WIDTH, maximumWidth: Number.MAX_SAFE_INTEGER }
+        : { minimumWidth: RAIL_MIN_WIDTH, maximumWidth: RAIL_MAX_WIDTH }
+    try {
+      write.call(g.api, bounds)
+    } catch (e) {
+      console.error('[dv-column-ops] 组宽约束写入失败', g.id, e)
+    }
+  }
   // 旧版的 colstash 快照在新机制下已无意义（不再摘组）——启动时清掉遗留键
   if (safeGet(STASH_KEY)) {
     console.info('[dv-column-ops] 布局快照机制已退役（收放改为纯宽度）——清理旧快照')
@@ -916,6 +989,7 @@ export const normalizeColumns = (): void => {
   }
   alignVisibleToOrder(a)
   persistFlagsColOrder(a)
+  return migrated
 }
 
 /** 可见列按物理序重排 colOrder（拖拽/手动改序后的记账）。

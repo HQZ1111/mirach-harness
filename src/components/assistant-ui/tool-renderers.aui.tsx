@@ -11,8 +11,9 @@
  * 2. `subagent` → 子代理行（ZCode agent.tsx 单行形态）；
  * 3. 工具目录查询 → 搜索行；`submit_plan` → 计划卡（不用摘要行，ZCode 的
  *    plan-guidance 也是独立卡）；
- * 4. **todo 工具不渲染**（ZCode `showTodoToolCalls` 默认 false：待办在状态
- *    面板有专区分区，消息流里重复一条是噪声）；
+ * 4. **todo 工具默认不渲染**（ZCode `showTodoToolCalls` 默认 false：待办在状态
+ *    面板有专区分区，消息流里重复一条是噪声）；「行为与工具 → 显示待办」打开
+ *    后走普通摘要行进流（ZCode 同款开关，conversation-display-store）；
  * 5. 按工具名分派：bash（终端）/ read|ls（读取）/ grep|find|ast_grep|lsp
  *    （搜索）/ edit|hashline_edit|ast_edit|write（更改）/ web_search（搜索卡）；
  * 6. 其余按 presentation 兜底（图标 + 中文动词 + 目标 chip + 参数/结果）。
@@ -55,6 +56,7 @@ import {
 } from "@/components/assistant-ui/work-summary";
 import { parsePlanSteps, planReviewState } from "@/components/assistant-ui/plan-parse";
 import { openFileFromToolPath } from "@/components/assistant-ui/open-file";
+import { useConversationDisplay } from "@/components/assistant-ui/conversation-display-store";
 import {
   describeToolCall,
   toolLabelZh,
@@ -290,6 +292,8 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
   const { toolName, args, result, status } = part;
   const running = status?.type === "running";
   const row = buildRowModel(part);
+  // 「行为与工具 → 显示待办」：false（默认，ZCode 同款）时 todo 行不进消息流。
+  const showTodos = useConversationDisplay((s) => s.showTodos);
 
   // 1. 子代理委托结果（结果里带 rpi-delegation JSON）→ 专用卡
   const delegation = parseDelegationResult(result);
@@ -319,8 +323,9 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     }
   }
 
-  // 4. todo 工具不在消息流渲染（状态面板有待办分区）
-  if (toolName === "todo") return null;
+  // 4. todo 工具默认不在消息流渲染（状态面板有待办分区；「显示待办」打开
+  //    时落到下方普通摘要行）
+  if (toolName === "todo" && !showTodos) return null;
 
   const kind = KIND_LABELS[toolName];
   const pres = describeToolCall({

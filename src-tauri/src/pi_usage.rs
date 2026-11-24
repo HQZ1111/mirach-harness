@@ -49,8 +49,9 @@
 //! heatmap/models/daily/costUsd`。`summary` 里实际用到的字段全部按真实数据
 //! 计算；不可得字段保持 `null`（不是 0，"没有数据"≠"0 错误"）：
 //! `avgTimeToFirstTokenMs` / `avgTurnDurationMs` / `modelErrorRate`（rpi 不记
-//! 耗时与模型错误）。`toolErrorRate` 现在**可得**（toolResult.isError），
-//! 但没有任何 toolResult 时为 `null`。
+//! 这两类耗时）。`toolErrorRate` 可得（toolResult.isError），没有 toolResult
+//! 时为 `null`；`longestSessionMs` = 单会话首末消息时间差的最大值。
+//! `daily[].models` 给出当天各模型的 token（模型折线图的真实数据）。
 //!
 //! `costUsd` 只累加**引擎记录的成本**（`usage.cost.total`），不做静态价目表
 //! 回填：免费模型真实成本就是 0，用价目表估算会把"未计费"变成"假装有成本"
@@ -259,6 +260,10 @@ struct Aggregate {
     by_model_messages: BTreeMap<(String, String), u64>,
     by_model_tokens: BTreeMap<(String, String), TokenTotals>,
     by_day: BTreeMap<String, DayTotals>,
+    /// 每天每个模型的 token（modelId = "provider/model"）。
+    by_day_model_tokens: BTreeMap<String, BTreeMap<String, u64>>,
+    /// 单会话首末消息时间差的最大值（毫秒，0 = 无可用时间戳）。
+    longest_session_ms: u64,
 }
 
 /// 会话 entry 行探针（只取聚合需要的字段；其它字段忽略）。
@@ -324,6 +329,8 @@ fn ingest_file(path: &Path, since_day: Option<i64>, agg: &mut Aggregate) -> Resu
     let mut reader = BufReader::new(file);
     let mut seen_entry_ids: HashSet<String> = HashSet::new();
     let mut counted_session = false;
+    let mut session_first_ts: Option<i64> = None;
+    let mut session_last_ts: Option<i64> = None;
     let mut buf: Vec<u8> = Vec::new();
     loop {
         buf.clear();
@@ -361,6 +368,8 @@ fn ingest_file(path: &Path, since_day: Option<i64>, agg: &mut Aggregate) -> Resu
             continue;
         }
         let date_key = day_index_to_date_key(day_index);
+        session_first_ts = Some(session_first_ts.map_or(ts_millis, |v| v.min(ts_millis)));
+        session_last_ts = Some(session_last_ts.map_or(ts_millis, |v| v.max(ts_millis)));
 
         // 单文件内同 id 只计一次（重放/重写残影；entry id 全局唯一）
         if let Some(id) = probe.id.as_deref() {
@@ -410,6 +419,13 @@ fn ingest_file(path: &Path, since_day: Option<i64>, agg: &mut Aggregate) -> Resu
                     message.model.clone().unwrap_or_else(|| "unknown".into()),
                 );
                 *agg.by_model_messages.entry(key.clone()).or_insert(0) += 1;
+                let model_id = format!("{}/{}", key.0, key.1);
+                *agg
+                    .by_day_model_tokens
+                    .entry(date_key.clone())
+                    .or_default()
+                    .entry(model_id)
+                    .or_insert(0) += tokens.total;
                 let model_tokens = agg.by_model_tokens.entry(key).or_default();
                 model_tokens.input += tokens.input;
                 model_tokens.output += tokens.output;
@@ -422,6 +438,13 @@ fn ingest_file(path: &Path, since_day: Option<i64>, agg: &mut Aggregate) -> Resu
                 day.turns += 1;
             }
             _ => {}
+        }
+    }
+    if let (Some(first), Some(last)) = (session_first_ts, session_last_ts) {
+        if last >= first {
+            agg.longest_session_ms = agg
+                .longest_session_ms
+                .max(u64::try_from(last - first).unwrap_or(0));
         }
     }
     Ok(())
@@ -538,10 +561,23 @@ fn build_snapshot(range: &str) -> Result<Value, String> {
         .by_day
         .iter()
         .map(|(date, day)| {
+            let mut day_models: Vec<(&String, u64)> = agg
+                .by_day_model_tokens
+                .get(date)
+                .map(|models| models.iter().map(|(id, tokens)| (id, *tokens)).collect())
+                .unwrap_or_default();
+            day_models.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
             json!({
                 "date": date,
                 "totalTokens": day.tokens,
                 "turnCount": day.turns,
+                "models": day_models
+                    .iter()
+                    .map(|(model_id, tokens)| json!({
+                        "modelId": model_id,
+                        "totalTokens": tokens,
+                    }))
+                    .collect::<Vec<Value>>(),
             })
         })
         .collect();
@@ -572,7 +608,9 @@ fn build_snapshot(range: &str) -> Result<Value, String> {
             "longestStreakDays": longest_streak,
             "peakDayTokens": peak_day_tokens,
             "favoriteModel": favorite,
-            // rpi 不记录：耗时与模型错误率（null = 不可得，UI 隐藏卡片）
+            // 会话时长 = 该会话首末消息时间差（header/entry 时间戳，毫秒）
+            "longestSessionMs": agg.longest_session_ms,
+            // rpi 不记录：模型错误率（null = 不可得，UI 隐藏卡片）
             "avgTimeToFirstTokenMs": Value::Null,
             "avgTurnDurationMs": Value::Null,
             "toolErrorRate": tool_error_rate,
@@ -715,6 +753,13 @@ mod tests {
         assert_eq!(day.turns, 2);
         assert_eq!(day.tokens, 41_075);
         assert_eq!(day.tool_calls, 1);
+        let day_models = agg
+            .by_day_model_tokens
+            .get("2026-11-14")
+            .expect("按天模型用量");
+        assert_eq!(day_models.get("DS/m-a"), Some(&20_512));
+        assert_eq!(day_models.get("DS/m-b"), Some(&20_563));
+        assert_eq!(agg.longest_session_ms, 85_207, "首末消息时间差");
 
         // 7d 过滤：把 since 调到数据次日 → 全部丢弃
         let mut empty = Aggregate::default();

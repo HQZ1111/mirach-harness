@@ -25,6 +25,7 @@
  * | `session.info` | 索引按 id 查（缺 → `data.reason='not_found'`） |
  * | `session.interrupt` | `pi_interrupt` |
  * | `session.compress` | `pi_compact` |
+ * | `bot_delivery.list` | `lib/bot-delivery.ts` 的未收尾投递登记表（本机直投 + relay） |
  * | `cron.manage` | `pi_cron_*` |
  * | `skills.manage` | 宿主无技能市场（明确报错；搜索面另行接线） |
  * | `cli.exec` | `pi_run_command`；`profile delete` 映射为删 bot |
@@ -102,6 +103,71 @@ function patchMetaExtras(name: string, patch: UnknownMeta): void {
   const all = readMetaExtras()
   all[name] = { ...(all[name] ?? {}), ...patch }
   writeMetaExtras(all)
+}
+
+/**
+ * 删除机器人（hermes `deleteBot` 的宿主对偶；2026-11-23）。
+ *
+ * 顺序与 hermes 一致：**先删后端 profile，再清本地缓存**。profile home
+ * (`<agent_dir>/profiles/<name>`) 由 Rust `pi_profile_delete` 整个删除；
+ * 删除失败原样抛出，注册表保持不动（不留"页面上没了、磁盘还在"的半态）。
+ * 目录本来就不存在时 `removed=false`——只有注册表里也没有这条记录才报错。
+ *
+ * 插件 meta / 选中项 / 宿主余字段的清理失败只记 console.error：profile 已
+ * 删除，继续保留旧外观缓存不会复活 bot（上游同款处理）。
+ */
+export async function deleteBotProfile(name: string): Promise<{ removed: boolean }> {
+  const trimmed = name.trim()
+  if (!trimmed) throw new Error('删除机器人：缺少名字')
+  const bot = findBot(trimmed)
+  const outcome = await invoke<{ removed: boolean }>('pi_profile_delete', { name: trimmed })
+
+  if (bot) {
+    botsStore.getState().remove(trimmed)
+  } else if (!outcome.removed) {
+    throw new Error(`删除机器人：找不到 profile「${trimmed}」`)
+  }
+
+  try {
+    const metaKey = 'mirach.plugin.hermes-bots.bot-meta-v2'
+    const raw = localStorage.getItem(metaKey)
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const meta = parsed as Record<string, unknown>
+        let changed = false
+        for (const key of [`local::${trimmed}`, trimmed]) {
+          if (Object.prototype.hasOwnProperty.call(meta, key)) {
+            delete meta[key]
+            changed = true
+          }
+        }
+        if (changed) localStorage.setItem(metaKey, JSON.stringify(meta))
+      }
+    }
+    const selectedKey = 'mirach.plugin.hermes-bots.selected-roster-bot-v1'
+    const selectedRaw = localStorage.getItem(selectedKey)
+    if (selectedRaw) {
+      const selected: unknown = JSON.parse(selectedRaw)
+      if (selected === `local::${trimmed}` || selected === trimmed) {
+        localStorage.setItem(selectedKey, JSON.stringify('local::default'))
+      }
+    }
+  } catch (e) {
+    console.error('[host-rpc] 删除机器人后清理插件缓存失败', e)
+  }
+
+  try {
+    const extras = readMetaExtras()
+    if (Object.prototype.hasOwnProperty.call(extras, trimmed)) {
+      delete extras[trimmed]
+      writeMetaExtras(extras)
+    }
+  } catch (e) {
+    console.error('[host-rpc] 删除机器人后清理 ui_meta 余字段失败', e)
+  }
+
+  return { removed: outcome.removed || Boolean(bot) }
 }
 
 /** ui_meta 里由 BotPreset 直接持有的字段（不进余字段表）。 */
@@ -400,22 +466,45 @@ async function enabledToolsFor(bot: BotPreset): Promise<null | string[]> {
 async function createSessionForBot(
   bot: BotPreset | null,
   title: string,
-): Promise<{ session_id: string; stored_session_id: string }> {
+  /** 会话落点环境（hermes plugin-open 的 dialWithoutSwitching：随创建传
+   *  profile，不切引擎活动环境）。
+   *  - 具名 `profile` → 落该环境 home；
+   *  - 显式 `'default'` → 本体（全局根）；
+   *  - 缺省/空 → **当前活动环境**（普通新聊天语义）。 */
+  profile?: string,
+): Promise<{ path?: string; session_id: string; stored_session_id: string }> {
   const systemPrompt = bot ? composeSystemPrompt(bot) : ''
   const { provider, modelId } = splitModel(bot?.model ?? '')
   const enabledTools = bot ? await enabledToolsFor(bot) : null
-  const state = await invoke<{ sessionId?: null | string }>('pi_create_bot_session', {
-    name: title,
-    ...(systemPrompt ? { systemPrompt } : {}),
-    ...(provider ? { provider, modelId } : {}),
-    ...(bot?.cwd ? { cwd: bot.cwd } : {}),
-    ...(enabledTools ? { enabledTools } : {}),
-  })
+  let scopedProfile = (profile ?? '').trim()
+  if (!scopedProfile) {
+    try {
+      scopedProfile = (await invoke<null | string>('pi_profile_get_active')) ?? ''
+    } catch (e) {
+      console.error('[host-rpc] 读取活动环境失败——新会话落默认根', e)
+    }
+  }
+  const sessionDirProfile = scopedProfile === 'default' ? '' : scopedProfile
+  const state = await invoke<{ path?: null | string; sessionId?: null | string }>(
+    'pi_create_bot_session',
+    {
+      name: title,
+      ...(sessionDirProfile ? { profile: sessionDirProfile } : {}),
+      ...(systemPrompt ? { systemPrompt } : {}),
+      ...(provider ? { provider, modelId } : {}),
+      ...(bot?.cwd ? { cwd: bot.cwd } : {}),
+      ...(enabledTools ? { enabledTools } : {}),
+    },
+  )
   const sid = state?.sessionId ?? null
   if (!sid) {
     throw new Error('pi_create_bot_session 未返回 sessionId')
   }
-  return { session_id: sid, stored_session_id: sid }
+  return {
+    ...(typeof state.path === 'string' && state.path ? { path: state.path } : {}),
+    session_id: sid,
+    stored_session_id: sid,
+  }
 }
 
 // ── bot 泳道（后台成员会话）────────────────────────────────────────────────
@@ -565,7 +654,7 @@ async function cliExec(params: Record<string, unknown>): Promise<unknown> {
     const action = argv[1]
     const name = argv[2]
     if (action === 'delete' && name) {
-      botsStore.getState().remove(name)
+      await deleteBotProfile(name)
       return { code: 0, stdout: `deleted ${name}` }
     }
     if (action === 'rename' && name && argv[3]) {
@@ -779,6 +868,7 @@ export async function dispatchHostRequest<T>(
     case 'session.list': {
       const profile = typeof params.profile === 'string' ? params.profile : ''
       const title = typeof params.title === 'string' ? params.title : null
+      console.info('[host-rpc] session.list profile=', JSON.stringify(profile), 'title=', JSON.stringify(title))
       const limit = typeof params.limit === 'number' && params.limit > 0 ? params.limit : undefined
       const rows = await readSessions()
       // pi 的会话存储是**单命名空间**：所有 bot 的 "Bot Chat" 同名，按标题
@@ -819,7 +909,9 @@ export async function dispatchHostRequest<T>(
 
     case 'session.create': {
       const profile = typeof params.profile === 'string' ? params.profile : ''
-      const bot = profile ? findBot(profile) : null
+      // `default` = 应用本体环境：没有 bot 预设可套（人格/模型/cwd 走引擎
+      // 默认），标题也不该退化成 "default"。具名 profile 才查预设。
+      const bot = profile && profile !== 'default' ? findBot(profile) : null
       const title =
         typeof params.title === 'string' && params.title.trim()
           ? params.title.trim()
@@ -844,18 +936,19 @@ export async function dispatchHostRequest<T>(
           stored_session_id: created.sessionId,
         } as T
       }
-      const created = await createSessionForBot(bot, title)
+      const created = await createSessionForBot(bot, title, profile)
       // hermes 的 bot 会话天生 hidden（Bot Mode 拥有）；宿主没有 hidden 面，
       // 显示层按 bots-store 的双锚路径集过滤。canonical Bot Chat 一创建就
-      // 记双锚 → 侧栏会话列表立刻隐藏（花名册是唯一入口）。
+      // 记双锚 → 侧栏会话列表立刻隐藏（花名册是唯一入口）。路径优先用
+      // pi 回传值（跨环境时 pi_list_sessions 扫不到活动环境之外的会话）。
       if (bot && title === 'Bot Chat') {
-        const path = await findSessionPath(created.stored_session_id)
+        const path = created.path ?? (await findSessionPath(created.stored_session_id))
         if (path) {
           botsStore
             .getState()
             .patchMeta(bot.name, { chatSessionPath: path, chatSessionId: created.stored_session_id })
         } else {
-          console.error(`[host-rpc] bot 会话 ${created.stored_session_id} 不在索引——双锚未记录`)
+          console.error(`[host-rpc] bot 会话 ${created.stored_session_id} 未回报路径——双锚未记录`)
         }
       }
       return created as T
@@ -1359,6 +1452,33 @@ export async function dispatchHostRequest<T>(
         from_handle: typeof params.from_handle === 'string' ? params.from_handle : undefined,
         from_connection: typeof params.from_connection === 'string' ? params.from_connection : undefined,
       })) as T
+    }
+
+    case 'bot_delivery.list': {
+      // hermes `tools/bot_delivery.py::list`：某 bot 发起、尚未 settle 的
+      // message_agent 投递。宿主投递由前端 engine-bridges 跑（本机直投 /
+      // 远端 relay），未收尾状态登记在 bot-delivery 的内存表里。
+      //
+      // `profile` 上游是可选参数（缺省 = 调用的活动面）。插件对 not_scoped
+      // 行会走 `host.request`（不带 profile）；宿主的富行经 host.agents 并集
+      // 后都带 route，正常路径有 profile，这里只兜「名册尚未合流」的窗口。
+      const { applyLiveDeliveryState, botBySession, listTrackedDeliveries } = await import(
+        '@/lib/bot-delivery'
+      )
+      let profile = String(params.profile ?? '').trim()
+      if (!profile) {
+        try {
+          const st = await invoke<{ sessionId?: null | string }>('pi_get_state')
+          profile = botBySession(st?.sessionId ?? undefined)?.name ?? ''
+        } catch (e) {
+          console.error('[host-rpc] bot_delivery.list 无 profile，读取活动会话失败', e)
+        }
+      }
+      if (!profile) throw new Error('bot_delivery.list 缺少 profile（且无法从活动会话推断发送者）')
+      return {
+        sender: profile,
+        deliveries: await applyLiveDeliveryState(listTrackedDeliveries(profile)),
+      } as T
     }
 
     case 'display.status': {

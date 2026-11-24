@@ -448,7 +448,7 @@ export function SelectItem({
           "flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm outline-none transition-colors",
           selected
             ? "bg-muted text-foreground"
-            : "text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:bg-muted",
+            : "text-muted-foreground hover:bg-(--hover-wash) hover:text-foreground focus-visible:bg-muted",
           "disabled:pointer-events-none disabled:opacity-50",
           className,
         )}

@@ -131,7 +131,7 @@ export function BreadcrumbLink({ className, render, ...props }: BreadcrumbLinkPr
   const linkProps = {
     ...props,
     className: cn(
-      "inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-md px-2 font-medium text-muted-foreground transition-colors duration-150 hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&>svg]:size-3.5 [&>svg]:shrink-0",
+      "inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-md px-2 font-medium text-muted-foreground transition-colors duration-150 hover:bg-(--hover-wash) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 [&>svg]:size-3.5 [&>svg]:shrink-0",
       className,
     ),
   };
@@ -251,7 +251,7 @@ export function BreadcrumbEllipsis({ children, className, label = "Show hidden p
             ref={trigger}
             type="button"
             aria-label={label}
-            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-(--hover-wash) hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={(event) => { focusOnOpen.current = event.detail === 0; }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {

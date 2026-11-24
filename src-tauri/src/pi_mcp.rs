@@ -101,6 +101,14 @@ pub struct McpSnapshot {
 
 /// 读一个配置文件里的 `mcpServers` 表。
 ///
+/// 数据同步用：全局 `mcp.json` 的原始 `mcpServers` 快照。**值可能含 env 密钥**
+/// ——只在 Rust 内推送到远端，绝不回传前端/日志。
+pub(crate) fn raw_global_servers() -> Result<BTreeMap<String, Value>, String> {
+    let path = global_config_path()?;
+    let (entries, _warnings) = read_server_entries(&path)?;
+    Ok(entries)
+}
+
 /// - 文件不存在 / 空文件 → 空表（`read_json_document` 同语义）；
 /// - JSON 解析失败、顶层非 object、`mcpServers` 非 object → `Err`；
 /// - 条目本身畸形不阻断整表读取（逐条 warning，列表里跳过该条）。

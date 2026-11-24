@@ -87,6 +87,66 @@ export type BotPatch = Partial<
   Pick<BotPreset, 'pinned' | 'hidden' | 'sectionId' | 'sectionName' | 'color' | 'shape' | 'image' | 'custom' | 'title' | 'chatSessionPath' | 'chatSessionId' | 'connectionId' | 'skills' | 'toolsets' | 'mcpServers'>
 >
 
+/** 本体环境（hermes 默认 profile "Hermes" 的宿主对偶，2026-11-22）：
+ *  永远在场、不可删除；它承载"应用自身/默认配置"这一环境，侧栏「配置
+ *  档案」选它 = 只看未被任何 bot 拥有的会话。 */
+export const DEFAULT_BOT_NAME = 'default'
+
+/** 默认 Mirach bot 的头像（2026-11-23 用户："默认的mirach头像不能更改，换成
+ *  logo的"）——品牌 logo 随 `public/brand/logo.png` 打包，BotFace 直接当
+ *  `<img src>` 用。用户仍可在编辑对话框里换成自己的图（custom 后迁移不动）。 */
+export const DEFAULT_BOT_AVATAR = '/brand/logo.png'
+
+/** 一次性迁移标记：把「默认 Mirach bot」的旧头像换成品牌 logo（2026-11-23
+ *  用户："默认的mirach头像不能更改，换成logo的"）。迁移后用户再改头像不再覆盖。 */
+const DEFAULT_LOGO_MIGRATION_KEY = 'mirach.harness.default-bot-logo.v1'
+
+/** hermes-bots 插件自己的 bot-meta 本地缓存（runtime-loader storage 的落盘键）。
+ *  机器人页头像是从这份 meta 画的，不是 botsStore——只改 botsStore 页面上
+ *  仍是旧头。 */
+const PLUGIN_BOT_META_V2_KEY = 'mirach.plugin.hermes-bots.bot-meta-v2'
+const DEFAULT_LOGO_PLUGIN_MIGRATION_KEY = 'mirach.harness.default-bot-logo.plugin.v1'
+
+function migrateDefaultBotPluginMeta(): void {
+  try {
+    if (localStorage.getItem(DEFAULT_LOGO_PLUGIN_MIGRATION_KEY)) return
+    const raw = localStorage.getItem(PLUGIN_BOT_META_V2_KEY)
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const meta = parsed as Record<string, unknown>
+        for (const key of ['local::default', 'default']) {
+          const entry = meta[key]
+          if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+            meta[key] = { ...(entry as Record<string, unknown>), image: DEFAULT_BOT_AVATAR }
+          }
+        }
+        localStorage.setItem(PLUGIN_BOT_META_V2_KEY, JSON.stringify(meta))
+      }
+    }
+    localStorage.setItem(DEFAULT_LOGO_PLUGIN_MIGRATION_KEY, '1')
+  } catch (e) {
+    console.error('[bots] 默认头像插件元数据迁移失败', e)
+  }
+}
+
+migrateDefaultBotPluginMeta()
+
+export function makeDefaultBot(): BotPreset {
+  return {
+    name: DEFAULT_BOT_NAME,
+    // hermes 的 displayName 对未命名的 default profile 返回产品名 "Hermes"；
+    // 宿主品牌替换后同位置显示 "Mirach"（不是"本体"——那是宿主早期自造名）。
+    title: 'Mirach',
+    systemPrompt: '',
+    model: '',
+    cwd: '',
+    description: 'Mirach 默认环境（应用默认配置）',
+    image: DEFAULT_BOT_AVATAR,
+    createdAt: 0,
+  }
+}
+
 /** 用户自建分区（hermes user-sections：{id, name}，本地存储）。 */
 export interface BotSection {
   id: string
@@ -171,7 +231,40 @@ export const botsStore = createStore<BotsState>((set, get) => ({
   sections: [],
   load: () => {
     const v2 = localStorage.getItem(STORAGE_KEY)
-    const bots = v2 === null ? migrateV1(localStorage.getItem(LEGACY_KEY)) : parseStored(v2)
+    let bots = v2 === null ? migrateV1(localStorage.getItem(LEGACY_KEY)) : parseStored(v2)
+    // 本体环境永远在场（hermes 默认 profile 的宿主对偶）——旧用户数据首次
+    // 读到即补种并写回（一次），此后用户可改 title/头像，但删不掉。
+    if (!bots.some((b) => b.name === DEFAULT_BOT_NAME)) {
+      bots = [makeDefaultBot(), ...bots]
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(bots))
+    } else {
+      // 宿主 v1 种子的默认显示名「本体」/空标题一次性升格为 hermes 同款的
+      // 产品名（用户自改过的 title 不动）。
+      let changed = false
+      bots = bots.map((b) => {
+        if (b.name !== DEFAULT_BOT_NAME) return b
+        let next = b
+        if (b.title === '本体' || b.title === '') {
+          next = { ...next, title: 'Mirach' }
+          changed = true
+        }
+        // 默认 Mirach 头像一次性换成品牌 logo（覆盖旧自造头像；迁移标记后
+        // 用户再改头像不再覆盖）。
+        if (!localStorage.getItem(DEFAULT_LOGO_MIGRATION_KEY)) {
+          next = { ...next, image: DEFAULT_BOT_AVATAR }
+          changed = true
+        }
+        return next
+      })
+      if (changed) localStorage.setItem(STORAGE_KEY, JSON.stringify(bots))
+    }
+    if (!localStorage.getItem(DEFAULT_LOGO_MIGRATION_KEY)) {
+      try {
+        localStorage.setItem(DEFAULT_LOGO_MIGRATION_KEY, '1')
+      } catch (e) {
+        console.error('[bots] 记录默认头像迁移标记失败', e)
+      }
+    }
     set({ bots, sections: parseSections(localStorage.getItem(SECTIONS_KEY)) })
   },
   save: (bots) => {
@@ -188,6 +281,12 @@ export const botsStore = createStore<BotsState>((set, get) => ({
     get().save([...rest, { ...bot, name: trimmed }])
   },
   remove: (name) => {
+    // 本体不可删（UI 已用 isDefaultBot 隐藏删除项；这里是数据层第二道闸，
+    // 违规删除 = 错误可见不静默装成功，规矩 12）。
+    if (name === DEFAULT_BOT_NAME) {
+      console.error('[bots] 本体环境不可删除——已忽略')
+      return
+    }
     get().save(get().bots.filter((b) => b.name !== name))
   },
   saveSections: (sections) => {

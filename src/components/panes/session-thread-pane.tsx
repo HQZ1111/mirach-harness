@@ -106,20 +106,28 @@ function SessionChatPane({
   const { runtime, error } = useThreadChatRuntime({ threadId, sessionPath })
   void tabName
   return (
-    <div className="assistant-thread-pane h-full" data-slot="session-thread-pane">
+    <div
+      className="assistant-thread-pane relative h-full"
+      data-slot="session-thread-pane"
+    >
       <AssistantRuntimeProvider runtime={runtime}>
-        {/* 分栏失败可见（主 runtime 的 RUN_ERROR 走全局 error 桥；本窗格的
-            轮次机错误只在这里，没有这段 = 失败静默，规矩 12）。 */}
+        {/* 分栏/机器人聊天失败可见（主 runtime 的 RUN_ERROR 走全局 error 桥；
+            本窗格的轮次机错误只在这里，没有这段 = 失败静默，规矩 12）。
+            **浮层而不是文档流**（2026-11-25 用户："机器人页的错误提示卡会把
+            内容挤到下面"）：absolute 在对话区顶部，错误出现/消失不再改变
+            Thread 的可用高度，也不推动消息与输入框。 */}
         {error ? (
-          <ErrorState
-            className="m-3"
-            data-slot="session-run-error-bar"
-            detail={String(error)}
-            retrying={false}
-            title="运行出错"
-          />
+          <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex justify-center">
+            <ErrorState
+              className="pointer-events-auto shadow-lg"
+              data-slot="session-run-error-bar"
+              detail={String(error)}
+              retrying={false}
+              title="运行出错"
+            />
+          </div>
         ) : null}
-        <Thread scoped />
+        <Thread scoped sessionId={threadId} />
       </AssistantRuntimeProvider>
     </div>
   )

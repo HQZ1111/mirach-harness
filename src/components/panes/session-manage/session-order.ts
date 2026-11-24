@@ -35,6 +35,9 @@ export interface SessionRowMeta {
   /** 项目归属（`pi_sessions_index.projectId`：显式映射优先、否则 cwd 落在
    *  项目根内推断；缺省 = 无归属）。project 分组按它分组。 */
   readonly projectId?: string
+  /** 父会话 id（fork 谱系；索引的 parentSessionId）。侧栏把分支会话挂在
+   *  父行下方缩进渲染。 */
+  readonly parentSessionId?: string
 }
 
 /** 最后活跃降序（同毫秒按 id 稳定排序——避免每次渲染顺序抖动） */

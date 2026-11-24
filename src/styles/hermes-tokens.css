@@ -105,6 +105,41 @@
     var(--theme-elevated-seed) var(--theme-mix-elevated),
     var(--theme-neutral-card)
   );
+  /* primary/secondary 两档此前漏抄：镜像组件（hermes-bots 的 teammate-waits
+     等）直接读 --ui-bg-secondary，缺了就是透明底。公式照抄上游 styles.css。 */
+  --ui-bg-primary: color-mix(
+    in srgb,
+    var(--ui-accent) var(--theme-fill-primary-accent-mix),
+    color-mix(in srgb, var(--ui-base) 10%, transparent)
+  );
+  --ui-bg-secondary: color-mix(
+    in srgb,
+    var(--ui-accent) var(--theme-fill-secondary-accent-mix),
+    color-mix(in srgb, var(--ui-base) 7%, transparent)
+  );
+  /* ── composer 几何 / 文字令牌（上游 styles.css:546-551）──────────────
+     hermes-bots 的群聊房间 RoomComposer 直接用这四个令牌做内距/间距/
+     输入行高；宿主此前一个都没定义 → padding/gap/min-height 全为 0，
+     输入框塌成一条线。取宿主主输入框（ComposerBar）的几何值保持两处
+     输入区观感一致：p 12 / 输入 40 / 文本 14 / 圆角见 hermes-ui.css。 */
+  --composer-control-gap: 0.5rem;
+  --composer-surface-pad-x: 0.75rem;
+  --composer-surface-pad-y: 0.75rem;
+  --composer-input-min-height: 2.5rem;
+  /* composer 表面填充与描边强度（上游 styles.css:548/2185）：上游
+     `[data-slot='composer-root']` 的 rest 档是 dt-card 72% + 12px blur；
+     宿主沿用同一透明度口径，房间输入区 backing 读同一 var。 */
+  --composer-fill: color-mix(in srgb, var(--background) 55%, transparent);
+  --composer-ring-strength: 1;
+  /* 100% = 宿主一直以来的 15px（2026-11-24 用户："之前是 15 的大小，
+     100 应该是 15"）。这里用绝对 15px，缩放仍由 --chat-text-scale 相乘。 */
+  --conversation-text-base-size: 15px;
+  --conversation-text-font-size: calc(var(--conversation-text-base-size) * var(--chat-text-scale, 1));
+  --conversation-caption-base-size: 0.75rem;
+  --conversation-caption-base-line-height: 1rem;
+  --conversation-caption-font-size: calc(var(--conversation-caption-base-size) * var(--chat-text-scale, 1));
+  --conversation-caption-line-height: calc(var(--conversation-caption-base-line-height) * var(--chat-text-scale, 1));
+  --chat-text-scale: 1;
   --ui-bg-card: color-mix(in srgb, var(--ui-accent) 4%, color-mix(in srgb, var(--ui-base) 4%, transparent));
   --ui-bg-input: #fcfcfc;
   --ui-surface-background: var(--ui-bg-editor);
@@ -159,8 +194,8 @@
   --dt-destructive-foreground: #ffffff;
   --dt-sidebar-border: var(--ui-stroke-secondary);
   /* 用户气泡：上游按 --user-bubble-keep 保留度混到透明（缺省 100% = 实色） */
-  --dt-user-bubble: color-mix(in srgb, var(--ui-chat-bubble-background) var(--user-bubble-keep, 100%), transparent);
-  --dt-user-bubble-border: var(--ui-stroke-tertiary);
+  --dt-user-bubble: color-mix(in srgb, var(--muted) var(--user-bubble-keep, 100%), transparent);
+  --dt-user-bubble-border: var(--stroke-soft);
 
   /* ── 排版与字族：上游 --dt-font-sans/mono 是字体栈；宿主用全局
      --font-family（HarmonyOS Sans SC，用户定稿）与等宽栈。base-size /

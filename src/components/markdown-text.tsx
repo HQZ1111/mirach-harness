@@ -55,7 +55,7 @@ const MarkdownTextImpl: FC<MarkdownTextProps> = ({ components }) => {
     <MarkdownTextPrimitive
       remarkPlugins={[remarkGfm, remarkMath]}
       rehypePlugins={[rehypeKatex]}
-      className="aui-md text-[14px] leading-[24.5px] [&>*+*]:mt-[16px]"
+      className="aui-md text-[length:var(--conversation-text-font-size)] leading-[1.75] [&>*+*]:mt-[16px]"
       components={markdownComponents}
       // 平滑逐字揭示（stream-animate 参数对齐，见 assistant-ui/stream-reveal.ts）：
       // 逐字铺开 + 限制提交频率，避免每个 SSE chunk 一次性贴上来、也避免
@@ -90,7 +90,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h3: ({ className, ...props }) => (
     <h3
       className={cn(
-        "aui-md-h3 mt-[24px] mb-[16px] scroll-m-20 text-[14px] leading-[24.5px] font-semibold first:mt-0",
+        "aui-md-h3 mt-[24px] mb-[16px] scroll-m-20 text-[length:var(--conversation-text-font-size)] leading-[1.75] font-semibold first:mt-0",
         className,
       )}
       {...props}
@@ -99,7 +99,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h4: ({ className, ...props }) => (
     <h4
       className={cn(
-        "aui-md-h4 mt-[24px] mb-[16px] scroll-m-20 text-[14px] leading-[24.5px] font-semibold first:mt-0",
+        "aui-md-h4 mt-[24px] mb-[16px] scroll-m-20 text-[length:var(--conversation-text-font-size)] leading-[1.75] font-semibold first:mt-0",
         className,
       )}
       {...props}
@@ -108,7 +108,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h5: ({ className, ...props }) => (
     <h5
       className={cn(
-        "aui-md-h5 mt-[24px] mb-[16px] text-[14px] leading-[24.5px] font-medium first:mt-0",
+        "aui-md-h5 mt-[24px] mb-[16px] text-[length:var(--conversation-text-font-size)] leading-[1.75] font-medium first:mt-0",
         className,
       )}
       {...props}
@@ -117,7 +117,7 @@ const defaultComponents = memoizeMarkdownComponents({
   h6: ({ className, ...props }) => (
     <h6
       className={cn(
-        "aui-md-h6 mt-[24px] mb-[16px] text-[14px] leading-[24.5px] font-normal first:mt-0",
+        "aui-md-h6 mt-[24px] mb-[16px] text-[length:var(--conversation-text-font-size)] leading-[1.75] font-normal first:mt-0",
         className,
       )}
       {...props}

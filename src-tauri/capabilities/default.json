@@ -11,12 +11,15 @@
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:window:allow-set-size",
+    "core:window:allow-set-min-size",
     "core:window:allow-inner-size",
     "core:window:allow-outer-size",
     "core:window:allow-scale-factor",
     "core:window:allow-start-resize-dragging",
     "core:window:allow-center",
     "core:window:allow-unmaximize",
+    "core:webview:allow-set-webview-zoom",
+    "core:window:allow-set-effects",
     "dialog:default"
   ]
 }

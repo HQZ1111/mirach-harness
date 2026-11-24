@@ -146,3 +146,22 @@ pub fn pi_notify_test(title: String, body: String) -> Result<bool, String> {
             .map_err(|e| format!("系统通知发送失败: {e}"))
     })?
 }
+
+/// OS 通知派发（hermes `window.hermesDesktop.notify` 的宿主对偶）。偏好/闸门
+/// 在 renderer 侧（`native-notify.ts`）判定；这里只负责投递一条系统通知。
+/// `silent = true` 不带声音（notify-rust 在 Windows 上默认静音，显式给
+/// `Default` 才响）；返回投递结果，失败如实传播。
+#[tauri::command(async)]
+pub fn pi_notify(title: String, body: String, silent: bool) -> Result<bool, String> {
+    on_big_stack(move || {
+        let mut notification = notify_rust::Notification::new();
+        notification.summary(&title).body(&body);
+        if !silent {
+            notification.sound_name("Default");
+        }
+        notification
+            .show()
+            .map(|_| true)
+            .map_err(|e| format!("系统通知发送失败: {e}"))
+    })?
+}

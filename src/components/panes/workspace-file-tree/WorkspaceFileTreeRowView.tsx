@@ -165,7 +165,11 @@ export function WorkspaceFileTreeRowView({
       className={cn(layout === "absolute" ? "absolute left-0 top-0 w-full" : "w-full")}
       style={rowStyle}
     >
-      <ContextMenu anchor="trigger" side="bottom" sideOffset={4}>
+      {/* 文件树行是"左键展开/选中 + 右键菜单"的双语义，不能挂
+          anchor="trigger"——ContextMenuAnchor 在 trigger 形态下会把左键也
+          当成开菜单（用户实报：点可展开项会弹出「打开/复制路径」选项）。
+          这里用默认 point 形态，只有右键才开菜单。 */}
+      <ContextMenu>
         <ContextMenuAnchor>{rowElement}</ContextMenuAnchor>
         <ContextMenuContent ariaLabel="文件操作" className="w-52">
           <ContextMenuItem onSelect={handleOpenPrimary}>打开</ContextMenuItem>

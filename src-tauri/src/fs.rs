@@ -368,6 +368,21 @@ pub fn fs_write_text_file(path: String, contents: String) -> Result<(), String> 
         .map_err(|error| error_code(&error).to_string())
 }
 
+/// 批量路径存在性（设置页「项目 → 未使用检测」的根目录缺失判定，ZCode
+/// `primaryRootStatus === "missing"` 的宿主等价物）。只读探测：空路径 = false；
+/// 其它按 `Path::exists`（不存在与探测失败同为 false——"现在用不了"是本页
+/// 要展示的事实，不区分原因）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn fs_paths_exist(paths: Vec<String>) -> Vec<bool> {
+    paths
+        .iter()
+        .map(|path| {
+            let trimmed = path.trim();
+            !trimmed.is_empty() && std::path::Path::new(trimmed).exists()
+        })
+        .collect()
+}
+
 // ── Git 变更统计（活动面板「环境」分区，docs/engine-gaps.md G6）─────────
 
 /// 工作区变更统计（活动面板 Environment 分区数据面）：跑
@@ -1226,5 +1241,22 @@ mod git_stat_tests {
             parse_porcelain_line("R  old/a.rs -> new/a.rs"),
             Some(("R ".into(), "new/a.rs".into()))
         );
+    }
+}
+
+#[cfg(test)]
+mod paths_exist_tests {
+    use super::fs_paths_exist;
+
+    /// 存在 / 不存在 / 空白路径逐项如实（项目「根目录缺失」判定的数据面）。
+    #[test]
+    fn probes_existing_missing_and_empty_paths() {
+        let existing = std::env::temp_dir();
+        let flags = fs_paths_exist(vec![
+            existing.to_string_lossy().into_owned(),
+            "Z:/definitely-missing-mirach-probe/x".to_string(),
+            "   ".to_string(),
+        ]);
+        assert_eq!(flags, vec![true, false, false]);
     }
 }

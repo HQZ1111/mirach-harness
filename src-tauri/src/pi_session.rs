@@ -56,7 +56,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rpi_agent::AgentEvent;
-use rpi_harness::agent_harness::{AgentHarness, AgentLane, CompactionOutcome, NavigationOutcome};
+use rpi_harness::agent_harness::{
+    AgentHarness, AgentLane, CompactionOutcome, HarnessRunOutcome, NavigationOutcome,
+};
 use rpi_harness::session::jsonl::{
     JsonlSessionCreateOptions, JsonlSessionListOptions, JsonlSessionMetadata, JsonlSessionRepo,
     JsonlSessionRepoOptions, JsonlSessionStorage,
@@ -66,7 +68,7 @@ use rpi_harness::session::types::{
     SessionTree, TranscriptPageQuery,
 };
 use rpi_harness::session::{DefaultIdGenerator, Session, SystemClock};
-use rpi_ai::types::{ImageContent, UserContent};
+use rpi_ai::types::{Content, ImageContent, UserContent, UserMessage};
 use rpi_cli::session::ReloadContext;
 
 use crate::agui::{AguiImage, AskRegistry, ApprovalRegistry, ThreadBuffers};
@@ -114,6 +116,17 @@ pub(crate) fn run_goal_command(
         .map_err(|_| "锁中毒".to_string())?
         .clone()
         .ok_or_else(|| NO_ACTIVE_SESSION.to_string())?;
+    run_plugin_command(&live, command, args)
+}
+
+/// 在一个指定 harness 上执行扩展 slash command。`/plan start|exit` 的
+/// **会话级**入口：并列窗格/非活动会话也能按自己的扩展实例执行（计划模式
+/// 插件每会话一份——见 rpi-extensions 的 per-session copy）。
+pub(crate) fn run_plugin_command(
+    live: &HarnessLive,
+    command: &str,
+    args: &str,
+) -> Result<serde_json::Value, String> {
     let snapshot = {
         let session = live
             .reload
@@ -645,6 +658,20 @@ pub(crate) struct EngineShared {
     session_facts_cache: Mutex<HashMap<PathBuf, SessionFactsCache>>,
     /// 活动会话 stat → SessionStats 缓存（`state()` 高频调用；文件不变即复用）。
     stats_cache: Mutex<Option<(PathBuf, u64, u64, SessionStats)>>,
+    /// 当前活动环境（profile）名（`pi_profiles`；None = 本体）。
+    ///
+    /// 写入面只有 `pi_set_active_profile`（用户切换环境时）；读面 = 新会话
+    /// 落点（`build_harness_with` 的 session_dir）、`list_sessions` /
+    /// `index_sessions` 的扫描根。**只加载当前环境的会话**——hermes
+    /// "切换时左侧栏会话会变、其余环境零开销" 的宿主对偶。
+    active_profile: Mutex<Option<String>>,
+    /// New Chat 尚未落会话时选择的审批模式（full access）：下一次主会话
+    /// 创建时消费并 pin 到该会话；打开已有会话不消费（dsh 的 preset 只在
+    /// 新会话落地）。None = 用默认 always-ask。
+    pending_approval_mode: Mutex<Option<rpi_cli::approval_gate::ApprovalMode>>,
+    /// New Chat 尚未落会话时选择的计划模式：第一份主会话创建后消费并执行
+    /// `/plan start`。打开已有会话不消费（New Chat 的暂存丢弃）。
+    pending_plan_mode: Mutex<bool>,
 }
 
 struct HarnessLive {
@@ -744,6 +771,10 @@ pub(crate) fn session_meta_in(
 
 /// 装配一个 harness（含 provider 解析、contextWindow 回填、ui_dialog attach、
 /// 新建会话的路径反查）。`session_path = Some` 走恢复路径。
+///
+/// `session_dir` = 环境（profile）隔离面（2026-11-22）：Some 时新会话落
+/// 该目录（rpi `Args.session_dir` 原生支持，见 `pi_profiles`）；None =
+/// 本体/默认解析（settings.sessionDir / `<cwd>/.rpi/sessions`）。
 pub(crate) fn build_harness_impl(
     rt: &PiRuntime,
     cwd: &Path,
@@ -751,6 +782,7 @@ pub(crate) fn build_harness_impl(
     provider: Option<&str>,
     model: Option<&str>,
     extension_filter: Option<&[String]>,
+    session_dir: Option<&Path>,
 ) -> Result<BuiltHarness, String> {
     let (harness, events, reload, resolved_provider, model_id, id) = rt.block_on(async {
         let t_open = std::time::Instant::now();
@@ -767,6 +799,11 @@ pub(crate) fn build_harness_impl(
         let mut args = rpi_cli::args::Args::default();
         if let Some(p) = session_path {
             args.session = Some(p.to_string());
+        }
+        // 环境隔离：具名 profile 的新会话落 `<home>/sessions`（rpi 的
+        // session_dir 优先级 = args > settings.sessionDir > 默认）。
+        if let Some(dir) = session_dir {
+            args.session_dir = Some(dir.to_path_buf());
         }
         // per-bot 扩展白名单：`dev_local_only=true` 阻止模式分支扫全局目录，
         // 再逐文件加载白名单内的 DLL（Args.extension = 显式文件路径）。
@@ -841,7 +878,12 @@ pub(crate) fn build_harness_impl(
         }
         Ok::<_, String>((harness, events, reload, provider, model_id, id))
     })?;
-    let sessions_root = resolve_session_root(cwd);
+    // 会话根的真相与 build 的 `Args.session_dir` 同源：具名环境用环境目录，
+    // 否则走 settings/默认解析。新建会话的反查必须在这个根里找——用默认根
+    // 会找不到刚落盘的具名环境会话。
+    let sessions_root = session_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| resolve_session_root(cwd));
     let path = match session_path {
         Some(p) => PathBuf::from(p),
         None => PathBuf::from(session_meta_in(rt, &sessions_root, &id)?.path),
@@ -937,6 +979,9 @@ impl PiEngine {
                 markers_cache: Mutex::new(None),
                 session_facts_cache: Mutex::new(HashMap::new()),
                 stats_cache: Mutex::new(None),
+                active_profile: Mutex::new(None),
+                pending_approval_mode: Mutex::new(None),
+                pending_plan_mode: Mutex::new(false),
             }),
             approvals,
             asks,
@@ -957,8 +1002,45 @@ impl PiEngine {
         Arc::clone(&self.asks)
     }
 
+    // ── 环境（profile）隔离（pi_profiles；2026-11-22）─────────────────────
+
+    /// 当前活动环境名（None = 本体）。名字在 `set_active_profile` 已规范化。
+    pub fn active_profile(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .shared
+            .active_profile
+            .lock()
+            .map_err(|_| "环境状态锁中毒".to_string())?
+            .clone())
+    }
+
+    /// 切换活动环境（`pi_set_active_profile` 的实现）。返回规范化后的名字
+    /// （None = 本体）。调用方负责随后的会话列表刷新/运行态复位。
+    pub fn set_active_profile(&self, name: Option<&str>) -> Result<Option<String>, String> {
+        let normalized = crate::pi_profiles::normalize_profile(name)?;
+        *self
+            .shared
+            .active_profile
+            .lock()
+            .map_err(|_| "环境状态锁中毒".to_string())? = normalized.clone();
+        Ok(normalized)
+    }
+
+    /// 活动环境的会话目录（写面；具名环境确保目录存在）。本体 = None。
+    fn active_profile_sessions_dir(&self) -> Result<Option<PathBuf>, String> {
+        let name = self.active_profile()?;
+        match name.as_deref() {
+            None => Ok(None),
+            Some(n) => crate::pi_profiles::ensure_profile_dirs(Some(n)),
+        }
+    }
+
     /// Harness 装配（resolve → build）。`session_path` = Some 时走恢复路径
     /// （args.session + allow_existing 由 CLI build 自动接管）。
+    ///
+    /// **环境隔离**：新会话落点取当前活动 profile 的 session_dir（本体 =
+    /// None → rpi 默认解析）；打开既有路径时 session_dir 只影响 `/reload`
+    /// 的默认目录，不改该文件身份。
     ///
     /// 返回的 `HarnessLive::session_path` **恒为 Some**：新建会话由 rpi 在
     /// build 内部落盘（`<root>/<encoded-cwd>/<ts>_<id>.jsonl`）但不回报路径，
@@ -977,7 +1059,16 @@ impl PiEngine {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> Result<HarnessLive, String> {
-        let built = build_harness_impl(&self.shared.rt, cwd, session_path, provider, model, None)?;
+        let profile_dir = self.active_profile_sessions_dir()?;
+        let built = build_harness_impl(
+            &self.shared.rt,
+            cwd,
+            session_path,
+            provider,
+            model,
+            None,
+            profile_dir.as_deref(),
+        )?;
         Ok(HarnessLive {
             harness: built.harness,
             events: built.events,
@@ -995,8 +1086,23 @@ impl PiEngine {
     /// `default_session_dir` 处理）；相对路径相对启动项目解析。
     /// **必须与 build 的 `cwd` 同源**：根不一致会让新建会话的路径反查直接
     /// 失败（`new_session_with_cwd` 以用户选定工作区建会话）。
+    ///
+    /// **环境隔离（2026-11-22）**：具名 profile 在场时根 = 该环境的
+    /// `<home>/sessions`（与 build 的 `Args.session_dir` 同一个来源）——
+    /// 列表/反查/新会话三处同源，切换环境即切换整张会话面。
     fn session_root(&self, cwd: &Path) -> PathBuf {
-        resolve_session_root(cwd)
+        match crate::pi_profiles::normalize_profile(self.active_profile().ok().flatten().as_deref())
+        {
+            Ok(Some(name)) => match crate::pi_profiles::profile_sessions_dir(Some(&name)) {
+                Ok(Some(dir)) => dir,
+                Ok(None) => resolve_session_root(cwd),
+                Err(e) => {
+                    eprintln!("[profile] 环境 {name} 会话目录解析失败: {e}——按本体根列出");
+                    resolve_session_root(cwd)
+                }
+            },
+            _ => resolve_session_root(cwd),
+        }
     }
 
     /// 会话根的 JSONL repo（列表/反查/fork 共用）。
@@ -1029,7 +1135,162 @@ impl PiEngine {
     ///
     /// 旧会话的挂起对话框一律 `cancel_all`：插件侧 poll 立刻看到 cancelled
     /// （不留到超时），宿主侧已取出的卡片随注册表清空（防鬼影卡片）。
+    /// 取一个 harness 的会话 id（引擎元数据 = approval_gate 的 pin 键）。
+    fn session_id_of(&self, live: &HarnessLive) -> Result<String, String> {
+        self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .get_metadata()
+                .await
+                .map(|m| m.id)
+                .map_err(|e| format!("会话 id 读取失败: {e}"))
+        })
+    }
+
+    /// 当前主柄会话 id（无 live = None）。
+    fn current_session_id(&self) -> Result<Option<String>, String> {
+        match self.live_opt()? {
+            Some(live) => Ok(Some(self.session_id_of(&live)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 安装/切换 live 前应用该会话持久化的审批模式（跨重启保持 full access）。
+    /// 读取失败只记 stderr、用默认审批——不阻断会话打开（偏好文件损坏不该
+    /// 让用户丢会话），但失败可见。
+    fn apply_persisted_approval_mode(&self, live: &HarnessLive) {
+        let id = match self.session_id_of(live) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[approval] {e}");
+                return;
+            }
+        };
+        // 计划态是**运行期**状态：rpi-plan-mode 的 active 在插件 static，
+        // 进程重启后条目虽在但插件不恢复 active（2026-11-23 实测）。
+        // 因此内存里已有的 Planning pin 优先，不能被持久化文件覆盖；文件
+        // 里若残留旧版写下的 planning，按 always-ask 处理并清掉。
+        if rpi_cli::approval_gate::session_mode(&id) == rpi_cli::approval_gate::ApprovalMode::Planning
+        {
+            return;
+        }
+        match crate::approval_modes::mode_for(&id) {
+            Ok(Some(persisted)) => {
+                let mode = if persisted == rpi_cli::approval_gate::ApprovalMode::Planning {
+                    rpi_cli::approval_gate::ApprovalMode::AlwaysAsk
+                } else {
+                    persisted
+                };
+                rpi_cli::approval_gate::set_session_mode(&id, mode);
+                if mode != persisted {
+                    if let Err(e) = crate::approval_modes::set_mode(&id, mode) {
+                        eprintln!("[approval] 会话 {id} 计划残留清理落盘失败：{e}");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("[approval] 会话 {id} 的审批模式读取失败：{e}"),
+        }
+    }
+
+    /// 主会话（New Chat / 选文件夹 / 打开已有）落初始审批模式：
+    /// - 新会话：优先消费 New Chat 里选的 pending（full access），否则用持久化
+    ///   值，再否则 **always-ask**（默认不再全局 yolo）；
+    /// - 打开已有会话：不消费 pending（New Chat 的暂存丢弃），用持久化值；
+    /// - 已有 pin 的会话说 set_session_mode 覆盖即可（幂等）。
+    fn pin_main_session_approval_mode(
+        &self,
+        session_id: &str,
+        consume_pending: bool,
+    ) -> Result<(), String> {
+        if session_id.trim().is_empty() || session_id.starts_with("unknown(") {
+            return Ok(());
+        }
+        let pending = self
+            .shared
+            .pending_approval_mode
+            .lock()
+            .map_err(|_| "审批模式 pending 锁中毒".to_string())?
+            .take();
+        let pending = if consume_pending { pending } else { None };
+        let persisted = match crate::approval_modes::mode_for(session_id) {
+            Ok(mode) => mode,
+            Err(e) => {
+                eprintln!("[approval] 会话 {session_id} 的审批模式读取失败：{e}");
+                None
+            }
+        };
+        // 旧版宿主可能把 planning 写进文件（现已禁止落盘）。计划态不跨
+        // 进程重启，按 always-ask 处理并清掉残留。
+        let persisted = match persisted {
+            Some(rpi_cli::approval_gate::ApprovalMode::Planning) => {
+                if let Err(e) = crate::approval_modes::set_mode(
+                    session_id,
+                    rpi_cli::approval_gate::ApprovalMode::AlwaysAsk,
+                ) {
+                    eprintln!("[approval] 会话 {session_id} 计划残留清理落盘失败：{e}");
+                }
+                Some(rpi_cli::approval_gate::ApprovalMode::AlwaysAsk)
+            }
+            other => other,
+        };
+        match pending.or(persisted) {
+            Some(mode) => {
+                rpi_cli::approval_gate::set_session_mode(session_id, mode);
+                if pending.is_some() {
+                    // 持久化失败不阻断建会话（内存 pin 已生效），但可见。
+                    if let Err(e) = crate::approval_modes::set_mode(session_id, mode) {
+                        eprintln!("[approval] 会话 {session_id} 的审批模式落盘失败：{e}");
+                    }
+                }
+            }
+            None => {
+                rpi_cli::approval_gate::set_session_mode(
+                    session_id,
+                    rpi_cli::approval_gate::ApprovalMode::AlwaysAsk,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 新主会话落定后消费 New Chat 选择的计划模式（有则 `/plan start`）。
+    /// 失败只记 stderr：会话已经建好，不能因计划启动失败把它丢掉。
+    fn apply_pending_plan_mode(&self) {
+        let enabled = match self.shared.pending_plan_mode.lock() {
+            Ok(mut guard) => std::mem::replace(&mut *guard, false),
+            Err(_) => {
+                eprintln!("[plan] pending 计划模式锁中毒");
+                false
+            }
+        };
+        if !enabled {
+            return;
+        }
+        match self.live_opt() {
+            Ok(Some(live)) => {
+                if let Err(e) = run_plugin_command(&live, "/plan", "start") {
+                    eprintln!("[plan] 新会话启动计划模式失败：{e}");
+                    return;
+                }
+                if let Ok(id) = self.session_id_of(&live) {
+                    // 计划态的审批 pin = Planning（确定性拦截变更工具），
+                    // 不是 Yolo：运行中的工具目录是 run 开始时快照的，只有
+                    // 这层 gate 能让"对话中切计划"对当前 run 立即生效。
+                    // **只设内存 pin，不落盘**：计划态不跨进程重启。
+                    rpi_cli::approval_gate::set_session_mode(
+                        &id,
+                        rpi_cli::approval_gate::ApprovalMode::Planning,
+                    );
+                }
+            }
+            Ok(None) => eprintln!("[plan] 新会话计划模式 pending：没有活动 harness"),
+            Err(e) => eprintln!("[plan] 新会话计划模式 pending 读取失败：{e}"),
+        }
+    }
+
     fn install_live(&self, live: HarnessLive) -> Result<(), String> {
+        self.apply_persisted_approval_mode(&live);
         let installed = Arc::new(live);
         // 目标校验的触发源 = **本会话每一次 run 结束**（AgentEnd），不是
         // 「宿主 prompt 返回」——目标的首个工作轮由 rpi-goal 经
@@ -1204,12 +1465,16 @@ impl PiEngine {
             return Ok(());
         }
         let live = self.build_harness(&self.shared.cwd, None)?;
+        let id = self.session_id_of(&live)?;
+        self.pin_main_session_approval_mode(&id, true)?;
         *self
             .shared
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
-        self.install_live(live)
+        self.install_live(live)?;
+        self.apply_pending_plan_mode();
+        Ok(())
     }
 
     /// 该路径是否就是当前活动会话。
@@ -1332,6 +1597,11 @@ impl PiEngine {
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
+        self.pin_main_session_approval_mode(&id, false)?;
+        // 打开已有会话 = 离开 New Chat：暂存的计划选择不消费。
+        if let Ok(mut pending) = self.shared.pending_plan_mode.lock() {
+            *pending = false;
+        }
         self.install_live(live)?;
         Ok(id)
     }
@@ -1347,6 +1617,14 @@ impl PiEngine {
         // 不 drop：同进程内再次打开该会话必须复用（lease 释放在引擎侧不可
         // 达），见 EngineShared::retired。
         self.retire_previous(previous)?;
+        // New Chat 的审批暂存随旧会话一起丢弃：下一个真实会话重新按默认/
+        // 持久化值落 pin，不继承上一个会话的 full access。
+        if let Ok(mut pending) = self.shared.pending_approval_mode.lock() {
+            *pending = None;
+        }
+        if let Ok(mut pending) = self.shared.pending_plan_mode.lock() {
+            *pending = false;
+        }
         self.approvals.cleanup();
         self.asks.cleanup();
         Ok(())
@@ -1370,11 +1648,59 @@ impl PiEngine {
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
+        self.pin_main_session_approval_mode(&id, true)?;
         self.install_live(live)?;
+        self.apply_pending_plan_mode();
         Ok(id)
     }
 
     // ── 对话 ────────────────────────────────────────────────────────────────
+
+    /// 把外部（Claude Code）会话转成 pi 会话落盘（迁移向导用）。
+    /// `cwd` 决定会话根（与 build 的 session_dir 同源），`title` 写入会话名。
+    pub(crate) fn import_agent_session(
+        &self,
+        cwd: &str,
+        title: Option<&str>,
+        messages: Vec<rpi_agent::message::AgentMessage>,
+    ) -> Result<String, String> {
+        let root = self.session_root(&PathBuf::from(cwd));
+        let repo = jsonl_repo_for(&root);
+        let options = JsonlSessionCreateOptions {
+            id: None,
+            parent_session_id: None,
+            cwd: cwd.to_string(),
+            metadata: None,
+        };
+        let title = title.map(str::to_string);
+        self.shared.rt.block_on(async move {
+            let storage = repo
+                .create_typed(&options)
+                .await
+                .map_err(|e| format!("创建导入会话失败: {e}"))?;
+            let session = Session::new(
+                Arc::new(storage) as Arc<dyn rpi_harness::session::types::SessionStorage>,
+                None,
+            );
+            for message in messages {
+                session
+                    .append_message(message)
+                    .await
+                    .map_err(|e| format!("写入导入消息失败: {e}"))?;
+            }
+            if let Some(title) = title {
+                session
+                    .set_name(Some(&title))
+                    .await
+                    .map_err(|e| format!("设置导入会话名失败: {e}"))?;
+            }
+            let metadata = session
+                .get_metadata()
+                .await
+                .map_err(|e| format!("读取导入会话元数据失败: {e}"))?;
+            Ok(metadata.id)
+        })
+    }
 
     /// 发一轮（纯文本）。on_event = rpi AgentEvent 流（agui.rs 映射到
     /// AG-UI 协议）；on_start = 拿到执行权、起跑前触发（RUN_STARTED 时点）。
@@ -1465,7 +1791,28 @@ fn prompt_inner(
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             let _ = stop_tx.send(true);
             let _ = drain.await;
-            result.map(|_| ()).map_err(|e| e.to_string())
+            // **RunResult.outcome = Failed 也是失败**（2026-11-25 实锤）：
+            // rpi 对 provider 连接失败/重试耗尽不发 AgentEnd(error)，而是
+            // 发一个 StopReason::Error 的 assistant 消息 + AgentEnd，并让
+            // prompt 返回 Ok(RunResult { outcome: Failed { error } })。
+            // 旧实现 `result.map(|_| ())` 把这种 Ok 当成功 → agui 只推
+            // RUN_FINISHED、不推 RUN_ERROR；空 assistant 消息又被前端隐藏，
+            // 用户看到的就是"发了消息，AI 没回复，也没错误"。
+            // 这里把 Failed 转成 Err，让 agui 的 Err 分支推 RUN_ERROR。
+            // Aborted（用户中断）是正常收尾，不是错误，保持 Ok。
+            match result {
+                Ok(run) => match run.outcome {
+                    HarnessRunOutcome::Failed { error, .. } => {
+                        if error.message.trim().is_empty() {
+                            Err(format!("运行失败（{}）", error.code))
+                        } else {
+                            Err(error.message)
+                        }
+                    }
+                    _ => Ok(()),
+                },
+                Err(e) => Err(e.to_string()),
+            }
         })
     }
 
@@ -1474,6 +1821,49 @@ fn prompt_inner(
         let live = self.live()?;
         self.shared.rt.block_on(async {
             AgentLane::abort(live.harness.as_ref())
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// 运行中注入用户引导（设置页「行为与工具 → 交互行为 = 引导」的宿主桥）。
+    ///
+    /// `AgentLane::steer` 把消息放进 steer 队列，引擎在当前 run 的**下一次
+    /// 工具调用批后**注入（rpi-agent getSteeringMessages 同语义；ZCode
+    /// 「引导至下一轮工具调用后运行」）。带图与 prompt 同构
+    /// （`UserContent::Blocks`）；图片校验复用 POST 的白名单（不静默丢）。
+    /// 无活动会话/无活跃 run 时上游返回错误——原样传播（前端只在 lane
+    /// busy + streaming 时调用；错误即错误，不吞）。
+    pub fn steer(&self, text: &str, images: &[AguiImage]) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() && images.is_empty() {
+            return Err("steer: text 与 images 不能同时为空".into());
+        }
+        crate::agui::validate_images(images)?;
+        let content = if images.is_empty() {
+            UserContent::Text(text.to_owned())
+        } else {
+            let mut blocks: Vec<Content> = Vec::new();
+            if !text.is_empty() {
+                blocks.push(Content::text(text));
+            }
+            blocks.extend(images.iter().map(|img| {
+                Content::Image(ImageContent {
+                    kind: Default::default(),
+                    data: std::sync::Arc::from(img.data.as_str()),
+                    mime_type: img.mime_type.clone(),
+                })
+            }));
+            UserContent::Blocks(blocks)
+        };
+        let message = rpi_agent::message::AgentMessage::User(UserMessage::new(
+            content,
+            chrono::Utc::now().timestamp_millis(),
+        ));
+        let live = self.live()?;
+        self.shared.rt.block_on(async {
+            AgentLane::steer(live.harness.as_ref(), message)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -1814,13 +2204,24 @@ fn prompt_inner(
         project_roots: &[String],
     ) -> Result<crate::session_index::IndexScan, String> {
         use crate::session_index as si;
-        use std::collections::HashSet;
 
         let cwd = self.shared.cwd.clone();
+        let mut roots: Vec<si::ScanRoot> = Vec::new();
+
+        // 环境隔离（2026-11-22）：具名 profile 只扫该环境自己的会话目录
+        // （项目根/工作区默认根都属于本体环境——切到具名环境时零扫描，
+        // hermes "只启用自己的会话" 的开销对偶）。
+        if let Some(name) = self.active_profile()? {
+            let dir = crate::pi_profiles::profile_sessions_dir(Some(&name))?
+                .ok_or_else(|| format!("环境 {name} 会话目录解析失败"))?;
+            si::push_root(&mut roots, dir, si::RootKind::SessionDir);
+
+            return self.index_sessions_from_roots(roots);
+        }
+
         let settings = rpi_cli::settings::load_settings()
             .map_err(|e| format!("读 rpi 设置失败，无法确定 sessionDir: {e}"))?;
 
-        let mut roots: Vec<si::ScanRoot> = Vec::new();
         if let Some(dir) = settings.session_dir.as_ref() {
             si::push_root(
                 &mut roots,
@@ -1845,6 +2246,20 @@ fn prompt_inner(
             si::resolve_session_path(&workspace_default, &cwd),
             si::RootKind::Workspace,
         );
+
+        self.index_sessions_from_roots(roots)
+    }
+
+    /// `index_sessions` 的共享扫描体：根已解析后的候选收集/project 归属/
+    /// 排序/统计（本体与具名环境同一条路，防止两份实现漂移）。
+    fn index_sessions_from_roots(
+        &self,
+        roots: Vec<crate::session_index::ScanRoot>,
+    ) -> Result<crate::session_index::IndexScan, String> {
+        use crate::session_index as si;
+        use std::collections::HashSet;
+
+        let cwd = self.shared.cwd.clone();
 
         struct Candidate {
             path: PathBuf,
@@ -2013,6 +2428,7 @@ fn prompt_inner(
                     name,
                     message_count,
                     last_modified: candidate.modified,
+                    created_at: candidate.header.created_at,
                     parent_session_id: candidate.header.parent_session_id,
                     project_id: None,
                     source_root: candidate.source_root,
@@ -2295,48 +2711,107 @@ fn prompt_inner(
         format!("rpi 引擎待接：{name}（rpi-main v0.24.0 尚无对应能力）")
     }
 
-    /// 模式快照（前端 mode-store 每 2s 拉一次）：**只投影 rpi-plan-mode 的
-    /// 会话条目**（customType `plan-mode`，data `{active, plan}`，见
-    /// pi_plugin_state.rs）。
+    /// 模式快照（前端 mode-chip 每 2s 拉一次）：**会话级**。
     ///
-    /// - `active=true` → `planMode:"planning"`；false / 无条目 → `"off"`；
-    /// - `planPending` 恒 null：rpi 插件没有宿主审批闸（`plan_mode_complete`
-    ///   只存计划并退出），编一个 pending 卡只会得到必被 `pi_decide_plan`
-    ///   Err 打回的按钮；
-    /// - `approvalMode` 恒 null：rpi 没有 always-ask/write/yolo 概念（权限由
-    ///   rpi-permissions 规则 + ask 对话框承担），不冒充任何模式。
+    /// - `planMode` = 该会话 rpi-plan-mode 的激活态（插件每会话一份实例；
+    ///   `plan-mode` 条目 + 主柄 `/plan status` 校验）；
+    /// - `planPending` 恒 null：rpi 插件没有 dsh `exit_plan_mode` 那种宿主审批闸
+    ///   （`plan_mode_complete` 只存计划并退出），不造假 pending 卡；
+    /// - `approvalMode` = 该会话的审批 pin（always-ask/write/yolo；引擎
+    ///   `approval_gate::session_mode`，宿主持久化 approval-modes.json）。
     ///
-    /// 无活动会话 = 默认快照（不是错误：mode-switch 挂载即轮询，首启时没有
-    /// 会话是预期态）。
-    pub fn mode_state(&self) -> Result<serde_json::Value, String> {
+    /// 无活动会话 = 默认快照（New Chat：pending 计划/审批可读；否则
+    /// always-ask / plan off——不是错误）。
+    pub fn mode_state_for(&self, session_id: Option<&str>) -> Result<serde_json::Value, String> {
         // rpi 的「模式」= plan-mode 插件态 + 启动期权限闸开关
         // （permissionGate，RPI_PERMISSION_GATE=1 → bash/write/edit 每次确认）。
         // 该开关**只读**：扩展在会话构建时读 env，宿主没有运行时切换面。
         let gate = permission_gate_enabled();
-        let mut wire = match self.live_opt()? {
+        let live = self.live_opt()?;
+        let live_id = match live.as_deref() {
+            Some(live) => Some(self.session_id_of(live)?),
+            None => None,
+        };
+        let requested = session_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let target = requested.clone().or_else(|| live_id.clone());
+        let target_live = match &requested {
+            Some(id) => self.session_harness(id)?,
+            None => live.clone(),
+        };
+        let mut wire = match target_live.as_deref() {
             None => crate::pi_plugin_state::mode_wire(None)?,
-            Some(live) => {
-                let data = self.latest_plugin_entry(&live, crate::pi_plugin_state::PLAN_ENTRY)?;
+            Some(target_live) => {
+                let data = self.latest_plugin_entry(target_live, crate::pi_plugin_state::PLAN_ENTRY)?;
                 crate::pi_plugin_state::mode_wire(data.as_ref())?
             }
         };
-        // **进程级真值**：rpi-plan-mode 的 active 是插件里的 static（不是会话
-        // 条目；切会话时不落新条目，`activate()` 只做 false→true 的持久化）。
-        // 只看会话条目会在"计划态切到另一个会话"时显示 off，而工具实际仍被
-        // veto——用 `/plan status` 的 "Plan · Planning" 覆盖条目判断。
-        if let Ok(status) = self.run_command("/plan", "status") {
-            if let Some(text) = status.get("text").and_then(|v| v.as_str()) {
-                if text.contains("Plan · Planning") {
-                    wire["planMode"] = serde_json::json!("planning");
-                } else if wire["planMode"] == serde_json::json!("planning") {
-                    wire["planMode"] = serde_json::json!("off");
+        // **插件 static 的覆盖**：rpi-plan-mode 的 active 在模块级 static；
+        // 现在 loader 为每个会话加载独立副本，SessionStart/Tree 会从该会话
+        // 的 plan-mode 条目恢复。主柄再补一次 `/plan status` 真值覆盖，防止
+        // 条目与运行态短暂不同步（窗格没有主柄命令面，只读条目）。
+        if requested.is_none() || requested == live_id {
+            if let Ok(status) = self.run_command("/plan", "status") {
+                if let Some(text) = status.get("text").and_then(|v| v.as_str()) {
+                    if text.contains("Plan · Planning") {
+                        wire["planMode"] = serde_json::json!("planning");
+                    } else if wire["planMode"] == serde_json::json!("planning") {
+                        wire["planMode"] = serde_json::json!("off");
+                    }
                 }
             }
         }
         wire["permissionGate"] = serde_json::json!(gate);
-        // 运行时审批模式（rpi-cli approval_gate；宿主桥安装后由前端切换）。
-        wire["approvalMode"] = serde_json::json!(rpi_cli::approval_gate::mode().as_wire());
+        if target.is_none() {
+            let pending_plan = self
+                .shared
+                .pending_plan_mode
+                .lock()
+                .map_err(|_| "计划模式 pending 锁中毒".to_string())?;
+            if *pending_plan {
+                wire["planMode"] = serde_json::json!("planning");
+            }
+        }
+        // 计划 pin 与插件态对账：rpi-plan-mode 的 `plan_mode_complete` 是
+        // 存盘即退出，插件自己把 active 置 false，但 approval pin 还停在
+        // Planning——不校正的话后续轮次的变更工具会被 gate 无由拦截。
+        // 反向同理（计划态恢复但 pin 丢了）也要补。**只改内存 pin**：计划
+        // 态不跨进程重启，落盘会在重启后留下假的 planning。这个读口每 2s
+        // 被 UI 轮询，顺带做幂等对账。
+        if let (Some(id), Some(_)) = (target.as_deref(), target_live.as_deref()) {
+            let plan_active = wire["planMode"] == serde_json::json!("planning");
+            let pinned = rpi_cli::approval_gate::session_mode(id);
+            if plan_active && pinned != rpi_cli::approval_gate::ApprovalMode::Planning {
+                rpi_cli::approval_gate::set_session_mode(
+                    id,
+                    rpi_cli::approval_gate::ApprovalMode::Planning,
+                );
+            } else if !plan_active && pinned == rpi_cli::approval_gate::ApprovalMode::Planning {
+                rpi_cli::approval_gate::set_session_mode(
+                    id,
+                    rpi_cli::approval_gate::ApprovalMode::AlwaysAsk,
+                );
+            }
+        }
+        // 会话级审批模式：有 sessionId 读该会话 pin；New Chat（无 live）读
+        // pending；再回退进程默认（bot/侧栏仍走默认）。
+        let approval = match &target {
+            Some(id) => rpi_cli::approval_gate::session_mode(id),
+            None => self
+                .shared
+                .pending_approval_mode
+                .lock()
+                .map_err(|_| "审批模式 pending 锁中毒".to_string())?
+                .unwrap_or(rpi_cli::approval_gate::ApprovalMode::AlwaysAsk),
+        };
+        wire["approvalMode"] = serde_json::json!(approval.as_wire());
         Ok(wire)
+    }
+
+    pub fn mode_state(&self) -> Result<serde_json::Value, String> {
+        self.mode_state_for(None)
     }
 
     /// 目标态（活动面板「目标」分区）：rpi-goal 把状态存成当前分支的
@@ -2429,14 +2904,139 @@ fn prompt_inner(
         ))
     }
 
-    pub fn set_approval_mode(&self, mode: &str) -> Result<(), String> {
+    /// 该 id 是否是并列窗格会话（审批卡只在前台窗口渲染；窗格里切到
+    /// always-ask 会让工具调用等一个永远不会出现的审批卡）。
+    fn is_side_session_id(&self, session_id: &str) -> Result<bool, String> {
+        let handles: Vec<Arc<HarnessLive>> = self
+            .shared
+            .side
+            .lock()
+            .map_err(|_| "窗格会话表锁中毒".to_string())?
+            .values()
+            .cloned()
+            .collect();
+        for handle in handles {
+            if self.session_id_of(&handle).ok().as_deref() == Some(session_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn set_approval_mode_for(
+        &self,
+        session_id: Option<&str>,
+        mode: &str,
+    ) -> Result<(), String> {
         let parsed = rpi_cli::approval_gate::ApprovalMode::parse(mode).ok_or_else(|| {
             format!(
                 "未知审批模式 `{mode}`（可用：always-ask / write / yolo）"
             )
         })?;
-        rpi_cli::approval_gate::set_mode(parsed);
+        // Planning 是计划模式的内部 pin，必须与插件的 `/plan start|exit`
+        // 同步；走审批 IPC 单独设置会造出"gate 拦变更但插件没进计划"的
+        // 半态。计划模式入口只有 `pi_set_plan_mode`。
+        if parsed == rpi_cli::approval_gate::ApprovalMode::Planning {
+            return Err(
+                "planning 不能经审批接口设置：计划模式请用 pi_set_plan_mode（它会同步插件态）"
+                    .into(),
+            );
+        }
+        let requested = session_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let live_id = match self.live_opt()? {
+            Some(live) => Some(self.session_id_of(&live)?),
+            None => None,
+        };
+        let target = match requested {
+            Some(id) => Some(id),
+            None => live_id.clone(),
+        };
+        // 并列窗格的审批卡没有渲染面：只允许保持完全访问，不允许切到
+        // 会等待审批的档位（错误可见，不静默挂起工具调用）。
+        if let (Some(id), Some(live_id)) = (target.as_deref(), live_id.as_deref()) {
+            if id != live_id && parsed != rpi_cli::approval_gate::ApprovalMode::Yolo {
+                if self.is_side_session_id(id)? {
+                    return Err(
+                        "并列窗格暂不支持逐次审批（审批卡只在前台渲染）；请保持完全访问"
+                            .into(),
+                    );
+                }
+            }
+        }
+        match target {
+            Some(id) => {
+                rpi_cli::approval_gate::set_session_mode(&id, parsed);
+                crate::approval_modes::set_mode(&id, parsed)?;
+            }
+            None => {
+                // New Chat：暂存到下一次主会话创建；不污染进程默认（bot/
+                // 侧栏仍按默认审批）。审批与计划互斥：清掉 pending 计划。
+                *self
+                    .shared
+                    .pending_approval_mode
+                    .lock()
+                    .map_err(|_| "审批模式 pending 锁中毒".to_string())? = Some(parsed);
+                if let Ok(mut pending) = self.shared.pending_plan_mode.lock() {
+                    *pending = false;
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub fn set_approval_mode(&self, mode: &str) -> Result<(), String> {
+        self.set_approval_mode_for(None, mode)
+    }
+
+    /// 删会话时清掉该会话的审批 pin（内存 + 持久化）。
+    pub fn clear_approval_mode(&self, session_id: &str) -> Result<(), String> {
+        rpi_cli::approval_gate::clear_session_mode(session_id);
+        crate::approval_modes::clear_mode(session_id)
+    }
+
+    /// 指定会话（主柄或并列窗格）的 harness；不存在 = None（不假装在场）。
+    fn session_harness(&self, session_id: &str) -> Result<Option<Arc<HarnessLive>>, String> {
+        let id = session_id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        if let Some(live) = self.live_opt()? {
+            if self.session_id_of(&live)? == id {
+                return Ok(Some(live));
+            }
+        }
+        let handles: Vec<Arc<HarnessLive>> = self
+            .shared
+            .side
+            .lock()
+            .map_err(|_| "窗格会话表锁中毒".to_string())?
+            .values()
+            .cloned()
+            .collect();
+        for handle in handles {
+            if self.session_id_of(&handle)? == id {
+                return Ok(Some(handle));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 指定会话当前的活动工具名（诊断/测试面：计划模式应只剩
+    /// read/bash/docs/plan_mode_complete；完全访问不改变工具目录）。
+    pub fn active_tools_for(&self, session_id: Option<&str>) -> Result<Vec<String>, String> {
+        let target = match session_id.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => self
+                .session_harness(id)?
+                .ok_or_else(|| format!("会话 {id} 不在场，无法读取工具集"))?,
+            None => self.live()?,
+        };
+        self.shared
+            .rt
+            .block_on(AgentLane::get_active_tools(target.harness.as_ref()))
+            .map_err(|e| format!("读取活动工具失败: {e}"))
     }
 
     /// 执行已注册的扩展 slash command（与 rpi-cli RPC `execute_command` 同一
@@ -2444,14 +3044,79 @@ fn prompt_inner(
     ///
     /// 没有加载扩展 / 命令未知 / handler 返回非 JSON = Err（不静默）。
     pub fn run_command(&self, command: &str, args: &str) -> Result<serde_json::Value, String> {
-        run_goal_command(&self.shared, command, args)
+        self.run_command_for(None, command, args)
+    }
+
+    /// 会话版 slash command：`sessionId` 指定时在该会话自己的扩展实例上执行
+    /// （计划模式插件每会话一份；窗格也能各自进出计划态），缺省 = 主柄。
+    pub fn run_command_for(
+        &self,
+        session_id: Option<&str>,
+        command: &str,
+        args: &str,
+    ) -> Result<serde_json::Value, String> {
+        let target = match session_id.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => self
+                .session_harness(id)?
+                .ok_or_else(|| format!("会话 {id} 不在场，无法执行 {command}"))?,
+            None => self.live()?,
+        };
+        run_plugin_command(&target, command, args)
     }
 
     pub fn set_plan_mode(&self, enabled: bool) -> Result<(), String> {
-        // rpi-plan-mode 的进入/退出是扩展命令 `/plan start|exit`；宿主通过
-        // 既有 run_command 通道转发（没有活动会话时如实 Err，不假装切了）。
-        self.run_command("/plan", if enabled { "start" } else { "exit" })
-            .map(|_| ())
+        self.set_plan_mode_for(None, enabled)
+    }
+
+    pub fn set_plan_mode_for(
+        &self,
+        session_id: Option<&str>,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let requested = session_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let target = match requested {
+            Some(id) => Some(id),
+            None => self.current_session_id()?,
+        };
+        match target {
+            Some(id) => {
+                self.run_command_for(Some(&id), "/plan", if enabled { "start" } else { "exit" })?;
+                // 计划态的审批 pin = Planning，不是 Yolo：除了插件把工具目录
+                // 收窄到 read/bash/docs/plan_mode_complete（下一次 run 才换
+                // 目录），approval_gate 还会对**当前 run** 的变更工具就地
+                // 拦截——run 开始时工具目录已快照，光靠插件对进行中的轮次无效。
+                // 退出计划回默认 always-ask；UI 的两个模式互斥，不保留进入前
+                // 的 full access（用户重新开即可）。
+                let plan_approval = if enabled {
+                    rpi_cli::approval_gate::ApprovalMode::Planning
+                } else {
+                    rpi_cli::approval_gate::ApprovalMode::AlwaysAsk
+                };
+                // 只设内存 pin：计划态不跨进程重启（插件重启后 active=false），
+                // 落盘会在重启后留下假的 planning。full access 才持久化。
+                rpi_cli::approval_gate::set_session_mode(&id, plan_approval);
+                Ok(())
+            }
+            None => {
+                // New Chat：暂存计划选择，第一份主会话创建后消费。
+                *self
+                    .shared
+                    .pending_plan_mode
+                    .lock()
+                    .map_err(|_| "计划模式 pending 锁中毒".to_string())? = enabled;
+                if enabled {
+                    *self
+                        .shared
+                        .pending_approval_mode
+                        .lock()
+                        .map_err(|_| "审批模式 pending 锁中毒".to_string())? = None;
+                }
+                Ok(())
+            }
+        }
     }
 
     pub fn decide_plan(&self, _approve: bool) -> Result<(), String> {

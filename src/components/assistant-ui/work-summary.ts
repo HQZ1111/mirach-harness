@@ -153,21 +153,57 @@ export function isSummaryRow(part: SummaryPartLike): boolean {
   return classifySummaryCategory(part) !== null;
 }
 
+/** 非首个非空思考的下标集合（「显示思考过程」= false 时从流中剔除）。
+ *
+ * ZCode `buildAssistantWorkRenderItems` 的 messageStreamShowReasoning 语义：
+ * 关闭时每轮仍展示第一次思考（其余行在扫描前剔除，不渲染、不断组、不计
+ * 统计——与本文件「空思考不切断连续摘要组」同一处理）。空思考本就不渲染，
+ * 不占「第一」的位置。true 时返回空集合（全部可见）。 */
+export function hiddenReasoningIndices(
+  parts: readonly SummaryPartLike[],
+  showReasoning: boolean,
+): ReadonlySet<number> {
+  if (showReasoning) return EMPTY_INDEX_SET;
+  const hidden = new Set<number>();
+  let firstVisibleSeen = false;
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    if (!part || part.type !== 'reasoning') continue;
+    if (!(part.text ?? '').trim()) continue;
+    if (firstVisibleSeen) hidden.add(index);
+    else firstVisibleSeen = true;
+  }
+  return hidden;
+}
+
+const EMPTY_INDEX_SET: ReadonlySet<number> = new Set<number>();
+
 /** 摘要组扫描项：单行（边界部件）或一段连续摘要行。 */
 export type WorkSummaryItem =
   | { kind: 'part'; key: string; index: number }
   | { kind: 'rows'; key: string; indices: readonly number[] };
+
+/** 扫描选项（「行为与工具」的两枚显示开关；缺省 = ZCode 当前默认行为）。 */
+export interface BuildWorkSummaryOptions {
+  /** `hiddenReasoningIndices(parts, false)` 的结果——非首条思考剔除。 */
+  hiddenReasoning?: ReadonlySet<number>;
+  /** 显示待办（ZCode `messageStreamShowTodos`）；false/缺省 = 剔除 todo 行。 */
+  showTodos?: boolean;
+}
 
 /**
  * 扫描一段部件（工作段内）→ 渲染项序列。
  *
  * 连续的可归类部件合成一个 `rows` 项（**长度 1 也保留 rows**——渲染层按
  * ZCode 的 `items.length < 2` 摊平成普通行）；边界部件各成一个 `part` 项。
- * 待办部件直接剔除（不渲染、不断组——ZCode 在扫描前 filter 掉）。
+ * 待办部件默认直接剔除（不渲染、不断组——ZCode 在扫描前 filter 掉）；
+ * `showTodos` 时作为普通部件进流（ZCode `showTodoToolCalls` 开启的行为）。
+ * 被隐藏的非首条思考同样剔除、不断组（与空思考同规）。
  */
 export function buildWorkSummaryItems(
   parts: readonly SummaryPartLike[],
   indices: readonly number[],
+  options: BuildWorkSummaryOptions = {},
 ): WorkSummaryItem[] {
   const items: WorkSummaryItem[] = [];
   let current: { indices: number[] } | null = null;
@@ -185,7 +221,14 @@ export function buildWorkSummaryItems(
   for (const index of indices) {
     const part = parts[index];
     if (!part) continue;
-    if (part.type === 'tool-call' && isTodoToolName(part.toolName ?? '')) continue;
+    if (options.hiddenReasoning?.has(index)) continue;
+    if (
+      part.type === 'tool-call' &&
+      isTodoToolName(part.toolName ?? '') &&
+      options.showTodos !== true
+    ) {
+      continue;
+    }
     // 空文本 / 空思考不是可见行（ZCode 在扫描前把流式空 reasoning 与空
     // assistantText 剔除）。它们既不渲染，也**不能切断连续摘要组**——
     // 否则每个空 delta 都会多开一个组头，把「已查阅 N 项，已执行 M 命令」

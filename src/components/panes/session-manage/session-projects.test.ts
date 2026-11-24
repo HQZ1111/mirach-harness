@@ -72,6 +72,7 @@ const indexSession = (id: string, extra?: Partial<SessionsIndexSession>): Sessio
   name: null,
   messageCount: 2,
   lastModified: 200,
+  createdAt: 100,
   parentSessionId: null,
   projectId: null,
   sourceRoot: 'C:\\work\\a\\.rpi\\sessions',
@@ -237,7 +238,7 @@ describe('groupSessionsByProject（设置页 · 归档会话分组）', () => {
       ],
       projects,
     )
-    expect(groups.map((g) => g.label)).toEqual(['Alpha', 'Beta', '未知项目 ghost', '主页'])
+    expect(groups.map((g) => g.label)).toEqual(['Alpha', 'Beta', '已移除项目', '未归类'])
     expect(groups.map((g) => g.sessions.map((s) => s.id))).toEqual([
       ['a1'],
       ['b1', 'b2'],

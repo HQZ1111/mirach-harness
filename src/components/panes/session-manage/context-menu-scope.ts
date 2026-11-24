@@ -52,7 +52,7 @@ export const CONTEXT_MENU_EDITABLE_SELECTOR = 'input, textarea'
  *  **行根必须登记**：右键落在行内边距/行尾标注上时，`closest()` 不会命中
  *  触发器槽，只命中行根——漏登记会让全局菜单抢走这一次右键。 */
 export const CONTEXT_MENU_OWNER_SELECTOR =
-  '[data-slot="aui_thread-list-item"], [data-slot="aui_thread-list-item-trigger"], [role="treeitem"], [data-roster-key], [data-slot="bots-pane"] [data-slot="bots-roster"] > div > div, [data-slot="terminal-pane"]'
+  '[data-slot="aui_thread-list-item"], [data-slot="aui_thread-list-item-trigger"], [role="treeitem"], [data-roster-key], [data-bots-menu-row], [data-slot="terminal-pane"]'
 
 export type ContextMenuScope = 'editable' | 'owned' | 'app'
 

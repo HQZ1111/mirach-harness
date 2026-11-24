@@ -33,11 +33,11 @@
  *   扩展命令）；
  * - 会话计划（rpi-plan-mode plan-mode 条目 → pi_plan_entries → 新 store）；
  * - 终端（pi_job_list → jobs-store；真源 = rpi-background-tasks 插件的
- *   `background-tasks` 会话快照，插件未安装时为空、分区不渲染——上游
- *   "无数据不渲染"同判）；
- * - 智能体（宿主从 delegate_task / subagent / dispatch 工具调用派生：未完成
- *   = 运行中，已完成 = 已结束目录；rpi 子代理运行态在插件进程内，没有
- *   roster 面，工具调用是唯一真值）。
+ *   `background-tasks` 会话快照——插件已安装
+ *   `~/.rpi/agent/extensions/rpi_background_tasks.dll`，无作业时为空、分区
+ *   不渲染，与上游"无数据不渲染"同判）；
+ * - 智能体（**引擎名册优先**：pi_child_agents 真运行态，running 行带停止钮；
+ *   delegate_task / subagent / dispatch 工具调用派生仅剩已结束目录用途）。
  * - 工作流（宿主从 rpi-orchestrator 的 plan / dispatch 工具调用派生：一次
  *   plan set = 一条 run，dispatch 波次更新节点状态；ZCode
  *   WorkflowStatusSection 的行结构照抄。rpi 没有 CreateWorkflow 子系统，
@@ -187,6 +187,12 @@ const L = {
   goalNotSatisfied: '目标未完成，任务继续',
   goalFailed: '目标校验失败',
   goalVerified: '目标已完成，任务结束',
+  // rpi-goal v2 的停止词（ZCode 面板没有对应字串；宿主按插件真实语义补词）。
+  goalBlocked: '已阻塞',
+  goalWaiting: '等待中',
+  goalUsageLimited: '用量受限',
+  goalBudgetLimited: '预算耗尽',
+  goalVerdictCancelled: '本轮未出校验结论',
   goalIteration: (n: number) => `第 ${n} 次迭代`,
   agentsRunning: (n: number) => `${n} 个运行中`,
   endedAgents: '已结束的智能体',
@@ -744,6 +750,15 @@ function GoalIterationRow({
     >
       <XCircleIcon className="text-destructive size-[var(--size-icon-sm)]" />
     </span>
+  ) : row.verificationOutcome === 'cancelled' ? (
+    <span
+      role="img"
+      aria-label={L.goalVerdictCancelled}
+      title={row.verificationReason ?? L.goalVerdictCancelled}
+      className="flex shrink-0"
+    >
+      <CircleAlertIcon className="text-foreground/45 size-[var(--size-icon-sm)]" />
+    </span>
   ) : null
   return (
     <div
@@ -787,12 +802,12 @@ function GoalStatusSection({
   actionPending: boolean
   actionError: string | null
 }) {
-  // 展示态：宿主校验在途 = verifying（goal.status 仍是引擎的 active——
-  // 校验结论不改目标状态，上游是把 status 置 verifying 的宿主对偶）。
+  // 展示态：rpi-goal v2 的 `verifying` 就是 status 本身；v1 宿主另写过
+  // `verifying` 对象——parseGoalState 已把两条来源归一，这里只读现值。
   const displayStatus: StatusPanelGoalModel['status'] =
     goal.verifying !== null ? 'verifying' : goal.status
   // 用时秒针只看「在不在跑」这一个布尔（上游注释同文：不能以整个 goal
-  // 对象为依赖重建 interval）。
+  // 对象为依赖重建 interval）。waiting / 停止词都不走秒针。
   const ticking =
     displayStatus === 'active' ||
     displayStatus === 'verifying' ||
@@ -816,23 +831,39 @@ function GoalStatusSection({
             ? L.goalNotSatisfied
             : displayStatus === 'failed'
               ? L.goalFailed
-              : L.goalActive
+              : displayStatus === 'blocked'
+                ? L.goalBlocked
+                : displayStatus === 'waiting'
+                  ? L.goalWaiting
+                  : displayStatus === 'usageLimited'
+                    ? L.goalUsageLimited
+                    : displayStatus === 'budgetLimited'
+                      ? L.goalBudgetLimited
+                      : L.goalActive
   const iterationRows = useMemo(
     () => buildConversationGoalIterationSummaries(goal),
     [goal],
   )
-  // 在途校验的迭代行（插件 `verifying` 状态下最后开的那一行——spinner 挂它；
-  // rows 会被「完成优先」重排，所以按 iteration 最大值判定，不用数组末位）。
+  // 在途校验的迭代行（v2 的 verifyIteration 是权威行号；v1 只剩 rows 可推，
+  // 按最大 iteration 判定——rows 会被「完成优先」重排，不能用数组末位）。
   const verifyingIteration =
-    goal.status === 'verifying'
-      ? goal.iterations.reduce((max, row) => Math.max(max, row.iteration), 0)
+    displayStatus === 'verifying'
+      ? (goal.verifying?.iteration ??
+        goal.iterations.reduce((max, row) => Math.max(max, row.iteration), 0))
       : null
-  // 控制：上游同判——active/verifying/notSatisfied → 暂停；paused → 恢复；
-  // verified → 完成图标；failed → 无控件。
+  // 控制：active/verifying/notSatisfied/waiting → 暂停；paused 与 v2 的各
+  // 停止词（blocked/usageLimited/budgetLimited/failed）→ 恢复；verified → 完成图标。
   const isPausable =
     displayStatus === 'active' ||
     displayStatus === 'verifying' ||
-    displayStatus === 'notSatisfied'
+    displayStatus === 'notSatisfied' ||
+    displayStatus === 'waiting'
+  const isResumable =
+    displayStatus === 'paused' ||
+    displayStatus === 'blocked' ||
+    displayStatus === 'usageLimited' ||
+    displayStatus === 'budgetLimited' ||
+    displayStatus === 'failed'
   const control =
     isPausable && onPauseGoal !== undefined ? (
       <button
@@ -846,7 +877,7 @@ function GoalStatusSection({
       >
         <PauseIcon className="size-3.5" />
       </button>
-    ) : displayStatus === 'paused' && onResumeGoal !== undefined ? (
+    ) : isResumable && onResumeGoal !== undefined ? (
       <button
         type="button"
         data-goal-action="resume"
@@ -1343,16 +1374,21 @@ function WorkflowRunLamp({ status }: { status: 'pending' | 'running' }) {
 }
 
 /** run 行（上游 WorkflowRunRow 的两行结构：名字 + 时长 / 灯 + 在做什么）；
- *  Stop 不渲染——orchestrator 没有取消面（不放假按钮）；详情按钮 = 面板栏
- *  标签页（openWorkflowRun），与上游 onOpenWorkflowRun 同义。 */
+ *  Stop 按上游 WorkflowRunStopButton（悬停显形、盖在时长上的幽灵钮）：
+ *  rpi 的 dispatch 是**轮内的工具调用**，引擎的 per-call 取消链
+ *  （run abort → 插件 ABI cancel → Control → 杀进程组 + 未启动节点回
+ *  pending）经由 pi_interrupt 可达——停的是这一轮 dispatch，不是造面。
+ *  详情按钮 = 面板栏标签页（openWorkflowRun），与上游 onOpenWorkflowRun 同义。 */
 function WorkflowRunRow({
   run,
   now,
   onOpen,
+  onCancel,
 }: {
   run: StatusPanelWorkflowRun
   now: number
   onOpen?: (run: StatusPanelWorkflowRun) => void
+  onCancel?: () => void
 }) {
   const name = workflowRunDisplayName(run)
   const displayName = name ?? L.workflowFallbackName
@@ -1409,6 +1445,26 @@ function WorkflowRunRow({
           </div>
         ) : null}
       </div>
+      {run.status === 'running' && onCancel ? (
+        <button
+          type="button"
+          aria-label={L.cancel}
+          data-workflow-run-stop
+          onClick={(event) => {
+            event.stopPropagation()
+            onCancel()
+          }}
+          className={cn(
+            'bg-[var(--surface)] text-foreground pointer-events-none absolute top-1.5 right-1.5 z-[2] flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[13px] opacity-0 transition-opacity',
+            'hover:bg-foreground/[0.08]',
+            'group-hover/wf-run:pointer-events-auto group-hover/wf-run:opacity-100 group-focus-within/wf-run:pointer-events-auto group-focus-within/wf-run:opacity-100',
+            '[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:static [@media(hover:none)]:bg-transparent [@media(hover:none)]:p-0 [@media(hover:none)]:opacity-100',
+          )}
+        >
+          <SquareIcon aria-hidden className="size-2.5 fill-current [@media(hover:none)]:size-3" />
+          <span className="[@media(hover:none)]:sr-only">{L.cancel}</span>
+        </button>
+      ) : null}
     </li>
   )
 }
@@ -1423,6 +1479,7 @@ function WorkflowStatusSection({
   onOpenChange,
   onOpenRun,
   onOpenDirectory,
+  onCancelRun,
 }: {
   model: StatusPanelModel
   separated: boolean
@@ -1430,6 +1487,7 @@ function WorkflowStatusSection({
   onOpenChange?: (open: boolean) => void
   onOpenRun?: (run: StatusPanelWorkflowRun) => void
   onOpenDirectory?: () => void
+  onCancelRun?: () => void
 }) {
   const runs = model.runningWorkflows
   const endedRunCount = model.endedWorkflowCount
@@ -1470,7 +1528,13 @@ function WorkflowStatusSection({
     >
       <ul className="space-y-0">
         {runs.map((run) => (
-          <WorkflowRunRow key={run.runId} run={run} now={now} onOpen={onOpenRun} />
+          <WorkflowRunRow
+            key={run.runId}
+            run={run}
+            now={now}
+            onOpen={onOpenRun}
+            onCancel={run.status === 'running' ? onCancelRun : undefined}
+          />
         ))}
       </ul>
     </StatusSection>
@@ -1516,11 +1580,18 @@ function StatusSummaryRow({
   const currentPlanItem = getCurrentPlanItem(model.plan)
   const completedPlanItem = getCompletedPlanItem(model.plan)
   const goalTitle = model.goal?.title ?? null
+  // v2 停止词（blocked / waiting / usage_limited / budget_limited）仍是"在场
+  // 的目标"，胶囊按活跃项展示；只有 verified 走完成位。
   const isActiveGoal =
     model.goal?.status === 'active' ||
     model.goal?.status === 'paused' ||
     model.goal?.status === 'verifying' ||
-    model.goal?.status === 'notSatisfied'
+    model.goal?.status === 'notSatisfied' ||
+    model.goal?.status === 'blocked' ||
+    model.goal?.status === 'waiting' ||
+    model.goal?.status === 'usageLimited' ||
+    model.goal?.status === 'budgetLimited' ||
+    model.goal?.status === 'failed'
   const isDoneGoal = model.goal?.status === 'verified'
   const added = model.git?.added ?? 0
   const removed = model.git?.removed ?? 0
@@ -1755,8 +1826,9 @@ function ConversationStatusPanelImpl() {
   }, [panelVisible])
 
   // 分区开合 = 上游受控 state 语义（SessionPane 同款）：终端/智能体默认
-  // 折起、归零折起、换会话复位；展开由用户点击分区头（上游另有 composer
-  // 徽标入口，宿主 composer 没有该徽标——不另造自动展开）。
+  // 折起、归零折起、换会话复位；展开由用户点击分区头或 composer 徽标
+  // （expandRequest，2026-11-20「全部对齐功能」轮接通——上游
+  // handleOpenRunningBackgroundWorks 的宿主对偶）。
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [agentOpen, setAgentOpen] = useState(false)
   useEffect(() => {
@@ -1769,10 +1841,25 @@ function ConversationStatusPanelImpl() {
   useEffect(() => {
     if (model.runningAgents.length === 0) setAgentOpen(false)
   }, [model.runningAgents.length])
-  // 工作流分区是**非受控**的（上游 defaultOpen = runs.length > 0）：有活 run
-  // 默认展开，用户收起后保持；换会话用 key={activeId} 强重挂载复位。此前把它
-  // 接成受控 state 且初值 false，运行中的 run 只出现在分区标题、行永远不可见
-  // （2026-11-18 实机踩中）。
+  // 工作流分区改受控，语义照上游 SessionPane 的 hasLiveWorkflowRun 翻转写入：
+  // 在跑数 0→≥1 打开、归零折起、换会话按该会话重判。只在这个布尔翻转（或换
+  // 会话）时写入，所以用户手动折起后 run 还在跑就一直保持折起。此前非受控
+  // （defaultOpen）也能工作；改受控是因为 composer 徽标需要驱动它——2026-11-18
+  // 踩过的坑是"受控且没有翻转写入"，不是受控本身。
+  const [workflowOpen, setWorkflowOpen] = useState(false)
+  const hasLiveWorkflowRun = model.runningWorkflows.length > 0
+  useEffect(() => {
+    setWorkflowOpen(hasLiveWorkflowRun)
+  }, [hasLiveWorkflowRun, activeId])
+  // 徽标展开请求：一次消费（nonce 变化才应用），三个分区独立置位。
+  const expandRequest = useStore(statusPanelStore, (s) => s.expandRequest)
+  useEffect(() => {
+    if (expandRequest === null) return
+    setTerminalOpen(expandRequest.terminal)
+    setAgentOpen(expandRequest.agent)
+    setWorkflowOpen(expandRequest.workflow)
+    statusPanelStore.getState().consumeExpandRequest()
+  }, [expandRequest])
 
   // 目标暂停/恢复（rpi-goal 扩展命令 /goal pause|resume）。
   const [goalActionPending, setGoalActionPending] = useState(false)
@@ -1844,6 +1931,15 @@ function ConversationStatusPanelImpl() {
     invoke('pi_job_cancel', { jobId })
       .then(() => jobsBridge.getState().refresh())
       .catch((e) => console.error('[status-panel] 后台任务取消失败', jobId, e))
+  }, [])
+
+  // 工作流 Stop：rpi 的 dispatch 是轮内工具调用，引擎 per-call 取消链
+  // （run abort → 插件 ABI cancel → Control）经由 pi_interrupt 可达——
+  // 停的是持有 dispatch 的这一轮；无活动 run 时为诚实的 no-op。
+  const onCancelWorkflowRun = useCallback(() => {
+    invoke('pi_interrupt').catch((e) =>
+      console.error('[status-panel] 工作流停止失败', e),
+    )
   }, [])
 
   // 停止子代理：引擎 host 按 childId 真取消（ChildAgents.stop）；名册随后刷新，
@@ -2005,8 +2101,11 @@ function ConversationStatusPanelImpl() {
                   canRenderTerminals
                 }
                 key={activeId}
+                open={workflowOpen}
+                onOpenChange={setWorkflowOpen}
                 onOpenRun={onOpenWorkflowRun}
                 onOpenDirectory={onOpenWorkflowDirectory}
+                onCancelRun={onCancelWorkflowRun}
               />
             ) : null}
             {canRenderAgents ? (

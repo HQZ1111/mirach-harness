@@ -203,9 +203,9 @@ export const CHAT_EMPTY_AREA = 'chat.empty'
  * 上游 `COMPOSER_AREAS`（`app/chat/composer/contrib.ts:32`）：输入区的 11 个
  * 贡献槽位。
  *
- * 宿主没有那套贡献区系统（ bots 已改落独立面板），但**标识符必须齐全**——
- * 上游代码按 `COMPOSER_AREAS.atCompletions` 这类方式取键，缺一个就编译不过。
- * 保留全部键让代码能编译；实际挂载点由宿主面板决定。
+ * 宿主已消费其中三个：`atCompletions`（ComposerWired 的 @ 行）、
+ * `middleware`（runtime onNew 的发送门）、`top`（ComposerTopSlot 的 banner
+ * 条）。其余键保留**标识符**让上游代码能编译——宿主没有对应挂载点。
  */
 export const COMPOSER_AREAS = {
   top: 'composer.top',
@@ -223,6 +223,10 @@ export const COMPOSER_AREAS = {
 export const PALETTE_AREA = 'command.palette'
 export const SIDEBAR_PROFILE_GROUP_HEADER_AREA = 'sidebar.profile.group.header'
 
+/** 上游 `sdk/areas.ts:15`：`composer.top` 贡献读到的会话身份（见
+ *  `hermes-bots/teammate-waits.tsx`）。 */
+export { type ComposerSessionInfo, useComposerSession } from '@/hermes-shim/app/composer-session'
+
 // ── 样式类常量 ──────────────────────────────────────────────────────────────
 
 /** 上游：幽灵图标按钮的尺寸类。 */
@@ -231,11 +235,19 @@ export const GHOST_ICON_BTN = 'size-6 rounded-[4px] hover:bg-[var(--hover-wash)]
 /** 上游：主图标按钮的尺寸类。 */
 export const PRIMARY_ICON_BTN = 'size-7 rounded-md'
 
-/** 上游：composer 输入区的 backing 样式。 */
-export const composerInputBacking = 'rounded-md border bg-background'
+/** 上游 `components/chat/composer-dock`：composer 表面填充层与描边。
+ *  直接复用镜像实现（backing = `absolute inset-0 -z-10` 填充层 + 描边色
+ *  mix）——此前的宿主近似值 `rounded-md border bg-background` 会让群聊
+ *  房间输入区出现"框里再套一个小框"。 */
+export { composerInputBacking, composerSurfaceRing } from '@/hermes-mirror/components/chat/composer-dock'
 
-/** 上游：composer 表面描边。 */
-export const composerSurfaceRing = 'ring-1 ring-border'
+/** 宿主主输入框的真实容器/按钮（2026-11-23：群聊房间输入区与主输入框
+ *  必须是同一套组件，用户："是你自己又做了一个"）。 */
+export {
+  ComposerAttachButton,
+  ComposerBar,
+  ComposerSend,
+} from '@/components/assistant-ui/elements/composer'
 
 // ── 调色板 ──────────────────────────────────────────────────────────────────
 
@@ -243,6 +255,9 @@ export const composerSurfaceRing = 'ring-1 ring-border'
  *  `ColorSwatches` 本身是 UI 组件（上面从 hermes-mirror 导出），不要再导出
  *  同名数组——重复导出会让 tsc 直接报错。 */
 export { PROFILE_SWATCHES, profileColor } from '@/lib/profile-color'
+
+/** 上游 `apps/shared/src/profile-id.ts`：profile id 语法唯一的 TS 真源。 */
+export { PROFILE_ID_ARG_RE } from '@/lib/profile-id'
 // ── host 数据面 ─────────────────────────────────────────────────────────────
 
 export { host } from './host'

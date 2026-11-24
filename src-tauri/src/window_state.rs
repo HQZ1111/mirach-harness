@@ -29,7 +29,9 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 /// 窗口最小尺寸（与 tauri.conf.json 的 minWidth/minHeight 同值）。
-pub const MIN_W: f64 = 600.0;
+/// 宽度下限 = 左栏 300 + 机器人栏 240 + 对话 395 + 面板栏 300 + 间距约 25；
+/// 低于这个宽度 dockview 四列无法同时容纳，右侧栏会被窗口边缘裁掉。
+pub const MIN_W: f64 = 1280.0;
 pub const MIN_H: f64 = 600.0;
 
 /// 至少要留在屏幕工作区内的像素（否则视为离屏坐标，丢弃）。

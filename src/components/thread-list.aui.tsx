@@ -44,6 +44,7 @@ import {
   createContext,
   forwardRef,
   memo,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -70,8 +71,10 @@ import {
   useSessionUnread,
   type SessionRowGroup,
 } from "@/components/panes/session-manage/session-catalog";
-import { botChatPaths, useBotsStore } from "@/components/panes/hub/bots-store";
+import { botChatPaths, botsStore, DEFAULT_BOT_NAME, useBotsStore } from "@/components/panes/hub/bots-store";
+import { switchProfileBridge, useActiveProfile } from "@/components/panes/session-manage/active-profile-bridge";
 import { useHiddenSessions } from "@/components/panes/hub/hidden-sessions";
+import { useBotsFeatureDesired } from "@/plugins/bots-gate";
 import {
   projectSessionActions,
   type SessionActionId,
@@ -393,12 +396,25 @@ const useThreadDisplay = (searchQuery: string) => {
   // （bots-store botChatPaths 的信任规则——旧名字匹配记录重新锚定后才
   // 参与，防误藏同名用户会话）。
   const bots = useBotsStore((s) => s.bots);
-  const botPathSet = useMemo(() => botChatPaths(bots), [bots]);
+  const botsEnabled = useBotsFeatureDesired();
+  // 插件关闭 = 不再做 Bot Chat 隐藏（否则"关插件"后这些会话仍消失，
+  // 用户无法处置；花名册入口已经随插件消失）。
+  const botPathSet = useMemo(
+    () => (botsEnabled ? botChatPaths(bots) : new Set<string>()),
+    [bots, botsEnabled],
+  );
   // 通用隐藏面（hermes setPersistedSessionHidden 的宿主对偶）：插件点名隐藏
   // 的会话（群聊成员 plumbing 会话 / Bot Chat 标题清扫）进 hidden-sessions
   // 路径集，与双锚集合并过滤。
+  // **环境（profile）隔离在引擎侧完成**（pi_profiles：具名环境的
+  // `pi_list_sessions` 只扫自己的 `<home>/sessions`；2026-11-22 用户定稿
+  // "每个环境只启用自己的配置和会话"）——前端不做第二套 profile 过滤：
+  // 切环境 = 列表整体换源（active-profile），本体 = 默认全局根。
   const hiddenPaths = useHiddenSessions((s) => s.paths);
-  const hiddenPathSet = useMemo(() => new Set(hiddenPaths), [hiddenPaths]);
+  const hiddenPathSet = useMemo(
+    () => (botsEnabled ? new Set(hiddenPaths) : new Set<string>()),
+    [hiddenPaths, botsEnabled],
+  );
   const metas = useMemo(
     () =>
       (showArchived ? allMetas : allMetas.filter((m) => !archived.includes(m.id))).filter(
@@ -547,6 +563,16 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   const showArchived = useSidebarView((s) => s.showArchived);
   const inboxStyle = useSidebarView((s) => s.inboxStyle);
   const projectFilter = useSidebarView((s) => s.projectFilter);
+  // 环境（profile）切换（hermes Filters>Profile / ProfileRail 的宿主对偶）：
+  // 本地 bot = 一个环境，选它就是切引擎活动 home——侧栏会话面整体换源，
+  // 不是前端过滤。null = 本体环境。
+  const activeProfile = useActiveProfile();
+  const bots = useBotsStore((s) => s.bots);
+  // 花名册懒加载：侧栏可能先于机器人页挂载；bots=[] 时「配置档案」子菜单
+  // 只剩「全部」，且 bot 会话的永久隐藏过滤会失效。读 localStorage 幂等。
+  useEffect(() => {
+    if (botsStore.getState().bots.length === 0) botsStore.getState().load();
+  }, []);
   // 状态筛选（hermes $sidebarStatusFilter 同构：五桶多选，空 = 不过滤）。
   const statusFilter = useSidebarView((s) => s.statusFilter);
   const customized = useSidebarView(isSidebarViewCustomized);
@@ -606,8 +632,9 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
       >
         {/* 1. 分组 ▸（触发行显示当前值 + chevron-right；子菜单四项 =
             用户截图：更新时间✓/项目/状态/网关与配置——无「平铺」）。
-            网关与配置（hermes grouping='profile' 的菜单标签）pi 单配置
-            档案无语义 → disabled radio 不发。 */}
+            网关与配置（hermes grouping='profile' 的菜单标签）：本地 bot 已是
+            配置档案语义（「配置档案 ▸」筛选即用 bots），但「按档案分组」维度
+            未实现 → disabled radio 不发。 */}
         <ContextMenuSub>
           <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
             <span>分组</span>
@@ -639,7 +666,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 className={VIEW_DISABLED_HINT_ITEM}
                 disabled
                 textValue="网关与配置"
-                title="pi 单配置档案，无可分组的网关与配置"
+                title="配置档案分组未实现——bot 会话只在按档案筛选时出现"
                 value="gateway"
               >
                 <ViewOptionRow icon={UserIcon} label="网关与配置" />
@@ -713,7 +740,8 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 git-pull-request/account → lucide GitPullRequest/User）：
                 专用 class 固定 disabled 观感（不用 VIEW_MENU_ITEM_BASE 的
                 data-[disabled]:pointer-events-none——native title 需要
-                hover，说明文字必须可触发）。 */}
+                hover，说明文字必须可触发）。profile 行标签未实现：bot 会话
+                只在「配置档案 ▸」筛选视图出现，此时行内档案名是恒值。 */}
             <ContextMenuCheckboxItem
               checked={false}
               className={VIEW_DISABLED_HINT_ITEM}
@@ -726,7 +754,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               checked={false}
               className={VIEW_DISABLED_HINT_ITEM}
               disabled
-              title="pi 单配置档案，无可展示项"
+              title="配置档案行标签未实现——bot 会话只在按档案筛选时出现"
             >
               <ViewOptionRow icon={UserIcon} label="配置档案" />
             </ContextMenuCheckboxItem>
@@ -744,12 +772,13 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
         </ContextMenuCheckboxItem>
 
         {/* 5. 配置档案栏（hermes $profileRailVisible：侧栏左缘的 profile
-            rail）——pi 单配置档案无 rail 数据面 → disabled（诚实）。 */}
+            rail）——视觉条待实现；配置档案筛选已以本菜单的「配置档案 ▸」
+            承担（bot=profile，真数据面）。 */}
         <ContextMenuCheckboxItem
           checked={false}
           className={VIEW_DISABLED_HINT_ITEM}
           disabled
-          title="pi 单配置档案，无配置档案栏"
+          title="配置档案栏（视觉条）待实现——筛选以「配置档案 ▸」为准"
         >
           <ViewOptionRow icon={NetworkIcon} label="配置档案栏" />
         </ContextMenuCheckboxItem>
@@ -793,24 +822,43 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             <ChevronRightIcon className="text-(--text-3) ml-auto size-[var(--size-icon-sm)]" />
           </ContextMenuSubTrigger>
         </ContextMenuSub>
-        {/* 9. 配置档案 ▸（子菜单：新建配置档案/导入配置档案…，hermes
-            t.profiles 文案）——pi 单配置档案无 profiles 桥面 → disabled。
-            10. 全部配置档案 checkbox：pi 单配置档案恒 ✓（诚实——所有
-            profile 就是这一个，永远全显示，不可取消）。 */}
+{/* 9. 环境 ▸（hermes Filters>Profile 的宿主对偶）：本地 bot = 一份
+            环境配置（独立 home + 独立会话面），选中 = 切引擎活动环境——
+            侧栏整体换源、新聊天落该环境。不是前端过滤。hermes 的「新建/
+            导入配置档案」依赖 gateway profiles 后端，宿主用机器人页管理
+            → 不列假入口。 */}
         <ContextMenuSub>
-          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-            <ViewOptionRow icon={UserIcon} label="配置档案" />
-            <ChevronRightIcon className="text-(--text-3) ml-auto size-[var(--size-icon-sm)]" />
+          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
+            <ViewOptionRow icon={UserIcon} label="环境" />
+            <span className="text-(--text-3) ml-auto flex items-center gap-1 pl-4">
+              {activeProfile
+                ? (bots.find((b) => b.name === activeProfile)?.title ||
+                  activeProfile)
+                : "Mirach"}
+              <ChevronRightIcon className="size-[var(--size-icon-sm)]" />
+            </span>
           </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            <ContextMenuRadioGroup
+              onValueChange={(value) =>
+                void switchProfileBridge(
+                  value === DEFAULT_BOT_NAME ? null : value,
+                )
+              }
+              value={activeProfile ?? DEFAULT_BOT_NAME}
+            >
+              {bots.map((b) => (
+                <ContextMenuRadioItem
+                  className={VIEW_MENU_ITEM_BASE}
+                  key={b.name}
+                  value={b.name}
+                >
+                  <ViewOptionRow icon={UserIcon} label={b.title || b.name} />
+                </ContextMenuRadioItem>
+              ))}
+            </ContextMenuRadioGroup>
+          </ContextMenuSubContent>
         </ContextMenuSub>
-        <ContextMenuCheckboxItem
-          checked
-          className={VIEW_DISABLED_HINT_ITEM}
-          disabled
-          title="pi 单配置档案——始终显示全部"
-        >
-          <span>全部配置档案</span>
-        </ContextMenuCheckboxItem>
         {/* 项目过滤（hermes Filters>Project 子菜单的条件形态：
             filter-menu.tsx:388 只在多于一个候选时出现——用户截图只有一个
             工作区所以没有这项；harness 候选 = distinct cwd（Home 桶=
@@ -911,21 +959,40 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   );
 };
 
-/** 当前渲染面（归档/项目过滤后）的行 metas——Mark all as read 的 ack 面与
- *  未读计数共用。与 ThreadListSections 的 metas 消费同源。
+/** 当前渲染面（归档/项目/配置档案过滤后）的行 metas——Mark all as read 的
+ *  ack 面与未读计数共用。与 ThreadListSections 的 metas 消费同源。
  *  projectFilter = pi cwd 直投影过滤（hermes Filters>Project 的等价物）；
- *  状态筛选不在此处（useThreadDisplay 的桶管线已滤——ack 面跟着可视面走）。 */
+ *  状态筛选不在此处（useThreadDisplay 的桶管线已滤——ack 面跟着可视面走）。
+ *  bot 隐藏面 / 配置档案独占与 useThreadDisplay 同一判据（ack 面不能把
+ *  侧栏看不见的 bot 会话算进未读）。 */
 function useThreadVisibleMetas(): SessionRowMeta[] {
   const allMetas = useSessionRowMetas();
   const archived = useSessionArchive((s) => s.archived);
   const showArchived = useSidebarView((s) => s.showArchived);
   const projectFilter = useSidebarView((s) => s.projectFilter);
+  const bots = useBotsStore((s) => s.bots);
+  const botsEnabled = useBotsFeatureDesired();
+  // 插件关闭 = 不再做 Bot Chat 隐藏（否则"关插件"后这些会话仍消失，
+  // 用户无法处置；花名册入口已经随插件消失）。
+  const botPathSet = useMemo(
+    () => (botsEnabled ? botChatPaths(bots) : new Set<string>()),
+    [bots, botsEnabled],
+  );
+  // 环境隔离在引擎侧（pi_profiles）——ack 面只跟隐藏面走。
+  const hiddenPaths = useHiddenSessions((s) => s.paths);
+  const hiddenPathSet = useMemo(
+    () => (botsEnabled ? new Set(hiddenPaths) : new Set<string>()),
+    [hiddenPaths, botsEnabled],
+  );
   return useMemo(() => {
     let rows = allMetas;
     if (!showArchived) rows = rows.filter((m) => !archived.includes(m.id));
+    rows = rows.filter(
+      (m) => !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))),
+    );
     if (projectFilter) rows = rows.filter((m) => (m.cwd ?? "") === projectFilter);
     return rows;
-  }, [allMetas, archived, showArchived, projectFilter]);
+  }, [allMetas, archived, showArchived, projectFilter, botPathSet, hiddenPathSet]);
 }
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
@@ -1684,9 +1751,18 @@ const ThreadListItemInner: FC = () => {
       }
     },
     "copy-id": () => {
-      navigator.clipboard.writeText(threadId).catch((err) => {
-        console.error("[session] 复制会话 ID 失败", err);
-      });
+      // 菜单关闭后 webview 可能失焦（NotAllowedError: Document is not
+      // focused）——先还焦点再写剪贴板；仍失败走 console.error（可见）。
+      const write = () =>
+        navigator.clipboard.writeText(threadId).catch((err) => {
+          console.error("[session] 复制会话 ID 失败", err);
+        });
+      if (document.hasFocus()) {
+        void write();
+      } else {
+        window.focus();
+        void write();
+      }
     },
     branch: () => {
       const points = branchBridge.getState().forkPoints;

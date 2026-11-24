@@ -235,13 +235,16 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
       aria-busy={isOpening || undefined}
       aria-label={rowTooltip}
       className={cn(
-        'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
+        'relative flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
         'hover:bg-(--chrome-action-hover)',
-        isActive && 'bg-(--ui-row-active-background)',
+        // 选中底由名单层的滑动 pill 承担（roster-active-pill.tsx，2026-11-23
+        // 用户："机器人页也用这个组件选择"）——行本身不再画静态底，否则
+        // pill 会被行底完全盖住/同色不可见。
         // The row being dragged fades in place; the browser's drag image is
         // the row itself, so the ghost under the pointer is the full row.
         dragging && 'opacity-40'
       )}
+      data-roster-active={isActive ? '' : undefined}
       data-roster-key={rosterKey}
       draggable
       onClick={open}
@@ -260,7 +263,7 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
           mood={botMood}
           name={bot.name}
           shape={shape}
-          size={34}
+          size={40}
         />
       </div>
       <div className="min-w-0 flex-1">
@@ -539,12 +542,13 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
   const row = (
     <RowButton
       aria-label={`${group}, ${b.group.memberCount(members.length)}, ${availabilityLabel}`}
+      data-bots-menu-row=""
       className={cn(
-        'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
+        'relative flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
         'hover:bg-(--chrome-action-hover)',
-        active && 'bg-(--ui-row-active-background)',
         dragging && 'opacity-40'
       )}
+      data-roster-active={active ? '' : undefined}
       draggable
       onClick={() => {
         haptic('tap')
@@ -557,12 +561,12 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
         $draggingBot.set(dragKey)
       }}
     >
-      <div className="relative flex w-[34px] shrink-0 items-center justify-center">
+      <div className="relative flex w-[40px] shrink-0 items-center justify-center">
         {room.image ? (
           <img
             alt=""
             className={cn(
-              'size-8 rounded-md object-cover ring-1 ring-(--ui-stroke-tertiary)',
+              'size-10 rounded-md object-cover ring-1 ring-(--ui-stroke-tertiary)',
               availableMembers === 0 && 'grayscale opacity-60'
             )}
             src={room.image}
@@ -570,7 +574,7 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
         ) : (
           <span
             className={cn(
-              'flex size-8 items-center justify-center rounded-md bg-(--chrome-action-hover) text-(--ui-text-tertiary)',
+              'flex size-10 items-center justify-center rounded-md bg-(--chrome-action-hover) text-(--ui-text-tertiary)',
               availableMembers === 0 && 'opacity-60'
             )}
           >

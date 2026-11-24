@@ -103,7 +103,8 @@ describe('sidebar-view 严格解析', () => {
     expect(parseStatusFilter('not-json')).toEqual([])
     spy.mockRestore()
   })
-})
+
+  })
 
 describe('loadInitialManual（手动序迁移推导）', () => {
   it('旗标存在以旗标为准（order 表内容无关）', () => {

@@ -22,6 +22,10 @@ mod pi_plugin_state;
 mod pi_goal_verify;
 mod agui;
 mod pi_paths;
+// 环境（profile）隔离——hermes `~/.hermes/profiles/<name>/` 的宿主对偶：
+// 具名环境 = `~/.rpi/agent/profiles/<name>/`（会话落 <home>/sessions，
+// 列表只扫活动环境；切环境 = 左侧栏会话面整体切换，2026-11-22）
+mod pi_profiles;
 
 // pi 设置页配置面（docs/pi-integration.md §7-7/§4.5）：settings/models/
 // auth 三个配置文件的读改命令——配置真相 = pi 自己的配置文件（§5）
@@ -97,6 +101,12 @@ mod pi_extensions;
 // IPC 面全在 pi_cron.rs 里，不散进既有模块（可整体摘除）。模块头有
 // "为什么不是 pi 扩展"的事实核查与对 hermes cron/ 的语义对照表。
 mod pi_connections;
+// 数据同步（设置页「数据与统计 → 数据同步」）：设备列表 + MCP 服务器推送。
+// 传输复用 pi_gateway（remote/cloud WS RPC）与 pi_ssh（ssh 隧道）；见模块头。
+mod pi_sync;
+// 迁移数据（数据同步页「迁移数据」）：从 Claude Code 扫描/导入 skills、MCP、
+// CLAUDE.md；Claude 会话无导入器（pi 无 session.foreign.*）。见模块头。
+mod pi_migration;
 // 定时任务（cron）——**自包含模块**：存储 / 调度解析 / tick 循环 / 执行 /
 // IPC 面全在 pi_cron.rs 里，不散进既有模块（可整体摘除）。模块头有
 // "为什么不是 pi 扩展"的事实核查与对 hermes cron/ 的语义对照表。
@@ -136,6 +146,7 @@ mod window_state;
 // 关窗→托盘 / 保持唤醒 / 启动恢复 / 最大步数。真相在进程内（关窗回调
 // 要同步读），文件 = app_data_dir/app-prefs.json
 mod app_prefs;
+mod approval_modes;
 
 // 托管群聊后端（hermes gateway/hosted_room_*.py 的 Rust 移植，2026-11-15）。
 // P1 = common（叶子工具）+ store（9 张表 + append-only 事件日志）。
@@ -1034,6 +1045,19 @@ fn pi_lane_busy(
     }
 }
 
+/// 运行中引导（设置页「行为与工具 → 交互行为 = 引导」）：把用户消息注入
+/// 当前 run 的 steer 队列，引擎在下一次工具调用批后生效（ZCode 同语义）。
+/// 前端仅在 lane busy + UI streaming（真活跃 run）时调用；失败 = Err
+/// （草稿回填 + 可见报错，不假装已发送）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_steer(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    text: String,
+    images: Option<Vec<agui::AguiImage>>,
+) -> Result<(), String> {
+    state.engine.steer(&text, images.as_deref().unwrap_or(&[]))
+}
+
 #[tauri::command(async)]
 fn pi_list_models(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
@@ -1081,11 +1105,20 @@ fn pi_extension_ui_response(
 // （Planning 态拒变更、submit_plan 提交、宿主批准/驳回）。语义见
 // pi_session.rs「模式切换」段注释。
 
-#[tauri::command(async)]
+#[tauri::command(rename_all = "camelCase", async)]
 fn pi_mode_state(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    session_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    state.engine.mode_state()
+    state.engine.mode_state_for(session_id.as_deref())
+}
+
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_active_tools(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    session_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    state.engine.active_tools_for(session_id.as_deref())
 }
 
 /// 目标态（活动面板「目标」分区）：rpi-goal 的 `goal-state` 会话条目。
@@ -1114,26 +1147,35 @@ fn pi_run_command(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     command: String,
     args: Option<String>,
+    session_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    state
-        .engine
-        .run_command(&command, args.as_deref().unwrap_or(""))
+    state.engine.run_command_for(
+        session_id.as_deref(),
+        &command,
+        args.as_deref().unwrap_or(""),
+    )
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_set_approval_mode(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     mode: String,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    state.engine.set_approval_mode(&mode)
+    state
+        .engine
+        .set_approval_mode_for(session_id.as_deref(), &mode)
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_set_plan_mode(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     enabled: bool,
+    session_id: Option<String>,
 ) -> Result<(), String> {
-    state.engine.set_plan_mode(enabled)
+    state
+        .engine
+        .set_plan_mode_for(session_id.as_deref(), enabled)
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
@@ -1151,6 +1193,32 @@ fn pi_list_sessions(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
 ) -> Result<serde_json::Value, String> {
     state.engine.list_sessions()
+}
+
+/// 当前活动环境（profile）名；None = 本体。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_get_active(
+    state: tauri::State<'_, std::sync::Arc<agui::AguiState>>,
+) -> Result<Option<String>, String> {
+    state.engine.active_profile()
+}
+
+/// 切换活动环境（hermes profile 切换的宿主对偶）：会话落点/列表扫描根
+/// 随之切换；前端负责刷新会话列表与复位运行态（本命令只改引擎状态）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_set_active(
+    state: tauri::State<'_, std::sync::Arc<agui::AguiState>>,
+    profile: Option<String>,
+) -> Result<Option<String>, String> {
+    state.engine.set_active_profile(profile.as_deref())
+}
+
+/// 删除具名环境 home（hermes `profiles.delete` 的宿主对偶；2026-11-23）。
+/// 默认环境拒绝；目录不存在返回 `removed=false`（幂等）。活动会话/运行中
+/// 轮次可能持有目录里的文件——删除失败原样返回，调用方不得先删注册表。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_delete(name: String) -> Result<pi_profiles::ProfileDeleteOutcome, String> {
+    pi_profiles::delete_profile_home(&name)
 }
 
 /// 跨根会话索引（设置页 / 会话管理的 P0 数据面）。
@@ -1358,6 +1426,11 @@ fn pi_delete_session(
         })
     });
     state.engine.delete_session(&path)?;
+    if let Some(id) = stored_id.as_deref() {
+        if let Err(e) = state.engine.clear_approval_mode(id) {
+            eprintln!("[approval] 删除会话 {id} 的审批 pin 失败：{e}");
+        }
+    }
     match stored_id {
         Some(stored_session_id) => {
             let _ = app.emit(
@@ -1685,6 +1758,14 @@ fn main() {
             // 装完子类化后 client == window_rect，偏移恒为 0，`set_size`
             // 才是"设多少就是多少"。所以这里必须早于下面的 set_size。
             apply_window_chrome(&window);
+            // 最小尺寸同时钉到运行期（tauri.conf 的 minWidth 只在创建时生效；
+            // 存档恢复/后续 set_size 不能把三栏窗口压到裁切宽度）。
+            if let Err(e) = window.set_min_size(Some(tauri::LogicalSize::new(
+                window_state::MIN_W,
+                window_state::MIN_H,
+            ))) {
+                eprintln!("[window] 设置最小尺寸失败：{e}");
+            }
             #[cfg(windows)]
             if let Ok(h) = window.hwnd() {
                 top_line::install(h.0 as isize);
@@ -1888,6 +1969,18 @@ fn main() {
             pi_connections::pi_connections_remove,
             pi_connections::pi_connections_set_primary,
             pi_connections::pi_connections_test,
+            pi_sync::pi_sync_devices,
+            pi_sync::pi_sync_manifest,
+            pi_sync::pi_sync_device_save,
+            pi_sync::pi_sync_device_remove,
+            pi_sync::pi_sync_probe_wsl,
+            pi_sync::pi_sync_probe_docker,
+            pi_sync::pi_sync_ssh_config_hosts,
+            pi_sync::pi_sync_device_test,
+            pi_sync::pi_sync_push,
+            pi_migration::pi_migration_scan,
+            pi_migration::pi_migration_import,
+            pi_migration::pi_migration_import_sessions,
             pi_pkg::pi_pkg_list,
             pi_pkg::pi_pkg_install,
             pi_pkg::pi_pkg_remove,
@@ -1903,6 +1996,7 @@ fn main() {
             pi_set_thinking_level,
             pi_interrupt,
             pi_lane_busy,
+            pi_steer,
             plugin_runtime::plugin_runtime_root,
             plugin_runtime::plugin_runtime_scan,
             plugin_runtime::plugin_runtime_read,
@@ -1913,6 +2007,7 @@ fn main() {
             pi_pending_approvals,
             pi_extension_ui_response,
             pi_mode_state,
+            pi_active_tools,
             pi_goal_state,
             pi_plan_entries,
             pi_run_command,
@@ -1925,6 +2020,9 @@ fn main() {
             pi_decide_plan,
             pi_list_sessions,
             pi_sessions_index,
+            pi_profile_get_active,
+            pi_profile_set_active,
+            pi_profile_delete,
             pi_discard_session,
             pi_new_session,
             pi_create_bot_session,
@@ -2077,6 +2175,7 @@ fn main() {
             fs::attachment_stage,
             fs::fs_write_text_file,
             fs::fs_open_url,
+            fs::fs_paths_exist,
             terminal::terminal_spawn,
             terminal::terminal_reap,
             terminal::terminal_attach,

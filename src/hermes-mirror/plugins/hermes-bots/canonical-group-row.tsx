@@ -52,10 +52,11 @@ export function CanonicalGroupRow({ active, onOpen, room }: CanonicalGroupRowPro
         <ContextMenuTrigger asChild>
           <RowButton
             aria-label={room.name}
+            data-bots-menu-row=""
+            data-roster-active={active ? '' : undefined}
             className={cn(
-              'flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
-              'hover:bg-(--chrome-action-hover)',
-              active && 'bg-(--ui-row-active-background)'
+              'relative flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden rounded-md px-2 py-2 text-left transition-colors',
+              'hover:bg-(--chrome-action-hover)'
             )}
             onClick={open}
           >

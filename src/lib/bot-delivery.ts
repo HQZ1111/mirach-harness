@@ -124,6 +124,160 @@ export interface RelayDeliverReceipt {
 
 const RELAY_DELIVER_TURN_WAIT_MS = 120_000
 
+// ── 未收尾投递清单（hermes `bot_delivery.list` 的宿主对偶）───────────────────
+//
+// 上游由网关按目标 profile 的投递回执回答「这个 bot 还有哪些 message_agent
+// 没落地」；宿主没有网关，投递由前端 engine-bridges 发起并在这里登记。
+// **只登记真正在跑的投递**：settle 即删，失败保留（UI 可忽略）；窗口重启后
+// 内存表清空 = 没有可证明的未收尾投递，不编造持久记录。
+
+export type HostDeliveryState = 'claimed' | 'failed' | 'queued' | 'waiting_on_you' | 'working'
+
+/** 与上游 `teammate-waits.tsx::TeammateDelivery` 同形（`since` = Unix 秒）。 */
+export interface HostDeliveryRow {
+  delivery_id: string
+  target: string
+  target_handle: string
+  state: HostDeliveryState
+  since: number
+  preview: string
+  waiting_on?: null | string
+  reason?: null | string
+  error?: null | string
+}
+
+interface TrackedDelivery extends HostDeliveryRow {
+  /** 发起投递的 bot profile（`bot_delivery.list` 的过滤键）。 */
+  from_profile: string
+}
+
+const activeDeliveries = new Map<string, TrackedDelivery>()
+
+/** 上游 `tools/bot_delivery_status.py`: PREVIEW_CHARS / FAILED_VISIBLE_SECONDS. */
+const DELIVERY_PREVIEW_CHARS = 140
+const DELIVERY_FAILED_VISIBLE_SECONDS = 24 * 3600
+
+/** 上游 `_preview`：摘掉投递签名、折叠空白、截到 140 字。 */
+function deliveryPreview(message: string): string {
+  let text = message
+  const marker = text.indexOf('): ')
+  if (marker >= 0 && text.startsWith('Message from ')) {
+    text = text.slice(marker + 3)
+  }
+  text = text.split(/\s+/).filter(Boolean).join(' ')
+  return text.length <= DELIVERY_PREVIEW_CHARS
+    ? text
+    : text.slice(0, DELIVERY_PREVIEW_CHARS - 1) + '…'
+}
+
+export function trackDeliveryStart(input: {
+  id: string
+  fromProfile: string
+  target: string
+  targetHandle?: string
+  message: string
+}): void {
+  const id = String(input.id ?? '').trim()
+  if (!id) return
+  activeDeliveries.set(id, {
+    delivery_id: id,
+    from_profile: String(input.fromProfile ?? '').trim(),
+    target: String(input.target ?? '').trim(),
+    target_handle: String(input.targetHandle ?? input.target ?? '').trim(),
+    state: 'queued',
+    since: Math.floor(Date.now() / 1000),
+    preview: deliveryPreview(String(input.message ?? '').trim()),
+  })
+}
+
+export function trackDeliveryState(id: string, state: HostDeliveryState): void {
+  const row = activeDeliveries.get(id)
+  if (row) row.state = state
+}
+
+export function trackDeliverySettled(id: string): void {
+  activeDeliveries.delete(id)
+}
+
+export function trackDeliveryFailed(id: string, error: string, reason = 'unknown'): void {
+  const row = activeDeliveries.get(id)
+  if (!row) return
+  row.state = 'failed'
+  row.reason = reason
+  row.error = error
+  // 上游 since = 回执最后一次写入（失败态即失败时刻），失败行可见 24h。
+  row.since = Math.floor(Date.now() / 1000)
+}
+
+/** 某个 bot 发起、尚未 settle 的投递（上游 `bot_delivery.list` 的 rows，newest first）。 */
+export function listTrackedDeliveries(profile: string): HostDeliveryRow[] {
+  const wanted = String(profile ?? '').trim()
+  const now = Math.floor(Date.now() / 1000)
+
+  // 过期失败行真的删掉（不只过滤）：内存表不随运行时长增长。
+  for (const [id, row] of activeDeliveries) {
+    if (row.state === 'failed' && now - row.since > DELIVERY_FAILED_VISIBLE_SECONDS) {
+      activeDeliveries.delete(id)
+    }
+  }
+
+  const rows: HostDeliveryRow[] = []
+  for (const row of activeDeliveries.values()) {
+    if (wanted && row.from_profile !== wanted) continue
+    // 上游 `list_sender_deliveries` 只扫本网关的本地队友回执；远端投递
+    // 不在网关数据面（Desktop 的 relay 属跨机总线），宿主同样不列。
+    if (!findBotByName(row.target)) continue
+    const { from_profile: _from, ...visible } = row
+    rows.push({ ...visible })
+  }
+  return rows.sort((a, b) => b.since - a.since)
+}
+
+/**
+ * 上游 `delivery_state` 的 `waiting_on_you`：目标 bot 的**本投递轮**停在
+ * 审批/澄清上时，strip 要写「等待你 — 请批准/回答问题」（只有一个「处理中」
+ * 会让用户不知道队友被自己卡住）。
+ *
+ * 只对 `working` 行取目标泳道态：`waitUntilIdle` 保证交付前目标空闲，所以
+ * 此刻的 pending prompt 属于本轮；`queued`/`claimed` 的 prompt（若有）属于
+ * 别的轮次，不冒充。远端目标无法本地查——保持原态（如实）。
+ */
+export async function applyLiveDeliveryState(rows: HostDeliveryRow[]): Promise<HostDeliveryRow[]> {
+  const out: HostDeliveryRow[] = []
+  for (const row of rows) {
+    if (row.state !== 'working') {
+      out.push(row)
+      continue
+    }
+    const target = findBotByName(row.target)
+    if (!target?.chatSessionId) {
+      out.push(row)
+      continue
+    }
+    try {
+      const state = await tauriInvoke<{
+        open_requests?: unknown[]
+        pending_approval?: unknown
+      }>('pi_bot_state', { sessionId: target.chatSessionId })
+      const approval = state?.pending_approval
+      const hasApproval = approval !== null && approval !== undefined
+      const hasClarify = Array.isArray(state?.open_requests) && state.open_requests.length > 0
+      out.push(
+        hasApproval
+          ? { ...row, state: 'waiting_on_you', waiting_on: 'approval' }
+          : hasClarify
+            ? { ...row, state: 'waiting_on_you', waiting_on: 'clarify' }
+            : row,
+      )
+    } catch (e) {
+      // 状态查询失败不把整条清单变成错误：行保持上一态，错误可见。
+      console.error('[bot-delivery] 读取目标泳道态失败', row.target, e)
+      out.push(row)
+    }
+  }
+  return out
+}
+
 /**
  * `bot_relay.deliver` 的宿主实现（目标 = 本机 bot）。
  *

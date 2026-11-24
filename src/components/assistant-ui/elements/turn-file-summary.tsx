@@ -108,7 +108,7 @@ export const TurnFileSummary: FC = () => {
     >
       <CollapsibleTrigger
         data-slot="aui_turn-file-summary-trigger"
-        className="hover:bg-muted/40 flex h-[40px] w-full min-w-0 items-center gap-2 px-2 text-left text-[14px] transition-colors"
+        className="hover:bg-(--hover-wash) flex h-[40px] w-full min-w-0 items-center gap-2 px-2 text-left text-[14px] transition-colors"
       >
         {/* ZCode 实测（9444）：卡片头 40 高、bg-card、左侧 file-diff 图标
             （不是 chevron）、14px 文本、+/- 与标题同一行。 */}

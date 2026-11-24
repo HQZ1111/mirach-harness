@@ -8,6 +8,8 @@ import {
 } from '@/components/assistant-ui/status-panel-store';
 import { VoiceLivePanel } from '@/components/assistant-ui/voice-live-panel';
 import { VoiceLiveConversationDrive } from '@/components/assistant-ui/voice-live-conversation';
+import { ThreadSessionIdProvider } from '@/components/assistant-ui/thread-session-id';
+import { AiMessageAvatar, UserMessageAvatar, useAiIdentityName, useUserIdentityName } from '@/components/assistant-ui/message-avatars';
 import { lookupLineageParentName } from "@/components/panes/session-manage/session-lineage-name";
 import { ApprovalCards } from '@/components/assistant-ui/approval-cards'
 import { AskCards } from '@/components/assistant-ui/ask-cards'
@@ -57,7 +59,8 @@ import {
   speechProgressBridge,
   wordIndexAt,
 } from "@/components/assistant-ui/speech-adapter";
-import { EmptyState, EmptyStateGreeting, EmptyStateSuggestion, EmptyStateSuggestions } from "@/components/assistant-ui/elements/empty-state";
+import { EmptyState, EmptyStateGreeting } from "@/components/assistant-ui/elements/empty-state";
+import { Wordmark } from "@/sdk/wordmark";
 import { ErrorState } from "@/components/assistant-ui/elements/error-state";
 import { ConnectionState } from "@/components/assistant-ui/elements/connection-state";
 import { MessageActions, type Reaction } from "@/components/assistant-ui/elements/message-actions";
@@ -89,7 +92,6 @@ import {
   transcriptTailStore,
   useEngineAttaching,
 } from "@/components/assistant-ui/transcript-paging";
-import { findActiveBridge } from "@/components/assistant-ui/find-active-bridge";
 import {
   groupMessagesIntoTurns,
   isLastContentAssistantOfTurn,
@@ -157,6 +159,8 @@ import {
   type ReactNode,
 } from "react";
 import { useStore } from "zustand";
+import { createPortal } from "react-dom";
+import { appearanceStore } from "@/lib/appearance-prefs";
 
 import { ContribBoundary } from "@/hermes-shim/contrib/react/contrib-boundary";
 import { useContributions } from "@/hermes-shim/contrib/react/use-contributions";
@@ -197,6 +201,11 @@ export type ThreadProps = {
   /** 会话分栏（v7.4）：跳过主会话管理 chrome（检查点/谱系/队列/成本/
    *  中断横幅——桥为主会话单例），消息/composer/思考指示照常。 */
   scoped?: boolean | undefined;
+  /** 本 pane 的落盘会话 id。分栏 runtime 没有 threadListAdapter，
+   *  `threadListItem.id` 恒为 DEFAULT_THREAD_ID——由 pane 显式传入，
+   *  composer 的会话级能力（审批芯片 / composer.top 的 useComposerSession）
+   *  才拿得到真 id。主 pane 不传，走 threadListItem 兜底。 */
+  sessionId?: null | string | undefined;
 };
 
 const EMPTY_COMPONENTS: ThreadComponents = {};
@@ -833,85 +842,6 @@ const EngineAttachHint: FC = () => {
   );
 };
 
-/** 轮次挂载门（真虚拟化）：wrapper div 恒在（轮导航器 rect / 滚动锚定
- *  依赖它），内部消息由 IntersectionObserver 按视口距离挂载/卸载。
- *  卸载时用**实测高度**的占位 div 保持布局稳定（滚动不跳）。
- *  查找打开时全量挂载（占位符无文本，查找需要全文 DOM）。
- *  高度缓存跨切换保留（二次切换直接出占位符，无需重测）。 */
-const GATE_ROOT_MARGIN = "2500px 0px 2500px 0px";
-const turnHeightCache = new Map<string, number>();
-const useFindActive = () => useStore(findActiveBridge, (s) => s.active);
-
-const TurnGate: FC<{
-  gateKey: string;
-  children: ReactNode;
-}> = ({ gateKey, children }) => {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const findActive = useFindActive();
-  const [show, setShow] = useState(() => {
-    // 初始：有缓存高度 = 之前挂载过 → 占位即可（等滚动到视口再真挂）
-    // 无缓存 = 首次见 → 真挂（需要测量高度）
-    if (findActiveBridge.getState().active) return true;
-    return !turnHeightCache.has(gateKey);
-  });
-  const heightRef = useRef(turnHeightCache.get(gateKey) ?? 0);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setShow(true);
-          } else {
-            const h = el.getBoundingClientRect().height;
-            if (h > 0) {
-              heightRef.current = h;
-              turnHeightCache.set(gateKey, h);
-            }
-            // 查找打开时不卸载（全文可搜）
-            if (!findActiveBridge.getState().active) {
-              setShow(false);
-            }
-          }
-        }
-      },
-      { rootMargin: GATE_ROOT_MARGIN },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [gateKey]);
-
-  // 挂载期间保持高度缓存新鲜
-  useEffect(() => {
-    if (!show) return;
-    const el = ref.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const h = el.getBoundingClientRect().height;
-      if (h > 0) {
-        heightRef.current = h;
-        turnHeightCache.set(gateKey, h);
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [show, gateKey]);
-
-  if (!show) {
-    return (
-      <div
-        ref={ref}
-        style={{ height: heightRef.current }}
-        aria-hidden="true"
-        data-turn-gate-placeholder="true"
-      />
-    );
-  }
-  return <div ref={ref}>{children}</div>;
-};
-
 const MessageTurnList: FC = () => {
   const ids = unstable_useThreadMessageIds();
   const roleSig = useAuiState((s) =>
@@ -1069,15 +999,13 @@ const MessageTurnList: FC = () => {
                 prevModel={m.prevModel}
               />
             ))}
-            <TurnGate gateKey={`${threadKey}:${turn.key}`}>
-              {turn.messageIds.map((id) => (
-                <ThreadPrimitive.Unstable_MessageById
-                  key={id}
-                  messageId={id}
-                  components={{ Message: MessageWithDaySeparator }}
-                />
-              ))}
-            </TurnGate>
+            {turn.messageIds.map((id) => (
+              <ThreadPrimitive.Unstable_MessageById
+                key={id}
+                messageId={id}
+                components={{ Message: MessageWithDaySeparator }}
+              />
+            ))}
           </div>
         );
       })}
@@ -1097,39 +1025,28 @@ const MessageTurnList: FC = () => {
 };
 
 // ── empty-state（官方元素，挂 Welcome 槽位）────────────────────────────
-// 只有问候语 + 起步建议；发送走 aui.thread.append = 现有发送通道（onNew → POST）。
-// 2026-10-16：移除原挂的罐头 composer（见下方 EmptyStateWelcome 注释）。
-const STARTER_SUGGESTIONS = [
-  "梳理这个仓库的模块结构",
-  "总结我们当前的对话进度",
-  "写一个 PowerShell 脚本批量重命名文件",
-  "帮我分析一段报错堆栈",
-] as const;
-
+// 只有开场字标 + 问候语。起步建议气泡已按用户要求删除卸载
+// （2026-11-24："总结我们当前的对话进度等气泡提示组件删除卸载"）。
+// 2026-10-16 已移除罐头 composer（见下）。
 const EmptyStateWelcome: FC = () => {
-  const aui = useAui();
+  // 设置 → 外观 →「开场标识」：关掉后空对话不再显示字标与提示语。
+  const introSplash = useStore(appearanceStore, (s) => s.introSplash);
+  if (!introSplash) return null;
   return (
-    <EmptyState className="aui-thread-welcome-root mx-auto my-6">
+    <EmptyState className="aui-thread-welcome-root mx-auto my-6 w-full max-w-none">
+      {/* 开场标识：完全照 hermes Wordmark（dev 的 fit-text 结构），字号随
+          容器/输入框宽度缩放并铺满整列；HarmonyOS Sans / Medium / 字距 2，
+          颜色跟随主题色（--brand）。 */}
+      <Wordmark
+        className="mb-1 text-(--brand)"
+        text="MIRACH"
+        width="100%"
+      />
       <EmptyStateGreeting>有什么可以帮你的？</EmptyStateGreeting>
-      <EmptyStateSuggestions>
-        {STARTER_SUGGESTIONS.map((s, i) => (
-          <EmptyStateSuggestion
-            key={s}
-            index={i}
-            onClick={() => aui.thread.append(s)}
-          >
-            {s}
-          </EmptyStateSuggestion>
-        ))}
-      </EmptyStateSuggestions>
       {/* 2026-10-16 去重：此处原挂 <EmptyStateComposer>——它是上游给
           "无底部 composer 场景"准备的**罐头输入框外观**（纯展示、onSend 即发），
           与页面底部真正的 ComposerBar 叠成两个输入框（用户实测："上面怎么还有
-          一个输入框"）。
-          hermes 参考：其新会话页不放该元素（全仓无 EmptyStateComposer 引用），
-          只留底部 composer。故本处移除；组件本体在 elements/empty-state.tsx
-          原样保留（上游原件不动），仅停止消费。
-          起步提示仍由下方建议按钮承担（点击 append）。 */}
+          一个输入框"）。hermes 新会话页不放该元素，只留底部 composer。 */}
     </EmptyState>
   );
 };
@@ -1197,12 +1114,15 @@ export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
   autoFocus = true,
   scoped = false,
+  sessionId = null,
 }) => {
   const isEmpty = useAuiState(isNewChatView);
 
   return (
     <ThreadComponentsContext.Provider value={components}>
-      <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} scoped={scoped} />
+      <ThreadSessionIdProvider value={sessionId}>
+        <ThreadRoot isEmpty={isEmpty} autoFocus={autoFocus} scoped={scoped} />
+      </ThreadSessionIdProvider>
     </ThreadComponentsContext.Provider>
   );
 };
@@ -1222,6 +1142,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
   // 动画）。采样：onScroll 300ms 节流写回（offset 存距底距离，上方内容
   // 增删不摇晃阅读位）。
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  // footer 通过 portal 挂到 viewport 外侧（同一 React 树，ThreadViewport
+  // context 仍在）：消息滚动区才能用 mask 渐隐，composer 不被 mask。
+  const [footerHost, setFooterHost] = useState<HTMLDivElement | null>(null);
   const restoreRequest = useStore(threadScrollBridge, (s) => s.scrollRestoreRequest);
   // 活动状态面板让位（与 ZCode conversationLayout.ts 逐条对账，2026-11-18）：
   // - 偏移只由"面板在场且非 mini 胶囊"决定（layout != none）；
@@ -1302,7 +1225,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           // composer 与消息同列，自动跟随。
           ["--composer-bg" as string]:
             "color-mix(in oklab, var(--color-muted) 30%, transparent)",
-          ["--composer-radius" as string]: "32px",
+          ["--composer-radius" as string]: "20px",
           ["--composer-padding" as string]: "12px",
         }}
       >
@@ -1373,20 +1296,20 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           >
             <MessageTurnList />
           </div>
+        </div>
 
+          {footerHost ? createPortal(
           <ThreadPrimitive.ViewportFooter
             className={cn(
-              // 2026-11-15 用户："对话内容穿透到输入框下面" + "用白色啊"。
-              // ZCode 的 composer dock 是白底（bg-background），不是外壳灰。
-              // 用 --surface（白）做遮罩：滚动内容在输入区边界消失，颜色与
-              // ZCode 一致；顶部 4px 白→透明渐隐，不硬切。
-              "aui-thread-viewport-footer relative flex flex-col gap-4 overflow-visible pb-4 md:pb-6",
-              "bg-[var(--surface)]",
-              "before:pointer-events-none before:absolute before:inset-x-0 before:-top-6 before:h-6 before:bg-gradient-to-t before:from-[var(--surface)] before:to-transparent before:content-['']",
-              !isEmpty &&
-                "sticky bottom-0 mt-auto rounded-t-(--composer-radius)",
+              // footer 现在在 viewport 外侧（portal），消息不再滚到它下面：
+              // 渐隐由 viewport 的 mask-image 负责，footer 自己不画遮罩。
+              "aui-thread-viewport-footer relative flex w-full flex-col overflow-visible pb-4 md:pb-6",
             )}
           >
+            {/* footer 本身撑满整栏（它的空间也让整栏宽）；里面的
+                status / composer 仍按对话内容列宽居中，输入框宽度不跟着
+                变宽（用户："输入框的宽度怎么跟着变了"）。 */}
+            <div className="mx-auto flex w-full max-w-(--dsh-chat-content-width) flex-col gap-4 px-4">
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             {/* 运行状态（2026-11-15 用户定稿）：ZCode 的「工作中 N」挂在
@@ -1426,10 +1349,12 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             <AuiIf condition={(s) => isNewChatView(s) && s.composer.isEmpty}>
               <ThreadSuggestions />
             </AuiIf>
+            </div>
           </ThreadPrimitive.ViewportFooter>
-          </div>
+          , footerHost) : null}
           </div>
         </ThreadPrimitive.Viewport>
+        <div ref={setFooterHost} className="shrink-0" data-slot="aui_thread-footer-host" />
         {/* 对话宽度手柄（dsh ConversationRoot 同款：左右各一条，拖拽 =
             对称缩放内容宽并持久化；仅对话在屏时渲染——新会话 hero 无列） */}
         {!isEmpty &&
@@ -1775,6 +1700,7 @@ const AssistantMessage: FC = () => {
   } = useContext(ThreadComponentsContext);
   // 朗读面板开合（footer 朗读钮 ↔ 消息底部 ReadAloud 面板）
   const [readAloudOpen, setReadAloudOpen] = useState(false);
+  const aiIdentity = useAiIdentityName();
 
   // ── 轮级操作条：一轮只挂一条（2026-11-02，ZCode
   //    `hideAssistantActions={!item.latest}` 同款）────────────────────
@@ -1804,15 +1730,25 @@ const AssistantMessage: FC = () => {
         isTurnTail && hasParts && "-mb-7.5 pb-7.5",
       )}
     >
-      <div
-        data-slot="aui_assistant-message-content"
-        className="text-foreground text-[14px] leading-[1.75] wrap-break-word"
+      {/* AI 身份行：头像在**外面**（最左），名字与内容左对齐；名字中线与
+          头像中线对齐（h-[40px] + items-center，头像 40px）。 */}
+      <div className="flex items-start gap-2.5">
+        <AiMessageAvatar />
+        <div className="min-w-0 flex-1">
+          <div className="flex h-[40px] items-center">
+            <span className="text-muted-foreground truncate text-[12px] leading-[18px]">{aiIdentity}</span>
+          </div>
+        <div
+          data-slot="aui_assistant-message-content"
+        className="text-foreground text-[length:var(--conversation-text-font-size)] leading-[1.75] wrap-break-word"
       >
-        {/* 工作项渲染器（2026-11-07）：替换 MessagePrimitive.GroupedParts。
-            ZCode 扫描语义——隐藏的思考行（非首条）在扫描前剔除，工具族组
-            因此能跨思考行（[思考,bash,思考,bash] → 一个「终端」组）。
-            叶子机制与官方逐条对齐（part scope / 注册工具 UI / data 渲染器 /
-            indicator），见 work-parts.aui.tsx 模块头。 */}
+        {/* 工作项渲染器（2026-11-07；2026-11-22 接显示开关）：替换
+            MessagePrimitive.GroupedParts。ZCode 扫描语义——「显示思考过程」
+            关闭时非首条思考在扫描前剔除（conversation-display-store），工具
+            族组因此能跨思考行（[思考,bash,思考,bash] → 一个「终端」组）；
+            打开时全部思考可见（ZCode 迁移后的默认）。叶子机制与官方逐条
+            对齐（part scope / 注册工具 UI / data 渲染器 / indicator），见
+            work-parts.aui.tsx 模块头。 */}
         <AssistantWorkParts
           ToolFallback={ToolFallbackComponent}
           ReasoningGroup={ReasoningGroup}
@@ -1879,6 +1815,8 @@ const AssistantMessage: FC = () => {
       {readAloudOpen && (
         <ReadAloudPanel className="mt-1 w-full max-w-none rounded-xl" />
       )}
+        </div>
+      </div>
     </MessagePrimitive.Root>
   );
 };
@@ -2154,12 +2092,26 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
 );
 
 const UserMessage: FC = memo(function UserMessage() {
+  const userIdentity = useUserIdentityName()
+  const bubbleOutline = useStore(appearanceStore, (s) => s.bubbleOutline)
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="group/user-row fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] content-start gap-y-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
+      className="group/user-row fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_minmax(0,auto)_auto] content-start gap-x-2 gap-y-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
       data-role="user"
     >
+      {/* 身份行：名字与内容同边（右对齐到气泡右缘），头像在**外面**（更右），
+          两者中线对齐（h-[40px] + items-center，头像 40px）。用户 2026-11-23：
+          "名字的文字和内容分别左右对齐，头像应该在外面"。 */}
+      <div className="col-start-2 row-start-1 flex h-[40px] min-w-0 items-center justify-end">
+        <span className="text-muted-foreground truncate whitespace-nowrap text-[12px] leading-[18px]">
+          {userIdentity}
+        </span>
+      </div>
+      <div className="col-start-3 row-start-1">
+        <UserMessageAvatar />
+      </div>
+
       <UserMessageAttachments />
 
       <div className="aui-user-message-content-wrapper col-start-2 min-w-0">
@@ -2167,7 +2119,7 @@ const UserMessage: FC = memo(function UserMessage() {
             text-ui-base 14/21。此前照旧版记的 24 + top-right 6 与 1px 描边
             都和现状不符（现在 ZCode 的 rounded-tr-xs 被 rounded-xl 覆盖，
             border 宽度为 0）。 */}
-        <div className="aui-user-message-content bg-muted text-foreground rounded-[24px] px-[16px] py-[12px] text-[14px] leading-[21px] wrap-break-word empty:hidden">
+        <div className={`aui-user-message-content rounded-[24px] ${bubbleOutline ? "border border-(--stroke-soft)" : "border border-transparent"} bg-(--dt-user-bubble) px-[16px] py-[12px] text-[length:var(--conversation-text-font-size)] leading-[1.5] text-foreground wrap-break-word empty:hidden`}>
           <MessagePrimitive.Parts
             components={{ File: UserFilePart, Image: UserImagePart, Quote: QuoteBlock }}
           />

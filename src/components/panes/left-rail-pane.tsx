@@ -16,9 +16,11 @@ import {
   toggleBotsPanel,
   useBotsPanelOpen,
 } from '@/components/panes/hub/bots-panel-actions'
+import { useBotsFeatureDesired } from '@/plugins/bots-gate'
 
 export function LeftRailPane() {
   const botsOpen = useBotsPanelOpen()
+  const botsEnabled = useBotsFeatureDesired()
   // 挂载同步一次（fromJSON 恢复的面板不走 didAddPanel——布局事件在 boot
   // 路径不可依赖，读最终态最稳）；之后由 shell 的 didAdd/didRemove 事件驱动
   useEffect(() => {
@@ -28,9 +30,9 @@ export function LeftRailPane() {
     <div className="left-rail-pane" data-slot="left-rail-pane">
       <div className="left-rail-logo-row">
         <RailLogoLeading
-          wordTitle="点击打开 / 收起 机器人"
-          onWordClick={toggleBotsPanel}
-          wordActive={botsOpen}
+          wordTitle={botsEnabled ? '点击打开 / 收起 机器人' : '机器人插件未启用'}
+          onWordClick={botsEnabled ? toggleBotsPanel : undefined}
+          wordActive={botsEnabled && botsOpen}
         />
       </div>
       <div className="left-rail-body">
