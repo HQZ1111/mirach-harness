@@ -315,6 +315,30 @@
 - **插件集成**：mirach-pkg 目录删除；mirach-connections 只保留
   `bots.roster.grouping`（设置页「连接」删除）；无贡献时整组隐藏。
 
+## 2026-11-25 对话错误面 + 技能本地开关 + 打包（当前有效）
+
+- **`RunResult.outcome = Failed` 必须转 Err**（`src-tauri/src/pi_session.rs`
+  的 `run_prompt_on`）：rpi 对 provider 连接失败/重试耗尽是 `Ok(RunResult
+  { outcome: Failed })`，AgentEnd 无 error 字段。若直接 `map(|_| ())`，
+  agui 只推 RUN_FINISHED，前端看不到任何错误（用户："发了消息 ai 没回复"）。
+  现在 Failed → `Err(error.message)` → agui 推 RUN_ERROR。**不要改回
+  `result.map(|_| ())`。** 实机失败形状：`http error: http transport error:
+  error sending request for url (...)`。
+- **分栏/机器人 run 错误卡是浮层**：`session-thread-pane.tsx` 里
+  `ErrorState` 用 `absolute inset-x-3 top-3 z-20`，不能放回文档流——会挤压
+  对话区（用户："错误提示卡会把内容挤到下面"）。
+- **设置 → 技能与工具 = 纯本地开关**：`src/app/settings/skills-tools-settings.tsx`
+  消费 `pi_capabilities` / `pi_set_toolset_enabled` / `pi_set_skill_enabled`
+  （`harness-capabilities.json`）；工具集 + 技能全部 Switch。旧的
+  skillDirs/promptDirs/extensionDirs/defaultTools 文本框已删；
+  shellPath/shellCommandPrefix 在「核心连接 → 引擎网络 → 终端执行」。
+- **打包命令**：`npx tauri build --config src-tauri/tauri.prod.conf.json
+  --config '{"build":{"beforeBuildCommand":"npx vite build"}}'`。
+  必须用第二个 `--config` 覆盖 beforeBuildCommand，否则 `npm run build`
+  的 `tsc --noEmit` 会撞 hermes-mirror 历史 1315 条基线错误。产物 =
+  `src-tauri/target/release/bundle/nsis/Mirach Harness_0.1.0_x64-setup.exe`。
+  prod 窗口 1280×600 / shadow true；安装器图标来自 `G:\MIRACH\src-tauri\icons`。
+
 ## 工具链钉版（升级前必读）
 
 | 包 | 版本 | 为什么 |

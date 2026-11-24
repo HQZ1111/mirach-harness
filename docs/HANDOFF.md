@@ -6,6 +6,32 @@
 
 ## 当前状态
 
+**✅ 2026-11-25：对话错误可见 + 技能与工具本地开关 + 打包**
+
+- **模型连接失败/运行失败有可见错误**（用户："用户发了消息就看到 ai 没回复"）：
+  根因 = rpi 的 `RunResult.outcome = Failed` 仍以 `Ok` 返回（AgentEnd 无
+  error 字段），`pi_session.rs::run_prompt_on` 的 `result.map(|_| ())` 把它
+  当成功 → agui 只推 RUN_FINISHED、不推 RUN_ERROR，空 assistant 消息又被
+  前端抑制。修复 = Failed 转 `Err(error.message)`，agui Err 分支推
+  RUN_ERROR；实机把 BBT baseUrl 指到关闭端口复现，错误条正确显示
+  `http error: ... http://127.0.0.1:9/v1/chat/completions`。
+- **机器人/分栏 run 错误卡不再挤内容**：`session-thread-pane.tsx` 的
+  `ErrorState` 从文档流改为 `absolute inset-x-3 top-3` 浮层（对话区
+  relative），出现/消失不改变 Thread 高度。
+- **设置 → 技能与工具 = 纯本地开关**（用户："内容全部换成本地的开关"）：
+  新 `src/app/settings/skills-tools-settings.tsx`，数据面
+  `pi_capabilities` / `pi_set_toolset_enabled` / `pi_set_skill_enabled`
+  （`harness-capabilities.json`）；17 个工具集 + 技能清单全部 Switch，
+  旧 skillDirs/promptDirs/extensionDirs/defaultTools 文本框删除。
+  `shellPath` / `shellCommandPrefix` 迁到「核心连接 → 引擎网络 → 终端执行」。
+- **打包**：`npx tauri build --config src-tauri/tauri.prod.conf.json
+  --config '{"build":{"beforeBuildCommand":"npx vite build"}}'`（跳过历史
+  tsc 基线错误，仅构建）→ `src-tauri/target/release/bundle/nsis/
+  Mirach Harness_0.1.0_x64-setup.exe`（84.27 MiB）。prod 窗口最小尺寸
+  同步 1280×600 / shadow true；`src-tauri/icons/*` 从 G:\MIRACH 复制
+  （安装器图标/配置对齐 hermes）。分支 `bots-plugin-complete` 已推送
+  `8d29b75`、`cd492ca`。
+
 **✅ 2026-11-24（续）：设置页大修 + 记忆插件 rpi-optchat**
 
 - **布局**：`--dialog-nav-w` 172→200（「密码与登录」不再截断）；左栏
