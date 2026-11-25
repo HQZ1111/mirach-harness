@@ -1098,9 +1098,13 @@ impl PiEngine {
             ),
             None => match session_path {
                 // 打开既有会话：绑定文件所属环境（本体/工作区 → None）。
+                // **具名环境走 ensure_profile_dirs**：隔离前建的 bot home 只有
+                // sessions/，补种子四件套（auth/models/settings/trust
+                // copy-if-missing）否则解析不到模型（实测打开 remote-bot 会话
+                // 报 "No API key" —— 纯读面 profile_sessions_dir 不够）。
                 Some(p) => {
                     let scoped = crate::pi_profiles::profile_from_session_path(Path::new(p));
-                    let dir = crate::pi_profiles::profile_sessions_dir(scoped.as_deref())?;
+                    let dir = crate::pi_profiles::ensure_profile_dirs(scoped.as_deref())?;
                     (scoped, dir)
                 }
                 // 新建：当前活动环境（具名时确保目录存在）。

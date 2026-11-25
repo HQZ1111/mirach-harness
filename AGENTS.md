@@ -485,6 +485,13 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
   配置档案栏（视觉条）；「新建/导入配置档案」入口（用机器人页管理）。
 - **「环境」子菜单语义不变**：选中 = 切引擎活动环境（新建会话落点与资源
   解析），但**不再**造成侧栏换源——列表由聚合面决定。
+- **打开跨环境会话 = 按文件环境绑定 + 补种子配置**（2026-11-25 实测修复）：
+  `build_harness_for_profile` 的「打开既有会话」路径改走
+  `ensure_profile_dirs`（原为只读的 `profile_sessions_dir`）——隔离前建的
+  bot home 只有 `sessions/`，纯读面会让打开的会话报
+  `模型解析失败: No API key`（实机：点 remote-bot 组里的 Bot Chat 复现）。
+  ensure 只做 copy-if-missing（auth/models/settings/trust），不覆盖用户
+  在该环境里的修改。
 
 
 

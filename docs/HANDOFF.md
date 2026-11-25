@@ -26,6 +26,10 @@
   **实机**：index 分桶 本体 73 / 微软 13 / remote-bot 10 / 风格和 7；
   网关与配置分组 4 组头（Mirach + 3 bot）滚到底分组计数 3/7/10 行。
   有意不做：`showAllProfiles` 复选框（恒聚合）、配置档案栏视觉条。
+- **打开跨环境会话补种子配置**（实机修复）：点 remote-bot 组里的会话报
+  `No API key`（隔离前建的 bot home 只有 sessions/）——
+  `build_harness_for_profile` 打开路径改走 `ensure_profile_dirs`
+  （copy-if-missing 四件套），重开验证通过。
 - **门禁**：`cargo test` 740 passed / 1 ignored；`npm test` 96 文件 /
   1126 用例；touched 文件 tsc 无新增错误。**待做**：`pi_pkg_*`（rpi
   install 落本体 home）、MCP 全局配置/cron 仍进程级（AGENTS「五·二/六」节）。
