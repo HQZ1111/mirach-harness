@@ -332,6 +332,13 @@
   （`harness-capabilities.json`）；工具集 + 技能全部 Switch。旧的
   skillDirs/promptDirs/extensionDirs/defaultTools 文本框已删；
   shellPath/shellCommandPrefix 在「核心连接 → 引擎网络 → 终端执行」。
+- **启动页（2026-11-25）**：`LaunchOverlay`（`src/components/launch-overlay.tsx`）
+  = hermes `GatewayConnectingOverlay` 宿主对偶，UI 用 ReactBits ParticleText
+  逐字复制（`src/components/particle-text/`，纯 Canvas，无依赖）。字标颜色
+  **不要传 `color="var(--brand)"`**（canvas fillStyle 不解析 CSS 变量 → 粒子
+  静默变黑）；默认 currentColor 读容器 computed color。boot 状态在
+  `src/lib/boot-store.ts`，runtime 端点发现带退避重试、SSE onopen 置 ready、
+  失败给「重试」；dev 预览 `?connecting=1`。z 层 = `--z-connecting: 200`。
 - **打包命令**：`npx tauri build --config src-tauri/tauri.prod.conf.json
   --config '{"build":{"beforeBuildCommand":"npx vite build"}}'`。
   必须用第二个 `--config` 覆盖 beforeBuildCommand，否则 `npm run build`

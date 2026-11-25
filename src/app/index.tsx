@@ -9,6 +9,7 @@ import { useEffect } from 'react'
 
 import { AppPrefsBoot } from '@/app/app-prefs-boot'
 import { EngineBridges } from '@/components/engine-bridges'
+import { LaunchOverlay } from '@/components/launch-overlay'
 import { DockviewShell } from '@/components/layout/dockview-shell'
 import { TrayBridge } from '@/components/layout/tray-bridge'
 import { ToastHost } from '@/components/motion/toast-host'
@@ -35,6 +36,10 @@ export function App() {
       {/* 全局 toast（host.notify / notifyError 的可见面，2026-11-18） */}
       <ToastHost />
       <DockviewShell />
+      {/* 启动页（hermes GatewayConnectingOverlay 的宿主移植 + ReactBits
+          ParticleText 字标）：冷启动全屏遮挡，引擎就绪后自退场；失败时
+          留在原地给错误与「重试」。放在最后 = z-(--z-connecting) 压过壳。 */}
+      <LaunchOverlay />
     </>
   )
 }

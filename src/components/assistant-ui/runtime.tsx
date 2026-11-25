@@ -54,6 +54,7 @@ import {
   type SwitchRequest,
 } from './branch-store'
 import { connectionBridge } from './connection-store'
+import { bootBridge } from '@/lib/boot-store'
 import { errorBridge } from './error-bridge'
 import { clearThreadScroll, threadScrollBridge } from './thread-scroll-store'
 import { deriveTitle, firstUserMessageText, nextTitleInLineage } from './session-title'
@@ -553,6 +554,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // requestReconnect 递增 reconnectSeq → 本 effect 重跑（cleanup close 旧
   // 连接 → 端点重发现 + 历史水合 + 会话列表重拉，幂等）。
   const reconnectSeq = useStore(connectionBridge, (s) => s.reconnectSeq)
+  // 启动页「重试」序号：启动失败后用户点重试 → 本 effect 重跑端点发现链。
+  const bootRetrySeq = useStore(bootBridge, (s) => s.retrySeq)
   useEffect(() => {
     let es: EventSource | null = null
     let cancelled = false
@@ -592,9 +595,34 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
     }
     void (async () => {
+      bootBridge.getState().setBooting()
+      // 端点发现带自动重试（2026-11-25 启动页全链路）：Rust setup 里引擎是
+      // 异步起步的，WebView 首帧可能早于 `agui endpoint ready`——旧实现一次
+      // invoke 失败就只 console.error，SSE 永不连接（聊天假死）。这里在
+      // 20s 窗口内退避重试；耗尽才把失败交给启动页（可重试）。
+      let ep: { port: number; token: string } | null = null
+      let endpointError: unknown = null
+      for (let attempt = 0; attempt < 40 && !cancelled && ep === null; attempt++) {
+        try {
+          ep = await invoke<{ port: number; token: string }>('get_agui_endpoint')
+        } catch (e) {
+          endpointError = e
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, attempt < 5 ? 300 : 700),
+          )
+        }
+      }
+      if (cancelled) return
+      if (ep === null) {
+        console.error('[agui] endpoint 获取失败（自动重试耗尽）', endpointError)
+        bootBridge
+          .getState()
+          .setFailed(
+            endpointError instanceof Error ? endpointError.message : String(endpointError),
+          )
+        return
+      }
       try {
-        const ep = await invoke<{ port: number; token: string }>('get_agui_endpoint')
-        if (cancelled) return
         setEndpoint(ep)
         // 挂载水合（§7-4 多会话）：历史真相在 pi（pi_get_messages 水合），
         // 流游标从缓冲最新 seq 起——跳过重放，避免混入其它会话的旧事件。
@@ -615,6 +643,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         // 进行中）与 dropped（CLOSED，浏览器放弃）——真相在 EventSource。
         es.onopen = () => {
           connectionBridge.getState().setConnected(true)
+          // 启动页就绪信号：事件流首连成功 = 引擎真的可用了（端点成功只
+          // 说明 HTTP 面在，SSE 打开才代表 run 事件链就绪）。
+          bootBridge.getState().setReady()
         }
         es.onerror = (e) => {
           console.error('[agui] SSE 连接错误', e)
@@ -707,14 +738,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           .refresh()
           .catch((err) => console.error('[pi] 审批列表拉取失败', err))
       } catch (e) {
-        console.error('[agui] endpoint 获取失败（应用重启中？）', e)
+        // 端点已发现、后续水合/列表失败：可见但不谎报启动失败（引擎可用，
+        // 只是首屏数据没齐）——启动页由 SSE onopen 决定退场。
+        console.error('[agui] 启动水合失败', e)
       }
     })()
     return () => {
       cancelled = true
       es?.close()
     }
-  }, [actorRef, refreshThreads, hydrateTranscriptTail, reconnectSeq])
+  }, [actorRef, refreshThreads, hydrateTranscriptTail, reconnectSeq, bootRetrySeq])
 
   /** 自动会话命名（规则段，hermes title_generator 两段式的即时段）：
    * POST 成功后对「默认态名」（pi SessionIndex 的 name 为 null/空 = 用户

@@ -234,6 +234,9 @@
   --z-titlebar: 50;
   --z-width-handle: 8;
   --z-local: 1;
+  /* 启动页：冷启动全屏遮罩，压过一切壳内层（含模态）——它只存在于
+     "壳还没就绪"的窗口里，就绪即卸载（LaunchOverlay）。 */
+  --z-connecting: 200;
 
   /* ── 文件树（workspace-file-tree，ZCode 移植；2026-10-01） ──
      行字号 = ZCode text-ui-base（--ui-font-size 14px）；其余语义色/悬停/

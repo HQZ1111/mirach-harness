@@ -1,0 +1,75 @@
+/* 启动页（LaunchOverlay）：hermes GatewayConnectingOverlay 的宿主形态。
+   实色 `--surface-shell-base` 保证玻璃/窗口透明模式下不透桌面（那是启动
+   过程，还不该看到桌面）。粒子字标本身由 ParticleText 的 canvas 画。 */
+.launch-overlay {
+  background: var(--surface-shell-base);
+  user-select: none;
+}
+
+.launch-overlay__wordmark {
+  height: clamp(200px, 34vh, 340px);
+  color: var(--brand);
+}
+
+.launch-overlay__status {
+  align-items: center;
+  color: var(--text-3);
+  display: flex;
+  font-size: var(--font-caption);
+  gap: 8px;
+  transition: opacity 300ms ease-out, transform 300ms ease-out;
+}
+
+.launch-overlay__status::before {
+  animation: launch-pulse 1.2s ease-in-out infinite;
+  background: var(--brand);
+  border-radius: 50%;
+  content: '';
+  height: 6px;
+  width: 6px;
+}
+
+.launch-overlay__card {
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--stroke-soft);
+  border-radius: var(--radius-panel-lg);
+  box-shadow: var(--shadow-dialog);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 560px;
+  padding: 16px 18px;
+}
+
+.launch-overlay__card-title {
+  color: var(--destructive);
+  font-weight: var(--weight-semibold);
+}
+
+.launch-overlay__card-detail {
+  color: var(--text-2);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+@keyframes launch-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.8);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launch-overlay__status::before {
+    animation: none;
+    opacity: 0.8;
+  }
+}

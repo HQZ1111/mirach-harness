@@ -6,6 +6,25 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（续）：hermes 启动页移植（ReactBits ParticleText）**
+
+- `src/components/launch-overlay.tsx` = hermes `GatewayConnectingOverlay` 的
+  宿主对偶：冷启动全屏实色遮罩（`--surface-shell-base`，玻璃/透明也不透桌
+  面）→ MIRACH 粒子字标 + 「正在启动 Mirach 引擎…」→ 就绪后按 hermes 编排
+  退场（字标 360ms 位移淡出去饱和 → 停 300ms → 遮罩 520ms → 卸载）；
+  最短展示 1200ms 防闪；`prefers-reduced-motion` 直接卸载。
+- 字标 UI = **ReactBits ParticleText 逐字复制**（`src/components/
+  particle-text/`，纯 Canvas 2D，无依赖；只删了 `'use client'`）。
+  **不要给它传 `color="var(--brand)"`**——canvas fillStyle 不解析 CSS 变量，
+  粒子会静默变黑；组件默认 `currentColor` 会读容器 computed color（正确）。
+- 全链路 boot 状态：`src/lib/boot-store.ts`（booting/ready/failed + retrySeq）
+  ← runtime endpoint 发现带 40 次退避重试（20s），失败进启动页错误卡；
+  SSE `onopen` 置 ready。启动页失败态有「重试」→ requestRetry → runtime
+  重跑发现/水合。启动 45s 未连上或 SSE dropped 也收敛为可见失败。
+  dev 预览：URL 加 `?connecting=1` 常驻展示。
+- 实机验证：`?connecting=1` 截图 MIRACH 蓝色粒子字标 + 状态行；导航回
+  `/` 真实冷启动 4s 后遮罩已卸载（`overlay:false`）。
+
 **✅ 2026-11-25：对话错误可见 + 技能与工具本地开关 + 打包**
 
 - **模型连接失败/运行失败有可见错误**（用户："用户发了消息就看到 ai 没回复"）：

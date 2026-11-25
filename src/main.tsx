@@ -39,6 +39,8 @@ import './styles/panes.css'
 import './styles/overlays.css'
 // 外观页的氛围层（底部波浪动效），在 tailwind 之前导入。
 import './styles/appearance.css'
+// 启动页（LaunchOverlay + ReactBits ParticleText）样式。
+import './styles/launch.css'
 // 全局原语（hermes 可抄件）：滚动条/弹窗阴影/z 层令牌——tailwind 之前，
 // 其工具类仍可覆盖
 import './styles/ui-primitives.css'
