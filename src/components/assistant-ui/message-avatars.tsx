@@ -29,8 +29,12 @@ export function UserMessageAvatar({ className }: { className?: string }) {
   return <img alt="" aria-hidden className={cn(AVATAR_CLASS, className)} src={src} />
 }
 
-/** 当前会话的 bot（分栏 pane 用显式会话 id，主 pane 用 threadList id）。 */
-function useSessionBot() {
+/** 当前会话的 bot（分栏 pane 用显式会话 id，主 pane 用 threadList id）。
+ *
+ *  导出供身份面复用（左栏底部用户区 rail-user-zone 2026-11-25：底栏身份 =
+ *  正在看的会话的归属 bot，没有则回落活动环境 bot——「切换机器人后左下角
+ *  跟着变」同源判定，不要各写一份 chatSessionId 匹配）。 */
+export function useSessionBot() {
   const scopedId = useThreadSessionId()
   const auiId = useAuiState((s) => s.threadListItem.id)
   const threadId =
