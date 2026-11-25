@@ -1011,7 +1011,9 @@ export function BotFace({ shape, color, image, size = 36, name = 'agent', mood =
         style={{
           width: size,
           height: size,
-          borderRadius: '22%',
+          // 头像统一圆形（2026-11-25 用户："头像统一成圆形"）——上传照片/
+          // 品牌 logo 同口径；与对话区身份头像（rounded-full）一致。
+          borderRadius: '50%',
           objectFit: 'cover',
           display: 'block'
         }}

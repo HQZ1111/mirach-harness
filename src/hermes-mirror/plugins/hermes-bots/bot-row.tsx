@@ -24,7 +24,6 @@ import {
   queryClient,
   RowButton,
   SessionStatusDot,
-  SidebarRowLead,
   Tip,
   useI18n,
   useValue
@@ -70,7 +69,6 @@ import { botRosterMeta, botWorkspaceOwnerKey, setBotsWorkspaceOwner } from './ro
 import { rowAge } from './row-age'
 import {
   A2A_PREFIX_RE,
-  botCanonicalSessionId,
   botRowOwnsWorkspace,
   botWorkingMood,
   previewKind,
@@ -131,7 +129,7 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
   // can highlight a remote row, which has no focusable local chat.
   const isActive = botRowOwnsWorkspace(bot, activeGroup, botChatFocused, focusedOwner, selectedRosterKey)
 
-  const { shape, color, image } = botAppearance(bot.name, meta)
+  const { color, image } = botAppearance(bot.name, meta)
   // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
   const photo = Boolean(image && !isBackfilledFacePng(image))
   const turnBusy = useTurnBusy()
@@ -153,9 +151,8 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
 
   const groupKeys = useValue($activeGroupMemberKeys)
   const botMood = botWorkingMood(bot, focusedOwner, turnBusy, activeConnectionId, Date.now(), groupKeys)
-  // Status keys off the canonical Bot Chat — the very session this row opens,
-  // so the dot and the click can never describe different conversations.
-  const canonicalSessionId = botCanonicalSessionId(bot)
+  // 状态点已改挂在头像右下角（见下方头像块），tone 直接取 botMood——
+  // 不再算 canonical 会话 id（那是 storedSessionId 版 SDK 的入参）。
   // Needs-attention badge (#93091 item 3): background failures record under
   // the selection key (group turns) or the route key (relay deliveries) —
   // check both. Local/unannotated rows carry no connectionId, so their relay
@@ -256,24 +253,31 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
       }}
       onPointerEnter={warm}
     >
-      <div className={cn('shrink-0', !sourceStatus.available && 'grayscale opacity-60')}>
+      <div className={cn('relative shrink-0', !sourceStatus.available && 'grayscale opacity-60')}>
+        {/* 头像统一圆形（2026-11-25 用户："头像统一成圆形"）：行内一律按
+            circle 渲染——照片走 BotFace 的 <img>（borderRadius 50%），
+            表情脸强制 circle silhouette（存储的 shape 仍归编辑对话框）。 */}
         <BotFace
           color={avatarColor(color, bot.name)}
           image={photo ? image : null}
           mood={botMood}
           name={bot.name}
-          shape={shape}
+          shape="circle"
           size={40}
         />
+        {/* 状态点搬到头像右下角（2026-11-25 用户："状态点放在头像的右下角"）
+            ——原来挂在名字行首的 SidebarRowLead 里；底盘 + 细环把它从脸部
+            颜色上分离（与群聊行的可用性角标同一套令牌）。
+            宿主 SDK 的 SessionStatusDot 是 tone 版（sdk/index.ts 的本地
+            对偶，不读 storedSessionId），tone 直接取 botMood：面部在做工 =
+            live（品牌蓝），否则 idle——点不撒谎。 */}
+        <span className="absolute -right-0.5 -bottom-0.5 flex size-3.5 items-center justify-center rounded-full bg-(--ui-bg-primary) ring-1 ring-(--ui-stroke-tertiary)">
+          <SessionStatusDot tone={botMood === 'work' || botMood === 'think' ? 'live' : 'idle'} />
+        </span>
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
           <div className="flex min-w-0 items-center gap-1.5">
-            {/* The session row's own lead cell, so a bot's name sits on the
-                same left edge as every session name above it in the rail. */}
-            <SidebarRowLead>
-              <SessionStatusDot storedSessionId={canonicalSessionId} />
-            </SidebarRowLead>
             {pinned ? (
               <Tip label={b.roster.pinned}>
                 <Codicon className="shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)" name="pinned" />
@@ -566,7 +570,8 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
           <img
             alt=""
             className={cn(
-              'size-10 rounded-md object-cover ring-1 ring-(--ui-stroke-tertiary)',
+              // 头像统一圆形（2026-11-25 用户）——群聊行与机器人行同口径。
+              'size-10 rounded-full object-cover ring-1 ring-(--ui-stroke-tertiary)',
               availableMembers === 0 && 'grayscale opacity-60'
             )}
             src={room.image}
@@ -574,7 +579,7 @@ export function GroupRow({ active, group, members, needsYou, onOpen, onDisband, 
         ) : (
           <span
             className={cn(
-              'flex size-10 items-center justify-center rounded-md bg-(--chrome-action-hover) text-(--ui-text-tertiary)',
+              'flex size-10 items-center justify-center rounded-full bg-(--chrome-action-hover) text-(--ui-text-tertiary)',
               availableMembers === 0 && 'opacity-60'
             )}
           >

@@ -10,10 +10,10 @@ import { describe, expect, it } from 'vitest'
 
 import { resolveContentWidth, scalePreference } from './width-handle'
 
-describe('resolveContentWidth（与 CSS clamp 同语义）', () => {
-  it('无偏好时 = min(列宽×0.64, 920)，地板 330', () => {
-    expect(resolveContentWidth(1400, null)).toBe(896)
-    expect(resolveContentWidth(2000, null)).toBe(920)
+describe('resolveContentWidth（与 CSS 同语义）', () => {
+  it('无偏好时 = 最大（列宽−176），地板 330（2026-11-25 用户：默认最大）', () => {
+    expect(resolveContentWidth(1400, null)).toBe(1224)
+    expect(resolveContentWidth(2000, null)).toBe(1824)
     expect(resolveContentWidth(300, null)).toBe(330)
   })
 

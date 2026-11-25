@@ -17,6 +17,7 @@ import {
   useConversationWidthAxis,
   WidthHandle,
 } from '@/components/assistant-ui/width-handle';
+import { useHtmlMaximized } from '@/lib/use-maximized';
 import {
   branchBridge,
   toBranchPickerView,
@@ -1217,6 +1218,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
   // 发布 --dsh-chat-user-width / --dsh-conversation-column-width，供手柄
   // 拖拽与 CSS 宽度轴消费
   const widthAxis = useConversationWidthAxis();
+  // 手柄只在窗口最大化时出现/生效（2026-11-25 用户："对话宽度调节组件改成
+  // 只在软件最大化的时候出现生效，平时默认对话宽度最大，不可调节"）——
+  // 普通态 CSS 也忽略存储偏好（panes.css 按 html[data-maximized] 分支）。
+  const windowMaximized = useHtmlMaximized();
   // scoped（v7.4 会话分栏）：跳过主会话管理 chrome——检查点/会话线谱系/
   // 队列/成本/中断横幅的桥是主会话单例（分栏各自会话不投影）；消息/
   // composer/思考指示/建议全部照常（分栏是完整 chat）。错误横幅同跳
@@ -1369,8 +1374,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
         </ThreadPrimitive.Viewport>
         <div ref={setFooterHost} className="shrink-0" data-slot="aui_thread-footer-host" />
         {/* 对话宽度手柄（dsh ConversationRoot 同款：左右各一条，拖拽 =
-            对称缩放内容宽并持久化；仅对话在屏时渲染——新会话 hero 无列） */}
+            对称缩放内容宽并持久化；仅对话在屏且**窗口最大化**时渲染——
+            新会话 hero 无列；普通态宽度最大且不可调，见 width-handle.tsx） */}
         {!isEmpty &&
+          windowMaximized &&
           (['left', 'right'] as const).map((side) => (
             <WidthHandle
               key={side}

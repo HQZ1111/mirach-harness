@@ -15,9 +15,10 @@
  *  - 偏好存 localStorage dsh.conversation.contentWidth（px）。
  *
  * 与官方两处偏差（有意，均已注释）：
- *  1. resolveContentWidth 的无偏好自适应与 CSS clamp 完全一致（官方 TS
- *     侧多一层 max(680,…) 地板，与其自身 CSS 在 <1063px 列宽下不一致——
- *     harness 主栏常驻该区间，照抄会出现"抓住手柄瞬间跳宽"）；
+ *  1. 无偏好默认 = **最大**（列宽−176 手柄余量；2026-11-25 用户："平时默认
+ *     对话宽度最大"），JS 与 CSS（panes.css 的 --dsh-chat-content-width）
+ *     同语义；官方 TS 侧是 64%/920 自适应 + 一层 max(680,…) 地板，与其
+ *     自身 CSS 在窄列下不一致——照抄会出现"抓住手柄瞬间跳宽"；
  *  2. 列宽变化时存储偏好按新旧列宽**等比迁移**（apps/mirach 的
  *     conversation-width.ts 补丁行为：窗口最大化/还原时宽度跟随缩放），
  *     官方只重夹不迁移。
@@ -67,12 +68,15 @@ function readWidthPreference(): number | null {
 }
 
 /** Resolves the content width the CSS axis shows for a column width —
- * mirrors the CSS clamp exactly（官方 TS 的 max(680,…) 地板在窄列与其自身
- * CSS 打架，harness 统一到 CSS 语义）. */
+ * mirrors the CSS clamp (`panes.css` 的 --dsh-chat-content-width) exactly。
+ *
+ * **2026-11-25 用户："平时默认对话宽度最大"**：无偏好 = 最大（列宽−176），
+ * 不再有 64%/920 的"阅读宽"自适应默认——那会让缺省态比最大值窄一截。
+ * 有偏好时仍夹在 [330, 列宽−176]。 */
 export function resolveContentWidth(columnWidth: number, preference: number | null): number {
   const max = Math.max(CONTENT_MIN, columnWidth - CONTENT_EDGE_BUDGET)
   if (preference !== null) return Math.min(Math.max(preference, CONTENT_MIN), max)
-  return Math.max(CONTENT_MIN, Math.min(columnWidth * 0.64, 920))
+  return max
 }
 
 /** One transcript width handle: pointer capture + rAF-throttled symmetric

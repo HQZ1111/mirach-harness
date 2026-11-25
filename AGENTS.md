@@ -380,6 +380,46 @@
   照旧归原主）；logo 行与页签条的手势不再被拖窗截胡。实机：clientY=45/60
   的 pointerdown 不再被 preventDefault（旧 85 会拦截）。
 
+## 2026-11-25（二）宽度调节只限最大化 + 机器人头像圆形/状态点 + 左栏生效 bot（当前有效）
+
+- **对话宽度手柄只在窗口最大化时出现/生效**（用户："对话宽度调节组件改成只在
+  软件最大化的时候出现生效，平时默认对话宽度最大，不可调节"）：
+  - `lib/use-maximized.ts` 新增 `useHtmlMaximized()`——**只读**
+    `html[data-maximized]`（MutationObserver 跟随）。写入方唯一 =
+    `useMaximized`/WindowControls；消费方不要再加一份 Tauri 监听。
+  - `thread.aui.tsx` 手柄渲染条件加 `windowMaximized`；`panes.css` 再兜
+    `html:not([data-maximized='true']) .aui-width-handle { display: none }`。
+  - 宽度轴默认值改为**最大**：`resolveContentWidth` 无偏好 = 列宽−176
+    （旧的 64%/920 阅读宽自适应删除，`width-handle.test.ts` 同步）；
+    `panes.css` 里 `--dsh-chat-content-width` 基础分支 = `max(330px,
+    列宽−176)`，`html[data-maximized='true']` 才套 `var(--dsh-chat-user-width,
+    同最大)`——**普通态 CSS 直接忽略存储偏好**（偏好只在最大化态生效）。
+  - 实机（893px 列）：普通态 handles=0、内容宽 = max(330, 893−176)=717；
+    最大化 handles=2、内容宽 = 存储偏好（实测 594——旧拖拽值经迁移逻辑
+    缩放而来，再拖一次即覆盖）；还原后回最大值。
+- **机器人页：头像统一圆形 + 状态点在头像右下角**（用户："机器人页的状态点
+  放在头像的右下角，头像统一成圆形"）：
+  - `bot-row.tsx::BotRow` 头像块改 `relative`；`BotFace` 行内强制
+    `shape="circle"`（存储 shape 仍归编辑对话框）；状态点 = SDK 的 tone 版
+    `SessionStatusDot`，`tone = botMood work/think ? 'live' : 'idle'`
+    （宿主 SDK 的 dot 不读 storedSessionId——那是上游形状残留），挂
+    `absolute -right-0.5 -bottom-0.5` 的底盘（`bg-(--ui-bg-primary)` +
+    `ring-(--ui-stroke-tertiary)`，与群聊行可用性角标同款）。
+  - 原来名字行首的 `SidebarRowLead + SessionStatusDot` 删除；
+    `botCanonicalSessionId` 随之不被使用（已从 row-helpers 导入表移除）。
+  - `avatar.tsx::BotFace` 照片分支 borderRadius 22% → **50%**（上传照片/
+    品牌 logo 全站圆形，与对话区身份头像一致）；`GroupRow` 房间图/占位图标
+    `rounded-md` → `rounded-full`。实机：三行 bot 头像全圆（`border-radius:
+    50%`）、点位于头像右下角（dx/dy ≈1px）。
+- **左栏底部 = 当前生效环境 bot 的头像 + 名字**（用户："左侧栏底部的用户改成
+  当前生效的配置bot配置头像和名字"）：`rail-user-zone.tsx` 重写——
+  `useActiveProfile()`（null = 本体）+ `botsStore`（runtime 启动即 load）；
+  bot 行在 → `botDisplayName(bot)` + `bot.image || /brand/logo.png`（圆形）；
+  行缺失 → 本体回落 Mirach + 品牌 logo。名字单行省略 + title 全名；齿轮不变；
+  旧的 "M" 占位（`.rail-user-avatar-mark`）删除。实机：默认态
+  「Mirach + /brand/logo.png + 圆形」。**切换态**走同一条 store 订阅
+  （profileStore/botsStore 与「环境」菜单同源），未做菜单实机切换。
+
 ## 工具链钉版（升级前必读）
 
 | 包 | 版本 | 为什么 |

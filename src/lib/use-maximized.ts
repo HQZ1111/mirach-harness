@@ -47,3 +47,26 @@ export function useMaximized(): boolean {
 
   return maximized
 }
+
+/** 只**读**最大化态（`html[data-maximized]`），MutationObserver 跟随。
+ *
+ *  与 `useMaximized` 的分工：那个是**唯一写入方**（每个顶层窗口必须有一个人
+ *  写属性，见模块头）；本 hook 给"只在最大化时生效"的消费方用（对话宽度手柄
+ *  2026-11-25）——消费方再注册一份 Tauri 监听只会重复劳动，读属性即可。
+ *  属性未落（首个 resolve 前）按未最大化答。 */
+export function useHtmlMaximized(): boolean {
+  const [maximized, setMaximized] = useState(
+    () => typeof document !== 'undefined' && document.documentElement.dataset.maximized === 'true',
+  )
+
+  useEffect(() => {
+    const el = document.documentElement
+    const sync = () => setMaximized(el.dataset.maximized === 'true')
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(el, { attributes: true, attributeFilter: ['data-maximized'] })
+    return () => observer.disconnect()
+  }, [])
+
+  return maximized
+}

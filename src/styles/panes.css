@@ -726,16 +726,24 @@ html[data-mirach-backdrop-ready] .term-pane {
 
 /* 面板脚注（目录说明/诊断等长文）——.hub-foot 已随组件删除，保留注释备查 */
 
-/* ── 对话宽度手柄（dsh ui-conversation ConversationRoot 移植，2026-10-05）
+/* ── 对话宽度手柄（dsh ui-conversation ConversationRoot 移植，2026-10-05；
+   2026-11-25 按用户口径改档）────────────────────────────────────────────
    宽度轴：一个内容宽 W 同时管消息列与 composer（harness 里 composer 与
    消息同列，输入卡片天然 = W；--dsh-composer-card-max-width 留作官方
-   ui-conversation 接入时的对齐轴）。W 自适应列宽：地板 330（mirach 用户
-   设定）、取列宽 64%、920px 行长上限；拖出的 --dsh-chat-user-width 整体
-   替换自适应项。列宽本体由 width-handle.tsx 的 ResizeObserver 发布。 ── */
+   ui-conversation 接入时的对齐轴）。列宽本体由 width-handle.tsx 的
+   ResizeObserver 发布（--dsh-conversation-column-width）。
+
+   **调节只在窗口最大化时生效**（用户："对话宽度调节组件改成只在软件最大化
+   的时候出现生效，平时默认对话宽度最大，不可调节"）：
+     · 普通态：W 恒为最大（列宽−176 手柄余量），**忽略存储偏好**；
+     · 最大化态：存储偏好（拖出来的 --dsh-chat-user-width）优先，缺省同样
+       取最大值——手柄只往窄里调，默认即最宽。
+   手柄元素本身也只在最大化态渲染（thread.aui 的 useHtmlMaximized）；这里
+   再按 html[data-maximized] 隐藏一道，任何渲染路径都不会漏。 ── */
 .aui-thread-root {
-  --dsh-chat-content-width: var(
-    --dsh-chat-user-width,
-    clamp(330px, calc(var(--dsh-conversation-column-width, 0px) * 0.64), 920px)
+  --dsh-chat-content-width: max(
+    330px,
+    calc(var(--dsh-conversation-column-width, 0px) - 176px)
   );
   --dsh-composer-card-max-width: calc(var(--dsh-chat-content-width) + 32px);
 
@@ -760,6 +768,20 @@ html[data-mirach-backdrop-ready] .term-pane {
   --dsh-column-width: var(--dsh-chat-content-width);
   --dsh-column-left: calc(50% - var(--dsh-column-width) / 2);
   --dsh-column-right: calc(50% + var(--dsh-column-width) / 2);
+}
+
+/* 最大化态：存储偏好（拖出来的宽度）优先，缺省仍最大。 */
+html[data-maximized='true'] .aui-thread-root {
+  --dsh-chat-content-width: var(
+    --dsh-chat-user-width,
+    max(330px, calc(var(--dsh-conversation-column-width, 0px) - 176px))
+  );
+}
+
+/* 宽度手柄只在最大化态出现（thread.aui.tsx 已按 useHtmlMaximized 条件渲染，
+   这里第二道闸防任何旁路渲染）。 */
+html:not([data-maximized='true']) .aui-width-handle {
+  display: none;
 }
 
 /* 状态面板让位：与 ZCode 一致，只有容器 ≥1280 才平移（<1280 面板/胶囊都
@@ -908,7 +930,9 @@ html[data-mirach-backdrop-ready] .term-pane {
    指示字冗余——组件已移除，规则随之删除） */
 
 /* ── 左栏底部用户区（2026-10-19，用户："参考 zcode 下面的用户，
-   一个头像，一个设置按钮"）——贴栏底单行，左头像 + 右齿轮。
+   一个头像，一个设置按钮"）——贴栏底单行：左头像 + 中名字 + 右齿轮。
+   2026-11-25 用户："改成当前生效的配置bot配置头像和名字"——内容归
+   rail-user-zone.tsx 从 active-profile + 花名册读取。
    内容线走 --rail-gutter（与左栏其余行同一条竖线）；行高固定，
    列表区（.left-rail-body）吃剩余高度，故本行永远贴底。 */
 .rail-user-zone {
@@ -937,16 +961,28 @@ html[data-mirach-backdrop-ready] .term-pane {
 .rail-user-avatar {
   background: var(--fl-accent);
   height: var(--rail-user-avatar);
+  overflow: hidden;
   width: var(--rail-user-avatar);
 }
 
-/* 头像占位字形（无账号体系时的首字母；接入账号后换真实头像图） */
-.rail-user-avatar-mark {
-  color: var(--on-brand);
-  font-size: var(--font-caption);
+/* 生效 bot 头像（机器人页同源 image；本体 = 品牌 logo）——统一圆形。 */
+.rail-user-avatar-img {
+  border-radius: var(--radius-pill);
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+/* 生效 bot 显示名：单行省略，悬停 title 看全名。 */
+.rail-user-name {
+  color: var(--text);
+  flex: 1 1 auto;
+  font-size: var(--font-sm);
   font-weight: var(--weight-semibold);
-  line-height: 1;
-  user-select: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rail-user-settings {
