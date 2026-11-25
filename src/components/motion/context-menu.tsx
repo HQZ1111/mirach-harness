@@ -830,12 +830,24 @@ export function ContextMenuContent({
       id={context.menuId}
       onContextMenu={(event) => event.preventDefault()}
       onPointerOver={(event) => {
-        // 指针离开二级项、回到父菜单的普通项 → 收起当前子菜单。子菜单是
-        // 独立 portal，进入它不会触发本面板的 pointerover；同一个
-        // SubTrigger 及其子节点也不收（悬停中）。
+        // 指针离开二级项、回到父菜单的普通项 → 收起当前子菜单。
+        //
+        // **事件可能来自子菜单自己的 portal（2026-11-25 实锤）**：子菜单
+        // 是独立 DOM portal，但 React 合成事件沿**组件树**冒泡——
+        // ContextMenuSubContent 是父菜单 Content 的 React 子节点，所以鼠标
+        // 一进子菜单、事件就冒到本处理器：旧实现按"非 SubTrigger 项"把
+        // openSubmenuId 清掉，子菜单在鼠标进入的瞬间被卸载（用户实报"鼠标
+        // 没法进二级窗口"）。判据 = 事件目标最近的菜单 portal 必须是**本
+        // 面板**；来自任何其它 portal（子菜单/更深的二级）一律忽略。
         if (context.openSubmenuId === null) return;
         const target = event.target as HTMLElement | null;
-        if (target?.closest("[data-submenu-trigger]")) return;
+        if (target === null || target === event.currentTarget) return;
+        const portal = target.closest("[data-menu-portal]");
+        if (portal !== null && portal !== event.currentTarget) return;
+        if (target.closest("[data-submenu-trigger]")) return;
+        // **非项元素不算"移到别的项"**：面板 p-1.5 内边距/分隔线不是菜单项，
+        // 鼠标取道子菜单时先划过它们——只有真正悬停到另一个**菜单项**才清。
+        if (!target.closest("[data-context-menu-item]")) return;
         context.setOpenSubmenuId(null);
       }}
       onKeyDown={onKeyDown}

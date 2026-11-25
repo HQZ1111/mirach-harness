@@ -493,6 +493,73 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
   ensure 只做 copy-if-missing（auth/models/settings/trust），不覆盖用户
   在该环境里的修改。
 
+## 2026-11-25（七）侧栏体验修复：Bot Chat 洪泛 / 二级菜单 / 折叠动画 / 例程面板
+
+用户："哪里来的这么多的 chat bot，现在会话名字还是有很多 chat bot。左侧栏
+的会话选项，鼠标没法进二级窗口。……左侧栏折叠和打开选项的动画组件，就是
+慢慢展开的那个，删除改回默认的。……打开机器人页会自动打开一个定时任务的面板。"
+
+- **Bot Chat 洪泛（实锤）**：磁盘上 61 条标题恰为 "Bot Chat" 的会话（本体 31
+  / 微软 13 / remote-bot 10 / 风格和 7），只有 2 条有 bots-store 双锚——其余
+  是**历史铸造**（旧版本/测试期 mint，双锚簿记缺失）→ 侧栏按路径过滤漏掉，
+  全部可见。**锚逻辑本身已对**（实机：同一 roster 行连点两次，Bot Chat 计数
+  61→61、锚不变，不再重复 mint）。修复 = 侧栏显示层加**标题判据**
+  （`hidden-sessions.ts::isBotModePlumbingTitle`，与 hermes
+  `session-sweep.ts` 的 `BOT_MODE_SWEEP_TITLES` + "Group: " 前缀逐字同形）：
+  精确 `Bot Chat` / `Agent Inbox` 或 `Group: ` 前缀 → bots 插件启用时隐藏
+  （`useThreadDisplay` 的行投影 + `useThreadVisibleMetas` 的 ack 面同判据）。
+  实机：侧栏 0 条 Bot Chat / 0 条 Group 行。
+- **侧栏选项二级菜单进不去（根因 = React 合成事件冒泡）**：子菜单是独立 DOM
+  portal，但 `ContextMenuSubContent` 在 **React 组件树**里是父菜单 Content
+  的子节点——鼠标一进子菜单，`pointerover` 沿组件树冒到父面板的处理器，旧
+  判据（非 SubTrigger 项即清 openSubmenuId）把子菜单当场卸载（实测：指针
+  一过行右缘 4px 即 close）。修复 = `context-menu.tsx` 的父面板
+  `onPointerOver`：①事件目标最近的 `[data-menu-portal]` 必须是**本面板**
+  （来自子菜单 portal 的事件一律忽略）；②只有真正悬停到
+  `[data-context-menu-item]` 才清（p-1.5 内边距/分隔线不算）。实测：悬停
+  分组 → 子菜单打开 → 鼠标进入 → 点击「项目」生效。
+- **折叠/展开动画删除（用户定稿"改回默认"）**：`deferred-collapse.ts` 从
+  「延迟提交 + 逐行 40ms/8ms 步进」退化为**同步一行**
+  `setGroupCollapsed`；`thread-list.aui.tsx` 的 justExpanded/collapsing/
+  animationOf/桶行数统计与 `rowCount` 参数全链路删除；
+  `ui-primitives.css` 的 `beui-disclose-row(-out)` 关键帧与 `.disclose-row*`
+  规则删除；`SessionListHoverPill` 的 `.disclose-row--closing` 判据删除。
+  实机：点「会话」段头 60ms 内行 25→0，展开 60ms 内 0→25，无 disclose 类。
+  （箭头旋转过渡 `--disclose-dur` 保留——不是"慢慢展开"那块。）
+- **例程面板不再抢激活（用户："打开机器人页会自动打开一个定时任务的面板"）**：
+  hermes 的 routines 贡献是 **Bot Mode 在屏时的右缘折叠竖标签**
+  （plugin.tsx：`defaultCollapsed: true` + 只在 bots pane 可见且 bot chat
+  拥有 workspace 时注册）——到达时不抢焦点、不占宽度。宿主 dockview 没有
+  折叠竖标签，`addPanel` 默认激活会把面板栏切到「定时任务」。修复 =
+  `dockview-shell.tsx` 的 routines `addPanel` 加 **`inactive: true`**（只挂
+  后台标签）。实机：打开机器人页后 routines 存在但 group 激活签仍是
+  「文件树」。
+
+### 附：群聊与远程/SSE 的会话落点（2026-11-25 审计，回答用户提问）
+
+- **群聊**：房间本身**不是会话**——hermes 的 room 是插件工作区（消息记录
+  在 room 状态里），宿主对偶 = `groups_dispatch` 的 rooms（state.db）+
+  `group-chat-record.ts` 的 durable 记录。**每个成员 bot 在自己的 profile
+  home 里有一条隐藏的管道会话**（`room_plumbing: true`）：
+  - hermes 标题 `Group: <roomId> · <thread>`（旧房 `Group: <roomId>`）；
+  - 宿主 `canonical-group-driver.ts::sessionTitle` = `Group: <roomId> · <profile>`
+    （宿主 resume 是按**标题**全局查 `pi_sessions_index`，必须带成员名防
+    两个成员撞标题；hermes 按 profile 天然隔离所以用 thread）。
+  成员会话永不进侧栏（hermes = 服务端 hidden 位 + sweep；宿主 = 路径簿记 +
+  上面的标题判据）。房间 transcript 的压缩（`group-compress`）按 room
+  记录的 stored session id 走 `session.compress`，不依赖标题格式。
+- **远程连接 / SSE**：
+  - 本地引擎（AG-UI HTTP + SSE，axum localhost）：会话文件落
+    `~/.rpi/agent[/profiles/<name>]/sessions`——SSE 只是传输层，记录在本地。
+  - **远程 bot**（connectionId ≠ local）：`host.requestProfile(route…)` →
+    `pi_gateway_call`（hermes 网关 WS）或 `pi_peer_call`（mirach peer HTTP）
+    ——`session.create/list/resume` 全在对端机器执行，**transcript 落在
+    远程网关自己的 profile home**；本机只有 roster 缓存与
+    `<agent_dir>/bot_relay/{outbox,claimed,replies,receipts}` 的**消息信封**
+    （DM/relay 的文本与回执，实机目录已核）。本地 `pi_sessions_index` 永不
+    包含远程会话——与 hermes「配置档案、聊天、消息和定时任务归属于各自
+    网关」同语义。
+
 
 
 - **对话宽度手柄只在窗口最大化时出现/生效**（用户："对话宽度调节组件改成只在

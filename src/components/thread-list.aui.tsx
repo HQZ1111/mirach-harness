@@ -73,7 +73,7 @@ import {
 } from "@/components/panes/session-manage/session-catalog";
 import { botChatPaths, botDisplayName, botsStore, DEFAULT_BOT_AVATAR, DEFAULT_BOT_NAME, useBotsStore } from "@/components/panes/hub/bots-store";
 import { switchProfileBridge, useActiveProfile } from "@/components/panes/session-manage/active-profile-bridge";
-import { useHiddenSessions } from "@/components/panes/hub/hidden-sessions";
+import { isBotModePlumbingTitle, useHiddenSessions } from "@/components/panes/hub/hidden-sessions";
 import { useBotsFeatureDesired } from "@/plugins/bots-gate";
 import {
   projectSessionActions,
@@ -87,7 +87,6 @@ import { VIRTUALIZE_THRESHOLD, VirtualSessionList } from "@/components/panes/ses
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import {
   requestGroupToggle,
-  useCollapsingGroups,
 } from "@/components/panes/session-manage/deferred-collapse";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
 import { exportSessionHtml } from "@/components/panes/session-manage/session-export";
@@ -432,12 +431,13 @@ const useThreadDisplay = (searchQuery: string) => {
     () =>
       (showArchived ? allMetas : allMetas.filter((m) => !archived.includes(m.id))).filter(
         (m) =>
-          !(
-            m.path !== undefined &&
-            (botPathSet.has(m.path) || hiddenPathSet.has(m.path))
-          ),
+          // 路径面（双锚/插件点名藏）与**标题面**（Bot Mode 管道：Bot Chat /
+          // Agent Inbox / Group: *，hermes session-sweep 同判据——历史铸造
+          // 没有双锚记录的行靠这道兜住）任一命中即隐藏。
+          !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))) &&
+          !(botsEnabled && isBotModePlumbingTitle(m.title)),
       ),
-    [allMetas, archived, showArchived, botPathSet, hiddenPathSet],
+    [allMetas, archived, showArchived, botPathSet, hiddenPathSet, botsEnabled],
   );
 
   // 状态桶判定（session-status.ts：needs-input > working > unread > draft >
@@ -1002,11 +1002,15 @@ function useThreadVisibleMetas(): SessionRowMeta[] {
     let rows = allMetas;
     if (!showArchived) rows = rows.filter((m) => !archived.includes(m.id));
     rows = rows.filter(
-      (m) => !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))),
+      (m) =>
+        !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))) &&
+        // 与 useThreadDisplay 同判据：Bot Mode 管道标题（Bot Chat / Agent
+        // Inbox / Group: *）不进未读统计——侧栏看不见的行不能算进"全部已读"。
+        !(botsEnabled && isBotModePlumbingTitle(m.title)),
     );
     if (projectFilter) rows = rows.filter((m) => (m.cwd ?? "") === projectFilter);
     return rows;
-  }, [allMetas, archived, showArchived, projectFilter, botPathSet, hiddenPathSet]);
+  }, [allMetas, archived, showArchived, projectFilter, botPathSet, hiddenPathSet, botsEnabled]);
 }
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
@@ -1017,11 +1021,9 @@ const SectionHeader: FC<{
   collapsed: boolean;
   collapsible?: boolean;
   action?: ReactNode;
-  /** 收起时要播动画的行数（决定逐行步进的等待时长，见 deferred-collapse）。 */
-  rowCount?: number;
   /** 外层追加类（置顶/会话组头间距等按实例微调用） */
   className?: string;
-}> = ({ headerKey, label, collapsed, collapsible = true, action, rowCount = 1, className }) => {
+}> = ({ headerKey, label, collapsed, collapsible = true, action, className }) => {
   const body = (
     <>
       {/* 组头（2026-10-18 分层定稿）：**小号 + 粗 + 字距**的分组标签体。
@@ -1065,7 +1067,7 @@ const SectionHeader: FC<{
             "group/section-label flex w-fit min-w-0 cursor-pointer items-center gap-1 rounded-md bg-transparent text-left leading-none pressable-sm",
             ICON_COL_PS,
           )}
-          onClick={() => requestGroupToggle(headerKey, !collapsed, rowCount)}
+          onClick={() => requestGroupToggle(headerKey, !collapsed)}
           title={collapsed ? "展开" : "收起"}
           type="button"
         >
@@ -1084,7 +1086,7 @@ const SectionHeader: FC<{
  * 线 + hover 显现折叠 caret——点击收起该桶下的会话（分隔线保留）。折叠态
  * 持久化 sessionCatalog.groupsCollapsed（桶 key → collapsed）。
  */
-const DateDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number }> = ({ bucketKey, label, rowCount = 1 }) => {
+const DateDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
@@ -1094,7 +1096,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number }
       <button
         aria-expanded={!collapsed}
         className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 bg-transparent text-left pressable-row"
-        onClick={() => requestGroupToggle(bucketKey, !collapsed, rowCount)}
+        onClick={() => requestGroupToggle(bucketKey, !collapsed)}
         title={collapsed ? "展开" : "收起"}
         type="button"
       >
@@ -1117,7 +1119,7 @@ const DateDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number }
  * 颜色 4C4C4C（--side-text 侧栏正文色，五轮定稿：与品牌色组头区分）；
  * 折叠语义与日期桶相同：组头保留、其下行隐藏，键 = `w:<cwd>`）。
  */
-const WorkspaceDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number }> = ({ bucketKey, label, rowCount = 1 }) => {
+const WorkspaceDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
@@ -1127,7 +1129,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string; rowCount?: num
       <button
         aria-expanded={!collapsed}
         className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left pressable-row"
-        onClick={() => requestGroupToggle(bucketKey, !collapsed, rowCount)}
+        onClick={() => requestGroupToggle(bucketKey, !collapsed)}
         title={collapsed ? "展开" : "收起"}
         type="button"
       >
@@ -1152,7 +1154,7 @@ const WorkspaceDividerRow: FC<{ bucketKey: string; label: string; rowCount?: num
  * 空闲殿后）；折叠语义与日期桶相同：组头保留、其下行隐藏，键 =
  * `s:<bucket>`）。
  */
-const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number }> = ({ bucketKey, label, rowCount = 1 }) => {
+const StatusDividerRow: FC<{ bucketKey: string; label: string }> = ({ bucketKey, label }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   // key = `s:<bucket>`（session-display groupEntriesByStatus 的约定）。
   const bucket = bucketKey.slice("s:".length) as SessionStatusBucket;
@@ -1164,7 +1166,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number
       <button
         aria-expanded={!collapsed}
         className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left pressable-row"
-        onClick={() => requestGroupToggle(bucketKey, !collapsed, rowCount)}
+        onClick={() => requestGroupToggle(bucketKey, !collapsed)}
         title={collapsed ? "展开" : "收起"}
         type="button"
       >
@@ -1186,7 +1188,7 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number
  * 环境聚合）。折叠语义与其它组头相同：组头保留、其下行隐藏，键 = `gw:<name>`
  * （本体 `gw:`）。
  */
-const GatewayDividerRow: FC<{ bucketKey: string; label: string; image?: string; rowCount?: number }> = ({ bucketKey, label, image, rowCount = 1 }) => {
+const GatewayDividerRow: FC<{ bucketKey: string; label: string; image?: string }> = ({ bucketKey, label, image }) => {
   const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
   return (
     <div
@@ -1196,7 +1198,7 @@ const GatewayDividerRow: FC<{ bucketKey: string; label: string; image?: string; 
       <button
         aria-expanded={!collapsed}
         className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left pressable-row"
-        onClick={() => requestGroupToggle(bucketKey, !collapsed, rowCount)}
+        onClick={() => requestGroupToggle(bucketKey, !collapsed)}
         title={collapsed ? "展开" : "收起"}
         type="button"
       >
@@ -1252,32 +1254,6 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   // 「没有会话符合这些筛选条件」zh.ts:2900 逐字）。
   const statusFilter = useSidebarView((s) => s.statusFilter);
   const aui = useAui();
-
-  // 展开动画（2026-10-18，beUI accordion-open 的列表版）
-  // 收起组的行是被 display 管线**整行滤掉**的（hideCollapsedGroupRows），
-  // 所以"展开"= 行重新挂载——挂载即播的 CSS animation 正好是唯一时序点。
-  // 但挂载也会发生在换分组/换排序时（那不该播），因此只对**刚刚由收→展**
-  // 的桶打标记（prevCollapsedRef 对比），250ms 后自然过期。
-  const prevCollapsedRef = useRef(groupsCollapsed);
-  const [justExpanded, setJustExpanded] = useState<ReadonlySet<string>>(() => new Set());
-  useEffect(() => {
-    const prev = prevCollapsedRef.current;
-    prevCollapsedRef.current = groupsCollapsed;
-    const opened: string[] = [];
-    for (const key of Object.keys(prev)) {
-      if (prev[key] === true && groupsCollapsed[key] !== true) opened.push(key);
-    }
-    if (opened.length === 0) return;
-    setJustExpanded(new Set(opened));
-    const timer = window.setTimeout(() => setJustExpanded(new Set()), 400);
-    return () => window.clearTimeout(timer);
-  }, [groupsCollapsed]);
-
-  // 收起动画（2026-10-18，用户报"收起没动画，又是直接收起"）：行是被数据
-  // 管线整行滤掉的，同步卸载没有动画机会——改为**延迟提交**（见
-  // deferred-collapse.ts 的模块级单例：四个分组头是独立组件，共享不到
-  // 本作用域的 hooks）。头部调 requestGroupToggle，这里订阅集合给行挂类。
-  const collapsing = useCollapsingGroups();
 
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
   // 归档表/未读水位同纪律（归档会话被 pi_delete_session 后不留死键）。
@@ -1373,7 +1349,6 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     id: string,
     group: SessionRowGroup | "search",
     key: string,
-    disclosure?: { enter?: number; exit?: number },
   ) => {
     const row = (
       <ThreadListPrimitive.ItemByIndex
@@ -1385,60 +1360,19 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     // 无 SortableRowBridge ⇒ ThreadListItem 无 bindings ⇒ 跨面拖照常、
     // 列表内不排。
     const body = group === "search" ? row : <SortableRowBridge id={id}>{row}</SortableRowBridge>;
-    // 展开入场（见上方 justExpanded）：行是重新挂载的，挂载即播的
-    // animation 才有时序；逐行 40ms 步进 = "内容被往下挤"（ui-primitives.css
-    // .disclose-row）。
-    // 收起退场（2026-10-18）：行没被卸载（延迟提交期间 store 未变），
-    // 挂 .disclose-row--closing 播反向动画；步进也反向（最后一行先走）。
-    // **包装层恒在**（不按需插拔）：动画结束后撤掉包装会让 React 换父类型
-    // → 整行卸载重挂（sortable 节点重绑、滚动位置抖动）。只切换类与
-    // 自定义属性，DOM 结构保持稳定。
-    const cls = [
-      disclosure?.enter === undefined ? null : "disclose-row",
-      disclosure?.exit === undefined ? null : "disclose-row--closing",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const vars: Record<string, number | string> = {};
-    if (disclosure?.enter !== undefined) vars["--disclose-index"] = disclosure.enter;
-    if (disclosure?.exit !== undefined) vars["--disclose-out-index"] = disclosure.exit;
     // fork 谱系缩进（branchDepths 产出；0/缺省不改变既有行距）。
     const depth = rowDepthById.get(id) ?? 0;
+    const vars: Record<string, number | string> = {};
     if (depth > 0) vars["--session-row-depth"] = `${depth * 12}px`;
     return (
       <SessionRowScope key={key} group={group} meta={metasById.get(id)}>
         <div
-          className={cls === "" ? undefined : cls}
           style={Object.keys(vars).length === 0 ? undefined : (vars as React.CSSProperties)}
         >
           {body}
         </div>
       </SessionRowScope>
     );
-  };
-
-  /** 行的动画描述（入/退二选一；undefined = 不播）。
-   *  入 = justExpanded（刚由收→展）；退 = collapsing（点击收起、等动画播完
-   *  才提交）。同一次渲染里两者不会同时成立：collapsing 期间 store 还没变，
-   *  justExpanded 只在该桶刚展开时为真。
-   *  **只用于非虚拟化分支**：虚拟行是 absolute + translateY 定位，动画的
-   *  max-height 会与 measureElement 的高度测量打架（滚动手感优先）。
-   *
-   *  **段级收起要覆盖整个段**（2026-10-18 实锤）：点「会话」段头时收起键是
-   *  `recent`，但段内行按**日期桶**分（`today`/`yesterday`/…）——只比对行
-   *  自己的桶 key 永远匹配不上，退场类一次都挂不上（实测点下去行直接消失）。
-   *  故这里同时看两把键：行所属桶 key 与段 key；`pinned` 段的行同理。 */
-  const animationOf = (
-    dividerKey: string | null,
-    nth: number,
-    segmentKey: string,
-    total: number,
-  ): { enter?: number; exit?: number } | undefined => {
-    const bucketKey = dividerKey ?? segmentKey;
-    if (justExpanded.has(bucketKey)) return { enter: nth };
-    if (collapsing.has(bucketKey) || collapsing.has(segmentKey))
-      return { exit: Math.max(0, total - 1 - nth) };
-    return undefined;
   };
 
   const query = searchQuery.trim();
@@ -1484,21 +1418,15 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         collapsed={collapsedPinned}
         headerKey="pinned"
         label="置顶"
-        rowCount={pinnedIds.length}
       />
-      {/* 段级收起也要等动画播完才卸载（见 deferred-collapse）：收起动画期间
-          store 仍是"展开"，所以这里的条件在动画期间仍为 true——行保持在树里
-          播 max-height 退场。动画结束提交后本条件转 false，整片正常卸载。 */}
-      {!(collapsedPinned && !collapsing.has("pinned")) &&
+      {!collapsedPinned &&
         (pinnedIds.length > 0 ? (
           <ReorderableList
             ids={sortablePinnedIds}
             onReorder={(next) => commitReorder("pinned", sortablePinnedIds, next)}
             sensors={dndSensors}
           >
-            {pinnedIds.map((id, i) =>
-              renderRow(id, "pinned", `p-${id}`, animationOf(null, i, "pinned", pinnedIds.length)),
-            )}
+            {pinnedIds.map((id) => renderRow(id, "pinned", `p-${id}`))}
           </ReorderableList>
         ) : (
           <PinnedEmptyState />
@@ -1517,9 +1445,8 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         collapsed={collapsedRecent}
         headerKey="recent"
         label="会话"
-        rowCount={sessionRows.length}
       />
-      {!(collapsedRecent && !collapsing.has("recent")) &&
+      {!collapsedRecent &&
         (sessionRows.length === 0 && rows.length === 0 ? (
           statusFilter.length > 0 ? (
             // 状态筛选激活导致的空（hermes noFilterMatches 空态——zh
@@ -1568,52 +1495,19 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
             sensors={dndSensors}
           >
             {(() => {
-              // 动画的桶游标：遇到 divider 重置当前桶 + 计数归零。
-              // 入 = 刚由收→展（justExpanded）；退 = 正在播收起（collapsing，
-              // 步进反向——最后一行先走）。桶总行数需要预先数一遍才能算
-              // 反向序号（第一趟只为 tally，不渲染）。
-              // **段级收起**（点「会话」段头）时反向步进要按**整段**算，否则
-              // 每个日期桶都从自己的末行重新倒数，视觉上是"各桶同时收"而不是
-              // 从段尾往上一路收。故额外数一个段总行数。
-              const bucketTotals = new Map<string, number>();
-              let segmentTotal = 0;
-              for (const row of rows) {
-                if (row.kind === "divider") continue;
-                segmentTotal += 1;
-              }
-              {
-                let k: string | null = null;
-                for (const row of rows) {
-                  if (row.kind === "divider") {
-                    k = row.key;
-                    continue;
-                  }
-                  const key = k ?? "recent";
-                  bucketTotals.set(key, (bucketTotals.get(key) ?? 0) + 1);
-                }
-              }
-              let dividerKey: string | null = null;
-              let nth = 0;
               return rows.map((row) => {
                 if (row.kind === "divider") {
-                  dividerKey = row.key;
-                  nth = 0;
-                  // 行数 = 该桶要收起的行（段级收起时桶头不参与动画，但它的
-                  // 行数仍用于"桶级收起"路径的步进时长）。
-                  const bucketRows = bucketTotals.get(row.key) ?? 0;
                   return row.variant === "project" ? (
                     <WorkspaceDividerRow
                       key={`div-${row.key}`}
                       bucketKey={row.key}
                       label={row.label}
-                      rowCount={bucketRows}
                     />
                   ) : row.variant === "status" ? (
                     <StatusDividerRow
                       key={`div-${row.key}`}
                       bucketKey={row.key}
                       label={row.label}
-                      rowCount={bucketRows}
                     />
                   ) : row.variant === "gateway" ? (
                     <GatewayDividerRow
@@ -1621,24 +1515,16 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
                       bucketKey={row.key}
                       label={row.label}
                       image={row.image}
-                      rowCount={bucketRows}
                     />
                   ) : (
                     <DateDividerRow
                       key={`div-${row.key}`}
                       bucketKey={row.key}
                       label={row.label}
-                      rowCount={bucketRows}
                     />
                   );
                 }
-                // 总行数：段级收起用整段，桶级收起用该桶。
-                const total = collapsing.has("recent")
-                  ? segmentTotal
-                  : (bucketTotals.get(dividerKey ?? "recent") ?? 0);
-                const anim = animationOf(dividerKey, nth, "recent", total);
-                nth += 1;
-                return renderRow(row.id, "recent", `r-${row.id}`, anim);
+                return renderRow(row.id, "recent", `r-${row.id}`);
               });
             })()}
           </ReorderableList>

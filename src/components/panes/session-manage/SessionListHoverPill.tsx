@@ -24,8 +24,7 @@
  * 时，pill 不能再停在上一行（否则看起来像组头被高亮，收起组后更是以旧
  * 几何悬在被收起的区域上）。故：
  *   1. 指针命中结构行 → 收起（只淡出，不位移）；
- *   2. 锚定行开始播收起动画（`.disclose-row--closing`）或已卸载 →
- *      MutationObserver 立即收起；
+ *   2. 锚定行被卸载（收起组 / 过滤 / 换排序）→ MutationObserver 立即收起；
  *   3. 同组其它行增删导致锚定行位移 → 跟着重新钉；
  *   4. 滚动时指针不动、行在下面换位 → 按最后指针位置 elementFromPoint
  *      重新判定（pointerover 不会因滚动触发）。
@@ -53,10 +52,8 @@ const STRUCTURAL_SELECTOR = [
   '[data-slot="aui_thread-list-date-divider"]',
   '[data-slot="aui_thread-list-workspace-divider"]',
   '[data-slot="aui_thread-list-status-divider"]',
+  '[data-slot="aui_thread-list-profile-divider"]',
 ].join(",");
-
-/** 收起动画中的行包装（deferred-collapse 的延迟提交窗口）。 */
-const CLOSING_SELECTOR = ".disclose-row--closing";
 
 export function SessionListHoverPill() {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -119,10 +116,9 @@ export function SessionListHoverPill() {
     const hideIfDetached = () => {
       const row = hoveredRowRef.current;
       if (row === null) return;
-      // 行被卸载（收起组的延迟提交落地 / 过滤 / 换排序）或开始播收起动画
-      // （行还在 DOM 里但正在退场）——两种情况都必须收起，否则 pill 会以
+      // 行被卸载（收起组落地 / 过滤 / 换排序）——必须收起，否则 pill 会以
       // 旧几何残留（用户 2026-11-23："显示残留"）。
-      if (!root.contains(row) || row.closest(CLOSING_SELECTOR) !== null) hide();
+      if (!root.contains(row)) hide();
     };
 
     const handleTarget = (target: HTMLElement | null) => {
@@ -171,7 +167,7 @@ export function SessionListHoverPill() {
         raf = 0;
         const row = hoveredRowRef.current;
         if (row === null) return;
-        if (!root.contains(row) || row.closest(CLOSING_SELECTOR) !== null) {
+        if (!root.contains(row)) {
           hide();
           return;
         }

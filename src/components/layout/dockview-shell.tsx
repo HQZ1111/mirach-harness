@@ -636,6 +636,13 @@ export function DockviewShell() {
             // 右侧新建列，窗口一窄就被挤成 100px 并被窗口边缘裁掉）。
             params: { region: 'panels' },
             position: panelsDropPosition(a),
+            // **inactive（2026-11-25 用户："切换打开机器人页会自动打开一个
+            // 定时任务的面板"）**：hermes 的例程面板是右缘的**折叠竖标签**
+            // （plugin.tsx routines 贡献 defaultCollapsed: true——到达时不抢
+            // 焦点、不占宽度）；宿主 dockview 没有折叠竖标签，等价物 = 只挂
+            // 一个后台标签：进入 Bot Mode 时出现「定时任务」签，但**不切换
+            // 当前激活签**。此前默认激活会把面板栏跳成定时任务（用户实报）。
+            inactive: true,
           })
         } catch (e) {
           console.error('[plugins] 例程面板创建失败', e)

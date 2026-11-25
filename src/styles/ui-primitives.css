@@ -203,68 +203,11 @@
   }
 }
 
-/* ── 3. 选项展开：内容被"挤"下去 ─────────────────────────────────
-   会话分组/日期桶的行是被 display 管线**整行滤掉**的
-   （session-display.hideCollapsedGroupRows），展开 = 行重新挂载——
-   只有挂载即播的 animation 有时序可放（transition 需要旧值在场）。
-   逐行 0 高入场 + --disclose-index × 40ms 步进：后续行跟着往下推，
-   视觉上就是"内容被挤下去"。见 thread-list.aui.tsx 的 renderRow。
-   fill-mode = backwards（不是 both）：延迟期先呈 0 高（步进才有意义），
-   动画结束后**不留** max-height——行回到自然高度，不被 200px 上限扣住。 */
-@keyframes beui-disclose-row {
-  from {
-    max-height: 0;
-    opacity: 0;
-  }
-  to {
-    max-height: 200px;
-    opacity: 1;
-  }
-}
-.disclose-row {
-  animation: beui-disclose-row var(--disclose-dur) var(--disclose-ease) backwards;
-  animation-delay: calc(var(--disclose-index, 0) * 40ms);
-  overflow: hidden;
-}
-/* 收起方向（2026-10-18，用户报"展开有动画、收起直接消失"）：行不是淡出
-   卸载，而是被**延迟提交**——点击收起先给行挂 `.disclose-row--closing`
-   播退场，动画结束才真正写 store（行随之被数据管线滤掉）。与展开**反向**
-   步进：最后一行先走，视觉上是"从下往上收"。
-   见 session-manage/deferred-collapse.ts（时长必须与其 COLLAPSE_MS 同值）。
-   **选择器不带 `.disclose-row`**：渲染侧入/退二选一（同一行不会同时带两个
-   类），写成后代/并列都会匹配不上（实测 animationName:none）。 */
-@keyframes beui-disclose-row-out {
-  from {
-    opacity: 1;
-    transform: translateY(0) scaleY(1);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-2px) scaleY(0.6);
-  }
-}
-.disclose-row--closing {
-  /* 收得比展开快一档（--disclose-out-dur）：收起是"用户已经决定不要了"，
-     慢动画会挡着下一次操作。 */
-  animation: beui-disclose-row-out var(--disclose-out-dur) var(--disclose-ease) forwards;
-  /* 步进 8ms：收起是"整片一起往下收"，慢步进会让大部分行停在 delay 里、
-     视觉上像卡住不动（2026-10-18 实测：30ms 步进下 op 恒 1.0）。
-     反向序号见 thread-list.aui.tsx 的 animationOf（末行先走）。 */
-  animation-delay: calc(var(--disclose-out-index, 0) * 8ms);
-  /* **不用 max-height**（2026-10-18 实锤）：行自然高度普遍 <200px，从
-     `200px` 起播时前段没有任何可见变化，用户看到的是"先静着、最后一瞬
-     消失"。transform/opacity 全程可插值。 */
-  overflow: hidden;
-  transform-origin: top center;
-}
-@media (prefers-reduced-motion: reduce) {
-  .disclose-row {
-    animation: none;
-  }
-  .disclose-row--closing {
-    animation: none;
-  }
-}
+/* ── 3. 选项展开 ─────────────────────────────────────────────────
+   2026-11-25 用户定稿："折叠和打开选项的动画组件，就是慢慢展开的那个，
+   删除改回默认的。" 原逐个会话行 0 高入场（--disclose-index × 40ms 步进）
+   与延迟提交的退场关键帧整体删除——点击组头即同步挂载/卸载，无动画。
+   消费方（session-manage/deferred-collapse.ts）现只剩同步 setGroupCollapsed。 */
 
 /* 折叠指示箭头：与展开同拍旋转（原先是无条件 -rotate-90 硬切）。
    状态由最近的 aria-expanded 祖先驱动。**注意**：本文件先于 tailwind.css

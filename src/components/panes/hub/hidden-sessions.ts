@@ -92,3 +92,22 @@ export function hiddenSessionPaths(): Set<string> {
   if (!state.loaded) state.load()
   return new Set(hiddenSessionsStore.getState().paths)
 }
+
+// ── Bot Mode 管道会话的**标题面**过滤（2026-11-25）────────────────────────
+//
+// hermes `session-sweep.ts:247-254` 的逐字对偶：Bot Mode 自己铸造的会话
+// 标题恰为 "Bot Chat" / "Agent Inbox"，群聊成员会话以 "Group: " 开头——
+// 上游由服务端 hidden 位与 ownership sweep 双保险隐藏。宿主没有服务端
+// hidden 面，路径簿记（上面的 store + bots-store 双锚）覆盖不到
+// **历史上铸造的**行（隔离前/旧版本逻辑 mint 的 Bot Chat 没有双锚记录，
+// 用户实报"哪里来的这么多的 chat bot，现在会话名字还是有很多 chat bot"）。
+//
+// 故侧栏显示层再加一道**标题判据**：bots 插件启用时隐藏这三类标题。
+// 判据与上游逐字同形（精确匹配 + "Group: " 前缀）——用户自己的会话标题
+// 不受影响（上游注释同款承诺）。
+
+/** 会话标题是否属于 Bot Mode 管道（侧栏应隐藏）。 */
+export function isBotModePlumbingTitle(title: null | string | undefined): boolean {
+  const t = String(title ?? '').trim()
+  return t === 'Bot Chat' || t === 'Agent Inbox' || t.startsWith('Group: ')
+}

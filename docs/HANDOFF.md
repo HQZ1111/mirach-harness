@@ -6,6 +6,26 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（七）：侧栏体验修复（Bot Chat 洪泛 / 二级菜单 / 折叠动画 / 例程面板）**
+
+- **Bot Chat 洪泛**：磁盘 61 条 "Bot Chat" 只有 2 条有双锚（其余旧版本历史
+  铸造）→ 侧栏加标题判据 `isBotModePlumbingTitle`（Bot Chat / Agent Inbox /
+  `Group: ` 前缀，hermes session-sweep 同形）；锚逻辑实测不再重复 mint。
+  实机：侧栏 0 条 Bot Chat / Group 行。
+- **侧栏选项二级菜单**：根因 = React 合成事件沿组件树冒泡——子菜单 portal 的
+  pointerover 也到父面板，父面板旧判据把子菜单卸载。修复判据 = 最近
+  `[data-menu-portal]` 必须是本面板 + 只有悬停真实菜单项才清。实测进入/
+  点击「项目」通过。
+- **折叠/展开动画删除**：deferred-collapse 退化为同步 setGroupCollapsed；
+  `beui-disclose-row*` 关键帧/.disclose-row 规则/justExpanded/collapsing
+  全删。实机 60ms 内 25↔0。
+- **例程面板**：hermes = Bot Mode 右缘折叠竖标签（defaultCollapsed）；宿主
+  addPanel 改 `inactive: true`——打开机器人页只挂后台「定时任务」标签，不抢
+  激活签（实测 group 激活仍是文件树）。
+- 附：群聊（room ≠ 会话；每成员一条隐藏 `Group: <roomId> · <profile>` 管道
+  会话）与远程/SSE（远程 bot transcript 落对端网关 home；本机只有
+  bot_relay 消息信封）的审计结论见 AGENTS「2026-11-25（七）」节。
+
 **✅ 2026-11-25（六）：配置绑定收尾 + 侧栏「网关与配置」跨环境聚合**
 
 - **（五·二）providers/models/auth + 技能装删 + 扩展列表按环境**（commit
