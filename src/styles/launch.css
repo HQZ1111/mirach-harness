@@ -28,6 +28,9 @@
 
 .launch-overlay__logo {
   border-radius: 50%;
+  /* 与左栏 `.rail-logo-mark` 同一批令牌：主题色自定义时位图 logo 的
+     hue-rotate/saturate 在启动页与栏内一致，接力不跳色。 */
+  filter: hue-rotate(var(--logo-hue-rotate, 0deg)) saturate(var(--logo-saturate, 1));
   height: var(--logo-size);
   object-fit: cover;
   transform: scale(2.1);
