@@ -55,6 +55,9 @@ const STRUCTURAL_SELECTOR = [
   '[data-slot="aui_thread-list-profile-divider"]',
 ].join(",");
 
+/** 收起过渡中的行（deferred-collapse 的 120ms 延迟提交窗口）。 */
+const CLOSING_SELECTOR = ".disclose-row--closing";
+
 export function SessionListHoverPill() {
   const ref = useRef<HTMLDivElement | null>(null);
   const [state, setState] = useState<PillState>(HIDDEN);
@@ -116,9 +119,9 @@ export function SessionListHoverPill() {
     const hideIfDetached = () => {
       const row = hoveredRowRef.current;
       if (row === null) return;
-      // 行被卸载（收起组落地 / 过滤 / 换排序）——必须收起，否则 pill 会以
-      // 旧几何残留（用户 2026-11-23："显示残留"）。
-      if (!root.contains(row)) hide();
+      // 行被卸载（收起落地 / 过滤 / 换排序）或正在播收起淡出——都必须收起，
+      // 否则 pill 会以旧几何残留在正在消失的行上。
+      if (!root.contains(row) || row.closest(CLOSING_SELECTOR) !== null) hide();
     };
 
     const handleTarget = (target: HTMLElement | null) => {
@@ -167,7 +170,7 @@ export function SessionListHoverPill() {
         raf = 0;
         const row = hoveredRowRef.current;
         if (row === null) return;
-        if (!root.contains(row)) {
+        if (!root.contains(row) || row.closest(CLOSING_SELECTOR) !== null) {
           hide();
           return;
         }

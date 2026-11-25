@@ -493,6 +493,73 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
   ensure 只做 copy-if-missing（auth/models/settings/trust），不覆盖用户
   在该环境里的修改。
 
+## 2026-11-25（八）对照 hermes 真源（D:\hermes-agent-main）：档案作用域 / 过渡 / 头像 / 开场宽 / 子菜单
+
+> **hermes 真源在 `D:\hermes-agent-main`**（此前只引用镜像注释；桌面端在
+> `apps/desktop/src`）。下面每条都按真源校正过。
+
+- **档案作用域 —— 此前理解是反的**：`store/profile.ts:996`
+  `$showAllProfiles` **默认 false**；`$profileScope = showAll ? ALL_PROFILES
+  : activeGatewayProfile`（:1005）；`selectProfile`（:1012）切档案时
+  `$showAllProfiles.set(false)` 且 `requestFreshSession()`——**切 bot = 侧栏
+  换源**，聚合视图是 opt-in。宿主对偶：
+  - `sidebar-view.ts` 新增 `showAllProfiles`（持久化
+    `mirach.harness.sidebar.showAllProfiles.v1`，默认 false）；
+  - `useThreadDisplay` / `useThreadVisibleMetas` 按
+    `(m.profile ?? null) === activeProfile` 过滤（历史无标签行 = 本体）；
+  - Filters 菜单新增「全部配置档案」复选项（`bots.length > 1 ||
+    showAllProfiles` 时显示，hermes filter-menu.tsx:424-430 同条件）；
+    聚合视图里具名环境的行带 **bot 头像角标**（hermes `showProfileTags`）；
+  - runtime `switchProfile` 成功后 `setShowAllProfiles(false)`（hermes
+    selectProfile 同语义）。
+  **网关与配置分组 / 过滤仍在**，但只在聚合视图里有意义（作用域内单组）。
+- **折叠/展开：一档轻量过渡**（用户："默认也加个过渡，默认太生硬了"）：
+  `deferred-collapse.ts` 恢复 120ms 延迟提交（无逐行步进）+ 220ms
+  「刚展开」标记；CSS `.disclose-row`（160ms 淡入上移）/`--closing`
+  （120ms 淡出）；**虚拟化分支和平铺分支共用同一 `recentRowDisclosure`
+  映射**（此前虚拟分支不挂类，用户列表 ≥25 行恒虚拟化——这就是"太生硬"
+  的实际来源）。实机 trace：收起 @195ms 25 行 + closing 25 → @213ms 0；
+  展开 @60ms entering 25。
+- **bot 自定义头像在左栏失效（根因）**：插件 `pushLocalAvatars`
+  （profile-ops.ts:64）把矢量脸**栅格化成 160×160 PNG** 后经
+  `profiles.set_asset` 推成 server 资产；宿主旧实现一律
+  `patchMeta({image, custom: true})`——矢量脸被钉成旧栅格（改形状/颜色后
+  底栏与消息头像不再跟随），竞态下还会盖掉刚上传的照片。修复：
+  - `src/lib/bot-avatar-image.ts::isBackfilledFacePng`（与插件同判据的纯
+    函数副本）：160×160 PNG = 人脸回填 ≠ 用户自定义；
+  - host-rpc `profiles.set_asset`：回填只写 image、**保留 custom 旗标**、
+    且**不覆盖已存在的真照片**；
+  - `rail-user-zone` 与机器人页同判定：真照片 → `<img>`；否则渲染
+    **实时 BotFace**（`botAppearance` + `avatarColor`）。静态 import
+    插件组件不影响"插件可关"（组件照常渲染）。
+- **开场标识宽度**（用户："文字没有和输入框宽度对齐"）：`.aui-intro-particle`
+  改 `container-type: inline-size`，ParticleText
+  `fontSize="min(25cqw, 18rem)"`（视口单位在窄列只画到 ~69% 宽）。实机
+  词宽 590/674 ≈ 88%，与输入框同列宽。
+- **分组子菜单"点不中"（真实鼠标路径）**：合成 click 测不出——真实鼠标
+  从 SubTrigger 斜向移动到下方子菜单项时**途经父面板的其他行**，父面板的
+  `onPointerOver` 立即清 openSubmenuId，子菜单在指针到达前消失。修复 =
+  `context-menu.tsx` 改为 **220ms 延迟关闭**：到点时若
+  `[data-menu-portal]:hover` 命中**子菜单 portal** 则跳过；换悬停到别的
+  SubTrigger（openSubmenuId 已变）也跳过。实测：斜向路径下子菜单存活，
+  分组四项全部可点可持久化。
+- **会话名 = bot 名（修复）**：`session.create` 未给标题时旧实现回落
+  `bot?.name`——会把 pi 的 name 永远写成档案名（用户："切换 bot 后会话名
+  显示的是 bot 的名字"）。改 **空标题 = 未命名**（hermes 语义：首条消息后
+  自动命名）；`host.newChat` 的 `workspaceMode:'bots'` 也不再拿 bot 名当
+  页签标题。
+- **host.ts「空实现」校正（用户质疑"这对吗？"——对一半）**：多 profile 与
+  多网关**早已存在**（bot=具名 home；remote/cloud/ssh=真网关），旧注释
+  "这些概念不存在"作废。现在：`warmProfile` = 新 IPC `pi_profile_ensure`
+  （补 home 目录 + 种子配置）；`warmAgent(conn, profile)` /
+  `retainProfileSocket(route)` 对远端 route 确保连接在场（socket 缓存在
+  Rust 连接注册表、按连接而非 profile）；`retainProfile` / `ensureAgent`
+  **仍空**——没有进程池引用计数对象可挂，注释写明；
+  `dropLeftoverProfilePrefs` = 清本机 bot-meta-v2 / bot-ui-meta 残条。
+  mirror `store/profile.ts`：`$profiles` 改为 botsStore 真实投影
+  （default + 具名，订阅同步）、`prewarmProfileBackend` 真调
+  `pi_profile_ensure`。
+
 ## 2026-11-25（七）侧栏体验修复：Bot Chat 洪泛 / 二级菜单 / 折叠动画 / 例程面板
 
 用户："哪里来的这么多的 chat bot，现在会话名字还是有很多 chat bot。左侧栏
@@ -518,13 +585,14 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
   （来自子菜单 portal 的事件一律忽略）；②只有真正悬停到
   `[data-context-menu-item]` 才清（p-1.5 内边距/分隔线不算）。实测：悬停
   分组 → 子菜单打开 → 鼠标进入 → 点击「项目」生效。
-- **折叠/展开动画删除（用户定稿"改回默认"）**：`deferred-collapse.ts` 从
-  「延迟提交 + 逐行 40ms/8ms 步进」退化为**同步一行**
-  `setGroupCollapsed`；`thread-list.aui.tsx` 的 justExpanded/collapsing/
-  animationOf/桶行数统计与 `rowCount` 参数全链路删除；
-  `ui-primitives.css` 的 `beui-disclose-row(-out)` 关键帧与 `.disclose-row*`
-  规则删除；`SessionListHoverPill` 的 `.disclose-row--closing` 判据删除。
-  实机：点「会话」段头 60ms 内行 25→0，展开 60ms 内 0→25，无 disclose 类。
+- **折叠/展开动画删除（用户定稿"改回默认"）→ 随后又加了轻量过渡**：
+  `deferred-collapse.ts` 先退化为**同步一行** `setGroupCollapsed`；
+  `thread-list.aui.tsx` 的 justExpanded/collapsing/animationOf/桶行数统计与
+  `rowCount` 参数先全链路删除；`ui-primitives.css` 的旧 stagger 关键帧与
+  `.disclose-row*` 规则删除。**注意：同日晚用户补充"默认也加个过渡，默认
+  太生硬了"——当前的最终形态见下一节（八）：单档淡入/淡出 + 120ms 延迟
+  提交（无逐行步进）**。历史实测（无过渡阶段）：点「会话」段头 60ms 内行
+  25→0，展开 60ms 内 0→25。
   （箭头旋转过渡 `--disclose-dur` 保留——不是"慢慢展开"那块。）
 - **例程面板不再抢激活（用户："打开机器人页会自动打开一个定时任务的面板"）**：
   hermes 的 routines 贡献是 **Bot Mode 在屏时的右缘折叠竖标签**

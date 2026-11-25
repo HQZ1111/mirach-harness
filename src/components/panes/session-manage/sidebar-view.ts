@@ -70,6 +70,9 @@ export const SIDEBAR_MANUAL_KEY = 'mirach.harness.sidebar.manual.v1'
 export const SIDEBAR_INBOX_KEY = 'mirach.harness.sidebar.inbox.v1'
 export const SIDEBAR_STATUS_FILTER_KEY = 'mirach.harness.sidebar.statusFilter.v1'
 export const SIDEBAR_PROJECT_FILTER_KEY = 'mirach.harness.sidebar.projectFilter.v1'
+/** 「显示全部配置档案」开关（hermes `$showAllProfiles`，默认 off——
+ *  一个档案的会话 = 当前 rail 选中的那个；2026-11-25 按上游校正）。 */
+export const SIDEBAR_SHOW_ALL_PROFILES_KEY = 'mirach.harness.sidebar.showAllProfiles.v1'
 
 /** 分组模式（会话区；hermes SIDEBAR_GROUPING_ORDER 四值同构）：
  *  date = 日历桶分隔线（默认）；project = 按工作区（cwd）分组；
@@ -197,6 +200,18 @@ export const parseInbox = (raw: string | null): boolean => {
   if (raw === 'true') return true
   if (raw === 'false') return false
   console.error(`[sidebar-view] ${SIDEBAR_INBOX_KEY} 形状非法（应为 true|false）——回默认`, raw)
+  return false
+}
+
+/** 「显示全部配置档案」解析（'true'/'false'；缺省 = false，hermes 默认）。 */
+export const parseShowAllProfiles = (raw: string | null): boolean => {
+  if (raw === null) return false
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  console.error(
+    `[sidebar-view] ${SIDEBAR_SHOW_ALL_PROFILES_KEY} 形状非法（应为 true|false）——回默认 off`,
+    raw,
+  )
   return false
 }
 
@@ -391,6 +406,11 @@ interface SidebarViewState {
   /** 项目过滤（hermes Filters>Project 的 pi 等价：null=全部，字符串=仅该 cwd）。 */
   projectFilter: string | null
   setProjectFilter(cwd: string | null): void
+  /** 「显示全部配置档案」（hermes $showAllProfiles，默认 false）：off = 侧栏只
+   *  列**活动环境**自己的会话（切环境 = 换源）；on = 跨环境聚合视图（网关
+   *  与配置分组 / 行标签 / 档案过滤的真数据面）。 */
+  showAllProfiles: boolean
+  setShowAllProfiles(show: boolean): void
   /** 状态筛选（hermes $sidebarStatusFilter 同构：五桶多选，空 = 不过滤）。
    *  持久化（hermes 同款——桶语义跨刷新稳定）。 */
   statusFilter: SidebarStatusFilter
@@ -415,6 +435,7 @@ export const sidebarViewStore = createStore<SidebarViewState>((set, get) => ({
   density: parseDensity(safeGetItem(SIDEBAR_DENSITY_KEY)),
   inboxStyle: parseInbox(safeGetItem(SIDEBAR_INBOX_KEY)),
   projectFilter: parseProjectFilter(safeGetItem(SIDEBAR_PROJECT_FILTER_KEY)),
+  showAllProfiles: parseShowAllProfiles(safeGetItem(SIDEBAR_SHOW_ALL_PROFILES_KEY)),
   statusFilter: parseStatusFilter(safeGetItem(SIDEBAR_STATUS_FILTER_KEY)),
   setGrouping: (grouping) => {
     set({ grouping })
@@ -454,6 +475,10 @@ export const sidebarViewStore = createStore<SidebarViewState>((set, get) => ({
   setProjectFilter: (projectFilter) => {
     set({ projectFilter })
     safeSetItem(SIDEBAR_PROJECT_FILTER_KEY, JSON.stringify(projectFilter))
+  },
+  setShowAllProfiles: (showAllProfiles) => {
+    set({ showAllProfiles })
+    safeSetItem(SIDEBAR_SHOW_ALL_PROFILES_KEY, showAllProfiles ? 'true' : 'false')
   },
   toggleStatusBucket: (bucket) => {
     const current = get().statusFilter

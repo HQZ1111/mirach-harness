@@ -976,6 +976,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error('[profile] 环境切换失败——保持原环境', e)
         return false
       }
+      // hermes `selectProfile`：切档案（或从"全部配置档案"浏览态回来）一律
+      // **退出聚合视图**——侧栏回到「只看当前环境」（$showAllProfiles=false
+      // 的对偶）。复位放这里，任何切换入口（设置页/菜单/插件）都走同一条。
+      sidebarViewStore.getState().setShowAllProfiles(false)
       try {
         if (actorRef.getSnapshot().matches('streaming')) await invoke('pi_interrupt')
         await invoke('pi_discard_session')

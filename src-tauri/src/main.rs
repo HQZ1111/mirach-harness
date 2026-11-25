@@ -1225,6 +1225,22 @@ fn pi_profile_delete(name: String) -> Result<pi_profiles::ProfileDeleteOutcome, 
     pi_profiles::delete_profile_home(&name)
 }
 
+/// 预热具名环境 home（hermes `host.warmProfile` 的宿主对偶；2026-11-25）。
+///
+/// hermes 的 warmProfile 预热的是**进程池里的 profile socket**；宿主是单
+/// 进程引擎、没有 per-profile 进程可在后台拉起——真实等价物 = 把该环境的
+/// home 目录与种子配置（auth/models/settings/trust copy-if-missing）**提前
+/// 备好**：机器人行悬停/点名时调，第一次点开其会话不再走"建目录 + 补配置"
+/// 的冷路径。幂等；不抢活动环境；`default`/空 = 本体（无操作）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_ensure(name: String) -> Result<serde_json::Value, String> {
+    let dir = pi_profiles::ensure_profile_dirs(Some(&name))?;
+    Ok(serde_json::json!({
+        "name": name,
+        "ensured": dir.is_some(),
+    }))
+}
+
 /// 跨根会话索引（设置页 / 会话管理的 P0 数据面）。
 ///
 /// 扫描根 = `settings.sessionDir` + 每个**未软删项目**的
@@ -2027,6 +2043,7 @@ fn main() {
             pi_profile_get_active,
             pi_profile_set_active,
             pi_profile_delete,
+            pi_profile_ensure,
             pi_discard_session,
             pi_new_session,
             pi_create_bot_session,

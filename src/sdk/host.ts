@@ -8,22 +8,30 @@
  *
  * ## 宿主（Mirach）怎么对偶
  *
- * Mirach 是单用户桌面端 + 单引擎（rpi），没有 hermes 的多 profile / 多连接 /
- * WebSocket 网关。所以这份实现的原则是：
+ * Mirach 是单用户桌面端 + **一个本机引擎**（rpi，进程内）；但
+ * **多配置档案（profile）与多网关都已存在**（2026-11-25 校正——此前的
+ * "单 profile" 前提已过时）：每个 bot = 一个具名 profile（`~/.rpi/agent/
+ * profiles/<name>` 完整 home），远程连接（remote/cloud/ssh）是真正的
+ * 外部网关（`pi_gateway_*` 的 WS JSON-RPC，或 mirach peer HTTP）。所以这
+ * 份实现的原则是：
  *
  * 1. **有的照实接线**：`state` 的 8 个字段接宿主真实 atom；`request` 接 IPC
- * 2. **没有的给安全默认 + 明确注释**：不编造行为，不假成功
- * 3. **插件生命周期类方法是空实现 + 注释**：宿主不需要 warm/retain/ensure
- *    （没有远程 profile 要预热）
+ * 2. **多档案/多网关语义按宿主真实机制实现**：warm = 备好本机 profile home
+ *    的目录与种子配置（`pi_profile_ensure`）；远程 route 的 warm = 保证连接
+ *    在场（socket 缓存在 Rust 连接注册表，按连接而非 profile）
+ * 3. **没有的给安全默认 + 明确注释**：不编造行为，不假成功
  *
- * ## 为什么这些"空实现"不是偷懒
+ * ## 为什么部分方法仍是空实现（不是偷懒）
  *
- * 上游那些方法（`warmProfile` / `retainProfileSocket` / `dropLeftoverProfilePrefs`）
- * 存在的理由是**hermes 有多台网关、多个 profile、需要预热 socket**。Mirach 只有
- * 一个进程内引擎，这些概念不存在。给空实现比伪造行为更诚实。
+ * 上游的 `warmAgent` / `ensureAgent` / `retainProfile` 面向的是
+ * **agent 进程池**（每个 agent 一个可冷启动的后端进程 + 每 profile 的
+ * socket 引用计数）。宿主没有进程池：本机 profile 没有独立进程可预热，
+ * 远程网关连接由 Rust 注册表常驻、按调用自动建连——**引用计数与进程池
+ * 保活没有对象可挂**。给空实现比伪造行为更诚实。
  *
- * 凡是**语义上应该有**但宿主确实没有的（如 `profileRoutes`），返回空数组而不是
- * 假数据，让上游代码自然走"没有对端"的分支。
+ * 凡是**语义上应该有**但宿主确实没有的（如 `profileRoutes` 的跨网关
+ * 路由表——宿主只有一个本机引擎 + 连接注册表），返回空数组/安全默认而
+ * 不是假数据，让上游代码自然走"没有对端"的分支。
  */
 
 import { atom, type Atom } from 'nanostores'
@@ -307,6 +315,61 @@ async function publishPeerBots(agents: ReadonlyArray<HostRosterAgent>): Promise<
   } catch (e) {
     console.error('[host] peer 名册发布失败（对端将看不到本机 bot）', e)
   }
+}
+
+// ── profile 预热（warmProfile / warmAgent / retainProfileSocket 的底座）────
+
+/** 已预热的**本机** profile（悬停扫过花名册不重复发 IPC；失败回退可重试）。 */
+const warmedLocalProfiles = new Set<string>()
+/** 已预拨的**远程** (connection, profile)（socket 是连接级常驻，成功即长期有效）。 */
+const warmedRemoteAgents = new Set<string>()
+
+/** 本机 profile 预热：备好 `<home>` 目录 + 种子配置（幂等，不抢活动环境）。 */
+function warmLocalProfileHome(raw: string): void {
+  const name = raw.trim()
+  if (!name) return
+  // 'default' = 本体：进程默认 home 已就绪（每次会话构建都在用），无需预热。
+  if (name === 'default') return
+  if (warmedLocalProfiles.has(name)) return
+  warmedLocalProfiles.add(name)
+  void (async () => {
+    try {
+      const { invoke } = await tauriCore()
+      await invoke('pi_profile_ensure', { name })
+    } catch (e) {
+      warmedLocalProfiles.delete(name) // 失败允许下次悬停重试
+      console.error(`[host] warmProfile(${name}) 失败——该环境首次打开走冷路径`, e)
+    }
+  })()
+}
+
+/** 确保远程连接已在场（Rust `pi_gateway` 注册表缓存 socket；幂等）。 */
+async function ensureRemoteGatewayConnected(connectionId: string): Promise<void> {
+  const { invoke } = await tauriCore()
+  const statusMap = await invoke<Record<string, { state?: string }>>('pi_gateway_status')
+  if (statusMap?.[connectionId]?.state === 'open') return
+  await invoke('pi_gateway_connect', {
+    connectionId,
+    url: remoteRosterCache.get(connectionId)?.url,
+    // token: null = Rust 侧取该连接在 OS 凭据管理器里存的那份（永不回显）。
+    token: null,
+  })
+}
+
+/** 远程 agent 预热：保证连接在场（没有 per-profile 进程可拉起；SSH 源由
+ *  `pi_gateway_connect` 自动起隧道，语义同上游"connect-on-demand"）。 */
+function warmRemoteAgent(connectionId: string, profile: string): void {
+  const key = `${connectionId}::${profile}`
+  if (warmedRemoteAgents.has(key)) return
+  warmedRemoteAgents.add(key)
+  void (async () => {
+    try {
+      await ensureRemoteGatewayConnected(connectionId)
+    } catch (e) {
+      warmedRemoteAgents.delete(key)
+      console.error(`[host] warmAgent(${connectionId}, ${profile}) 连接未就绪`, e)
+    }
+  })()
 }
 
 export const host = {
@@ -720,10 +783,13 @@ export const host = {
         })
         const bridge = await import('@/components/panes/session-manage/session-tab-bridge')
         if (options.workspaceMode === 'bots') {
+          // 页签标题不拿 bot 名兜底（2026-11-25）：新会话未命名时页签应显示
+          // 会话自己的派生标题/「New Chat」，而非档案名。调用方显式给的
+          // tabTitle 才用。
           const title =
             typeof options.tabTitle === 'string' && options.tabTitle.trim()
               ? options.tabTitle.trim()
-              : name
+              : ''
           bridge.openSessionColumnBridge(created.stored_session_id, title ? { title } : {})
         } else {
           bridge.openStoredSessionBridge(created.stored_session_id)
@@ -873,24 +939,57 @@ export const host = {
   /** 设置工作区 owner 标签。 */
   setWorkspaceOwnerLabel: (_args: unknown): void => {},
 
-  // ── 以下方法在宿主没有对应概念，全部空实现 + 注释 ──────────────────────────
+  // ── profile 预热 / socket 常驻 / 偏好清理（2026-11-25 校正：多 profile
+  //    与多网关都已存在，这些方法不再是"概念不存在"的空实现）─────────────
   //
-  // 上游这些方法的共同前提是「多台网关 + 远程 profile 需要预热/保活/清理」。
-  // Mirach 是单进程单引擎，profile 是本地概念、socket 不存在、也没有"遗留偏好"
-  // 这类跨设备状态。空实现是这里最诚实的处理：调用方拿到 undefined 继续跑，
-  // 不会因为等待一个永远不会发生的事件而挂起。
+  // 上游语义（hermes apps/desktop/src/sdk/index.ts + profile-local.ts）：
+  // - warmProfile(profile)：悬停/"点名"时**后台预热该 profile 的后端**
+  //   （进程池 + socket），不切活动环境；
+  // - warmAgent(connectionId, profile)：在它自己的 source 上预拨 socket
+  //   （多源花名册的 (连接, profile) 版；SSH 源不预热、按需建连）；
+  // - retainProfileSocket(route)：relay drain 等连续 RPC 期间保 socket
+  //   引用计数（括号随请求租约关闭）；字符串重载 = 本地/旧路由 → 空壳；
+  // - dropLeftoverProfilePrefs(profile, connectionId)：profiles.create
+  //   成功后清掉同名旧档案留下的**桌面端偏好**（不是删 profile 数据）。
+  //
+  // 宿主对偶（本机引擎 + Rust 网关连接注册表）：
+  // - 本机 profile：预热 = 备好 `<home>` 目录 + 种子配置（`pi_profile_ensure`
+  //   copy-if-missing），首次打开其会话不再走"建目录+补配置"冷路径；
+  // - 远程 route：socket 属于**连接**（`pi_gateway` 注册表按连接常驻），
+  //   预热的真实动作 = 保证连接在场（`pi_gateway_connect`）；
+  // - 没有 per-profile 进程池与 socket 引用计数 → retainProfile 仍是空壳
+  //   （没有对象可计数），retainProfileSocket 对远程 route 只做"确保连接"、
+  //   释放为空操作（宿主不会因一次 drain 结束关连接）。
 
-  /** 预热 profile（宿主无远程 profile）。上游签名 。 */
-  warmProfile: (_connectionId?: unknown, _profile?: unknown): void => {},
-  /** 预热 agent（同上）。上游签名 。 */
-  warmAgent: (_connectionId?: unknown, _name?: unknown): void => {},
-  /** 确保 agent 存在（同上）。上游签名 。 */
+  /** 预热本机/远程 profile（上游单参签名：`warmProfile(profile)`）。 */
+  warmProfile: (profile: unknown): void => {
+    warmLocalProfileHome(String(profile ?? ''))
+  },
+  /** 在指定 source 上预拨（上游 `warmAgent(connectionId, profile)`）。 */
+  warmAgent: (connectionId?: unknown, profile?: unknown): void => {
+    const name = String(profile ?? '').trim() || 'default'
+    const conn = String(connectionId ?? '').trim()
+    if (conn && conn !== 'local') {
+      warmRemoteAgent(conn, name)
+      return
+    }
+    warmLocalProfileHome(name)
+  },
+  /** 确保 agent 存在（激活路径；宿主没有待拉起的进程池，保持空壳）。 */
   ensureAgent: (_connectionId?: unknown, _name?: unknown): void => {},
-  /** 保有 profile 引用计数（宿主无此生命周期）。上游签名 。 */
+  /** 保有 profile 引用计数（宿主没有进程池引用计数对象，保持空壳）。 */
   retainProfile: (_connectionId?: unknown, _profile?: unknown): void => {},
-  /** 保有 profile socket（宿主无 socket）：仍然返回释放函数，调用方会
-   *  `release()`，返回 void 会在运行时炸。 */
-  retainProfileSocket: (_connectionId?: unknown, _profile?: unknown): (() => void) => () => {},
+  /** 保有 profile socket（route 对象 → 确保远程连接在场并返回幂等释放
+   *  函数；字符串重载 = 本机/旧路由 → 空壳释放函数）。 */
+  retainProfileSocket: (route: unknown): (() => void) => {
+    if (typeof route !== 'object' || route === null) return () => undefined
+    const r = route as { connectionId?: unknown; profile?: unknown }
+    const connectionId = String(r.connectionId ?? '').trim()
+    const profile = String(r.profile ?? '').trim()
+    if (!connectionId || connectionId === 'local') return () => undefined
+    warmRemoteAgent(connectionId, profile || 'default')
+    return () => undefined
+  },
   /**
    * 删除机器人（profile-ops.deleteBot 的入口；参数是 route 对象或名字）。
    *
@@ -930,8 +1029,30 @@ export const host = {
     const { deleteBotProfile } = await import('./host-rpc')
     await deleteBotProfile(trimmed)
   },
-  /** 清理遗留 profile 偏好（宿主无跨设备遗留态）。 */
-  dropLeftoverProfilePrefs: (_args: unknown): void => {},
+  /** 清理遗留 profile 偏好（profiles.create 成功后的清理；上游语义 =
+   *  删掉同名旧档案在这台桌面留下的**偏好**，不是 profile 数据）。
+   *  宿主对偶 = 该 profile 在插件 bot-meta 与 bot-ui-meta 缓存里的残条
+   *  （删除机器人路径清的是同一组键）。远端 source 的档案不归本机清。 */
+  dropLeftoverProfilePrefs: (profile: unknown, connectionId?: unknown): void => {
+    const name = String(profile ?? '').trim()
+    const conn = String(connectionId ?? '').trim()
+    if (!name || name === 'default') return
+    if (conn && conn !== 'local') return
+    try {
+      for (const key of ['mirach.plugin.hermes-bots.bot-meta-v2', 'mirach.harness.bot-ui-meta.v1']) {
+        const raw = localStorage.getItem(key)
+        if (!raw) continue
+        const parsed: unknown = JSON.parse(raw)
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+        const obj = parsed as Record<string, unknown>
+        if (!(name in obj)) continue
+        delete obj[name]
+        localStorage.setItem(key, JSON.stringify(obj))
+      }
+    } catch (e) {
+      console.error(`[host] dropLeftoverProfilePrefs(${name}) 失败——遗留偏好未清`, e)
+    }
+  },
   /** 完成 MCP OAuth（宿主走设置页）。 */
   /**
    * MCP OAuth（`McpSetupButton` 的 OAuth 分支）。

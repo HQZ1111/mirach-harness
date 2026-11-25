@@ -1037,12 +1037,16 @@ const EmptyStateWelcome: FC = () => {
     <EmptyState className="aui-thread-welcome-root mx-auto my-6 w-full max-w-none">
       {/* 开场标识（2026-11-25 用户："开场标识也用启动页的那个组件"）：
           与启动页同源的 ReactBits ParticleText——粒子聚合 + 指针斥力 + 空闲
-          漂移；颜色跟随主题色（--brand）。不再用静态 fit-text 字标。 */}
+          漂移；颜色跟随主题色（--brand）。不再用静态 fit-text 字标。
+          字号 = **容器宽度百分比**（`.aui-intro-particle` 是 inline-size
+          容器）：2026-11-25 用户"开场标识的文字没有和输入框宽度对齐"——
+          视口单位的 clamp 在窄对话列里只画到约七成宽，字号随容器走才能
+          让 MIRACH 两缘与输入框对齐。 */}
       <div className="aui-intro-particle mb-1" data-slot="aui_intro_particle">
         <ParticleText
           clickBurst={false}
           density={4}
-          fontSize="clamp(2.25rem, 9vw, 5.5rem)"
+          fontSize="min(25cqw, 18rem)"
           fontWeight={800}
           gatherDuration={1400}
           glow

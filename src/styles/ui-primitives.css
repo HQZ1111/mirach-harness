@@ -203,11 +203,42 @@
   }
 }
 
-/* ── 3. 选项展开 ─────────────────────────────────────────────────
-   2026-11-25 用户定稿："折叠和打开选项的动画组件，就是慢慢展开的那个，
-   删除改回默认的。" 原逐个会话行 0 高入场（--disclose-index × 40ms 步进）
-   与延迟提交的退场关键帧整体删除——点击组头即同步挂载/卸载，无动画。
-   消费方（session-manage/deferred-collapse.ts）现只剩同步 setGroupCollapsed。 */
+/* ── 3. 选项展开/收起：单一轻量过渡 ──────────────────────────────
+   2026-11-25 用户两轮定稿：先删掉逐行 40ms/8ms 步进的"慢慢展开"，又要求
+   "默认也加个过渡，默认太生硬了"——这里只留**一档**过渡（无步进、无按行
+   延迟）：展开 = 重新挂载的行淡入 + 上移 2px 回位；收起 = 延迟提交窗口里
+   淡出（见 session-manage/deferred-collapse.ts，时长与其同值）。
+   消费方只切类名，DOM 结构稳定。 */
+@keyframes beui-disclose-row {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.disclose-row {
+  animation: beui-disclose-row var(--disclose-dur) var(--disclose-ease) backwards;
+}
+@keyframes beui-disclose-row-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.disclose-row--closing {
+  animation: beui-disclose-row-out var(--disclose-out-dur) var(--disclose-ease) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .disclose-row,
+  .disclose-row--closing {
+    animation: none;
+  }
+}
 
 /* 折叠指示箭头：与展开同拍旋转（原先是无条件 -rotate-90 硬切）。
    状态由最近的 aria-expanded 祖先驱动。**注意**：本文件先于 tailwind.css

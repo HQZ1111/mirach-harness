@@ -6,6 +6,31 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（八）：对照 hermes 真源（D:\hermes-agent-main）修档案作用域 / 过渡 / 头像 / 开场宽 / 子菜单**
+
+- **档案作用域校正**：hermes `$showAllProfiles` **默认 false**（opt-in 聚合），
+  `selectProfile` 切档案即复位并换源。宿主：`sidebar-view` 新增同名开关
+  （默认 false，`mirach.harness.sidebar.showAllProfiles.v1`）；侧栏行投影与
+  ack 面按 `(profile ?? null) === activeProfile` 过滤；Filters 菜单加
+  「全部配置档案」复选框；聚合行带 bot 头像角标；runtime 切环境成功后
+  自动关聚合。
+- **过渡**：单档 160ms 淡入 / 120ms 淡出（deferred-collapse 恢复 120ms
+  延迟提交，无逐行步进）；虚拟化分支也挂类（用户列表 ≥25 行恒虚拟化）。
+- **头像**：160×160 人脸回填 PNG ≠ 用户自定义——`profiles.set_asset` 不再
+  把它写成 custom、不覆盖真照片；左栏底栏改与机器人页同判定（真照片 img /
+  否则实时 BotFace）。
+- **开场标识**：`.aui-intro-particle` inline-size 容器 + `min(25cqw,18rem)`
+  字号；词宽 590/674 ≈ 88%（原 69%）。
+- **子菜单点不中**：220ms 延迟关闭 + `[data-menu-portal]:hover` 判据（真实
+  鼠标斜向路径穿过父面板行不再瞬关）。分组四项实测可点可持久化。
+- **会话名 = bot 名**：`session.create` 无标题时不再回落 bot.name（未命名，
+  首条消息后自动命名）；host.newChat bots 页签不再拿 bot 名当标题。
+- **host.ts 空实现校正**：多 profile / 多网关已存在；`warmProfile` =
+  `pi_profile_ensure`（新 IPC），`warmAgent`/`retainProfileSocket` 远端
+  route 确保连接在场；`retainProfile`/`ensureAgent` 仍空（无进程池引用
+  计数对象，注释说明）；`dropLeftoverProfilePrefs` 清本机 bot-meta/ui-meta
+  残条；mirror `store/profile.ts` 的 `$profiles` = botsStore 真实投影。
+
 **✅ 2026-11-25（七）：侧栏体验修复（Bot Chat 洪泛 / 二级菜单 / 折叠动画 / 例程面板）**
 
 - **Bot Chat 洪泛**：磁盘 61 条 "Bot Chat" 只有 2 条有双锚（其余旧版本历史

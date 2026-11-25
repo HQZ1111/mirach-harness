@@ -53,6 +53,7 @@ import {
   type BotPreset,
 } from '@/components/panes/hub/bots-store'
 import { hiddenSessionsStore } from '@/components/panes/hub/hidden-sessions'
+import { isBackfilledFacePng } from '@/lib/bot-avatar-image'
 import {
   approveCanonicalAction,
   canonicalDriverStatus,
@@ -807,6 +808,17 @@ export async function dispatchHostRequest<T>(
       }
       const data = typeof params.data === 'string' ? params.data : ''
       if (!data.startsWith('data:')) throw new Error('profiles.set_asset: data 必须是 data URL')
+      // **人脸回填不是用户自定义**（2026-11-25 实测修复）：插件把 160×160
+      // 的矢量脸栅格化后经本接口推成 server 资产——若照单写成 `custom: true`
+      // 的"用户头像"，会把 bot 的实时脸钉成旧栅格（底栏/消息头像从此不跟
+      // 形状/颜色变），竞态下还会盖掉刚上传的照片（"自定义头像失效"根因）。
+      // 回填：保留 custom 旗标、且**不覆盖已存在的真照片**（上传 256 /
+      // 宠物 96×104 / 生成图）。
+      if (isBackfilledFacePng(data)) {
+        if (bot.image && !isBackfilledFacePng(bot.image)) return {} as T
+        botsStore.getState().patchMeta(name, { image: data })
+        return {} as T
+      }
       botsStore.getState().patchMeta(name, { image: data, custom: true })
       return {} as T
     }
@@ -912,10 +924,14 @@ export async function dispatchHostRequest<T>(
       // `default` = 应用本体环境：没有 bot 预设可套（人格/模型/cwd 走引擎
       // 默认），标题也不该退化成 "default"。具名 profile 才查预设。
       const bot = profile && profile !== 'default' ? findBot(profile) : null
+      // **未命名就是未命名**（2026-11-25 用户："切换 bot 后会话名显示的是
+      // bot 的名字"）：hermes 的 session.create 不拿档案名冒充会话名——新
+      // 会话保持无标题，首条消息后由自动命名/派生标题接管。此前回落
+      // `bot.name` 会把 pi 的 name 永远写成 bot 名（侧栏/页签都是它）。
       const title =
         typeof params.title === 'string' && params.title.trim()
           ? params.title.trim()
-          : (bot?.name ?? '新会话')
+          : ''
       // 群聊成员会话（`room_plumbing: true`）：跑在**后台 bot 泳道**，不抢
       // 前台活动会话；建好即登记进隐藏路径集（room 成员会话永不进侧栏）。
       if (params.room_plumbing === true) {

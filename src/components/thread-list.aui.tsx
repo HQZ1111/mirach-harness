@@ -33,6 +33,7 @@ import {
   NetworkIcon,
   PencilIcon,
   UserIcon,
+  UsersIcon,
   PinIcon,
   PlusIcon,
   RotateCcwIcon,
@@ -87,6 +88,8 @@ import { VIRTUALIZE_THRESHOLD, VirtualSessionList } from "@/components/panes/ses
 import { ReorderableList, useSortableBindings } from "@/components/panes/session-manage/reorderable-list";
 import {
   requestGroupToggle,
+  useCollapsingGroups,
+  useJustExpandedGroups,
 } from "@/components/panes/session-manage/deferred-collapse";
 import { buildSessionFigures, type SessionUsageRow } from "@/components/panes/session-manage/session-figures";
 import { exportSessionHtml } from "@/components/panes/session-manage/session-export";
@@ -385,6 +388,10 @@ const useThreadDisplay = (searchQuery: string) => {
   const grouping = useSidebarView((s) => s.grouping);
   const ordering = useSidebarView(effectiveOrdering);
   const showArchived = useSidebarView((s) => s.showArchived);
+  // 档案作用域（hermes $showAllProfiles / $profileScope）：off（默认）=
+  // 只看活动环境的会话；on = 跨环境聚合视图。
+  const showAllProfiles = useSidebarView((s) => s.showAllProfiles);
+  const activeProfile = useActiveProfile();
   const query = searchQuery.trim();
   // 项目注册表（project 分组的组名/组序来源）。未加载 = undefined →
   // buildSessionDisplay 退回 cwd 分组（旧行为，不把「没拉到」画成「没有项目」）。
@@ -435,9 +442,13 @@ const useThreadDisplay = (searchQuery: string) => {
           // Agent Inbox / Group: *，hermes session-sweep 同判据——历史铸造
           // 没有双锚记录的行靠这道兜住）任一命中即隐藏。
           !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))) &&
-          !(botsEnabled && isBotModePlumbingTitle(m.title)),
+          !(botsEnabled && isBotModePlumbingTitle(m.title)) &&
+          // 档案作用域（hermes $profileScope，2026-11-25）：默认只列**活动
+          // 环境**自己的会话（切 bot = 侧栏换源）；「显示全部配置档案」打开
+          // 才跨环境聚合。历史行没有 profile 标签 = 本体（default）。
+          (showAllProfiles || (m.profile ?? null) === activeProfile),
       ),
-    [allMetas, archived, showArchived, botPathSet, hiddenPathSet, botsEnabled],
+    [allMetas, archived, showArchived, botPathSet, hiddenPathSet, botsEnabled, showAllProfiles, activeProfile],
   );
 
   // 状态桶判定（session-status.ts：needs-input > working > unread > draft >
@@ -576,6 +587,8 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
   const showArchived = useSidebarView((s) => s.showArchived);
   const inboxStyle = useSidebarView((s) => s.inboxStyle);
   const projectFilter = useSidebarView((s) => s.projectFilter);
+  // 「全部配置档案」（hermes $showAllProfiles，默认 off）：档案作用域开关。
+  const showAllProfiles = useSidebarView((s) => s.showAllProfiles);
   // 环境（profile）切换（hermes Filters>Profile / ProfileRail 的宿主对偶）：
   // 本地 bot = 一个环境，选它就是切引擎活动 home——侧栏会话面整体换源，
   // 不是前端过滤。null = 本体环境。
@@ -928,6 +941,23 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             </ContextMenuSubContent>
           </ContextMenuSub>
         )}
+        {/* 全部配置档案（hermes filter-menu.tsx:424-430 的 OptionCheckbox
+            `profiles.allProfiles`）：**默认 off**——一个档案的会话就是当前
+            「环境」选中的那个，切环境 = 侧栏换源（hermes selectProfile 会把
+            它复位 off）；打开 = 跨环境聚合视图（网关与配置分组 / 行头像角标
+            / 工作区过滤都在这层）。多于一个 bot 才显示；已打开时保持可见，
+            免得降回单档案后被困在聚合视图里出不来。 */}
+        {(bots.length > 1 || showAllProfiles) && (
+          <ContextMenuCheckboxItem
+            checked={showAllProfiles}
+            className={VIEW_MENU_ITEM_BASE}
+            onCheckedChange={(checked) =>
+              sidebarViewStore.getState().setShowAllProfiles(Boolean(checked))
+            }
+          >
+            <ViewOptionRow icon={UsersIcon} label="全部配置档案" />
+          </ContextMenuCheckboxItem>
+        )}
         {/* 11. 已归档（hermes $sidebarShowArchived）。 */}
         <ContextMenuCheckboxItem
           checked={showArchived}
@@ -984,6 +1014,8 @@ function useThreadVisibleMetas(): SessionRowMeta[] {
   const archived = useSessionArchive((s) => s.archived);
   const showArchived = useSidebarView((s) => s.showArchived);
   const projectFilter = useSidebarView((s) => s.projectFilter);
+  const showAllProfiles = useSidebarView((s) => s.showAllProfiles);
+  const activeProfile = useActiveProfile();
   const bots = useBotsStore((s) => s.bots);
   const botsEnabled = useBotsFeatureDesired();
   // 插件关闭 = 不再做 Bot Chat 隐藏（否则"关插件"后这些会话仍消失，
@@ -1006,11 +1038,13 @@ function useThreadVisibleMetas(): SessionRowMeta[] {
         !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))) &&
         // 与 useThreadDisplay 同判据：Bot Mode 管道标题（Bot Chat / Agent
         // Inbox / Group: *）不进未读统计——侧栏看不见的行不能算进"全部已读"。
-        !(botsEnabled && isBotModePlumbingTitle(m.title)),
+        !(botsEnabled && isBotModePlumbingTitle(m.title)) &&
+        // 档案作用域同判据（活动环境之外的会话不在可视面）。
+        (showAllProfiles || (m.profile ?? null) === activeProfile),
     );
     if (projectFilter) rows = rows.filter((m) => (m.cwd ?? "") === projectFilter);
     return rows;
-  }, [allMetas, archived, showArchived, projectFilter, botPathSet, hiddenPathSet, botsEnabled]);
+  }, [allMetas, archived, showArchived, projectFilter, botPathSet, hiddenPathSet, botsEnabled, showAllProfiles, activeProfile]);
 }
 
 // ── 区头（hermes SidebarSectionHeader：label + hover 显现 caret + 动作位）──
@@ -1255,6 +1289,11 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   const statusFilter = useSidebarView((s) => s.statusFilter);
   const aui = useAui();
 
+  // 过渡订阅（deferred-collapse 单例）：收起 = 延迟提交窗口里挂退场类；
+  // 展开 = 刚挂载的行挂入场类（单一档，无逐行步进）。
+  const collapsing = useCollapsingGroups();
+  const justExpanded = useJustExpandedGroups();
+
   // 死会话清理：列表非空才清——首帧 threads=[] 是"未加载"不是"已删光"。
   // 归档表/未读水位同纪律（归档会话被 pi_delete_session 后不留死键）。
   useEffect(() => {
@@ -1349,6 +1388,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     id: string,
     group: SessionRowGroup | "search",
     key: string,
+    disclosure?: "disclose-row" | "disclose-row--closing",
   ) => {
     const row = (
       <ThreadListPrimitive.ItemByIndex
@@ -1360,6 +1400,10 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     // 无 SortableRowBridge ⇒ ThreadListItem 无 bindings ⇒ 跨面拖照常、
     // 列表内不排。
     const body = group === "search" ? row : <SortableRowBridge id={id}>{row}</SortableRowBridge>;
+    // 展开入场 / 收起退场 = **单一过渡**（2026-11-25 用户："默认也加个
+    // 过渡，默认太生硬了"——逐行步进已删，只留一档淡入/淡出，见
+    // deferred-collapse.ts 与 ui-primitives.css 的 .disclose-row）。
+    // 包装层恒在（只换类，DOM 结构稳定，sortable 节点不重绑）。
     // fork 谱系缩进（branchDepths 产出；0/缺省不改变既有行距）。
     const depth = rowDepthById.get(id) ?? 0;
     const vars: Record<string, number | string> = {};
@@ -1367,6 +1411,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     return (
       <SessionRowScope key={key} group={group} meta={metasById.get(id)}>
         <div
+          className={disclosure}
           style={Object.keys(vars).length === 0 ? undefined : (vars as React.CSSProperties)}
         >
           {body}
@@ -1406,6 +1451,25 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
   // SortableContext 的 children 里（dividers 不 transform，行在其间换位）。
   const sortablePinnedIds = pinnedIds;
   const sortableSessionIds = sessionRows.map((r) => r.id);
+  // 行级过渡类（入场/退场各一档）——**两个渲染分支共用**：虚拟化分支的
+  // 行同样要淡入/淡出（2026-11-25 用户："默认太生硬"；此前虚拟分支不挂类
+  // 是因为旧动画的 max-height 会和 measureElement 打架——现在动画只有
+  // opacity/translate，无高度变化，可以安全挂上）。
+  const recentRowDisclosure = new Map<string, "disclose-row" | "disclose-row--closing">();
+  {
+    let bucketKey: string | null = null;
+    for (const row of rows) {
+      if (row.kind === "divider") {
+        bucketKey = row.key;
+        continue;
+      }
+      const bucket = bucketKey ?? "recent";
+      const entering = justExpanded.has(bucket) || justExpanded.has("recent");
+      const leaving = collapsing.has(bucket) || collapsing.has("recent");
+      if (entering) recentRowDisclosure.set(row.id, "disclose-row");
+      else if (leaving) recentRowDisclosure.set(row.id, "disclose-row--closing");
+    }
+  }
 
   return (
     <SessionListContext.Provider value={ctxValue}>
@@ -1419,14 +1483,25 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         headerKey="pinned"
         label="置顶"
       />
-      {!collapsedPinned &&
+      {!(collapsedPinned && !collapsing.has("pinned")) &&
         (pinnedIds.length > 0 ? (
           <ReorderableList
             ids={sortablePinnedIds}
             onReorder={(next) => commitReorder("pinned", sortablePinnedIds, next)}
             sensors={dndSensors}
           >
-            {pinnedIds.map((id) => renderRow(id, "pinned", `p-${id}`))}
+            {pinnedIds.map((id) =>
+              renderRow(
+                id,
+                "pinned",
+                `p-${id}`,
+                justExpanded.has("pinned")
+                  ? "disclose-row"
+                  : collapsing.has("pinned")
+                    ? "disclose-row--closing"
+                    : undefined,
+              ),
+            )}
           </ReorderableList>
         ) : (
           <PinnedEmptyState />
@@ -1446,7 +1521,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
         headerKey="recent"
         label="会话"
       />
-      {!collapsedRecent &&
+      {!(collapsedRecent && !collapsing.has("recent")) &&
         (sessionRows.length === 0 && rows.length === 0 ? (
           statusFilter.length > 0 ? (
             // 状态筛选激活导致的空（hermes noFilterMatches 空态——zh
@@ -1484,7 +1559,7 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
                   <DateDividerRow bucketKey={row.key} label={row.label} />
                 )
               }
-              renderSessionRow={(id, key) => renderRow(id, "recent", key)}
+              renderSessionRow={(id, key) => renderRow(id, "recent", key, recentRowDisclosure.get(id))}
               rows={rows as SessionListRow[]}
             />
           </ReorderableList>
@@ -1495,8 +1570,12 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
             sensors={dndSensors}
           >
             {(() => {
+              // 行所属桶游标（遇到 divider 重置）：入场/退场类按桶（或整段
+              // recent）挂——单一过渡，不再按行号计数。
+              let dividerKey: string | null = null;
               return rows.map((row) => {
                 if (row.kind === "divider") {
+                  dividerKey = row.key;
                   return row.variant === "project" ? (
                     <WorkspaceDividerRow
                       key={`div-${row.key}`}
@@ -1524,7 +1603,16 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
                     />
                   );
                 }
-                return renderRow(row.id, "recent", `r-${row.id}`);
+                const bucket = dividerKey ?? "recent";
+                const entering = justExpanded.has(bucket) || justExpanded.has("recent");
+                const leaving = collapsing.has(bucket) || collapsing.has("recent");
+                return renderRow(
+                  row.id,
+                  "recent",
+                  `r-${row.id}`,
+                  recentRowDisclosure.get(row.id) ??
+                    (entering ? "disclose-row" : leaving ? "disclose-row--closing" : undefined),
+                );
               });
             })()}
           </ReorderableList>
@@ -1661,6 +1749,15 @@ const ThreadListItemInner: FC = () => {
   const path = meta?.path;
   const messageCount = meta?.messageCount ?? 0;
   const aui = useAui();
+  // 档案标签（hermes session-row 的 showProfileTags）：只在「显示全部配置
+  // 档案」聚合视图里出现——具名环境的行带一个圆形 bot 头像角标，本体行无
+  // 标签（上游同判据：normalizeProfileKey !== 'default'）。
+  const rowProfile = meta?.profile;
+  const showAllProfiles = useSidebarView((s) => s.showAllProfiles);
+  const rowProfileBot = useMemo(
+    () => (rowProfile ? botsStore.getState().bots.find((b) => b.name === rowProfile) : undefined),
+    [rowProfile],
+  );
 
   // 项目归属由工作区本身表达（用户口径：工作区 = 项目），侧栏不再提供
   // “移到项目”动作；sessionProjects 仅保留给设置页/未来跨工作区项目。
@@ -1984,6 +2081,15 @@ const ThreadListItemInner: FC = () => {
             className="z-[2] relative flex shrink-0 items-center justify-end gap-1 self-stretch"
             data-row-actions=""
           >
+            {showAllProfiles && rowProfile !== undefined && (
+              <img
+                alt=""
+                aria-hidden
+                className="size-3.5 shrink-0 rounded-full object-cover transition-opacity group-hover/row:opacity-0"
+                src={rowProfileBot?.image?.trim() || DEFAULT_BOT_AVATAR}
+                title={rowProfileBot ? botDisplayName(rowProfileBot) : rowProfile}
+              />
+            )}
             {hasTrailing && (
               <span className="text-(--text-3) pointer-events-none whitespace-nowrap text-[0.625rem] leading-none">
                 {head ? (

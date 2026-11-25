@@ -34,6 +34,8 @@ import {
   useBotsStore,
 } from '@/components/panes/hub/bots-store'
 import { useActiveProfile } from '@/components/panes/session-manage/active-profile-bridge'
+import { avatarColor, botAppearance, BotFace } from '@/hermes-mirror/plugins/hermes-bots/avatar'
+import { isBackfilledFacePng } from '@/lib/bot-avatar-image'
 
 export const RailUserZone: FC = () => {
   const activeProfile = useActiveProfile()
@@ -44,7 +46,22 @@ export const RailUserZone: FC = () => {
   // 环境的 bot；名册行缺失 → 本体口径（Mirach + 品牌 logo）。
   const bot = focusedBot ?? bots.find((b) => b.name === profileName)
   const label = bot ? botDisplayName(bot) : profileName === DEFAULT_BOT_NAME ? 'Mirach' : profileName
-  const avatar = bot?.image?.trim() || DEFAULT_BOT_AVATAR
+  // 头像与机器人页**同一判定**（2026-11-25 用户："bot 的自定义头像在左侧栏
+  // 中失效了"）：真照片（上传/宠物/生成图）用 <img>；**160×160 的人脸回填
+  // PNG 不是用户自定义**（插件把矢量脸栅格化推给 server 资产），显示实时
+  // BotFace——否则底栏停在旧栅格，改形状/颜色后永远不跟着变。
+  const appearance = bot
+    ? botAppearance(bot.name, {
+        color: bot.color ?? undefined,
+        shape: bot.shape ?? undefined,
+        image: bot.image ?? undefined,
+        custom: bot.custom === true,
+      })
+    : null
+  const photo =
+    appearance?.image && !isBackfilledFacePng(appearance.image) ? appearance.image : null
+  const face = !photo && bot && appearance ? appearance : null
+  const avatar = photo || DEFAULT_BOT_AVATAR
 
   return (
     <div className="rail-user-zone" data-slot="rail-user-zone">
@@ -54,7 +71,17 @@ export const RailUserZone: FC = () => {
         title={label}
         type="button"
       >
-        <img alt="" aria-hidden className="rail-user-avatar-img" src={avatar} />
+        {face ? (
+          <BotFace
+            color={avatarColor(face.color, bot!.name)}
+            mood="idle"
+            name={bot!.name}
+            shape={face.shape}
+            size={26}
+          />
+        ) : (
+          <img alt="" aria-hidden className="rail-user-avatar-img" src={avatar} />
+        )}
       </button>
       <span className="rail-user-name" title={label}>
         {label}

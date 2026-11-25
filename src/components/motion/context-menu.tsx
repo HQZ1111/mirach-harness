@@ -621,6 +621,19 @@ export function ContextMenuContent({
   const [size, setSize] = useState({ width: 0, height: 0 });
   const typeahead = useRef("");
   const typeaheadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 子菜单的**延迟关闭**（见 onPointerOver）：真实鼠标从 SubTrigger 斜向
+   *  移动到子菜单项时，路径会先掠过父面板里的其他行——立即清 openSubmenuId
+   *  会让子菜单在指针到达前消失（用户实报"分组选项点不中/进不去二级"）。
+   *  改：220ms 后再关；届时指针若已落在**子菜单 portal** 里则跳过本次关闭
+   *  （`[data-menu-portal]:hover`），换悬停到别的 SubTrigger（openSubmenuId
+   *  已变）也跳过。 */
+  const submenuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (submenuCloseTimer.current !== null) clearTimeout(submenuCloseTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => setMounted(true), []);
 
@@ -848,7 +861,18 @@ export function ContextMenuContent({
         // **非项元素不算"移到别的项"**：面板 p-1.5 内边距/分隔线不是菜单项，
         // 鼠标取道子菜单时先划过它们——只有真正悬停到另一个**菜单项**才清。
         if (!target.closest("[data-context-menu-item]")) return;
-        context.setOpenSubmenuId(null);
+        // 延迟关闭（见 submenuCloseTimer 注释）：给指针留出去子菜单的时间。
+        const submenuId = context.openSubmenuId;
+        if (submenuCloseTimer.current !== null) return;
+        submenuCloseTimer.current = setTimeout(() => {
+          submenuCloseTimer.current = null;
+          if (context.openSubmenuId !== submenuId) return;
+          const hovered = document.querySelector("[data-menu-portal]:hover");
+          if (hovered !== null && hovered.getAttribute("data-menu-portal") !== context.menuId) {
+            return;
+          }
+          context.setOpenSubmenuId(null);
+        }, 220);
       }}
       onKeyDown={onKeyDown}
       ref={context.contentRef}

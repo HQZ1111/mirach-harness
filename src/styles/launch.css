@@ -174,9 +174,12 @@ html[data-launch-reveal-active] .app-titlebar {
 
 /* 空对话开场标识（2026-11-25 用户："开场标识也用启动页的那个组件"）：
    与启动页同源的 ParticleText，容器高度比启动页小，min-height 归零覆盖
-   组件自带的 240px。 */
+   组件自带的 240px。**inline-size 容器**：字号以 cqw 随对话列宽走
+   （用户："开场标识的文字没有和输入框宽度对齐"——视口单位在窄列里字号
+   偏小，字标两缘到不了输入框边）。 */
 .aui-intro-particle {
   color: var(--brand);
+  container-type: inline-size;
   height: clamp(140px, 20vh, 220px);
   width: 100%;
 }
