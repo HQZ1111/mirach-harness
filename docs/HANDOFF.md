@@ -16,7 +16,18 @@
 - 字标 UI = **ReactBits ParticleText 逐字复制**（`src/components/
   particle-text/`，纯 Canvas 2D，无依赖；只删了 `'use client'`）。
   **不要给它传 `color="var(--brand)"`**——canvas fillStyle 不解析 CSS 变量，
-  粒子会静默变黑；组件默认 `currentColor` 会读容器 computed color（正确）。
+  粒子会静默变黑；组件默认 `currentColor` 会读容器 computed color（正确，
+  容器 `.launch-overlay__particles` 设 `color: var(--brand)`）。
+- **品牌接力（2026-11-25 用户："启动页 logo 也加进去……文字和 logo 缩小移动
+  到主页 logo 和文字的位置，主页的内容从四面八方落位"）**：启动页显示
+  logo（`--logo-size` 基座 ×2.1）+ 粒子 MIRACH；就绪后隐藏真实栏品牌
+  （`data-launch-handoff`），粒子淡出、精确版「Mirach」文字出现，logo 与
+  文字按 FLIP（translate + scale，680ms）落到 `.rail-logo-mark` /
+  `.rail-logo-word` 的**最终 rect**（实测 260ms 时 logo 45px@30,25、文字
+  116.5px@87,25，与左栏完全重合），随后卸载遮罩、真实品牌原样出现。
+  同时给每个 `.dv-groupview` 按 x 排序分配左/上/下/右方向矢量
+  （`--launch-enter-x/y` + 70ms 递进），`data-launch-reveal(-active)`
+  触发 `launch-enter-group` keyframes，标题栏从顶部落下。
 - 全链路 boot 状态：`src/lib/boot-store.ts`（booting/ready/failed + retrySeq）
   ← runtime endpoint 发现带 40 次退避重试（20s），失败进启动页错误卡；
   SSE `onopen` 置 ready。启动页失败态有「重试」→ requestRetry → runtime

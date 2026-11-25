@@ -1,14 +1,78 @@
-/* 启动页（LaunchOverlay）：hermes GatewayConnectingOverlay 的宿主形态。
-   实色 `--surface-shell-base` 保证玻璃/窗口透明模式下不透桌面（那是启动
-   过程，还不该看到桌面）。粒子字标本身由 ParticleText 的 canvas 画。 */
+/* 启动页（LaunchOverlay）：hermes GatewayConnectingOverlay 的宿主形态 +
+   品牌接力（logo/文字 FLIP 到左栏真实位置）+ 主壳从四面八方落位。
+   实色 `--surface-shell-base` 保证玻璃/窗口透明模式下不透桌面。 */
+
 .launch-overlay {
-  background: var(--surface-shell-base);
   user-select: none;
 }
 
-.launch-overlay__wordmark {
-  height: clamp(200px, 34vh, 340px);
+/* 背景单独成层：品牌接力时先淡出它，下面的壳内容才能在落位动画中露出来。 */
+.launch-overlay__bg {
+  background: var(--surface-shell-base);
+  inset: 0;
+  position: absolute;
+  transition: opacity 300ms ease-out;
+}
+
+.launch-overlay--handoff .launch-overlay__bg {
+  opacity: 0;
+}
+
+/* 品牌基座 = 左栏真实品牌几何：logo 与文字在接力末态与 `.rail-logo-mark` /
+   `.rail-logo-word` 完全重合（字号/字重/字距/颜色逐项取同一批令牌）。 */
+.launch-overlay__brand {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+}
+
+.launch-overlay__logo {
+  border-radius: 50%;
+  height: var(--logo-size);
+  object-fit: cover;
+  transform: scale(2.1);
+  transform-origin: center;
+  width: var(--logo-size);
+}
+
+.launch-overlay__word-box {
+  align-items: center;
+  display: flex;
+  height: clamp(180px, 30vh, 300px);
+  justify-content: center;
+  position: relative;
+  width: 100%;
+}
+
+.launch-overlay__particles {
+  /* 品牌蓝：ParticleText 的默认 color=currentColor 会读这里的 computed
+     color 作为粒子基色（传 CSS 变量字符串给 canvas fillStyle 无效）。 */
   color: var(--brand);
+  height: 100%;
+  inset: 0;
+  position: absolute;
+  transition: opacity 180ms ease-out;
+}
+
+.launch-overlay__word {
+  color: var(--logo-text-color);
+  font-size: var(--logo-text-size);
+  font-weight: var(--logo-text-weight);
+  letter-spacing: var(--logo-text-tracking);
+  line-height: var(--logo-size);
+  opacity: 0;
+  position: absolute;
+  transform: scale(3);
+  transform-origin: center;
+  transition: opacity 200ms ease-out;
+}
+
+.launch-overlay--handoff .launch-overlay__particles {
+  opacity: 0;
+}
+
+.launch-overlay--handoff .launch-overlay__word {
+  opacity: 1;
 }
 
 .launch-overlay__status {
@@ -17,7 +81,12 @@
   display: flex;
   font-size: var(--font-caption);
   gap: 8px;
-  transition: opacity 300ms ease-out, transform 300ms ease-out;
+  transition: opacity 220ms ease-out;
+}
+
+.launch-overlay--handoff .launch-overlay__status,
+.launch-overlay--handoff .launch-overlay__card {
+  opacity: 0;
 }
 
 .launch-overlay__status::before {
@@ -40,6 +109,7 @@
   gap: 10px;
   max-width: 560px;
   padding: 16px 18px;
+  transition: opacity 220ms ease-out;
 }
 
 .launch-overlay__card-title {
@@ -52,6 +122,51 @@
   font-size: var(--font-caption);
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+/* ── 主壳落位（LaunchOverlay 在接力开始时给 <html> 挂属性）─────────────
+   隐藏 → 下一帧 active 触发动画；动画结束属性移除，元素回归常态。 */
+html[data-launch-reveal] .dv-groupview,
+html[data-launch-reveal] .app-titlebar {
+  opacity: 0;
+}
+
+html[data-launch-handoff] .rail-logo-mark,
+html[data-launch-handoff] .rail-logo-word {
+  opacity: 0 !important;
+}
+
+html[data-launch-reveal-active] .dv-groupview {
+  animation: launch-enter-group 680ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+  animation-delay: var(--launch-enter-delay, 0ms);
+}
+
+html[data-launch-reveal-active] .app-titlebar {
+  animation: launch-enter-titlebar 520ms ease-out both;
+}
+
+@keyframes launch-enter-group {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--launch-enter-x, 0), var(--launch-enter-y, 0), 0) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes launch-enter-titlebar {
+  from {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 @keyframes launch-pulse {
@@ -71,5 +186,10 @@
   .launch-overlay__status::before {
     animation: none;
     opacity: 0.8;
+  }
+
+  .launch-overlay__logo,
+  .launch-overlay__word {
+    transform: none;
   }
 }

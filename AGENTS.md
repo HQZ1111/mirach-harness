@@ -339,6 +339,10 @@
   静默变黑）；默认 currentColor 读容器 computed color。boot 状态在
   `src/lib/boot-store.ts`，runtime 端点发现带退避重试、SSE onopen 置 ready、
   失败给「重试」；dev 预览 `?connecting=1`。z 层 = `--z-connecting: 200`。
+  **品牌接力**：就绪后 FLIP logo/文字到 `.rail-logo-mark` / `.rail-logo-word`
+  最终 rect（基座样式必须与左栏同令牌，否则落点跳变），同时
+  `data-launch-reveal(-active)` 驱动 `.dv-groupview` 四向落位（方向矢量按
+  x 排序分配）、标题栏从顶部落下；`reduced-motion` 全部跳过，就绪即卸载。
 - **打包命令**：`npx tauri build --config src-tauri/tauri.prod.conf.json
   --config '{"build":{"beforeBuildCommand":"npx vite build"}}'`。
   必须用第二个 `--config` 覆盖 beforeBuildCommand，否则 `npm run build`

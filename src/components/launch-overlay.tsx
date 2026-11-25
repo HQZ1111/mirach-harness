@@ -2,21 +2,20 @@
  * 启动页（hermes `GatewayConnectingOverlay` 的宿主移植，2026-11-25；UI 用
  * ReactBits ParticleText 渲染 MIRACH 字标——用户指定）。
  *
- * 全链路语义（对齐 hermes）：
- *   · 冷启动全屏遮罩，盖住整个壳（`--surface-shell-base` 实色；玻璃/透明
- *     模式下也不透桌面）；
- *   · 连接中：粒子字标 + 状态行；
- *   · 就绪：先字标退场（360ms 位移+淡出+去饱和）→ 停顿 300ms → 遮罩
- *     淡出 520ms → 卸载。热重载/已在线的窗口直接不渲染（不闪）；
- *   · 失败：遮罩保留，显示 IPC 原文错误 + 「重试」（bootStore.requestRetry
- *     触发 runtime 重跑端点发现/水合）；
- *   · `prefers-reduced-motion`：跳过退场编排与粒子进场（ParticleText 内部
- *     已处理），就绪即卸载。
+ * 全链路语义：
+ *   · 冷启动全屏实色遮罩，盖住整个壳（玻璃/透明模式也不透桌面）；
+ *   · 连接中：品牌 logo + 粒子 MIRACH 字标 + 状态行；
+ *   · 就绪：做**品牌接力**——启动页的 logo 与文字缩小并移动到左栏
+ *     `.rail-logo-mark` / `.rail-logo-word` 的真实位置（FLIP：
+ *     translate + scale，680ms），同时主壳内容从四面八方落位
+ *     （每栏按位置取方向矢量，逐栏 60ms 递进）；接力完成即卸载遮罩，
+ *     真实品牌在原位出现（几何一致，无跳变）。
+ *   · 失败：遮罩保留，显示 IPC 原文错误 + 「重试」。
+ *   · `prefers-reduced-motion`：不做 FLIP/落位编排，就绪即卸载。
  *
- * 最短展示 1200ms：引擎常常比 WebView 先就绪，直接按 online 淡出会"闪一下
- * 白屏"；最短窗口让启动页有完整的一次粒子聚合。
+ * 防闪：最短展示 1200ms；热重载/已在线的窗口直接不渲染。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useStore } from 'zustand'
 
 import ParticleText from '@/components/particle-text/ParticleText'
@@ -27,12 +26,10 @@ import {
 import { bootBridge } from '@/lib/boot-store'
 import { cn } from '@/lib/utils'
 
-const TEXT_OUT_MS = 360
-const POST_TEXT_HOLD_MS = 300
-const OVERLAY_OUT_MS = 520
+const HANDOFF_MS = 700
 const MIN_SHOW_MS = 1200
 
-type Phase = 'live' | 'text-out' | 'overlay-out' | 'gone'
+type Phase = 'live' | 'handoff' | 'gone'
 
 function prefersReducedMotion(): boolean {
   try {
@@ -52,24 +49,33 @@ function forcedPreview(): boolean {
   }
 }
 
+function clearRevealAttrs(): void {
+  delete document.documentElement.dataset.launchReveal
+  delete document.documentElement.dataset.launchRevealActive
+  delete document.documentElement.dataset.launchHandoff
+}
+
 export function LaunchOverlay() {
   const bootPhase = useStore(bootBridge, (s) => s.phase)
   const bootError = useStore(bootBridge, (s) => s.error)
+  const connectionPhase = useConnectionPhase()
   const [preview] = useState(forcedPreview)
   const [phase, setPhase] = useState<Phase>(() =>
-    // 热重载 / 已在线的窗口（dev HMR、主窗二次挂载）：不显示启动页。
     !preview && connectionBridge.getState().connected === true ? 'gone' : 'live',
   )
   const [minElapsed, setMinElapsed] = useState(false)
-  const mountedRef = useRef(true)
-  const connectionPhase = useConnectionPhase()
+  const logoRef = useRef<HTMLImageElement | null>(null)
+  const wordRef = useRef<HTMLSpanElement | null>(null)
+  const handoffTimerRef = useRef<number | null>(null)
 
   useEffect(() => {
-    mountedRef.current = true
     const id = window.setTimeout(() => setMinElapsed(true), MIN_SHOW_MS)
     return () => {
-      mountedRef.current = false
       window.clearTimeout(id)
+      if (handoffTimerRef.current !== null) {
+        window.clearTimeout(handoffTimerRef.current)
+      }
+      clearRevealAttrs()
     }
   }, [])
 
@@ -92,7 +98,91 @@ export function LaunchOverlay() {
     return () => window.clearTimeout(id)
   }, [bootPhase, phase])
 
-  // 就绪 → 退场编排（reduced motion 直接卸载）。dev 预览下不退出。
+  /**
+   * 品牌接力：量测启动页元素与左栏真实品牌，算 FLIP transform；同时给每个
+   * 栏设置方向矢量并触发落位动画。目标缺失（老布局/窄屏）则退回纯淡出。
+   */
+  const runHandoff = useCallback(() => {
+    const logoEl = logoRef.current
+    const wordEl = wordRef.current
+    const railMark = document.querySelector<HTMLElement>('.rail-logo-mark')
+    const railWord = document.querySelector<HTMLElement>('.rail-logo-word')
+    if (!logoEl || !wordEl || !railMark || !railWord) {
+      setPhase('gone')
+      return
+    }
+
+    if (prefersReducedMotion()) {
+      setPhase('gone')
+      return
+    }
+    const html = document.documentElement
+
+    // 1) 隐藏真实品牌 + 冻结壳内容（落位动画起点）。
+    html.dataset.launchHandoff = ''
+    html.dataset.launchReveal = ''
+
+    // 2) 每栏方向矢量：按 x 排序 → 左/上/下/右四向。
+    const groups = [...document.querySelectorAll<HTMLElement>('.dv-groupview')].sort(
+      (a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left,
+    )
+    const dirs: [number, number][] = [
+      [-1, 0],
+      [0, -1],
+      [0, 1],
+      [1, 0],
+    ]
+    groups.forEach((group, index) => {
+      const [dx, dy] = dirs[index % dirs.length]!
+      group.style.setProperty('--launch-enter-x', `${dx * 64}px`)
+      group.style.setProperty('--launch-enter-y', `${dy * 48}px`)
+      group.style.setProperty('--launch-enter-delay', `${index * 70}ms`)
+    })
+    // 双 rAF：先让"隐藏"这一帧落地，再加 active 触发动画（避免浏览器合并
+    // 两次样式变更导致动画不跑）。
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        html.dataset.launchRevealActive = ''
+      })
+    })
+
+    // 3) FLIP：末态 transform 用"未变换基座"计算——scale 以中心为原点，
+    //    所以当前 rect 中心就是基座中心；offsetWidth/Height 不受 transform 影响。
+    const fromLogo = logoEl.getBoundingClientRect()
+    const fromWord = wordEl.getBoundingClientRect()
+    const toLogo = railMark.getBoundingClientRect()
+    const toWord = railWord.getBoundingClientRect()
+    const logoBaseW = logoEl.offsetWidth || 1
+    const wordBaseW = wordEl.offsetWidth || 1
+    const logoCenter = {
+      x: fromLogo.left + fromLogo.width / 2,
+      y: fromLogo.top + fromLogo.height / 2,
+    }
+    const wordCenter = {
+      x: fromWord.left + fromWord.width / 2,
+      y: fromWord.top + fromWord.height / 2,
+    }
+    const logoScale = toLogo.width / logoBaseW
+    const wordScale = toWord.width / wordBaseW
+    const ease = 'cubic-bezier(0.22, 1, 0.36, 1)'
+    logoEl.style.transition = `transform ${HANDOFF_MS}ms ${ease}`
+    wordEl.style.transition = `transform ${HANDOFF_MS}ms ${ease}`
+    logoEl.style.transform = `translate(${toLogo.left + toLogo.width / 2 - logoCenter.x}px, ${
+      toLogo.top + toLogo.height / 2 - logoCenter.y
+    }px) scale(${logoScale})`
+    wordEl.style.transform = `translate(${toWord.left + toWord.width / 2 - wordCenter.x}px, ${
+      toWord.top + toWord.height / 2 - wordCenter.y
+    }px) scale(${wordScale})`
+
+    setPhase('handoff')
+    handoffTimerRef.current = window.setTimeout(() => {
+      handoffTimerRef.current = null
+      setPhase('gone')
+      clearRevealAttrs()
+    }, HANDOFF_MS + 60)
+  }, [])
+
+  // 就绪 → 接力（dev 预览下不退出）。
   useEffect(() => {
     if (preview) return
     if (phase !== 'live' || bootPhase !== 'ready' || !minElapsed) return
@@ -100,28 +190,13 @@ export function LaunchOverlay() {
       setPhase('gone')
       return
     }
-    setPhase('text-out')
-  }, [bootPhase, minElapsed, phase, preview])
-
-  useEffect(() => {
-    if (phase === 'text-out') {
-      const id = window.setTimeout(
-        () => setPhase('overlay-out'),
-        TEXT_OUT_MS + POST_TEXT_HOLD_MS,
-      )
-      return () => window.clearTimeout(id)
-    }
-    if (phase === 'overlay-out') {
-      const id = window.setTimeout(() => setPhase('gone'), OVERLAY_OUT_MS)
-      return () => window.clearTimeout(id)
-    }
-  }, [phase])
+    runHandoff()
+  }, [bootPhase, minElapsed, phase, preview, runHandoff])
 
   if (phase === 'gone') return null
 
-  const leaving = phase !== 'live'
-  const overlayHidden = phase === 'overlay-out'
   const failed = bootPhase === 'failed'
+  const handoff = phase === 'handoff'
 
   return (
     <div
@@ -129,38 +204,51 @@ export function LaunchOverlay() {
       aria-live="polite"
       className={cn(
         'launch-overlay fixed inset-0 z-(--z-connecting) grid place-items-center',
-        'transition-opacity duration-500 ease-out',
-        overlayHidden ? 'pointer-events-none opacity-0' : 'opacity-100',
+        handoff && 'launch-overlay--handoff',
       )}
       role={failed ? 'alert' : 'status'}
     >
-      <div className="flex w-[min(760px,86vw)] flex-col items-center gap-3">
-        <div
-          className={cn(
-            'launch-overlay__wordmark w-full transition duration-300 ease-out',
-            leaving ? 'translate-y-2 opacity-0 saturate-0' : 'translate-y-0 opacity-100',
-          )}
-        >
-          <ParticleText
-            clickBurst={false}
-            // 不传 color：ParticleText 默认 currentColor，会读容器的
-            // getComputedStyle().color（var(--brand) 在这里已被浏览器解析）。
-            // 传 "var(--brand)" 字符串给 canvas fillStyle 是**无效值**，粒子
-            // 会静默落回黑色（实测）。
-            density={5}
-            fontSize="clamp(3.5rem, 14vw, 9rem)"
-            fontWeight={800}
-            gatherDuration={1500}
-            glow
-            highlightColor="#5aa2ff"
-            idleDrift={0.5}
-            intro="gather"
-            particleSize={2.2}
-            pointerRepel={24}
-            repelRadius={110}
-            stagger={380}
-            text="MIRACH"
+      {/* 背景单独一层：接力时先淡出它，壳内容在下面落位。 */}
+      <div className="launch-overlay__bg" />
+
+      <div className="relative flex w-[min(760px,86vw)] flex-col items-center gap-2">
+        <div className="launch-overlay__brand">
+          <img
+            alt="Mirach"
+            className="launch-overlay__logo"
+            ref={logoRef}
+            src="/brand/logo.png"
           />
+        </div>
+
+        <div className="launch-overlay__word-box">
+          <div className="launch-overlay__particles">
+            <ParticleText
+              clickBurst={false}
+              // 不传 color：ParticleText 默认 currentColor，会读容器的
+              // getComputedStyle().color（var(--brand) 在这里已被浏览器解析）。
+              // 传 "var(--brand)" 字符串给 canvas fillStyle 是**无效值**，粒子
+              // 会静默落回黑色（实测）。
+              density={5}
+              fontSize="clamp(3.5rem, 14vw, 9rem)"
+              fontWeight={800}
+              gatherDuration={1500}
+              glow
+              highlightColor="#5aa2ff"
+              idleDrift={0.5}
+              intro="gather"
+              particleSize={2.2}
+              pointerRepel={24}
+              repelRadius={110}
+              stagger={380}
+              text="MIRACH"
+            />
+          </div>
+          {/* 接力用的真实文字：基座样式 = 左栏 `.rail-logo-word`（同字号/
+              字重/字距/颜色），初始放大 3×，FLIP 后与左栏文字完全重合。 */}
+          <span className="launch-overlay__word" ref={wordRef}>
+            Mirach
+          </span>
         </div>
 
         {failed ? (
@@ -176,14 +264,7 @@ export function LaunchOverlay() {
             </button>
           </div>
         ) : (
-          <p
-            className={cn(
-              'launch-overlay__status',
-              leaving ? 'translate-y-2 opacity-0' : 'translate-y-0 opacity-100',
-            )}
-          >
-            正在启动 Mirach 引擎…
-          </p>
+          <p className="launch-overlay__status">正在启动 Mirach 引擎…</p>
         )}
       </div>
     </div>
