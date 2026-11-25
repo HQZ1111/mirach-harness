@@ -355,6 +355,16 @@
 
 ## 2026-11-25 技能市场 = 本地技能目录 + 开场粒子 + 拖动带 30（当前有效）
 
+> **2026-11-25（三）口径修正（用户："我要的是只显示本地仓库的技能"）**：技能与
+> 工具页**只列本机已装技能**（`pi_capabilities` 扫 `~/.rpi/agent/skills` +
+> 当前工作区 `.rpi/skills`，即 pi 实际装载的那份）。上午接的 139 条
+> optional-skills「可安装目录」不再在技能页展示——`getOfficialSkills` 回空、
+> `catalog-browser.tsx` 的 `isDiscoverView` 对 skills 恒 false（平铺列表，
+> 无 "Discover 技能" 货架）。随包目录（`src-tauri/skills-catalog/`）与
+> `pi_skills_search` / `pi_skill_install` **仍服务机器人编辑框的技能选择器**
+> （`skills.manage`），只是不在技能页当市场。下面这段是当时（二）的接线记录，
+> 数据面（`localActions` / install / uninstall shim）仍有效。
+
 - **「技能与工具」页的技能市场 = 本地技能目录**（用户："技能与工具不是做
   成本地目录吗?"）。此前面板拉的是 hermes 公共远端快照
   （`CATALOG_BASE = nousresearch.github.io/hermes-agent/docs/api/skills.json`，

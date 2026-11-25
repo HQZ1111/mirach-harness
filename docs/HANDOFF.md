@@ -6,6 +6,20 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（四）：技能页只列本机已装 + 左栏底部跟随正在看的 bot**
+
+- **技能与工具页 = 只列本机已装技能**（用户："我要的是只显示本地仓库的技能"——
+  即 pi 实际装载的 `~/.rpi/agent/skills` + 工作区 `.rpi/skills`）：shim
+  `getOfficialSkills` 回空（139 条随包 optional-skills 目录不再在技能页展示，
+  只留给机器人编辑框的技能选择器）；`catalog-browser.tsx::isDiscoverView`
+  对 skills 恒 false（平铺列表，无 "Discover 技能" 货架）。实机：技能页 =
+  「1password」一行（已装）+ Disable 开关 + Local/Global 标注，无目录行。
+- **左栏底部身份 = 正在看的会话的 bot**（用户："左栏的左下角没有在切换机器人
+  后变"）：点机器人行是导航（不切引擎活动环境），底栏改为
+  `focusedBot ?? 活动环境 bot ?? 本体`（`useSessionBot` 从 message-avatars
+  导出复用）。实机：点二万人 → 底栏 二万人+头像；回普通会话 → Mirach+logo；
+  环境菜单切换 → 底栏随环境变（本来就通）。
+
 **✅ 2026-11-25（三）：宽度调节只限最大化 + 机器人头像圆形/状态点 + 左栏生效 bot**
 
 - **对话宽度手柄只在窗口最大化时出现/生效**（用户："只在软件最大化的时候出现

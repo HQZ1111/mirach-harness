@@ -362,33 +362,16 @@ export async function deleteLearningNode(
   return { message: 'deleted', ok: true }
 }
 
-/** `pi_skills_search` 的一行（见 `pi_skills_catalog.rs`）。 */
-interface LocalCatalogEntry {
-  name: string
-  description?: string
-  category?: string
-  installed?: boolean
-}
-
 /** The Skills tab's "available to install" rows.
  *
- * 宿主（2026-11-25 用户："技能与工具不是做成本地目录吗?"）：行 = **本地技能
- * 目录**——hermes `optional-skills/` 的随包复制（22 分类 / 139 技能，
- * `src-tauri/skills-catalog`，见 `pi_skills_catalog.rs`）。`installed` 由磁盘
- * 现状回答（`~/.rpi/agent/skills/<name>` 是否在场），与 `pi_capabilities` 的
- * 已安装清单同源。 */
+ * **宿主口径（2026-11-25 用户："我要的是只显示本地仓库的技能"）**：技能页只列
+ * **本机已装的技能**（`pi_capabilities` 扫 `~/.rpi/agent/skills` + 当前工作区
+ * `.rpi/skills`，即 pi 实际装载的那份），这里**不再提供「可安装目录」行**
+ * （2026-11-25 上午的 139 条 optional-skills 目录展示已撤——用户："现在里面
+ * 的技能哪来的？"）。随包目录与 `pi_skills_search` / `pi_skill_install` 仍服务
+ * 机器人编辑框的技能选择器（`skills.manage`），只是不在技能页当"Discover"。 */
 export async function getOfficialSkills(_profile?: ProfileScope): Promise<{ skills: OfficialSkillInfo[] }> {
-  const res = await invokeOnce<{ entries?: LocalCatalogEntry[] }>('pi_skills_search', { query: '' })
-  return {
-    skills: (res.entries ?? []).map(entry => ({
-      category: entry.category ?? 'general',
-      description: entry.description ?? '',
-      identifier: entry.name,
-      installed: entry.installed === true,
-      name: entry.name,
-      tags: []
-    }))
-  }
+  return { skills: [] }
 }
 
 // ── Skills Hub（宿主 = 本地技能目录；没有远端 hub）─────────────────────────

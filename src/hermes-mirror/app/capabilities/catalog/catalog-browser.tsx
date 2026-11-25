@@ -264,9 +264,17 @@ const detailRelated = (entries: CatalogEntry[], selected: CatalogEntry | undefin
 /** Shelves (not a flat grid) while nothing narrows the catalog, and also
  *  while only tiers (plugins) or several categories do: Official / Verified
  *  stay their own shelves, Community and multi-category picks keep their
- *  category shelves. One category is a drill-in, so it stays a flat grid. */
+ *  category shelves. One category is a drill-in, so it stays a flat grid.
+ *
+ *  宿主分支（2026-11-25 用户："只显示本机已装技能"）：技能目录不再有公共 feed
+ *  ——技能页的行 = 本机已装的技能，货架视图（"Discover 技能" 顶图）只对插件
+ *  目录保留；技能页平铺列表。 */
 const isDiscoverView = (facets: CatalogFacets, query: string, kind: CatalogKind) =>
-  (kind === 'plugins' || !facets.sources.length) && facets.categories.length !== 1 && !facets.tags.length && !query && !facets.installedOnly
+  kind === 'plugins' &&
+  facets.categories.length !== 1 &&
+  !facets.tags.length &&
+  !query &&
+  !facets.installedOnly
 
 function CatalogLoadState({ error, onRetry }: { error: Error | null; onRetry: () => void }) {
   const { t } = useI18n()
