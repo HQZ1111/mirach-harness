@@ -197,15 +197,18 @@
     `$chatFontFamily`；终端字体写 `--term-font-family`，`TerminalPane`
     订阅 appearanceStore 热更新已有 xterm。
   - 开场标识：空对话显示 **MIRACH 字标** +「有什么可以帮你的？」；关闭
-    整块隐藏。**2026-11-24 按 hermes `Wordmark` 的 `.fit-text` 复制**：
-    字标宽度 = 输入框列宽（`thread.aui` 里 `width="100%"`），字号由
-    `--fit-ratio` 随宽度缩放（实测 934px 列 → 215px 字），不再写死 32px。
-    **letter-spacing 必须同时挂 `.mirach-wordmark` 和它内部每个 span 的
-    `0.08em`**——只写在 p 上会在父字号 15px 结算，200px 大字只有 1.2px
-    间距，左右各空 74px；逐 span 解析后文字左右边与输入框误差 <0.1px。
-    结构里的第二份 `aria-hidden` 文案是宽度参照，不能删。starter
-    suggestions 气泡整组已删除（用户："总结我们当前对话进度等气泡提示
-    组件删除卸载"）。
+    整块隐藏。**2026-11-25 用户："开场标识也用启动页的那个组件？"——已换成
+    启动页同款 `ParticleText`**（`components/particle-text/`，纯 Canvas 粒子，
+    参数见「启动页」节）。容器 `.aui-intro-particle`（`styles/launch.css`）：
+    `color: var(--brand)` 提供粒子基色、height `clamp(140px,20vh,220px)`、
+    `min-height: 0` 覆盖组件自带的 240px。**不要传
+    `color="var(--brand)"`**（canvas fillStyle 不解析 CSS 变量 → 粒子静默变黑，
+    实测）。实机：672x220 画布、约 2000 个着色像素、平均色 (0,111,255) =
+    `--brand`。旧实现（宿主 `Wordmark` + `.mirach-wordmark` 的 `.fit-text`
+    字号缩放 + 逐 span letter-spacing 0.08em）已撤下——那段 2026-11-24 的
+    letter-spacing 结论只对旧实现有效（hermes-bots 空对话仍用上游 Wordmark）。
+    starter suggestions 气泡整组已删除（用户："总结我们当前对话进度等气泡
+    提示组件删除卸载"）。
   - 底部动效：`BottomWave`（`components/bottom-wave.tsx` +
     `styles/appearance.css`）——窗口底部两层弧形渐变波浪，颜色 `--brand`，
     **高度 33.333dvh（软件 1/3）、从底边起**。2026-11-24 用户："不能挡
@@ -349,6 +352,33 @@
   的 `tsc --noEmit` 会撞 hermes-mirror 历史 1315 条基线错误。产物 =
   `src-tauri/target/release/bundle/nsis/Mirach Harness_0.1.0_x64-setup.exe`。
   prod 窗口 1280×600 / shadow true；安装器图标来自 `G:\MIRACH\src-tauri\icons`。
+
+## 2026-11-25 技能市场 = 本地技能目录 + 开场粒子 + 拖动带 30（当前有效）
+
+- **「技能与工具」页的技能市场 = 本地技能目录**（用户："技能与工具不是做
+  成本地目录吗?"）。此前面板拉的是 hermes 公共远端快照
+  （`CATALOG_BASE = nousresearch.github.io/hermes-agent/docs/api/skills.json`，
+  行在本宿主**不可安装**）。现在三处接线（全在 shim/mirror 的数据面，
+  组件树零改动）：
+  - `catalog-data.ts::fetchCatalog('skills')` **直接返回 `[]`**（带注释）——
+    skills 行不再发远端请求；插件目录（`kind === 'plugins'`）仍走公共快照。
+  - `hermes-shim/hermes.ts::getOfficialSkills` = `pi_skills_search('')`
+    （`src-tauri/skills-catalog/` 随包资源：hermes `optional-skills` 22 分类 /
+    139 技能；`installed` 读磁盘现值）→ official 行（source 'optional'）。
+  - `installSkillFromHub(identifier)` = `pi_skill_install`（`official/<name>`
+    剥前缀）；`uninstallSkillFromHub(name)` = `pi_skill_remove`。上游
+    `runHubAction` 是「spawn → 轮询 getActionStatus」两步，宿主没有子进程，
+    用模块级 `localActions` 登记表接第二步（完成即终态，轮询一次读到；
+    未知名字仍如实 `exit_code:null`）。`updateSkillsFromHub` 如实抛错
+    （目录随安装包分发，无可更新项）。**实机**：Skills 页 = 139 条 Optional
+    行 / 22 分类；点 1password「安装」→ `~/.rpi/agent/skills/1password/SKILL.md`
+    落盘（5104B）、行即刻翻成已装（Disable 开关）、页签计数 0→1。
+- **开场标识 = 启动页同款 ParticleText**（见「外观」节；旧 Wordmark 撤下）。
+- **顶栏拖动带 = 30px**（`dockview-shell.tsx::TOP_BAND_PX`，旧值 85）。
+  只有最顶部 30px 是拖窗/双击最大化带（`.app-shell / .app-main /
+  .rail-logo-* / .app-titlebar` 面上的空白；button/input/`.dv-tab`/sash
+  照旧归原主）；logo 行与页签条的手势不再被拖窗截胡。实机：clientY=45/60
+  的 pointerdown 不再被 preventDefault（旧 85 会拦截）。
 
 ## 工具链钉版（升级前必读）
 
@@ -2557,7 +2587,7 @@ hermes 的数据面是 REST（`/api/skills`、`/api/tools/toolsets`）；宿主�
 | `getToolsets` | `pi_capabilities` | **pi 没有 toolset 概念** → 宿主把 `KNOWN_TOOL_NAMES`（tools.rs:5607）按语义分 17 组 |
 | 工具集启停 | `pi_set_toolset_enabled` | 映射到 `SessionOptions.enabled_tools` |
 | SkillEditorDialog | `pi_read/write/delete_skill` | 落 `~/.pi/agent/skills/<name>/SKILL.md`；校验规则逐条照抄 `resources::validate_name/description`（pub(crate) 拿不到，复刻 + 常量同源） |
-| Hub 浏览 | ❌ | hermes 搜自己的技能库；pi 无技能市场 → 页面如实说明 + 列出可放 SKILL.md 的目录 |
+| Hub 浏览（技能市场） | **本地技能目录**（2026-11-25） | 不再拉 hermes 公共远端快照；`getOfficialSkills` = `pi_skills_search`（随包 `src-tauri/skills-catalog/`：hermes optional-skills 22 分类 / 139 技能），安装/卸载 = `pi_skill_install` / `pi_skill_remove`（详见「2026-11-25 技能市场 = 本地技能目录」节） |
 
 **技能提示由宿主渲染**（这是"技能开关"能生效的唯一位置）：pi 的
 `SessionOptions.skills_prompt` 是宿主提供的字符串（`sdk.rs:399`，pi 自己不扫

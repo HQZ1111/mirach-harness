@@ -6,6 +6,27 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（续）：技能市场 = 本地技能目录 + 开场粒子 + 拖动带 30**
+
+- **「技能与工具」页的技能市场改用本地技能目录**（用户："技能与工具不是做
+  成本地目录吗?"）：`fetchCatalog('skills')` 直接 `[]`（不再拉
+  nousresearch.github.io 的远端 skills.json）；shim `getOfficialSkills` =
+  `pi_skills_search('')`（随包 `src-tauri/skills-catalog/`：hermes
+  optional-skills 22 分类 / 139 技能，`installed` 读磁盘）；
+  `installSkillFromHub` / `uninstallSkillFromHub` = `pi_skill_install` /
+  `pi_skill_remove`（上游 runHubAction 的「spawn → 轮询」两步用模块级
+  `localActions` 登记表接住第二步）。实机：139 条 Optional 行渲染、点
+  「安装」1password → `~/.rpi/agent/skills/1password/SKILL.md` 落盘
+  （5104B）、行即刻翻已装、页签计数 0→1。
+- **开场标识 = 启动页同款 ParticleText**（用户："开场标识也用启动页的那个
+  组件？"）：`thread.aui.tsx` 的 `EmptyStateWelcome` 换成
+  `components/particle-text/`，容器 `.aui-intro-particle`（`launch.css`）；
+  旧宿主 `Wordmark` 撤下。实机：672x220 画布、平均色 (0,111,255) = `--brand`。
+- **顶栏拖动带 = 30px**（用户："拖动窗口的区域高度改为 30"）：
+  `dockview-shell.tsx::TOP_BAND_PX` 85→30；clientY=45/60 的 pointerdown
+  不再被拖窗处理器 preventDefault（旧 85 会拦截），页签/按钮手势不再被
+  截胡。
+
 **✅ 2026-11-25（续）：hermes 启动页移植（ReactBits ParticleText）**
 
 - `src/components/launch-overlay.tsx` = hermes `GatewayConnectingOverlay` 的

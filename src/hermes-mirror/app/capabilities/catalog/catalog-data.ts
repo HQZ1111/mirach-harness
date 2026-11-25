@@ -203,6 +203,16 @@ export function parseCatalog(kind: CatalogKind, data: unknown): CatalogEntry[] {
 }
 
 export async function fetchCatalog(kind: CatalogKind): Promise<CatalogEntry[]> {
+  // 宿主分支（2026-11-25 用户："技能与工具不是做成本地目录吗?"）：技能行 =
+  // **本地技能目录**——shim 的 getOfficialSkills 从 `pi_skills_search` 回答
+  // （hermes `optional-skills/` 的随包复制：22 分类 / 139 技能，见
+  // src-tauri/src/pi_skills_catalog.rs），安装/卸载也走本地 IPC。这里不再拉
+  // hermes 公共远端快照——那些行在本宿主不可安装（hermes hub 才认的标识）。
+  // 插件目录（kind === 'plugins'）仍走下方公共快照。
+  if (kind === 'skills') {
+    return []
+  }
+
   // Bound inactivity, not total transfer time: a large skills snapshot can
   // take minutes on a healthy slow connection. Headers and each body chunk
   // get the same deadline; an actually stalled download still terminates.

@@ -1101,19 +1101,15 @@ export function DockviewShell() {
   }, [])
 
 
-  // window 捕获段按命中面分派：顶带（--logo-strip-h=75）内非交互面拖窗口、
-  // 双击最大化；绝不改用绝对定位盖层——盖层会截胡顶带内页签 pointerdown
-  //（2026-09-29 定稿）。
-  // 75 必须与 tokens.css 的 --logo-strip-h 同值（2026-10-19：85 → 75）；
-  // 卡片化后顶带整体下移 --pane-edge(10)——窗边 7.5（.app-main）+
-  // 卡片内 2.5（.dv-view），可拖区的下界 = 10 + 75。改间距令牌必须同步这里。
+  // window 捕获段按命中面分派：顶带内非交互面拖窗口、双击最大化；绝不改用
+  // 绝对定位盖层——盖层会截胡顶带内页签 pointerdown（2026-09-29 定稿）。
   //
-  // **再叠加透明边距**（2026-10-23）：窗口投影改 CSS 画之后壳从
-  // `--shell-shadow-margin`(40) 处开始，clientY 是相对**窗口矩形**的，
-  // 所以要加这条边距。最大化态令牌被覆盖成 0，判定自动回到贴屏边。
-  // 令牌读不到时按 0 处理（不是兜底——`--shell-shadow-margin` 是
-  // tokens.css 的常量，读不到说明样式没注入，那时整个界面都是坏的）。
-  const TOP_BAND_PX = 85
+  // **可拖区高度 = 30px**（2026-11-25 用户："顶栏拖动窗口的区域高度改为 30"）。
+  // 旧值 85 覆盖整条 75px logo 带 + 10px 栏间留白，连 logo/会话按钮的上半都
+  // 算进拖拽区；现在只有最顶部 30px 是拖窗带，下面的 logo 行、页签条、
+  // 栏卡片归属各自的手势。再叠加 `--shell-shadow-margin`（当前 0；最大化态
+  // 也是 0），clientY 相对窗口矩形。
+  const TOP_BAND_PX = 30
   useEffect(() => {
     if (!inTauri || !appWindow) return
     const win = appWindow

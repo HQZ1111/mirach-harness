@@ -60,7 +60,7 @@ import {
   wordIndexAt,
 } from "@/components/assistant-ui/speech-adapter";
 import { EmptyState, EmptyStateGreeting } from "@/components/assistant-ui/elements/empty-state";
-import { Wordmark } from "@/sdk/wordmark";
+import ParticleText from "@/components/particle-text/ParticleText";
 import { ErrorState } from "@/components/assistant-ui/elements/error-state";
 import { ConnectionState } from "@/components/assistant-ui/elements/connection-state";
 import { MessageActions, type Reaction } from "@/components/assistant-ui/elements/message-actions";
@@ -1034,14 +1034,27 @@ const EmptyStateWelcome: FC = () => {
   if (!introSplash) return null;
   return (
     <EmptyState className="aui-thread-welcome-root mx-auto my-6 w-full max-w-none">
-      {/* 开场标识：完全照 hermes Wordmark（dev 的 fit-text 结构），字号随
-          容器/输入框宽度缩放并铺满整列；HarmonyOS Sans / Medium / 字距 2，
-          颜色跟随主题色（--brand）。 */}
-      <Wordmark
-        className="mb-1 text-(--brand)"
-        text="MIRACH"
-        width="100%"
-      />
+      {/* 开场标识（2026-11-25 用户："开场标识也用启动页的那个组件"）：
+          与启动页同源的 ReactBits ParticleText——粒子聚合 + 指针斥力 + 空闲
+          漂移；颜色跟随主题色（--brand）。不再用静态 fit-text 字标。 */}
+      <div className="aui-intro-particle mb-1" data-slot="aui_intro_particle">
+        <ParticleText
+          clickBurst={false}
+          density={4}
+          fontSize="clamp(2.25rem, 9vw, 5.5rem)"
+          fontWeight={800}
+          gatherDuration={1400}
+          glow
+          highlightColor="#5aa2ff"
+          idleDrift={0.45}
+          intro="gather"
+          particleSize={1.7}
+          pointerRepel={20}
+          repelRadius={90}
+          stagger={340}
+          text="MIRACH"
+        />
+      </div>
       <EmptyStateGreeting>有什么可以帮你的？</EmptyStateGreeting>
       {/* 2026-10-16 去重：此处原挂 <EmptyStateComposer>——它是上游给
           "无底部 composer 场景"准备的**罐头输入框外观**（纯展示、onSend 即发），

@@ -19,7 +19,8 @@
  * | testMcpServer                      | pi_mcp_test_server                             |
  * | getUsageAnalytics                  | pi_usage_snapshot                              |
  * | getProfiles                        | the single local profile                       |
- * | getOfficialSkills / hub / catalog  | empty + a recorded reason                      |
+ * | getOfficialSkills / hub / catalog  | 技能市场 = 本地技能目录（pi_skills_search /  |
+ * |                                    | pi_skill_install / pi_skill_remove）；其余如实空 |
  * | getLogs                            | pi's MCP config diagnostics, labelled as such  |
  *
  * Everything else (toolset provider matrices, terminal backends, computer-use
@@ -139,6 +140,7 @@ export interface McpTestResult {
 }
 
 import type {
+  ActionResponse,
   ActionStatusResponse,
   AnalyticsResponse,
   ComputerUseStatus,
@@ -360,20 +362,85 @@ export async function deleteLearningNode(
   return { message: 'deleted', ok: true }
 }
 
-/** The Skills tab's "available to install" rows come from hermes' bundled
- *  optional-skill catalog. pi ships no such catalog. */
-export async function getOfficialSkills(_profile?: ProfileScope): Promise<{ skills: OfficialSkillInfo[] }> {
-  unsupported(
-    'skills.hub.official',
-    'pi 没有内置可选技能目录（hermes 的 optional-skills 是它仓库自己的内容）——本栏为空'
-  )
-  return { skills: [] }
+/** The Skills tab's "available to install" rows.
+ *
+ * 宿主（2026-11-25 用户："技能与工具不是做成本地目录吗?"）：行 = **本地技能
+ * 目录**——hermes `optional-skills/` 的随包复制（22 分类 / 139 技能，
+ * `src-tauri/skills-catalog`，见 `pi_skills_catalog.rs`）。`installed` 由磁盘
+ * 现状回答（`~/.rpi/agent/skills/<name>` 是否在场），与 `pi_capabilities` 的
+ * 已安装清单同源。 */
+interface LocalCatalogEntry {
+  name: string
+  description?: string
+  category?: string
+  installed?: boolean
 }
 
-// ── Skills Hub (no hub on this host; the tab's banner copy says so) ─────────
+export async function getOfficialSkills(_profile?: ProfileScope): Promise<{ skills: OfficialSkillInfo[] }> {
+  const res = await invokeOnce<{ entries?: LocalCatalogEntry[] }>('pi_skills_search', { query: '' })
+  return {
+    skills: (res.entries ?? []).map(entry => ({
+      category: entry.category ?? 'general',
+      description: entry.description ?? '',
+      identifier: entry.name,
+      installed: entry.installed === true,
+      name: entry.name,
+      tags: []
+    }))
+  }
+}
 
+// ── Skills Hub（宿主 = 本地技能目录；没有远端 hub）─────────────────────────
+
+// 本地安装/卸载是同步 IPC，没有 hermes 那种「起 CLI 子进程再轮询动作日志」的
+// 形态；而上游 `runHubAction`（store/hub-actions.ts）固定两步：spawn() 返回
+// 动作名 → `getActionStatus(name)` 轮询到终态。这里用一张小登记表接住第二步：
+// 完成即写终态，轮询一次就读到，行随即翻转。未知名字仍如实回答（running:false,
+// exit_code:null = 没有这个动作），不圆成 0。
+const localActions = new Map<string, ActionStatusResponse>()
+const LOCAL_ACTIONS_LIMIT = 32
+
+function noteLocalAction(name: string, lines: string[]): ActionResponse {
+  if (localActions.size >= LOCAL_ACTIONS_LIMIT) {
+    const oldest = localActions.keys().next().value
+    if (oldest !== undefined) {
+      localActions.delete(oldest)
+    }
+  }
+  localActions.set(name, { exit_code: 0, lines, name, pid: null, running: false })
+  // pid 0 = 没有子进程（宿主安装是进程内 IPC；hermes 这里返回 CLI 的 pid）。
+  return { name, ok: true, pid: 0 }
+}
+
+/** 安装一个本地技能：整个目录复制到 `~/.rpi/agent/skills/<name>`（rpi 的技能
+ *  发现目录，下次会话/刷新即生效）。identifier 是 official 行的标识
+ *  （`<name>`；老形态 `official/<name>` 兼容剥前缀）。失败原样传播（规矩 12）。 */
+export async function installSkillFromHub(identifier: string, _profile?: ProfileScope): Promise<ActionResponse> {
+  const name = identifier.startsWith('official/') ? identifier.slice('official/'.length) : identifier
+  const res = await invokeOnce<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', { name })
+  return noteLocalAction(identifier, [`已安装「${res.name ?? name}」→ ${res.path ?? `~/.rpi/agent/skills/${name}`}`])
+}
+
+/** 卸载一个本地技能：删除 `~/.rpi/agent/skills/<name>` 目录（不在场 = 幂等
+ *  的 removed:false，如实记一行，不当失败）。 */
+export async function uninstallSkillFromHub(name: string, _profile?: ProfileScope): Promise<ActionResponse> {
+  const res = await invokeOnce<{ removed?: boolean; name?: string }>('pi_skill_remove', { name })
+  return noteLocalAction(
+    name,
+    [res.removed === false ? `「${res.name ?? name}」本来就不在场` : `已删除「${res.name ?? name}」`]
+  )
+}
+
+/** 本地目录随安装包分发（同一次打包里快照固定），没有远端版本可比——如实报
+ *  「没有可更新项」，不假装成功（规矩 12）。 */
+export async function updateSkillsFromHub(_profile?: ProfileScope): Promise<ActionResponse> {
+  throw new Error('本宿主没有远端技能源：技能目录随安装包分发，没有可更新项')
+}
+
+/** hermes 的 Skills Hub = 它自己的远端技能源（社区索引、来源锁、安全扫描）。
+ *  宿主没有这个源——技能市场就是上面的本地目录，所以这里如实空。 */
 export async function getSkillHubSources(_profile?: null | string): Promise<SkillHubSourcesResponse> {
-  unsupported('skills.hub.sources', '本宿主没有 Skills Hub 数据源')
+  unsupported('skills.hub.sources', '本宿主没有远端技能源；技能市场 = 本地技能目录（见「技能」页）')
   return { featured: [], index_available: false, installed: {}, sources: [] }
 }
 
@@ -392,24 +459,6 @@ export async function previewSkillHub(_identifier: string, _profile?: ProfileSco
 
 export async function scanSkillHub(_identifier: string, _profile?: null | string): Promise<SkillHubScanResult> {
   throw new Error('本宿主没有 Skills Hub，无法扫描技能')
-}
-
-export async function installSkillFromHub(
-  _identifier: string,
-  _profile?: ProfileScope
-): Promise<import('@/hermes-mirror/types/hermes').ActionResponse> {
-  throw new Error('本宿主没有 Skills Hub，无法安装技能（pi 的技能是 ~/.pi/agent/skills 下的目录）')
-}
-
-export async function uninstallSkillFromHub(
-  _name: string,
-  _profile?: ProfileScope
-): Promise<import('@/hermes-mirror/types/hermes').ActionResponse> {
-  throw new Error('本宿主没有 Skills Hub，无法卸载（请直接删除技能目录，或用编辑器的归档）')
-}
-
-export async function updateSkillsFromHub(_profile?: ProfileScope): Promise<import('@/hermes-mirror/types/hermes').ActionResponse> {
-  throw new Error('本宿主没有 Skills Hub，无可更新项')
 }
 
 // ── Toolsets ────────────────────────────────────────────────────────────────
@@ -753,7 +802,13 @@ export async function getActionStatus(
   _wait?: number,
   _profile?: ProfileScope
 ): Promise<ActionStatusResponse> {
-  unsupported('actions.status', 'pi 的后台动作通过 jobs 工具上报，没有 REST 动作状态端点')
+  // 本地技能动作（install/uninstall）在上面的小登记表里；其余动作名如实回答
+  // 「没有这个动作」（exit_code null），不圆成 0（规矩 12）。
+  const local = localActions.get(name)
+  if (local) {
+    return local
+  }
+  unsupported('actions.status', '本宿主的技能安装/卸载是同步 IPC（本地登记表回答终态）；没有 hermes 的通用后台动作端点')
   return { exit_code: null, lines: [], name, pid: null, running: false }
 }
 

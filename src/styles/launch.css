@@ -172,6 +172,19 @@ html[data-launch-reveal-active] .app-titlebar {
   }
 }
 
+/* 空对话开场标识（2026-11-25 用户："开场标识也用启动页的那个组件"）：
+   与启动页同源的 ParticleText，容器高度比启动页小，min-height 归零覆盖
+   组件自带的 240px。 */
+.aui-intro-particle {
+  color: var(--brand);
+  height: clamp(140px, 20vh, 220px);
+  width: 100%;
+}
+
+.aui-intro-particle .particle-text {
+  min-height: 0;
+}
+
 @keyframes launch-pulse {
   0%,
   100% {
