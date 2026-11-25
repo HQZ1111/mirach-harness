@@ -38,13 +38,15 @@
 //!     "createdAt": 1760000000000,
 //!     "parentSessionId": "01a1..." | null,
 //!     "projectId": "proj-uuid" | null,
+//!     "profile": "二万人" | null,
 //!     "sourceRoot": "C:\\work\\proj\\.rpi\\sessions",
-//!     "source": "sessionDir" | "projectRoot" | "workspace"
+//!     "source": "sessionDir" | "projectRoot" | "workspace" | "profile"
 //!   }],
 //!   "skipped": [{ "path": "...", "root": "...", "reason": "会话文件损坏：..." }],
 //!   "roots": [{
 //!     "path": "C:\\work\\proj\\.rpi\\sessions",
 //!     "kind": "projectRoot",
+//!     "profile": null,
 //!     "exists": true,
 //!     "error": null
 //!   }]
@@ -75,6 +77,9 @@ pub enum RootKind {
     ProjectRoot,
     /// 当前启动 cwd 的默认会话根。
     Workspace,
+    /// 具名环境 home 的会话根（`<agent>/profiles/<name>/sessions`；
+    /// 跨环境聚合，2026-11-25）。
+    Profile,
 }
 
 /// 一个待扫描的会话根。
@@ -82,6 +87,9 @@ pub enum RootKind {
 pub struct ScanRoot {
     pub path: String,
     pub kind: RootKind,
+    /// 根所属环境（`None` = 本体环境；具名环境 = `<home>/sessions` 根）。
+    /// 记录沿根继承该值——侧栏「按配置档案分组」的身份来源。
+    pub profile: Option<String>,
 }
 
 /// 根扫描报告（wire 形状见模块头）。
@@ -90,6 +98,7 @@ pub struct ScanRoot {
 pub struct RootReport {
     pub path: String,
     pub kind: RootKind,
+    pub profile: Option<String>,
     pub exists: bool,
     pub error: Option<String>,
 }
@@ -119,6 +128,9 @@ pub struct SessionRecord {
     pub parent_session_id: Option<String>,
     /// 由命令层按 sessionProjects / cwd 归属推断后填入。
     pub project_id: Option<String>,
+    /// 会话所属环境（None = 本体；由扫描根继承——`profiles/<name>/sessions`
+    /// 根下的记录带名字。跨环境聚合的身份标签，2026-11-25）。
+    pub profile: Option<String>,
     pub source_root: String,
     pub source: RootKind,
 }
@@ -222,8 +234,13 @@ pub fn dedup_key(path: &Path) -> String {
     path_key(&canonical)
 }
 
-/// 追加根并按路径去重（先到先得；重复根的 kind 保持第一次的）。
-pub fn push_root(roots: &mut Vec<ScanRoot>, path: PathBuf, kind: RootKind) {
+/// 追加根并按路径去重（先到先得；重复根的 kind/profile 保持第一次的）。
+pub fn push_root(
+    roots: &mut Vec<ScanRoot>,
+    path: PathBuf,
+    kind: RootKind,
+    profile: Option<String>,
+) {
     let key = dedup_key(&path);
     if roots.iter().any(|r| dedup_key(Path::new(&r.path)) == key) {
         return;
@@ -231,6 +248,7 @@ pub fn push_root(roots: &mut Vec<ScanRoot>, path: PathBuf, kind: RootKind) {
     roots.push(ScanRoot {
         path: path.to_string_lossy().into_owned(),
         kind,
+        profile,
     });
 }
 
@@ -267,6 +285,7 @@ pub fn scan_root(root: &ScanRoot) -> RootScan {
         report: RootReport {
             path: root.path.clone(),
             kind: root.kind,
+            profile: root.profile.clone(),
             exists: false,
             error: None,
         },
@@ -444,6 +463,7 @@ mod tests {
             let root = ScanRoot {
                 path: root_dir.to_string_lossy().into_owned(),
                 kind: RootKind::ProjectRoot,
+                profile: None,
             };
             let scan = scan_root(&root);
             assert!(scan.report.exists);
@@ -474,6 +494,7 @@ mod tests {
         let root = ScanRoot {
             path: base.join("nope").to_string_lossy().into_owned(),
             kind: RootKind::SessionDir,
+            profile: None,
         };
         let scan = scan_root(&root);
         assert!(!scan.report.exists);
@@ -501,14 +522,17 @@ mod tests {
         let a = base.join("sessions");
         std::fs::create_dir_all(&a).unwrap();
         let mut roots = Vec::new();
-        push_root(&mut roots, a.clone(), RootKind::SessionDir);
+        push_root(&mut roots, a.clone(), RootKind::SessionDir, None);
         push_root(
             &mut roots,
             PathBuf::from(format!("{}\\", a.to_string_lossy())),
             RootKind::ProjectRoot,
+            Some("bot-x".to_string()),
         );
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].kind, RootKind::SessionDir);
+        // 去重先到先得：重复根的 profile 保持第一次的（本体）。
+        assert_eq!(roots[0].profile, None);
         std::fs::remove_dir_all(&base).ok();
     }
 

@@ -431,11 +431,60 @@ bot 等同于整个软件是新的了，会话，技能，插件等等" + "复�
     没有凭据（现存 bot 都是隔离前建的）。
   - `pi_cron` 显式 `AgentHome::process()`（cron 仍是进程级：`Job.bot` 只是
     归档/过滤标签，没有可靠 profile 归属）。
-- **还没绑定的面（下一步清单）**：providers/models/auth 设置页与相关 IPC
-  （`pi_settings` / `pi_keys` / `pi_login` / `pi_image` /
-  `pi_session::list_models` 仍走 `pi_paths::*`/`rpi_cli::config::*` 的进程
-  home）；技能选择器的安装落点（`pi_skill_install` 仍装本体 home）；侧栏
-  「网关与配置」聚合/分组。
+- **还没绑定的面（下一步清单）**：`pi_pkg_*`（`rpi install` 原生包安装
+  仍落本体 home）；MCP 全局配置（`pi_mcp.rs` 的 `~/.rpi/agent/mcp.json`）
+  与 cron 作业存储仍是进程级。~~providers/models/auth IPC、技能安装落点、
+  侧栏「网关与配置」聚合~~ **已于（二）轮与（六）轮完成，见下**。
+
+## 2026-11-25（五·二）配置绑定收尾：providers/models/auth + 技能装删 + 扩展列表按环境（f0cdaf2）
+
+- `pi_settings` / `pi_keys` / `pi_login`（discover）/ `pi_image` 的命令全部
+  `state: State<Arc<AguiState>>` + `pi_profiles::active_home(&state.engine)?`：
+  settings.json / models.json / auth.json 的读写、`pi_auth_status` 的路径
+  回显、`persist_default_model`（按**会话所属环境**写默认模型）、图片生成的
+  凭据链都按活动环境 home。语音配置（`persist_voice_live_config` /
+  `read_settings_document`）保持**本体 home**——语音是进程级能力。
+- 技能装/删（`pi_skills_catalog`）按**目标环境**：`skills.manage` 的
+  search/install/remove 随请求带 `profile`（host-rpc 透传，bot 编辑框的
+  技能选择器给哪个 bot 装就落哪个 bot 的 home）；`installed_root` =
+  `home.global_dir("skills")`。缺省（无 profile）= 活动环境。
+- `pi_extensions` 列表按活动环境 home（与引擎给该环境会话装载的扩展同源；
+  切 bot 后列表 = 该环境自己的 `<home>/extensions`）。
+
+## 2026-11-25（六）跨环境聚合：侧栏「网关与配置」打通（当前有效）
+
+用户："是因为左侧栏的网关与配置没有打通吗？"→ 答复口径 = **完全按 hermes**。
+hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话）+
+分组子菜单的 `grouping='profile'`（菜单标签「网关与配置」，zh
+`gatewayGroups.grouping`）。
+
+- **引擎/宿主扫描聚合**（`pi_session.rs::index_sessions`）：本体环境的既有
+  根（settings.sessionDir → 项目根 → 启动 cwd）之外，再扫**每个具名环境**
+  的 `<home>/sessions`（`pi_profiles::list_profile_names()`；环境目录读不了
+  = Err，不把坏环境当没有）。`ScanRoot`/`RootReport`/`SessionRecord` 增加
+  `profile: Option<String>`（根 → 记录继承；`RootKind::Profile` 新变体）。
+  **切环境不再让列表整体换源**——一个列表看全部环境（此前"具名环境只扫
+  自己"的分支已删）。
+- **前端标签链**：`SessionsIndexSession.profile` → `indexRowCustom` →
+  `SessionCatalogEntry.profile` / `SessionRowMeta.profile`；`pi_list_sessions`
+  基线行按 `profileStore` 当前值打标签（活动环境自己的会话）；
+  工作区登记表补行带 `record.profile ?? null`（否则跨工作区行误落「Mirach」组）。
+- **分组**：`grouping='gateway'` 从 disabled 转正（`parseGrouping` 接受
+  `gateway`）；`session-display.ts::groupEntriesByProfile`——本体组恒第一
+  （组头「Mirach」+ 品牌 logo），具名组按 bot 花名册序（组头 = bot 头像
+  圆形 + `botDisplayName`），名单外的孤儿环境按名字殿后直示；折叠键
+  `gw:<name>`（本体 `gw:`）。渲染 = `GatewayDividerRow`
+  （`data-slot="aui_thread-list-profile-divider"`，两条渲染分支都接了）。
+- **实机验证**（CDP，2026-11-25）：`pi_sessions_index` 分桶 = 本体 73 /
+  微软 13 / remote-bot 10 / 风格和 7，profile 根 3 条全 exists；分组切到
+  网关与配置后 4 组头（Mirach + 3 bot，头像圆形）、滚到底部分组 = 二万人 3 /
+  风格和 7 / remote-bot 10 行；`localStorage` 持久化 = "gateway"（验后已归
+  回 date 默认）。
+- **有意不做的**（hermes 有、宿主不做）：`showAllProfiles` 复选框
+  （宿主恒聚合 = 恒 ✓ 语义，没有隐藏其它档案的需求时不做假开关）；
+  配置档案栏（视觉条）；「新建/导入配置档案」入口（用机器人页管理）。
+- **「环境」子菜单语义不变**：选中 = 切引擎活动环境（新建会话落点与资源
+  解析），但**不再**造成侧栏换源——列表由聚合面决定。
 
 
 

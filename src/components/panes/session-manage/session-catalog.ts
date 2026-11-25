@@ -204,6 +204,9 @@ export interface SessionCatalogEntry {
   /** 项目归属（`pi_sessions_index` 的 projectId：显式映射优先、否则 cwd
    *  落在项目根内推断）。undefined = 无归属（侧栏归「主页」桶）。 */
   projectId?: string
+  /** 会话所属环境（`pi_sessions_index` 的 profile：null = 本体）。侧栏
+   *  「网关与配置」分组/筛选的身份标签（2026-11-25 跨环境聚合）。 */
+  profile?: string
   /** 父会话 id（fork 谱系；索引的 parentSessionId）。 */
   parentSessionId?: string
   /** 该会话被哪个扫描根发现（诊断字段，UI 可不用）。 */
@@ -223,6 +226,8 @@ export interface SessionCatalogRow {
     /** `null` = 索引明确说「无项目归属」（清除旧值）；缺键 = 该来源不提供
      *  这一维（保留先前的值——pi_list_sessions 的老形状即如此）。 */
     projectId?: unknown
+    /** 会话所属环境（null/缺键 = 本体）——与 projectId 同为索引补充维。 */
+    profile?: unknown
     parentSessionId?: unknown
     sourceRoot?: unknown
     source?: unknown
@@ -280,8 +285,10 @@ export interface SessionsIndexSession {
   parentSessionId: string | null
   /** 显式 sessionProjects 优先，否则按 cwd 落在项目根内推断；null = 无归属。 */
   projectId: string | null
+  /** 会话所属环境（null = 本体；具名环境 = `profiles/<name>/sessions` 根）。 */
+  profile: string | null
   sourceRoot: string
-  source: 'sessionDir' | 'projectRoot' | 'workspace'
+  source: 'sessionDir' | 'projectRoot' | 'workspace' | 'profile'
 }
 
 /** 被跳过的会话文件 / 扫描问题（诊断可见，不静默丢）。 */
@@ -294,7 +301,9 @@ export interface SessionsIndexSkipped {
 /** 一个扫描根的报告。 */
 export interface SessionsIndexRoot {
   path: string
-  kind: 'sessionDir' | 'projectRoot' | 'workspace'
+  kind: 'sessionDir' | 'projectRoot' | 'workspace' | 'profile'
+  /** 根所属环境（null = 本体）。 */
+  profile: string | null
   exists: boolean
   error: string | null
 }
@@ -528,6 +537,8 @@ const indexRowCustom = (session: SessionsIndexSession): NonNullable<SessionCatal
   lastModifiedMs: session.lastModified,
   // null = 索引明确「无归属」（ingest 会清掉旧值）；缺键语义不同，见类型注。
   projectId: session.projectId,
+  // null = 本体环境（索引补充维；旧 Rust 缺键时 ingest 保留先前值）。
+  profile: session.profile,
   parentSessionId: session.parentSessionId,
   sourceRoot: session.sourceRoot,
   source: session.source,
@@ -617,6 +628,11 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
       const rawProject = row.custom?.projectId
       const projectId =
         rawProject === null ? undefined : strOrUndef(rawProject) ?? prior?.projectId
+      // profile 三态同 projectId：null = 本体环境（清旧值）；缺键 = 该来源
+      // 不提供这一维（pi_list_sessions 基线只带活动环境，保留索引补的值）。
+      const rawProfile = row.custom?.profile
+      const profile =
+        rawProfile === null ? undefined : strOrUndef(rawProfile) ?? prior?.profile
       entries[row.id] = {
         id: row.id,
         path: strOrUndef(row.custom?.path) ?? prior?.path,
@@ -627,11 +643,15 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
         lastModifiedMs: numOrUndef(row.custom?.lastModifiedMs),
         createdMs: numOrUndef(row.custom?.timestamp),
         projectId,
+        profile,
         parentSessionId: strOrUndef(row.custom?.parentSessionId),
         sourceRoot: strOrUndef(row.custom?.sourceRoot),
         source: (() => {
           const source = row.custom?.source
-          return source === 'sessionDir' || source === 'projectRoot' || source === 'workspace'
+          return source === 'sessionDir' ||
+            source === 'projectRoot' ||
+            source === 'workspace' ||
+            source === 'profile'
             ? source
             : prior?.source
         })(),

@@ -136,6 +136,9 @@ export interface WorkspaceSessionRow {
     lastModifiedMs: number
     cwd: string
     timestamp: number
+    /** 环境标签（跨环境聚合后侧栏「网关与配置」分组/筛选消费；
+     *  null = 本体——与 pi_sessions_index.profile 同形）。 */
+    profile: null | string
   }
 }
 
@@ -161,6 +164,8 @@ export function mergeWorkspaceSessionRows<T extends { id: string }>(
         lastModifiedMs: record.lastModifiedMs,
         cwd: record.cwd,
         timestamp: record.createdAtMs,
+        // 登记表按创建时的活动 profile 归属（跨环境聚合的标签来源）。
+        profile: record.profile ?? null,
       },
     })
   }

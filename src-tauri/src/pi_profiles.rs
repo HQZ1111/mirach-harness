@@ -146,6 +146,39 @@ pub fn profile_from_session_path(path: &std::path::Path) -> Option<String> {
     normalize_profile(Some(name)).ok().flatten()
 }
 
+/// 全部具名环境名（`<agent>/profiles/*` 的目录项；名字过 `normalize_profile`
+/// 校验，非法形状跳过不报错——它们本来就进不了 profile_home）。
+///
+/// 读面：跨环境聚合（侧栏「网关与配置」的候选清单）用。目录不存在 = 空
+/// 列表（还没建过环境是正常态）；根目录读不了 = Err（坏环境不能当成没有）。
+pub fn list_profile_names() -> Result<Vec<String>, String> {
+    let root = pi_paths::agent_dir()?.join("profiles");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("环境目录读取失败 {}: {e}", root.display())),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("环境目录项读取失败: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("环境目录项类型读取失败: {e}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        if let Some(name) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| normalize_profile(Some(n)).ok().flatten())
+        {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
 /// 删除具名环境的整个 home（hermes profile 删除的宿主对偶；2026-11-23）。
 ///
 /// 只删 `<agent_dir>/profiles/<name>`，`default` 永远拒绝。目录不存在
@@ -215,5 +248,15 @@ mod tests {
         assert!(delete_profile_home("default").is_err());
         assert!(delete_profile_home("../x").is_err());
         assert!(delete_profile_home("a/b").is_err());
+    }
+
+    #[test]
+    fn list_profile_names_returns_empty_when_root_missing() {
+        // 目录不存在（或没建过环境）→ 空列表，不是错误。
+        // 本机真目录里可能有环境——只断言不报错与形状（全为规范化名字）。
+        let names = list_profile_names().expect("list must not fail");
+        for name in &names {
+            assert!(!name.contains('/') && !name.contains('\\') && !name.contains(".."));
+        }
     }
 }

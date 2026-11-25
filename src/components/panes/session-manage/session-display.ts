@@ -16,7 +16,10 @@
  *   直投影；hermes grouping='project' 的项目树在此简化为 cwd 分组，组
  *   标签 = pathLeaf(cwd)，无 cwd 归 Home 桶「主页」zh 原文）；
  * - status：按状态桶分组（groupEntriesByStatus——五桶各一组头，带状态
- *   色点文案，hermes date/status 桶共用 listGroupIds 折叠面）。
+ *   色点文案，hermes date/status 桶共用 listGroupIds 折叠面）；
+ * - gateway：按环境（配置档案）分组（groupEntriesByProfile——hermes
+ *   grouping='profile'，2026-11-25 跨环境聚合后本地 bot 真的多环境了；
+ *   组头 = bot 头像 + 显示名，本体组 = 品牌 logo +「Mirach」）。
  *
  * 排序（hermes sidebar-sort.ts 的 rank 语义）：updated → 无排名（recency
  * 即到达序）；created → 创建时间降序；status → 状态 rank 升序
@@ -63,7 +66,8 @@ const isHidden = (collapsed: Readonly<Record<string, boolean>>, key: string): bo
 /** 侧栏选项（视图模式）：缺省 = date + updated（出厂形态）。 */
 export interface SessionViewMode {
   /** 'date' = 日历桶分隔线；'project' = 按工作区分组；'status' = 按状态
-   *  桶分组（hermes 分组子菜单的 pi 数据面三值；gateway 单配置档案不发）。 */
+   *  桶分组；'gateway' = 按环境（配置档案）分组（hermes 分组子菜单四值
+   *  同构）。 */
   readonly grouping?: SidebarGroupingMode
   /** 'updated' = 新近；'created' = 创建时间降序；'status' = 状态 rank 升序；
    *  'tokens' = 词元数降序（组内应用）；'manual' = 拖拽声明序（hermes
@@ -75,6 +79,9 @@ export interface SessionViewMode {
   /** 项目注册表（project 分组的标签与组序来源）。缺省 = 兼容旧行为：
    *  按 cwd 分组（项目表还没拉到时不得把「没加载」显示成「没有项目」）。 */
   readonly projects?: readonly ProjectGroupRef[]
+  /** 环境清单（gateway 分组的组名/头像/组序来源 = bot 花名册）。缺省 =
+   *  按记录里的 profile 名字直示（名字/无头像，稳定序）。 */
+  readonly profiles?: readonly ProfileGroupRef[]
 }
 
 // ── hermes lib/display-path.ts：路径显示格式化（组标签用 pathLeaf）────────
@@ -281,6 +288,98 @@ export function groupEntriesByProject(
 }
 
 /**
+ * 环境（配置档案）清单在展示层的投影（gateway 分组的组名/头像/组序）。
+ * 本体环境不进这张表——组头固定「Mirach」+ 品牌 logo（渲染层常量）。
+ */
+export interface ProfileGroupRef {
+  /** 环境名（`pi_sessions_index.profile` 的原值）。 */
+  readonly name: string
+  /** 组头显示名（bot 显示名）。 */
+  readonly label: string
+  /** 头像 URL（bot.image）；缺省 = 渲染层回落品牌 logo。 */
+  readonly image?: string
+}
+
+/** 本体环境组头文案（hermes defaultProfile「Hermes（默认）」的宿主对偶；
+ *  「Mirach」与左栏底栏/环境菜单的默认项同词）。 */
+export const DEFAULT_PROFILE_GROUP_LABEL = 'Mirach'
+
+/**
+ * 按环境（配置档案）分组（hermes grouping='profile'，2026-11-25）：
+ * 组 = `pi_sessions_index.profile` 桶（undefined = 本体，恒第一组）。
+ * 具名组序 = 传入的 profiles 花名册序（bot 行序）；名单外的孤儿环境按名字
+ * 排序殿后（名字直示，不改写——环境被删但会话文件仍在时如实显示）。
+ * 折叠键 = `gw:<name>`（本体 `gw:`）。组内保持排序键给定的相对序。
+ */
+export function groupEntriesByProfile(
+  entries: readonly { readonly id: string; readonly profile?: string }[],
+  profiles: readonly ProfileGroupRef[],
+): SessionListRow[] {
+  const order = new Map<string, number>()
+  const refs = new Map<string, ProfileGroupRef>()
+  profiles.forEach((ref, index) => {
+    order.set(ref.name, index)
+    refs.set(ref.name, ref)
+  })
+
+  interface Bucket {
+    readonly key: string
+    readonly name: string | undefined
+    readonly label: string
+    readonly image?: string
+    readonly rank: readonly [number, number | string]
+    readonly ids: string[]
+  }
+  const buckets: Bucket[] = []
+  const index = new Map<string, Bucket>()
+
+  for (const entry of entries) {
+    const name = entry.profile === undefined || entry.profile === '' ? undefined : entry.profile
+    const key = `gw:${name ?? ''}`
+    let bucket = index.get(key)
+    if (bucket === undefined) {
+      const ref = name === undefined ? undefined : refs.get(name)
+      const rank: readonly [number, number | string] =
+        name === undefined
+          ? [0, 0]
+          : order.has(name)
+            ? [1, order.get(name)!]
+            : [2, name]
+      bucket = {
+        key,
+        name,
+        label: name === undefined ? DEFAULT_PROFILE_GROUP_LABEL : ref?.label ?? name,
+        ...(ref?.image ? { image: ref.image } : {}),
+        rank,
+        ids: [],
+      }
+      index.set(key, bucket)
+      buckets.push(bucket)
+    }
+    bucket.ids.push(entry.id)
+  }
+
+  buckets.sort((a, b) => {
+    if (a.rank[0] !== b.rank[0]) return a.rank[0] - b.rank[0]
+    if (a.rank[0] === 2) return String(a.rank[1]).localeCompare(String(b.rank[1]))
+    return Number(a.rank[1]) - Number(b.rank[1])
+  })
+
+  const rows: SessionListRow[] = []
+  for (const bucket of buckets) {
+    rows.push({
+      key: bucket.key,
+      kind: 'divider',
+      label: bucket.label,
+      variant: 'gateway',
+      ...(bucket.image ? { image: bucket.image } : {}),
+    })
+    for (const id of bucket.ids) rows.push({ id, kind: 'session' })
+  }
+  return rows
+}
+
+/**
  * 按状态桶分组（hermes grouping='status' 的 pi 数据面：五桶各一组头—— * 需要 input/运行中/未读/草稿/空闲，状态排序 rank 的同序决定组序 =
  * needs-input 最前、idle 殿后；桶内保持排序键给定的相对序）。每组一条
  * 状态分隔线（variant:'status'，label = 中文名 + 色点名由渲染层定）。
@@ -391,10 +490,12 @@ export function buildSessionDisplay(
         ? opts.view?.projects !== undefined
           ? groupEntriesByProject(rankedEntries, opts.view.projects)
           : groupEntriesByWorkspace(rankedEntries)
-        : groupEntriesByRecency(
-            unpinned.map((m) => ({ id: m.id, ms: m.lastActiveMs })),
-            opts,
-          )
+        : grouping === 'gateway'
+          ? groupEntriesByProfile(rankedEntries, opts.view?.profiles ?? [])
+          : groupEntriesByRecency(
+              unpinned.map((m) => ({ id: m.id, ms: m.lastActiveMs })),
+              opts,
+            )
   // 排名序在日期桶内应用（hermes：日历组留在新近给的位置，排序只动桶内；
   // 状态/工作区分组无日期桶界——分组本身由排名序的 partition 保留）。
   const ordered =

@@ -75,6 +75,7 @@ const indexSession = (id: string, extra?: Partial<SessionsIndexSession>): Sessio
   createdAt: 100,
   parentSessionId: null,
   projectId: null,
+  profile: null,
   sourceRoot: 'C:\\work\\a\\.rpi\\sessions',
   source: 'projectRoot',
   ...extra,

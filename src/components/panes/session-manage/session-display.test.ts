@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildSessionDisplay,
+  groupEntriesByProfile,
   groupEntriesByWorkspace,
   pathLeaf,
   workspaceGroupLabel,
@@ -49,6 +50,59 @@ describe('groupEntriesByWorkspace', () => {
       { id: 'e', kind: 'session' },
       { key: 'w:C:\\w\\beta', kind: 'divider', label: 'beta', variant: 'project' },
       { id: 'd', kind: 'session' },
+    ])
+  })
+})
+
+describe('groupEntriesByProfile（网关与配置：按环境分组）', () => {
+  it('本体恒第一组（「Mirach」），具名组按花名册序、组头带头像；名单外环境殿后按名字', () => {
+    const rows = groupEntriesByProfile(
+      [
+        { id: 'b1', profile: 'bot-b' },
+        { id: 'a1' },
+        { id: 'x1', profile: 'zz-orphan' },
+        { id: 'a2' },
+        { id: 'b2', profile: 'bot-b' },
+      ],
+      [
+        { name: 'bot-b', label: '二万人', image: 'https://img/b.png' },
+        { name: 'bot-a', label: '微软' },
+      ],
+    )
+    expect(rows).toEqual([
+      { key: 'gw:', kind: 'divider', label: 'Mirach', variant: 'gateway' },
+      { id: 'a1', kind: 'session' },
+      { id: 'a2', kind: 'session' },
+      { key: 'gw:bot-b', kind: 'divider', label: '二万人', variant: 'gateway', image: 'https://img/b.png' },
+      { id: 'b1', kind: 'session' },
+      { id: 'b2', kind: 'session' },
+      { key: 'gw:zz-orphan', kind: 'divider', label: 'zz-orphan', variant: 'gateway' },
+      { id: 'x1', kind: 'session' },
+    ])
+  })
+
+  it('gateway 分组在 buildSessionDisplay 里可折叠（键 = gw:<name>）', () => {
+    const display = buildSessionDisplay(
+      [
+        { id: 'a1', lastActiveMs: 300 },
+        { id: 'b1', lastActiveMs: 200, profile: 'bot-b' },
+        { id: 'b2', lastActiveMs: 100, profile: 'bot-b' },
+      ],
+      [],
+      {},
+      { 'gw:bot-b': true },
+      {
+        view: {
+          grouping: 'gateway',
+          ordering: 'updated',
+          profiles: [{ name: 'bot-b', label: '二万人' }],
+        },
+      },
+    )
+    expect(display.rows).toEqual([
+      { key: 'gw:', kind: 'divider', label: 'Mirach', variant: 'gateway' },
+      { id: 'a1', kind: 'session' },
+      { key: 'gw:bot-b', kind: 'divider', label: '二万人', variant: 'gateway' },
     ])
   })
 })

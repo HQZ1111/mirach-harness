@@ -71,7 +71,7 @@ import {
   useSessionUnread,
   type SessionRowGroup,
 } from "@/components/panes/session-manage/session-catalog";
-import { botChatPaths, botsStore, DEFAULT_BOT_NAME, useBotsStore } from "@/components/panes/hub/bots-store";
+import { botChatPaths, botDisplayName, botsStore, DEFAULT_BOT_AVATAR, DEFAULT_BOT_NAME, useBotsStore } from "@/components/panes/hub/bots-store";
 import { switchProfileBridge, useActiveProfile } from "@/components/panes/session-manage/active-profile-bridge";
 import { useHiddenSessions } from "@/components/panes/hub/hidden-sessions";
 import { useBotsFeatureDesired } from "@/plugins/bots-gate";
@@ -355,6 +355,8 @@ const projectRowMeta = (id: string, item: unknown): SessionRowMeta => {
       typeof countRaw === "number" && Number.isFinite(countRaw) ? countRaw : undefined,
     // 项目归属（pi_sessions_index.projectId；null = 明确无归属）。
     projectId: typeof custom?.projectId === "string" ? custom.projectId : undefined,
+    // 所属环境（pi_sessions_index.profile；缺省 = 本体）——网关与配置分组键。
+    profile: typeof custom?.profile === "string" ? custom.profile : undefined,
     // fork 谱系（pi_sessions_index.parentSessionId）：侧栏分支缩进。
     parentSessionId:
       typeof custom?.parentSessionId === "string" ? custom.parentSessionId : undefined,
@@ -396,6 +398,17 @@ const useThreadDisplay = (searchQuery: string) => {
   // （bots-store botChatPaths 的信任规则——旧名字匹配记录重新锚定后才
   // 参与，防误藏同名用户会话）。
   const bots = useBotsStore((s) => s.bots);
+  // 环境花名册（gateway 分组的组名/头像/组序来源 = bot 行——「网关与配置」
+  // 组头与机器人页同一身份；本体组由 session-display 固定「Mirach」）。
+  const profileGroups = useMemo(
+    () =>
+      bots.map((b) => ({
+        name: b.name,
+        label: botDisplayName(b),
+        image: b.image ?? undefined,
+      })),
+    [bots],
+  );
   const botsEnabled = useBotsFeatureDesired();
   // 插件关闭 = 不再做 Bot Chat 隐藏（否则"关插件"后这些会话仍消失，
   // 用户无法处置；花名册入口已经随插件消失）。
@@ -406,10 +419,10 @@ const useThreadDisplay = (searchQuery: string) => {
   // 通用隐藏面（hermes setPersistedSessionHidden 的宿主对偶）：插件点名隐藏
   // 的会话（群聊成员 plumbing 会话 / Bot Chat 标题清扫）进 hidden-sessions
   // 路径集，与双锚集合并过滤。
-  // **环境（profile）隔离在引擎侧完成**（pi_profiles：具名环境的
-  // `pi_list_sessions` 只扫自己的 `<home>/sessions`；2026-11-22 用户定稿
-  // "每个环境只启用自己的配置和会话"）——前端不做第二套 profile 过滤：
-  // 切环境 = 列表整体换源（active-profile），本体 = 默认全局根。
+  // **跨环境聚合（2026-11-25）**：`pi_sessions_index` 扫全部环境 home 的
+  // 会话根、每行带 `profile` 标签——侧栏一个列表看全部环境的会话（hermes
+  // 「网关与配置」语义），分组/筛选消费该标签；切环境只改新建会话落点与
+  // 资源解析，不再让列表整体换源。
   const hiddenPaths = useHiddenSessions((s) => s.paths);
   const hiddenPathSet = useMemo(
     () => (botsEnabled ? new Set(hiddenPaths) : new Set<string>()),
@@ -510,10 +523,10 @@ const useThreadDisplay = (searchQuery: string) => {
       threadIds,
       metas: filteredMetas,
       display: buildSessionDisplay(filteredMetas, pinned, order, collapsed, {
-        view: { grouping, ordering, aux, projects },
+        view: { grouping, ordering, aux, projects, profiles: profileGroups },
       }),
     };
-  }, [query, threadIds, threadItems, filteredMetas, pinned, order, collapsed, grouping, ordering, aux, projects]);
+  }, [query, threadIds, threadItems, filteredMetas, pinned, order, collapsed, grouping, ordering, aux, projects, profileGroups]);
 };
 
 // ── 侧栏选项钮（hermes SidebarFilterMenu 对齐：段头 + 右侧的常驻视图
@@ -632,9 +645,10 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
       >
         {/* 1. 分组 ▸（触发行显示当前值 + chevron-right；子菜单四项 =
             用户截图：更新时间✓/项目/状态/网关与配置——无「平铺」）。
-            网关与配置（hermes grouping='profile' 的菜单标签）：本地 bot 已是
-            配置档案语义（「配置档案 ▸」筛选即用 bots），但「按档案分组」维度
-            未实现 → disabled radio 不发。 */}
+            网关与配置（hermes grouping='profile' 的菜单标签）：2026-11-25
+            跨环境聚合后是真数据面（pi_sessions_index 扫全部环境 home 的
+            会话根、行带 profile 标签）——按环境分组，组头 = bot 头像 +
+            显示名（本体 = 「Mirach」+ 品牌 logo）。 */}
         <ContextMenuSub>
           <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
             <span>分组</span>
@@ -642,7 +656,13 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               {/* grouping='project' 自 2026-11-15 起按**项目注册表**（projectId）
                   分组，标签从「工作区」改为「项目」——cwd 桶只用于无归属的
                   旧数据（Filters 里的「工作区」是 cwd 过滤，另一回事）。 */}
-              {grouping === "date" ? "更新时间" : grouping === "project" ? "项目" : "状态"}
+              {grouping === "date"
+                ? "更新时间"
+                : grouping === "project"
+                  ? "项目"
+                  : grouping === "gateway"
+                    ? "网关与配置"
+                    : "状态"}
               <ChevronRightIcon className="size-[var(--size-icon-sm)]" />
             </span>
           </ContextMenuSubTrigger>
@@ -662,13 +682,7 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
               <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="status">
                 <ViewOptionRow icon={ActivityIcon} label="状态" />
               </ContextMenuRadioItem>
-              <ContextMenuRadioItem
-                className={VIEW_DISABLED_HINT_ITEM}
-                disabled
-                textValue="网关与配置"
-                title="配置档案分组未实现——bot 会话只在按档案筛选时出现"
-                value="gateway"
-              >
+              <ContextMenuRadioItem className={VIEW_MENU_ITEM_BASE} value="gateway">
                 <ViewOptionRow icon={UserIcon} label="网关与配置" />
               </ContextMenuRadioItem>
             </ContextMenuRadioGroup>
@@ -1166,6 +1180,43 @@ const StatusDividerRow: FC<{ bucketKey: string; label: string; rowCount?: number
   );
 };
 
+/**
+ * 环境分隔线（分组=网关与配置；hermes grouping='profile' 的组头——bot 头像
+ * + 显示名（本体组 = 品牌 logo +「Mirach」）+ 折叠 caret；2026-11-25 跨
+ * 环境聚合）。折叠语义与其它组头相同：组头保留、其下行隐藏，键 = `gw:<name>`
+ * （本体 `gw:`）。
+ */
+const GatewayDividerRow: FC<{ bucketKey: string; label: string; image?: string; rowCount?: number }> = ({ bucketKey, label, image, rowCount = 1 }) => {
+  const collapsed = useSessionManage((s) => s.groupsCollapsed[bucketKey] === true);
+  return (
+    <div
+      className="group/workspace flex w-full min-w-0 items-center gap-2 px-2 pb-[var(--rail-section-gap-bottom)] pt-[var(--tl-ws-pt,1.5rem)] select-none"
+      data-slot="aui_thread-list-profile-divider"
+    >
+      <button
+        aria-expanded={!collapsed}
+        className="group/section-label flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent text-left pressable-row"
+        onClick={() => requestGroupToggle(bucketKey, !collapsed, rowCount)}
+        title={collapsed ? "展开" : "收起"}
+        type="button"
+      >
+        <img
+          alt=""
+          aria-hidden
+          className="size-4 shrink-0 rounded-full object-cover"
+          src={image && image.trim() ? image : DEFAULT_BOT_AVATAR}
+        />
+        <span className="text-(--side-text) min-w-0 truncate text-(length:--side-workspace-size) font-bold">{label}</span>
+        <ChevronDownIcon
+          aria-hidden
+          className="disclosure-chevron text-(--text-3) size-3 shrink-0 opacity-0 group-hover/workspace:opacity-100 group-focus-visible/workspace:opacity-100"
+        />
+        <span aria-hidden className="bg-(--stroke-soft) h-px min-w-4 flex-1" />
+      </button>
+    </div>
+  );
+};
+
 /** 已置顶空态（hermes SidebarPinnedEmptyState 照抄——置顶手势的常驻教学位）。 */
 const PinnedEmptyState: FC = () => (
   <div className="text-(--text-3) flex min-h-7 items-center gap-1.5 rounded-lg pl-2 text-xs">
@@ -1500,6 +1551,8 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
                   <WorkspaceDividerRow bucketKey={row.key} label={row.label} />
                 ) : row.variant === "status" ? (
                   <StatusDividerRow bucketKey={row.key} label={row.label} />
+                ) : row.variant === "gateway" ? (
+                  <GatewayDividerRow bucketKey={row.key} label={row.label} image={row.image} />
                 ) : (
                   <DateDividerRow bucketKey={row.key} label={row.label} />
                 )
@@ -1560,6 +1613,14 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
                       key={`div-${row.key}`}
                       bucketKey={row.key}
                       label={row.label}
+                      rowCount={bucketRows}
+                    />
+                  ) : row.variant === "gateway" ? (
+                    <GatewayDividerRow
+                      key={`div-${row.key}`}
+                      bucketKey={row.key}
+                      label={row.label}
+                      image={row.image}
                       rowCount={bucketRows}
                     />
                   ) : (

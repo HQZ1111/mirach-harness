@@ -2242,6 +2242,11 @@ fn prompt_inner(
     /// 与每个已登记项目根的默认会话根，并为每条记录带出
     /// `parentSessionId` / `sourceRoot` / `skipped` 诊断。
     ///
+    /// **跨环境聚合（2026-11-25，hermes 侧栏「网关与配置」语义）**：本体
+    /// 环境的既有根之外，再扫**每个具名环境**的 `<home>/sessions`，记录带
+    /// `profile` 标签——侧栏一个列表看全部环境的会话，按配置分组/筛选用这个
+    /// 标签（切环境只影响新建会话落点与资源解析，不再让列表整体换源）。
+    ///
     /// - 坏文件（缺 header / 半写 / 快照读失败）进 `skipped`，其余照常。
     /// - 同一个文件被多个根发现时按规范化路径去重（先到先得）。
     /// - `name` / `messageCount` 与 `list_sessions` 同源：只读快照
@@ -2258,17 +2263,7 @@ fn prompt_inner(
         let cwd = self.shared.cwd.clone();
         let mut roots: Vec<si::ScanRoot> = Vec::new();
 
-        // 环境隔离（2026-11-22）：具名 profile 只扫该环境自己的会话目录
-        // （项目根/工作区默认根都属于本体环境——切到具名环境时零扫描，
-        // hermes "只启用自己的会话" 的开销对偶）。
-        if let Some(name) = self.active_profile()? {
-            let dir = crate::pi_profiles::profile_sessions_dir(Some(&name))?
-                .ok_or_else(|| format!("环境 {name} 会话目录解析失败"))?;
-            si::push_root(&mut roots, dir, si::RootKind::SessionDir);
-
-            return self.index_sessions_from_roots(roots);
-        }
-
+        // 本体环境（既有行为不变）：settings.sessionDir → 项目根 → 当前 cwd。
         let settings = rpi_cli::settings::load_settings()
             .map_err(|e| format!("读 rpi 设置失败，无法确定 sessionDir: {e}"))?;
 
@@ -2277,6 +2272,7 @@ fn prompt_inner(
                 &mut roots,
                 si::resolve_session_path(dir, &cwd),
                 si::RootKind::SessionDir,
+                None,
             );
         }
         for root in project_roots {
@@ -2288,6 +2284,7 @@ fn prompt_inner(
                 &mut roots,
                 si::resolve_session_path(&default_dir, &resolved),
                 si::RootKind::ProjectRoot,
+                None,
             );
         }
         let workspace_default = rpi_cli::session::default_session_dir(&cwd);
@@ -2295,7 +2292,16 @@ fn prompt_inner(
             &mut roots,
             si::resolve_session_path(&workspace_default, &cwd),
             si::RootKind::Workspace,
+            None,
         );
+
+        // 每个具名环境的 home 会话根（跨环境聚合）。环境目录读不了 = Err，
+        // 不把"坏环境"静默当成"没有环境"。
+        for name in crate::pi_profiles::list_profile_names()? {
+            if let Some(dir) = crate::pi_profiles::profile_sessions_dir(Some(&name))? {
+                si::push_root(&mut roots, dir, si::RootKind::Profile, Some(name));
+            }
+        }
 
         self.index_sessions_from_roots(roots)
     }
@@ -2315,6 +2321,8 @@ fn prompt_inner(
             path: PathBuf,
             source_root: String,
             source: si::RootKind,
+            /// 根所属环境（记录沿根继承——侧栏按配置分组/筛选的标签）。
+            profile: Option<String>,
             header: si::SessionHeader,
             modified: u64,
             size: u64,
@@ -2380,6 +2388,7 @@ fn prompt_inner(
                     path,
                     source_root: root.path.clone(),
                     source: root.kind,
+                    profile: root.profile.clone(),
                     header,
                     modified,
                     size: metadata.len(),
@@ -2481,6 +2490,7 @@ fn prompt_inner(
                     created_at: candidate.header.created_at,
                     parent_session_id: candidate.header.parent_session_id,
                     project_id: None,
+                    profile: candidate.profile,
                     source_root: candidate.source_root,
                     source: candidate.source,
                 }),

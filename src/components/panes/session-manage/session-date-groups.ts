@@ -43,9 +43,12 @@ export type SessionListRow =
       /** 'date'（默认）= 日历桶分隔线；'project' = 工作区分组头（按
        *  SessionMeta.cwd，session-display 的 groupEntriesByWorkspace 产出）；
        *  'status' = 状态桶组头（session-display 的 groupEntriesByStatus 产出，
-       *  label = 状态中文名）——形制由渲染层区分，折叠语义相同：分隔线
-       *  保留、其下行隐藏。 */
-      readonly variant?: 'date' | 'project' | 'status'
+       *  label = 状态中文名）；'gateway' = 环境（配置档案）组头
+       *  （groupEntriesByProfile 产出）——形制由渲染层区分，折叠语义相同：
+       *  分隔线保留、其下行隐藏。 */
+      readonly variant?: 'date' | 'project' | 'status' | 'gateway'
+      /** 组头像（gateway 组的 bot 图；缺省 = 渲染层回落品牌 logo）。 */
+      readonly image?: string
     }
 
 // ── lib/time.ts：日历桶（逐语义） ─────────────────────────────────────────

@@ -64,6 +64,9 @@ describe('sidebar-view 严格解析', () => {
   it('合法形状原样解析', () => {
     expect(parseGrouping('status')).toBe('status')
     expect(parseGrouping('project')).toBe('project')
+    // gateway = 网关与配置：2026-11-25 跨环境聚合后本地 bot 多环境，
+    // 按配置档案分组成为真数据面（不再是非法值）。
+    expect(parseGrouping('gateway')).toBe('gateway')
     expect(parseOrdering('tokens')).toBe('tokens')
     expect(parseOrdering('status')).toBe('status')
     expect(parseOrdering('created')).toBe('created')
@@ -74,9 +77,6 @@ describe('sidebar-view 严格解析', () => {
 
   it('非法形状 → console.error + 默认（不冒充旧数据）', () => {
     const spy = silenceErrors()
-    // gateway = 网关与配置：pi 单配置档案无语义（菜单 disabled）→ 持久化
-    // 中出现按非法回默认。
-    expect(parseGrouping('gateway')).toBe('date')
     // 'none'（平铺）自任务定稿起删除（用户截图无此项）。
     expect(parseGrouping('none')).toBe('date')
     // 'title'（标题字母序）/'manual'（手动）自任务定稿起从菜单删除。

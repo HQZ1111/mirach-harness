@@ -6,6 +6,30 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（六）：配置绑定收尾 + 侧栏「网关与配置」跨环境聚合**
+
+- **（五·二）providers/models/auth + 技能装删 + 扩展列表按环境**（commit
+  f0cdaf2）：`pi_settings`/`pi_keys`/`pi_login`(discover)/`pi_image` 全走
+  `pi_profiles::active_home`；语音配置留本体 home；`pi_skills_catalog`
+  的搜索/安装/删除按**目标环境**（`skills.manage` 随请求带 `profile`，
+  host-rpc + shim 透传；bot 编辑框给哪个 bot 装就落哪个 home）；
+  `pi_extensions` 列表按活动环境 home。
+- **（六）侧栏「网关与配置」打通**（用户："网关与配置没有打通吗？"→
+  完全按 hermes）：`pi_session::index_sessions` **跨环境聚合**——本体既有
+  根之外再扫每个具名环境的 `<home>/sessions`（`list_profile_names()`；
+  切环境不再让列表换源）；`ScanRoot`/`SessionRecord` 带 `profile` 标签
+  （`RootKind::Profile`）；前端标签链（`SessionsIndexSession.profile` →
+  catalog/session-order/profile 元数据 → 基线行按活动环境打标、登记表
+  补行带 `record.profile`）；`grouping='gateway'` 从 disabled 转正
+  （`groupEntriesByProfile`：本体「Mirach」+ 品牌 logo 恒第一组，具名组
+  按 bot 花名册序带圆形头像，孤儿环境殿后；折叠键 `gw:<name>`）。
+  **实机**：index 分桶 本体 73 / 微软 13 / remote-bot 10 / 风格和 7；
+  网关与配置分组 4 组头（Mirach + 3 bot）滚到底分组计数 3/7/10 行。
+  有意不做：`showAllProfiles` 复选框（恒聚合）、配置档案栏视觉条。
+- **门禁**：`cargo test` 740 passed / 1 ignored；`npm test` 96 文件 /
+  1126 用例；touched 文件 tsc 无新增错误。**待做**：`pi_pkg_*`（rpi
+  install 落本体 home）、MCP 全局配置/cron 仍进程级（AGENTS「五·二/六」节）。
+
 **✅ 2026-11-25（五）：配置绑定（引擎同步 AgentHome + 会话/技能按环境走）**
 
 - **引擎已同步到上游 main@301c98c**（`G:\pi-rust-main`，宿主 path 依赖）：
@@ -19,9 +43,8 @@
   `pi_capabilities`/技能开关/读写删全部按**活动环境** home；环境 home 的
   auth/models/settings/trust 四件套 copy-if-missing 克隆（hermes
   `profile create --clone-all` 对偶）。
-- **门禁**：`cargo test` 739 passed / 1 ignored。**待做**：providers/models/auth
-  页与 IPC 的 per-home、技能选择器安装落点、侧栏「网关与配置」聚合（AGENTS
-  「2026-11-25（五）」节列了清单）。
+- **门禁**：`cargo test` 739 passed / 1 ignored。（同轮后续已在（五·二）/
+  （六）完成 providers/models/auth IPC、技能安装落点与侧栏聚合——见上。）
 
 **✅ 2026-11-25（四）：技能页只列本机已装 + 左栏底部跟随正在看的 bot**
 

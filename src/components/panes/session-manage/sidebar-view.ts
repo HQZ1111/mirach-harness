@@ -9,9 +9,9 @@
  * - grouping：hermes SIDEBAR_GROUPING_ORDER = ['date','project','status',
  *   'profile']（layout.ts:255），菜单第 1 项「分组 ▸」子菜单 = 更新时间/
  *   项目/状态/网关与配置（'profile' 的菜单标签 = 网关与配置，zh
- *   gatewayGroups.grouping）。harness 类型同构四值；**网关与配置在 pi 数据
- *   面无语义（单配置档案、SessionMeta 无 provider）→ 菜单项 disabled 不发
- *   （任务定稿"不做+disabled"）**；持久化里出现 → 非法回默认。
+ *   gatewayGroups.grouping）。harness 类型同构四值；**网关与配置自
+ *   2026-11-25 跨环境聚合后是真数据面**（pi_sessions_index 扫全部环境
+ *   home、行带 profile 标签；此前单配置档案时代 disabled 不发）。
  * - ordering：hermes updated/created/status/tokens/cost/manual
  *   （layout.ts:260 + sidebar-sort.ts rankBy）。**菜单四值 = updated/
  *   created/status/tokens（无标题字母序、无手动、无成本——用户截图）**；
@@ -73,8 +73,8 @@ export const SIDEBAR_PROJECT_FILTER_KEY = 'mirach.harness.sidebar.projectFilter.
 
 /** 分组模式（会话区；hermes SIDEBAR_GROUPING_ORDER 四值同构）：
  *  date = 日历桶分隔线（默认）；project = 按工作区（cwd）分组；
- *  status = 按状态桶分组；gateway = 网关与配置（pi 单配置档案——菜单
- *  disabled，持久化中出现按非法回默认）。 */
+ *  status = 按状态桶分组；gateway = 网关与配置（按环境/配置档案分组——
+ *  2026-11-25 跨环境聚合后本地 bot 真的多环境了）。 */
 export type SidebarGroupingMode = 'date' | 'gateway' | 'project' | 'status'
 /** 排序键（菜单四值 = 持久键；manual 不是持久键——拖拽声明态走 manual 旗标）。 */
 export type SidebarSortKey = 'created' | 'status' | 'tokens' | 'updated'
@@ -122,9 +122,9 @@ const safeSetItem = (key: string, value: string): void => {
 
 export const parseGrouping = (raw: string | null): SidebarGroupingMode => {
   if (raw === null) return SIDEBAR_DEFAULT_GROUPING
-  if (raw === 'date' || raw === 'project' || raw === 'status') return raw
+  if (raw === 'date' || raw === 'project' || raw === 'status' || raw === 'gateway') return raw
   console.error(
-    `[sidebar-view] ${SIDEBAR_GROUPING_KEY} 形状非法（应为 date|project|status；gateway 在 pi 数据面无语义）——回默认`,
+    `[sidebar-view] ${SIDEBAR_GROUPING_KEY} 形状非法（应为 date|project|status|gateway）——回默认`,
     raw,
   )
   return SIDEBAR_DEFAULT_GROUPING

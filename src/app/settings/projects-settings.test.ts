@@ -31,6 +31,7 @@ const session = (over: Partial<SessionsIndexSession>): SessionsIndexSession => (
   createdAt: NOW - 30 * DAY,
   parentSessionId: null,
   projectId: 'p1',
+  profile: null,
   sourceRoot: 'sessionDir',
   source: 'sessionDir',
   ...over,

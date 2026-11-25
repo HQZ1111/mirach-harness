@@ -35,6 +35,9 @@ export interface SessionRowMeta {
   /** 项目归属（`pi_sessions_index.projectId`：显式映射优先、否则 cwd 落在
    *  项目根内推断；缺省 = 无归属）。project 分组按它分组。 */
   readonly projectId?: string
+  /** 会话所属环境（`pi_sessions_index.profile`；缺省 = 本体）。
+   *  「网关与配置」分组/筛选的标签（2026-11-25 跨环境聚合）。 */
+  readonly profile?: string
   /** 父会话 id（fork 谱系；索引的 parentSessionId）。侧栏把分支会话挂在
    *  父行下方缩进渲染。 */
   readonly parentSessionId?: string

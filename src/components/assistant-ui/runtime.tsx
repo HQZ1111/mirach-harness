@@ -473,6 +473,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
               lastModifiedMs: m.lastModifiedMs,
               cwd: m.cwd,
               timestamp: m.timestamp,
+              // 基线 = 引擎活动环境自己的会话（跨环境聚合的标签；具名环境 =
+              // 环境名，本体 = null——与 pi_sessions_index.profile 同形）。
+              profile: profileStore.getState().profile,
             },
           }))
         : []

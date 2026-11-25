@@ -13,6 +13,7 @@ const session = (over: Partial<SessionsIndexSession>): SessionsIndexSession => (
   createdAt: 500,
   parentSessionId: null,
   projectId: 'p1',
+  profile: null,
   sourceRoot: 'sessionDir',
   source: 'sessionDir',
   ...over,
