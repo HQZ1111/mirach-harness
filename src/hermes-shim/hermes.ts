@@ -362,13 +362,7 @@ export async function deleteLearningNode(
   return { message: 'deleted', ok: true }
 }
 
-/** The Skills tab's "available to install" rows.
- *
- * 宿主（2026-11-25 用户："技能与工具不是做成本地目录吗?"）：行 = **本地技能
- * 目录**——hermes `optional-skills/` 的随包复制（22 分类 / 139 技能，
- * `src-tauri/skills-catalog`，见 `pi_skills_catalog.rs`）。`installed` 由磁盘
- * 现状回答（`~/.rpi/agent/skills/<name>` 是否在场），与 `pi_capabilities` 的
- * 已安装清单同源。 */
+/** `pi_skills_search` 的一行（见 `pi_skills_catalog.rs`）。 */
 interface LocalCatalogEntry {
   name: string
   description?: string
@@ -376,6 +370,13 @@ interface LocalCatalogEntry {
   installed?: boolean
 }
 
+/** The Skills tab's "available to install" rows.
+ *
+ * 宿主（2026-11-25 用户："技能与工具不是做成本地目录吗?"）：行 = **本地技能
+ * 目录**——hermes `optional-skills/` 的随包复制（22 分类 / 139 技能，
+ * `src-tauri/skills-catalog`，见 `pi_skills_catalog.rs`）。`installed` 由磁盘
+ * 现状回答（`~/.rpi/agent/skills/<name>` 是否在场），与 `pi_capabilities` 的
+ * 已安装清单同源。 */
 export async function getOfficialSkills(_profile?: ProfileScope): Promise<{ skills: OfficialSkillInfo[] }> {
   const res = await invokeOnce<{ entries?: LocalCatalogEntry[] }>('pi_skills_search', { query: '' })
   return {
