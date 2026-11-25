@@ -959,7 +959,11 @@ html:not([data-maximized='true']) .aui-width-handle {
 }
 
 .rail-user-avatar {
-  background: var(--fl-accent);
+  /* 2026-11-25 用户："切换bot后，头像叠加了" —— 旧 "M" 占位用 --fl-accent
+     圆底；换成 bot 头像图后，脸图 PNG 自带透明边（回填的脸是圆外透明），
+     圆底会从透明边透出来，蓝盘 + 橙脸叠成两层。按钮不再画底，头像图自己
+     就是圆。 */
+  background: transparent;
   height: var(--rail-user-avatar);
   overflow: hidden;
   width: var(--rail-user-avatar);
