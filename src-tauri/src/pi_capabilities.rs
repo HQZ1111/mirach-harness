@@ -46,7 +46,6 @@ use std::sync::Arc;
 use rpi_harness::skills::{self, LoadSkillsResult};
 use rpi_tools::os_env::OsExecutionEnv;
 
-use crate::pi_paths;
 use crate::pi_session::{list_runtime, on_big_stack};
 
 /// 技能装载所需的 ExecutionEnv（rpi-harness skills.rs 的 env 参数）。
@@ -56,41 +55,47 @@ fn skills_env() -> Arc<dyn rpi_tools::ExecutionEnv> {
     )))
 }
 
-/// 技能目录集（workspace skills + global skills）。
-fn skill_dirs() -> Result<Vec<String>, String> {
-    let mut dirs = Vec::new();
-    // 项目级 .rpi/skills
-    if let Ok(cwd) = std::env::current_dir() {
-        dirs.push(cwd.join(".rpi").join("skills").to_string_lossy().to_string());
-    }
-    // 全局 ~/.rpi/agent/skills
-    dirs.push(
-        pi_paths::agent_dir()?
-            .join("skills")
-            .to_string_lossy()
-            .to_string(),
-    );
-    Ok(dirs)
+/// 配置绑定（2026-11-25 用户："会话本身没有成功绑定配置……我切换 bot 等同于
+/// 整个软件是新的了，会话，技能，插件等等"）：能力面（技能清单/开关/读写）
+/// 跟着**当前活动环境**的 home 走——hermes 每个 profile 一个完整 home 的宿主
+/// 对偶。写入（装/删技能、开关）也落该 home：切 bot = 换一套技能/插件面。
+pub(crate) fn active_home_for(
+    state: &tauri::State<'_, Arc<crate::agui::AguiState>>,
+) -> Result<rpi_cli::config::AgentHome, String> {
+    crate::pi_profiles::home_for_profile(state.engine.active_profile()?.as_deref())
+}
+
+/// 技能目录集（会话 home 的解析：项目 `.rpi/skills` + 该 home 的全局技能根，
+/// 与引擎 session build 读的是**同一份规则** `AgentHome::skill_dirs`，防漂移）。
+fn skill_dirs_for(home: &rpi_cli::config::AgentHome) -> Vec<String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    home.skill_dirs(&cwd)
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect()
 }
 
 /// 技能装载（rpi-harness load_skills——语义与旧 pi::resources 同名同职责）。
 /// rpi 的 loader 是 async（tokio::fs 底座）——经共享列举运行时 block_on。
-fn load_all_skills() -> Result<LoadSkillsResult, String> {
+fn load_all_skills_for(home: &rpi_cli::config::AgentHome) -> Result<LoadSkillsResult, String> {
     let env = skills_env();
-    let dirs = skill_dirs()?;
+    let dirs = skill_dirs_for(home);
     Ok(list_runtime()
         .block_on(async { skills::load_skills(&env, &dirs).await }))
 }
 
 /// 宿主侧的技能禁用集 / 工具集启用集的落点。
-
-/// 宿主侧的技能禁用集 / 工具集启用集的落点。
 ///
 /// **不放 settings.json**：那是 rpi 的 schema（强类型结构，塞私有键会被
 /// 忽略，但会污染用户的配置文件、也会在 rpi 版本升级时被它的写回覆盖）。
-/// 放 `~/.rpi/agent/` 同目录的独立文件，与 `harness-*` 前缀对齐。
-fn harness_prefs_path() -> Result<PathBuf, String> {
-    Ok(pi_paths::agent_dir()?.join("harness-capabilities.json"))
+/// 放会话 home 根目录（本体 = `~/.rpi/agent/harness-capabilities.json`，
+/// 具名环境 = `<home>/harness-capabilities.json`）——配置绑定：每个 bot 环境
+/// 有自己的技能/工具开关。
+fn harness_prefs_path_for(home: &rpi_cli::config::AgentHome) -> Result<PathBuf, String> {
+    Ok(home
+        .root()
+        .map_err(|e| format!("能力偏好路径解析失败: {e}"))?
+        .join("harness-capabilities.json"))
 }
 
 /// 技能禁用集 + 工具集开关（`harness-capabilities.json` 的形状）。
@@ -153,8 +158,8 @@ impl CapabilityPrefs {
     }
 }
 
-fn read_prefs() -> Result<CapabilityPrefs, String> {
-    let path = harness_prefs_path()?;
+fn read_prefs_for(home: &rpi_cli::config::AgentHome) -> Result<CapabilityPrefs, String> {
+    let path = harness_prefs_path_for(home)?;
     match std::fs::read_to_string(&path) {
         Ok(raw) if raw.trim().is_empty() => Ok(CapabilityPrefs::default()),
         Ok(raw) => serde_json::from_str(&raw)
@@ -164,8 +169,11 @@ fn read_prefs() -> Result<CapabilityPrefs, String> {
     }
 }
 
-fn write_prefs(prefs: &CapabilityPrefs) -> Result<(), String> {
-    let path = harness_prefs_path()?;
+fn write_prefs_for(
+    prefs: &CapabilityPrefs,
+    home: &rpi_cli::config::AgentHome,
+) -> Result<(), String> {
+    let path = harness_prefs_path_for(home)?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("能力偏好目录创建失败 {}: {e}", parent.display()))?;
@@ -377,10 +385,11 @@ pub fn default_enabled_toolsets() -> BTreeSet<String> {
 /// 委托给 `CapabilityPrefs::session_enabled_tools`（双向语义：禁用集 +
 /// 显式启用集）。`None` = 用户没动过任何开关——**不传比传一份算出来的
 /// 列表更安全**：引擎升级加了新默认工具时，不传能自动拿到。
-/// rpi 迁移后暂无调用方（工具过滤未接线），接线点保留。
+/// rpi 迁移后暂无调用方（工具过滤未接线），接线点保留；本体 home 口径。
 #[allow(dead_code)]
 pub(crate) fn enabled_tools_for_session() -> Result<Option<Vec<String>>, String> {
-    let prefs = read_prefs()?;
+    let home = rpi_cli::config::AgentHome::process();
+    let prefs = read_prefs_for(&home)?;
     Ok(prefs.session_enabled_tools())
 }
 
@@ -434,11 +443,11 @@ fn validate_skill_description(description: &str) -> Vec<String> {
     errors
 }
 
-/// 技能目录（`<agent_dir>/skills`；项目级 `.rpi/skills` 由 loader 自己加）。
-fn global_skills_dir() -> PathBuf {
-    pi_paths::agent_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("skills")
+/// 技能目录（会话 home 的 `<home>/skills`；项目级 `.rpi/skills` 由 loader
+/// 自己加）。配置绑定：具名环境写自己的技能目录。
+fn global_skills_dir_for(home: &rpi_cli::config::AgentHome) -> Result<PathBuf, String> {
+    home.global_dir("skills")
+        .ok_or_else(|| "会话 home 的 skills 目录不可解析".to_string())
 }
 
 /// 一个技能行（rpi Skill 的宿主投影：name/description/enabled/path）。
@@ -466,10 +475,13 @@ fn skill_rows(loaded: &LoadSkillsResult, disabled: &[String]) -> Vec<serde_json:
 /// 技能 + 工具集的完整快照（页面首屏一次拉全，与 hermes 的
 /// `Promise.all([getSkills, getToolsets])` 同形）。
 #[tauri::command(async)]
-pub fn pi_capabilities() -> Result<serde_json::Value, String> {
+pub fn pi_capabilities(
+    state: tauri::State<'_, Arc<crate::agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    let home = active_home_for(&state)?;
     on_big_stack(move || {
-        let prefs = read_prefs()?;
-        let loaded = load_all_skills()?;
+        let prefs = read_prefs_for(&home)?;
+        let loaded = load_all_skills_for(&home)?;
         let skills = skill_rows(&loaded, &prefs.disabled_skills);
 
         let toolsets: Vec<serde_json::Value> = TOOLSETS
@@ -504,8 +516,8 @@ pub fn pi_capabilities() -> Result<serde_json::Value, String> {
             .collect();
 
         Ok(serde_json::json!({
-            "agentDir": pi_paths::agent_dir()?.display().to_string(),
-            "skillsDir": global_skills_dir().display().to_string(),
+            "agentDir": home.root().map(|p| p.display().to_string()).unwrap_or_default(),
+            "skillsDir": global_skills_dir_for(&home)?.display().to_string(),
             "skills": skills,
             "toolsets": toolsets,
             "diagnostics": diagnostics,
@@ -513,33 +525,44 @@ pub fn pi_capabilities() -> Result<serde_json::Value, String> {
     })?
 }
 
-/// 开关一个技能（写 `harness-capabilities.json` 的 disabledSkills）。
+/// 开关一个技能（写该环境 home 的 `harness-capabilities.json` 的
+/// disabledSkills）。
 ///
 /// **不影响已存在的会话**（它们的系统提示在创建时就定了）——新会话生效。
 /// 这是 pi 的语义（skills_prompt 是 SessionOptions 的入参），UI 要如实说明。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_set_skill_enabled(name: String, enabled: bool) -> Result<(), String> {
+pub fn pi_set_skill_enabled(
+    state: tauri::State<'_, Arc<crate::agui::AguiState>>,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let home = active_home_for(&state)?;
     on_big_stack(move || {
         if name.trim().is_empty() {
             return Err("技能名为空".to_string());
         }
-        let mut prefs = read_prefs()?;
+        let mut prefs = read_prefs_for(&home)?;
         prefs.disabled_skills.retain(|d| !d.eq_ignore_ascii_case(&name));
         if !enabled {
             prefs.disabled_skills.push(name);
         }
-        write_prefs(&prefs)
+        write_prefs_for(&prefs, &home)
     })?
 }
 
-/// 开关一个工具集。
+/// 开关一个工具集（写当前活动环境 home 的偏好文件）。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_set_toolset_enabled(key: String, enabled: bool) -> Result<(), String> {
+pub fn pi_set_toolset_enabled(
+    state: tauri::State<'_, Arc<crate::agui::AguiState>>,
+    key: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let home = active_home_for(&state)?;
     on_big_stack(move || {
         if !TOOLSETS.iter().any(|ts| ts.key == key) {
             return Err(format!("未知工具集：{key}"));
         }
-        let mut prefs = read_prefs()?;
+        let mut prefs = read_prefs_for(&home)?;
         // 双向语义（见 CapabilityPrefs 的类型注释）：
         // - 启用 → 从禁用集移除 + 进显式启用集（opt-in 组的唯一开启途径）；
         // - 停用 → 进禁用集 + 从显式启用集移除（对 opt-in 组同样生效）。
@@ -550,15 +573,19 @@ pub fn pi_set_toolset_enabled(key: String, enabled: bool) -> Result<(), String> 
         } else {
             prefs.disabled_toolsets.push(key);
         }
-        write_prefs(&prefs)
+        write_prefs_for(&prefs, &home)
     })?
 }
 
-/// 读一个技能文件（编辑器用）。`name` 必须是已装载技能的名字。
+/// 读一个技能文件（编辑器用）。`name` 必须是当前环境已装载技能的名字。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_read_skill(name: String) -> Result<serde_json::Value, String> {
+pub fn pi_read_skill(
+    state: tauri::State<'_, Arc<crate::agui::AguiState>>,
+    name: String,
+) -> Result<serde_json::Value, String> {
+    let home = active_home_for(&state)?;
     on_big_stack(move || {
-        let loaded = load_all_skills()?;
+        let loaded = load_all_skills_for(&home)?;
         let skill = loaded
             .skills
             .iter()
@@ -579,14 +606,17 @@ pub fn pi_read_skill(name: String) -> Result<serde_json::Value, String> {
 
 /// 写一个技能文件（新建或覆盖）。`name` 走 pi 的 `validate_name`。
 ///
-/// 落点 = `<global_dir>/skills/<name>/SKILL.md`（全局技能目录；项目级
-/// `.pi/skills` 由用户在项目里自己建——宿主不猜用户想写哪一层）。
+/// 落点 = **当前活动环境 home** 的 `<home>/skills/<name>/SKILL.md`（配置绑定：
+/// 切 bot 后写到那个 bot 自己的技能目录；项目级 `.rpi/skills` 由用户在项目里
+/// 自己建——宿主不猜用户想写哪一层）。
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_write_skill(
+    state: tauri::State<'_, Arc<crate::agui::AguiState>>,
     name: String,
     description: String,
     body: String,
 ) -> Result<serde_json::Value, String> {
+    let home = active_home_for(&state)?;
     on_big_stack(move || {
         let name_errors = validate_skill_name(&name);
         if !name_errors.is_empty() {
@@ -596,7 +626,7 @@ pub fn pi_write_skill(
         if !desc_errors.is_empty() {
             return Err(desc_errors.join("; "));
         }
-        let dir = global_skills_dir().join(&name);
+        let dir = global_skills_dir_for(&home)?.join(&name);
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("技能目录创建失败 {}: {e}", dir.display()))?;
         let path = dir.join("SKILL.md");
@@ -613,20 +643,25 @@ pub fn pi_write_skill(
     })?
 }
 
-/// 删除一个技能（整目录）。只允许删全局技能目录下的——项目级/packages
-/// 里的技能属于别人的工作区，宿主不碰。
+/// 删除一个技能（整目录）。只允许删**当前活动环境 home** 技能目录下的——
+/// 项目级/packages 里的技能属于别人的工作区，宿主不碰。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_delete_skill(name: String) -> Result<(), String> {
+pub fn pi_delete_skill(
+    state: tauri::State<'_, Arc<crate::agui::AguiState>>,
+    name: String,
+) -> Result<(), String> {
+    let home = active_home_for(&state)?;
     on_big_stack(move || {
         let name_errors = validate_skill_name(&name);
         if !name_errors.is_empty() {
             return Err(name_errors.join("; "));
         }
-        let dir = global_skills_dir().join(&name);
+        let global_dir = global_skills_dir_for(&home)?;
+        let dir = global_dir.join(&name);
         if !dir.exists() {
             return Err(format!(
                 "技能不在全局目录下，拒绝删除（只删 {} 里的）：{name}",
-                global_skills_dir().display()
+                global_dir.display()
             ));
         }
         std::fs::remove_dir_all(&dir)
@@ -648,10 +683,12 @@ pub fn pi_validate_skill(name: String, description: String) -> serde_json::Value
 /// 返回 `Ok(None)` = 没有可见技能（不注入空块）；读配置/装载失败一律 Err
 /// （用户以为技能生效了、实际没生效，比报错难查得多）。
 /// rpi 迁移后暂无调用方——注入点（rpi AgentHarnessResources 组装）待接回。
+/// **本体 home** 口径（进程级兜底；会话侧技能由引擎按 AgentHome 自己装）。
 #[allow(dead_code)]
 pub(crate) fn skills_prompt_for_session() -> Result<Option<String>, String> {
-    let prefs = read_prefs()?;
-    let loaded = load_all_skills()?;
+    let home = rpi_cli::config::AgentHome::process();
+    let prefs = read_prefs_for(&home)?;
+    let loaded = load_all_skills_for(&home)?;
     let visible: Vec<rpi_harness::types::Skill> = loaded
         .skills
         .into_iter()
@@ -676,7 +713,9 @@ pub(crate) fn load_skills_for_prompt(names: &[String]) -> Result<String, String>
     if names.is_empty() {
         return Ok(String::new());
     }
-    let loaded = load_all_skills()?;
+    // cron 仍是进程级（本体 home）执行——作业的技能名按本体技能目录装载。
+    let home = rpi_cli::config::AgentHome::process();
+    let loaded = load_all_skills_for(&home)?;
     let mut picked: Vec<rpi_harness::types::Skill> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     for name in names {

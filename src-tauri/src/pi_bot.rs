@@ -267,9 +267,12 @@ fn ensure_session(
     let cwd = pi_session::workspace_from_session_path(path_ref)
         .unwrap_or_else(pi_session::default_workspace);
     // 环境隔离：成员会话属于它自己的 profile home（hermes profile 的
-    // sessions 目录对偶；config.profile 为 None/ default = 本体）。
+    // sessions 目录对偶；config.profile 为 None/ default = 本体）。home 与
+    // 会话根同源——重开会话也读该环境的技能/扩展/settings（配置绑定）。
     let session_dir = crate::pi_profiles::ensure_profile_dirs(config.profile.as_deref())?;
+    let home = crate::pi_profiles::home_for_profile(config.profile.as_deref())?;
     let built = pi_session::build_harness_impl(
+        &home,
         &lane().rt,
         &cwd,
         Some(&path),
@@ -485,9 +488,12 @@ pub fn pi_bot_create_session(
         extension_filter,
     };
     // 先建（未命名）→ 设置人格/工具 → 命名（set_name 是 fact 条目）。
-    // 环境隔离：新成员会话落其 profile home 的 sessions 目录。
+    // 环境隔离：新成员会话落其 profile home 的 sessions 目录 + 该 home 的
+    // 技能/扩展/settings（AgentHome 配置绑定）。
     let session_dir = crate::pi_profiles::ensure_profile_dirs(config.profile.as_deref())?;
+    let home = crate::pi_profiles::home_for_profile(config.profile.as_deref())?;
     let built = pi_session::build_harness_impl(
+        &home,
         &lane().rt,
         &cwd,
         None,

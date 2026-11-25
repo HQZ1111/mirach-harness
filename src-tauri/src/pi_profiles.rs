@@ -67,7 +67,76 @@ pub fn ensure_profile_dirs(name: Option<&str>) -> Result<Option<PathBuf>, String
         return Ok(None);
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("环境目录创建失败 {}: {e}", dir.display()))?;
+    if let Some(n) = normalize_profile(name)? {
+        seed_profile_home_config(&n)?;
+    }
     Ok(Some(dir))
+}
+
+/// 具名环境 home 的配置四件套缺失时，从**本体 home 克隆**一份
+/// （hermes `hermes profile create --clone-all` 的宿主对偶；2026-11-25 配置
+/// 绑定）。没有它们，切到该环境后 provider/model 解析拿不到凭据——
+/// 现存 bot 是隔离前建的，home 里只有 sessions/。
+///
+/// **只补缺**：已存在的文件（哪怕空文件）不覆盖，用户在该环境里的修改不会被
+/// 回滚；本体也没有的文件跳过（首次写入时引擎/设置页自然生成）。
+pub fn seed_profile_home_config(name: &str) -> Result<(), String> {
+    let Some(normalized) = normalize_profile(Some(name))? else {
+        return Ok(());
+    };
+    let home = profile_home(Some(&normalized))?;
+    let default_home = profile_home(None)?;
+    if home == default_home {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&home)
+        .map_err(|e| format!("环境 home 创建失败 {}: {e}", home.display()))?;
+    for file in ["auth.json", "models.json", "settings.json", "trust.json"] {
+        let dst = home.join(file);
+        if dst.exists() {
+            continue;
+        }
+        let src = default_home.join(file);
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "环境配置克隆失败 {} → {}: {e}",
+                    src.display(),
+                    dst.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 环境名 → rpi `AgentHome`（**配置绑定** 2026-11-25：会话构建与资源解析
+/// ——技能/扩展/SYSTEM.md/settings/trust——都按这个 home 走；AgentHome 是
+/// 上游 PR #409 注入面，同一进程可为不同会话用不同 home）。
+///
+/// 本体 = `AgentHome::process()`（进程 agent 目录，行为与升级前一致）；
+/// 具名 = `<agent>/profiles/<name>`（hermes「每个 profile 一个完整 home」
+/// 的宿主对偶）。目录不创建（读面）。
+pub fn home_for_profile(name: Option<&str>) -> Result<rpi_cli::config::AgentHome, String> {
+    match normalize_profile(name)? {
+        None => Ok(rpi_cli::config::AgentHome::process()),
+        Some(n) => rpi_cli::config::AgentHome::from_option(Some(profile_home(Some(&n))?))
+            .map_err(|e| format!("环境 home 解析失败（{n}）：{e}")),
+    }
+}
+
+/// 会话文件路径 → 所属环境：`<agent>/profiles/<name>/sessions/...` →
+/// `Some(name)`。其余路径（本体 home 的会话 / 工作区 `<cwd>/.rpi/sessions`
+/// / 自定义根）= `None`（本体口径）——**打开会话即绑定文件自己所在环境的
+/// 配置**（跨环境打开不会拿错技能/插件面）。
+pub fn profile_from_session_path(path: &std::path::Path) -> Option<String> {
+    let root = pi_paths::agent_dir().ok()?;
+    let rel = path.strip_prefix(root.join("profiles")).ok()?;
+    let mut components = rel.components();
+    let name = components.next()?.as_os_str().to_str()?;
+    normalize_profile(Some(name)).ok().flatten()
 }
 
 /// 删除具名环境的整个 home（hermes profile 删除的宿主对偶；2026-11-23）。

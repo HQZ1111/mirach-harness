@@ -974,13 +974,16 @@ fn pi_peek_session_tail(
 /// 快照（sessionId 供前端直接采纳）。
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_create_bot_session(
-    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    state: tauri::State<'_, std::sync::Arc<agui::AguiState>>,
     name: String,
     system_prompt: Option<String>,
     provider: Option<String>,
     model_id: Option<String>,
     cwd: Option<String>,
     enabled_tools: Option<Vec<String>>,
+    // bot 所属环境（会话落该 profile home + 该 home 的技能/扩展/settings；
+    // 不抢引擎活动环境）。None = 当前活动环境。
+    profile: Option<String>,
 ) -> Result<serde_json::Value, String> {
     state.engine.create_bot_session(
         provider,
@@ -988,6 +991,7 @@ fn pi_create_bot_session(
         system_prompt,
         cwd,
         enabled_tools,
+        profile,
         Some(state.ui_bridge("main")),
     )?;
     state.engine.rename_session(&name)?;

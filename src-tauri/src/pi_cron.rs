@@ -1210,7 +1210,12 @@ fn run_in_session(job: &Job, prompt: &str, session_path: &Path) -> Result<String
                 let out = runtime.block_on(async {
                     // 作业级 provider/model 是用户建作业时的明确选择；
                     // 没给就走 rpi 默认解析（settings + 内置目录）。
+                    // 配置绑定：cron 目前仍是**进程级（本体 home）**执行——
+                    // 作业没有可靠的 profile 归属（Job.bot 只是过滤标签），
+                    // 按本体 home 解析才有确定的技能/扩展/settings 面。
+                    let home = rpi_cli::config::AgentHome::process();
                     let resolved = rpi_cli::provider::resolve(
+                        &home,
                         provider.as_deref(),
                         model.as_deref(),
                         None,
@@ -1232,7 +1237,7 @@ fn run_in_session(job: &Job, prompt: &str, session_path: &Path) -> Result<String
                     args.session_id = Some(session_id);
                     args.session_dir = Some(session_dir);
                     let (harness, mut events, _reload) =
-                        rpi_cli::session::build(&resolved, &args, &cwd, trusted)
+                        rpi_cli::session::build(&home, &resolved, &args, &cwd, trusted)
                             .await
                             .map_err(|e| format!("cron 会话创建失败: {e}"))?;
 

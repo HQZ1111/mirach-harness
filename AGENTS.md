@@ -390,7 +390,54 @@
   照旧归原主）；logo 行与页签条的手势不再被拖窗截胡。实机：clientY=45/60
   的 pointerdown 不再被 preventDefault（旧 85 会拦截）。
 
-## 2026-11-25（二）宽度调节只限最大化 + 机器人头像圆形/状态点 + 左栏生效 bot（当前有效）
+## 2026-11-25（五）配置绑定：引擎同步 main@301c98c（AgentHome 注入）→ 会话/技能按环境走（当前有效）
+
+用户："会话本身没有成功绑定配置，也就是 bot，新建会话，会话还都是默认的，我切换
+bot 等同于整个软件是新的了，会话，技能，插件等等" + "复刻 hermes 的，不自己做"。
+
+- **引擎同步**（`G:\pi-rust-main` = 宿主 `src-tauri/Cargo.toml` 的 path 依赖
+  真源）：以本地上游合并树 `E:\Temp\pi-pr1-latest`（= main@301c98c / PR #409
+  的 merge tree，树与 PR head 相同）为准 `robocopy /MIR` 覆盖（排除
+  `.git`/`target`/`.runtime-tests.tmp`），本地补丁层（14 个文件 + 1 个未跟踪
+  测试：`approval_gate` per-session 模式 / `loader` 的 rpi_plan_mode 副本 /
+  bash+powershell 描述与注册 / shell prefix 等）用
+  `git apply --3way C:\…\rpi-local-patches.patch` 重放——**只有
+  `bash_options_for` 一处冲突，取上游版**（上游已带 `home.settings()` +
+  `shellCommandPrefix`，本地那段补丁不再需要）。引擎仓库提交：`a99b25b`
+  （sync）+ `eb258cf`（replay）。
+  - 引擎现在有 **`AgentHome`**（PR #409）：`session::build(home, …)`、
+    `provider::resolve(home, …)`、`prepare_extensions(home, …)`、
+    `home.settings()/skill_dirs(cwd)/global_dir(sub)/root()`。
+  - 同步顺带更新了 rpi 0.27→0.28 区间的上游改动（96 文件）。
+- **宿主配置绑定（本轮）**：
+  - `pi_profiles::home_for_profile(name)`（本体 = `AgentHome::process()`；
+    具名 = `<agent>/profiles/<name>`）+ `profile_from_session_path`（路径 =
+    环境身份：`profiles/<n>/sessions/…`）。
+  - `pi_session::build_harness_impl(home, …)`：provider 解析 / session::build /
+    per-bot 扩展白名单目录都按 home；`build_harness_for_profile` 的归属规则 =
+    **显式 profile（bot 会话）> 打开既有会话按文件所属环境 > 新建按活动环境**。
+    打开跨环境会话会读该环境自己的技能/扩展/SYSTEM.md/settings/auth。
+  - **`pi_create_bot_session` 新增 `profile` 参数**——前端 host-rpc 早就传了
+    `profile`，Rust 侧此前**丢弃**（bot 会话落错根的实锤）；`create_bot_session`
+    / `pi_bot_create_session` / bot 泳道 `ensure_session` 现在都按 bot 的 home 建。
+  - `pi_capabilities` / `pi_set_skill_enabled` / `pi_set_toolset_enabled` /
+    `pi_read_skill` / `pi_write_skill` / `pi_delete_skill` 全部按**活动环境**
+    的 home（技能清单、开关、装删技能；`active_home_for(state)` 从引擎拿活动
+    环境）。技能目录集用引擎自己的 `home.skill_dirs(cwd)`（与 session build
+    同一份规则，防漂移）。
+  - **环境 home 配置克隆**（hermes `profile create --clone-all` 的宿主对偶）：
+    `ensure_profile_dirs` 把本体 home 的 auth/models/settings/trust 四件套
+    **copy-if-missing** 进具名环境（只补缺、不覆盖）——否则切过去模型解析
+    没有凭据（现存 bot 都是隔离前建的）。
+  - `pi_cron` 显式 `AgentHome::process()`（cron 仍是进程级：`Job.bot` 只是
+    归档/过滤标签，没有可靠 profile 归属）。
+- **还没绑定的面（下一步清单）**：providers/models/auth 设置页与相关 IPC
+  （`pi_settings` / `pi_keys` / `pi_login` / `pi_image` /
+  `pi_session::list_models` 仍走 `pi_paths::*`/`rpi_cli::config::*` 的进程
+  home）；技能选择器的安装落点（`pi_skill_install` 仍装本体 home）；侧栏
+  「网关与配置」聚合/分组。
+
+
 
 - **对话宽度手柄只在窗口最大化时出现/生效**（用户："对话宽度调节组件改成只在
   软件最大化的时候出现生效，平时默认对话宽度最大，不可调节"）：

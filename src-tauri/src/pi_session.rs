@@ -776,6 +776,7 @@ pub(crate) fn session_meta_in(
 /// 该目录（rpi `Args.session_dir` 原生支持，见 `pi_profiles`）；None =
 /// 本体/默认解析（settings.sessionDir / `<cwd>/.rpi/sessions`）。
 pub(crate) fn build_harness_impl(
+    home: &rpi_cli::config::AgentHome,
     rt: &PiRuntime,
     cwd: &Path,
     session_path: Option<&str>,
@@ -786,7 +787,10 @@ pub(crate) fn build_harness_impl(
 ) -> Result<BuiltHarness, String> {
     let (harness, events, reload, resolved_provider, model_id, id) = rt.block_on(async {
         let t_open = std::time::Instant::now();
-        let mut resolved = rpi_cli::provider::resolve(provider, model, None, None, None)
+        // 配置绑定（2026-11-25）：provider/model 解析读的是**这个 home** 的
+        // settings/auth/models——不是进程级配置。跨环境打开会话不会拿错
+        // provider 凭据。
+        let mut resolved = rpi_cli::provider::resolve(home, provider, model, None, None, None)
             .map_err(|e| format!("模型解析失败: {e}"))?;
         // 宿主侧模型目录：models.json 缺 contextWindow（0）时用
         // models.dev 的值补进**本次会话的 model**——引擎的压缩阈值
@@ -811,9 +815,11 @@ pub(crate) fn build_harness_impl(
         if let Some(whitelist) = extension_filter {
             args.dev_local_only = true;
             args.extensions_dir.clear();
-            let ext_dir = crate::pi_paths::agent_dir()
-                .map_err(|e| e)?
-                .join("extensions");
+            // per-bot 扩展白名单从**会话 home** 的 extensions/ 里挑（配置绑定：
+            // 具名环境的插件面是自己的；本体 = 进程 agent 目录，行为不变）。
+            let ext_dir = home
+                .global_dir("extensions")
+                .ok_or_else(|| "会话 home 的 extensions 目录不可解析".to_string())?;
             if let Ok(entries) = std::fs::read_dir(&ext_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -845,7 +851,7 @@ pub(crate) fn build_harness_impl(
                 }
             }
         }
-        let (harness, events, reload) = rpi_cli::session::build(&resolved, &args, cwd, false)
+        let (harness, events, reload) = rpi_cli::session::build(home, &resolved, &args, cwd, false)
             .await
             .map_err(|e| format!("Harness 构建失败: {e}"))?;
         let t_build = t_open.elapsed();
@@ -1059,8 +1065,47 @@ impl PiEngine {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> Result<HarnessLive, String> {
-        let profile_dir = self.active_profile_sessions_dir()?;
+        self.build_harness_for_profile(cwd, session_path, provider, model, None)
+    }
+
+    /// 同 [`Self::build_harness_with`]，但允许显式指定**会话所属环境**。
+    ///
+    /// 配置绑定（2026-11-25 用户："会话本身没有成功绑定配置"；复刻 hermes 的
+    /// profile = 完整 home）：home 与会话根同源——
+    ///   · 显式 `profile`（bot 会话/后台泳道）→ 该环境 home（**不抢**引擎的
+    ///     活动环境：bot 聊天落自己的 home，活动环境保持原样）；
+    ///   · 打开既有会话（有路径）→ **文件所属环境**（`profiles/<name>/sessions/…`
+    ///     路径即身份；本体/工作区文件 → None = 本体 home）；
+    ///   · 新建会话（无路径、无 profile）→ 当前活动环境。
+    /// home 决定技能/扩展/SYSTEM.md/settings/auth 的解析面（AgentHome 注入）。
+    fn build_harness_for_profile(
+        &self,
+        cwd: &Path,
+        session_path: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        profile: Option<&str>,
+    ) -> Result<HarnessLive, String> {
+        let (session_profile, profile_dir) = match profile {
+            // 显式环境（bot）：home + 会话根都归它；具名环境确保目录存在。
+            Some(name) => (
+                crate::pi_profiles::normalize_profile(Some(name))?,
+                crate::pi_profiles::ensure_profile_dirs(Some(name))?,
+            ),
+            None => match session_path {
+                // 打开既有会话：绑定文件所属环境（本体/工作区 → None）。
+                Some(p) => {
+                    let scoped = crate::pi_profiles::profile_from_session_path(Path::new(p));
+                    let dir = crate::pi_profiles::profile_sessions_dir(scoped.as_deref())?;
+                    (scoped, dir)
+                }
+                // 新建：当前活动环境（具名时确保目录存在）。
+                None => (self.active_profile()?, self.active_profile_sessions_dir()?),
+            },
+        };
+        let home = crate::pi_profiles::home_for_profile(session_profile.as_deref())?;
         let built = build_harness_impl(
+            &home,
             &self.shared.rt,
             cwd,
             session_path,
@@ -3928,6 +3973,9 @@ fn prompt_inner(
         system_prompt: Option<String>,
         cwd: Option<String>,
         enabled_tools: Option<Vec<String>>,
+        // bot 所属环境（她的 profile home：会话落点 + 技能/扩展/settings 解析面）。
+        // None = 当前活动环境（普通新聊天）；**不切**引擎活动环境。
+        profile: Option<String>,
         _ui_bridge: Option<UiBridgeHandle>,
     ) -> Result<String, String> {
         // hermes/旧 pi 的 bot 会话 = **带 system_prompt 与（可选）模型覆盖的
@@ -3937,11 +3985,12 @@ fn prompt_inner(
         let cwd = cwd
             .map(PathBuf::from)
             .unwrap_or_else(|| self.shared.cwd.clone());
-        let live = self.build_harness_with(
+        let live = self.build_harness_for_profile(
             &cwd,
             None,
             provider.as_deref(),
             model.as_deref(),
+            profile.as_deref(),
         )?;
         if let Some(prompt) = system_prompt {
             self.shared

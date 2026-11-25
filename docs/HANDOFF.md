@@ -6,6 +6,23 @@
 
 ## 当前状态
 
+**✅ 2026-11-25（五）：配置绑定（引擎同步 AgentHome + 会话/技能按环境走）**
+
+- **引擎已同步到上游 main@301c98c**（`G:\pi-rust-main`，宿主 path 依赖）：
+  本地补丁层已重放（approval per-session / plan-mode 副本 / 工具描述 / shell
+  prefix），`cargo check -p rpi-cli --all-targets` 干净。上游新增
+  **`AgentHome`**（PR #409）：`session::build(home,…)` / `provider::resolve(home,…)`。
+- **宿主**：`home_for_profile` + `profile_from_session_path`；`build_harness_impl`
+  按 home 解析 provider/build/扩展；`build_harness_for_profile` 归属 = 显式
+  profile（bot）> 打开会话按文件环境 > 新建按活动环境；**`pi_create_bot_session`
+  补上 `profile` 参数**（前端一直传、Rust 此前丢弃 —— bot 会话落错根的根因）；
+  `pi_capabilities`/技能开关/读写删全部按**活动环境** home；环境 home 的
+  auth/models/settings/trust 四件套 copy-if-missing 克隆（hermes
+  `profile create --clone-all` 对偶）。
+- **门禁**：`cargo test` 739 passed / 1 ignored。**待做**：providers/models/auth
+  页与 IPC 的 per-home、技能选择器安装落点、侧栏「网关与配置」聚合（AGENTS
+  「2026-11-25（五）」节列了清单）。
+
 **✅ 2026-11-25（四）：技能页只列本机已装 + 左栏底部跟随正在看的 bot**
 
 - **技能与工具页 = 只列本机已装技能**（用户："我要的是只显示本地仓库的技能"——
