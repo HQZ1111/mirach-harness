@@ -1383,13 +1383,15 @@ export async function dispatchHostRequest<T>(
     case 'skills.manage': {
       // 宿主技能目录 = hermes `optional-skills/` 的本地复制（22 分类 139 技能，
       // 见 src-tauri/src/pi_skills_catalog.rs）。搜索真实命中；安装 = 整目录
-      // 复制到 ~/.rpi/agent/skills/<name>（rpi 的技能发现目录）。
+      // 复制到目标环境 home 的 skills/<name>（配置绑定 2026-11-25：bot 编辑框
+      // 随请求带 profile → 装进该 bot 自己的环境；缺省 = 活动环境）。
       const action = String(params.action ?? '')
+      const profile = typeof params.profile === 'string' ? params.profile : ''
       if (action === 'search') {
         const query = typeof params.query === 'string' ? params.query : ''
         const res = await invoke<{
           entries?: { name: string; description?: string; category?: string; installed?: boolean }[]
-        }>('pi_skills_search', { query })
+        }>('pi_skills_search', { query, profile })
         return {
           results: (res?.entries ?? []).map((entry) => ({
             name: entry.name,
@@ -1401,13 +1403,13 @@ export async function dispatchHostRequest<T>(
         // 插件把技能标识放在 `query`（skills-hub.tsx install()），兼容 name/identifier。
         const name = String(params.query ?? params.name ?? params.identifier ?? '').trim()
         if (!name) throw new Error('skills.manage install 缺少技能名')
-        const res = await invoke<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', { name })
+        const res = await invoke<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', { name, profile })
         return { ok: true, result: res } as T
       }
       if (action === 'remove' || action === 'uninstall') {
         const name = String(params.query ?? params.name ?? '').trim()
         if (!name) throw new Error('skills.manage remove 缺少技能名')
-        return (await invoke('pi_skill_remove', { name })) as T
+        return (await invoke('pi_skill_remove', { name, profile })) as T
       }
       throw new Error(`skills.manage 未知 action：${action}`)
     }

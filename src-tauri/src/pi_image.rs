@@ -31,16 +31,25 @@ const IMAGE_MODEL_HINTS: &[&str] = &[
     "seedream",
 ];
 
-fn settings_doc() -> Result<Option<Value>, String> {
-    crate::pi_settings::read_json_document(&crate::pi_paths::settings_path().map_err(|e| e)?)
+fn settings_doc(home: &rpi_cli::config::AgentHome) -> Result<Option<Value>, String> {
+    let path = home
+        .settings_path()
+        .map_err(|e| format!("settings.json 路径解析失败: {e}"))?;
+    crate::pi_settings::read_json_document(&path)
 }
 
-fn models_doc() -> Result<Option<Value>, String> {
-    crate::pi_settings::read_json_document(&crate::pi_paths::models_path().map_err(|e| e)?)
+fn models_doc(home: &rpi_cli::config::AgentHome) -> Result<Option<Value>, String> {
+    let path = home
+        .models_path()
+        .map_err(|e| format!("models.json 路径解析失败: {e}"))?;
+    crate::pi_settings::read_json_document(&path)
 }
 
-fn auth_doc() -> Result<Option<Value>, String> {
-    crate::pi_settings::read_json_document(&crate::pi_paths::auth_path().map_err(|e| e)?)
+fn auth_doc(home: &rpi_cli::config::AgentHome) -> Result<Option<Value>, String> {
+    let path = home
+        .auth_path()
+        .map_err(|e| format!("auth.json 路径解析失败: {e}"))?;
+    crate::pi_settings::read_json_document(&path)
 }
 
 fn provider_env_key(provider: &str) -> Option<&'static str> {
@@ -130,10 +139,10 @@ fn provider_key_from_auth(auth: &Value, provider: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn resolve_provider() -> Result<ImageProvider, String> {
-    let settings = settings_doc()?.unwrap_or_else(|| json!({}));
-    let models = models_doc()?.unwrap_or_else(|| json!({ "providers": {} }));
-    let auth = auth_doc()?.unwrap_or_else(|| json!({}));
+fn resolve_provider(home: &rpi_cli::config::AgentHome) -> Result<ImageProvider, String> {
+    let settings = settings_doc(home)?.unwrap_or_else(|| json!({}));
+    let models = models_doc(home)?.unwrap_or_else(|| json!({ "providers": {} }));
+    let auth = auth_doc(home)?.unwrap_or_else(|| json!({}));
 
     let explicit = settings
         .get("image")
@@ -292,8 +301,13 @@ fn extract_image(body: &Value) -> Option<(Option<String>, Option<String>)> {
     Some((data_url, url.map(str::to_string)))
 }
 
-fn generate(provider: &ImageProvider, prompt: &str, aspect_ratio: Option<&str>) -> Result<Value, String> {
-    let model = match configured_model()? {
+fn generate(
+    home: &rpi_cli::config::AgentHome,
+    provider: &ImageProvider,
+    prompt: &str,
+    aspect_ratio: Option<&str>,
+) -> Result<Value, String> {
+    let model = match configured_model(home)? {
         Some(model) => model,
         None => probe_image_model(provider)?.ok_or_else(|| {
             format!(
@@ -348,19 +362,23 @@ fn generate(provider: &ImageProvider, prompt: &str, aspect_ratio: Option<&str>) 
 
 /// IPC：probe=true 只报可用性；否则按 prompt 真生成。
 /// 形状 = hermes `ImageGenerateResult`（available/success/image/image_data/error）。
+/// 配置面（settings/models/auth）按**活动环境 home** 读取（配置绑定
+/// 2026-11-25：切环境后图像生成也用那个环境的凭据）。
 #[tauri::command(rename_all = "camelCase", async)]
 pub fn pi_image_generate(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
     prompt: Option<String>,
     aspect_ratio: Option<String>,
     probe: Option<bool>,
 ) -> Result<Value, String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
         if probe == Some(true) {
-            let provider = match resolve_provider() {
+            let provider = match resolve_provider(&home) {
                 Ok(provider) => provider,
                 Err(error) => return Ok(json!({ "available": false, "error": error })),
             };
-            let configured = match configured_model() {
+            let configured = match configured_model(&home) {
                 Ok(configured) => configured,
                 Err(error) => return Ok(json!({ "available": false, "error": error })),
             };
@@ -394,14 +412,14 @@ pub fn pi_image_generate(
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .ok_or_else(|| "image.generate: prompt 不能为空".to_string())?;
-        let provider = resolve_provider()?;
-        generate(&provider, prompt, aspect_ratio.as_deref())
+        let provider = resolve_provider(&home)?;
+        generate(&home, &provider, prompt, aspect_ratio.as_deref())
     })?
 }
 
 /// 设置覆盖：`settings.image.model`（可选）——显式指定时跳过模型目录探测。
-fn configured_model() -> Result<Option<String>, String> {
-    Ok(settings_doc()?
+fn configured_model(home: &rpi_cli::config::AgentHome) -> Result<Option<String>, String> {
+    Ok(settings_doc(home)?
         .and_then(|s| {
             s.get("image")
                 .and_then(|i| i.get("model"))

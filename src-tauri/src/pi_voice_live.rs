@@ -107,7 +107,7 @@ fn live_instructions(live: &Value) -> String {
 /// 客户端可读的就绪判定：选中的模式 + GPT-Live 能否启动（key 能解析到）。
 /// **永不返回 key**（hermes resolve_gpt_live_status :131-144 同款）。
 pub fn voice_live_status() -> Result<Value, String> {
-    let settings = crate::pi_settings::pi_get_settings()?.unwrap_or(json!({}));
+    let settings = crate::pi_settings::read_settings_document()?;
     let mode = voice_chat_mode(&settings);
     let live = live_section(&settings);
     let (api_key, _base) = resolve_credentials(&live);
@@ -154,7 +154,7 @@ pub fn create_webrtc_session(sdp_offer: &str, history: Option<Vec<Value>>) -> Re
     if sdp_offer.trim().is_empty() {
         return Err("missing SDP offer".into());
     }
-    let settings = crate::pi_settings::pi_get_settings()?.unwrap_or(json!({}));
+    let settings = crate::pi_settings::read_settings_document()?;
     let live = live_section(&settings);
     let (api_key, base_url) = resolve_credentials(&live);
     let Some(api_key) = api_key else {

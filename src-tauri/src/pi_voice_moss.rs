@@ -60,7 +60,7 @@ fn normalize_base_url(base: &str) -> String {
 }
 
 fn moss_config() -> Result<(String, String, String), String> {
-    let settings = crate::pi_settings::pi_get_settings()?.unwrap_or(json!({}));
+    let settings = crate::pi_settings::read_settings_document()?;
     let live = settings
         .get("voice")
         .and_then(|v| v.get("moss_live"))

@@ -23,21 +23,20 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::pi_paths;
-
-
-
 use crate::pi_session::on_big_stack;
 
-/// settings.json 的实际路径 = `~/.rpi/agent/settings.json`（rpi 语义；
-/// RPI_CODING_AGENT_DIR 覆盖已在 pi_paths::agent_dir 内处理）。
-fn settings_path() -> PathBuf {
-    pi_paths::settings_path().unwrap_or_else(|_| PathBuf::from("."))
+/// settings.json 的实际路径 = **会话 home** 的 settings.json（配置绑定
+/// 2026-11-25：活动环境 = 本体 → `~/.rpi/agent/settings.json`；具名环境 →
+/// `<home>/settings.json`。RPI_CODING_AGENT_DIR 覆盖在 AgentHome 内处理）。
+fn settings_path_for(home: &rpi_cli::config::AgentHome) -> Result<PathBuf, String> {
+    home.settings_path()
+        .map_err(|e| format!("settings.json 路径解析失败: {e}"))
 }
 
-/// models.json 的实际路径 = `~/.rpi/agent/models.json`。
-fn models_config_path() -> PathBuf {
-    pi_paths::models_path().unwrap_or_else(|_| PathBuf::from("."))
+/// models.json 的实际路径 = **会话 home** 的 models.json。
+fn models_config_path_for(home: &rpi_cli::config::AgentHome) -> Result<PathBuf, String> {
+    home.models_path()
+        .map_err(|e| format!("models.json 路径解析失败: {e}"))
 }
 
 /// provider → env key 名称映射（rpi 迁移：原 pi::provider_metadata 的
@@ -78,6 +77,14 @@ pub(crate) fn read_json_document(path: &Path) -> Result<Option<serde_json::Value
     let value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("配置文件解析失败 {}: {e}", path.display()))?;
     Ok(Some(value))
+}
+
+/// 读**本体 home** 的 settings.json 文档（缺席 = 空对象 `{}`）。
+/// 语音等进程级能力（不分环境）的读取点共用；会话/技能/模型面走
+/// `AgentHome`（活动环境 home）。
+pub(crate) fn read_settings_document() -> Result<serde_json::Value, String> {
+    let path = settings_path_for(&rpi_cli::config::AgentHome::process())?;
+    Ok(read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({})))
 }
 
 /// 临时文件代号发生器（并发写不共用同一 tmp 名——两个 IPC 写入并发时
@@ -170,32 +177,54 @@ fn validate_models_document(value: &serde_json::Value) -> Result<(), String> {
 /// 读 pi 全局 settings.json 原始文档（§5 配置真相）。不存在 → Ok(None)
 /// （真实状态：上游同语义——缺文件视作默认配置）。
 #[tauri::command(async)]
-pub fn pi_get_settings() -> Result<Option<serde_json::Value>, String> {
-    on_big_stack(move || read_json_document(&settings_path()))?
+pub fn pi_get_settings(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
+    on_big_stack(move || {
+        let path = settings_path_for(&home)?;
+        read_json_document(&path)
+    })?
 }
 
 /// 整体替换写入 settings.json（§5 nested 不合并——前端送完整文档）。
 /// 写入前对 pi Config schema 校验；失败 Err 不落盘。
 #[tauri::command(async)]
-pub fn pi_set_settings(value: serde_json::Value) -> Result<(), String> {
+pub fn pi_set_settings(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
-        write_json_document(&settings_path(), &value, validate_settings_document)
+        let path = settings_path_for(&home)?;
+        write_json_document(&path, &value, validate_settings_document)
     })?
 }
 
-/// 读 models.json 原始文档（路径 = default_models_path(&global_dir)，
-/// 上游 models.rs:3994 / pi main.rs:887 同款）。不存在 → Ok(None)。
+/// 读 models.json 原始文档（路径 = 会话 home 的 models.json）。不存在 →
+/// Ok(None)。
 #[tauri::command(async)]
-pub fn pi_get_models_config() -> Result<Option<serde_json::Value>, String> {
-    on_big_stack(move || read_json_document(&models_config_path()))?
+pub fn pi_get_models_config(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+) -> Result<Option<serde_json::Value>, String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
+    on_big_stack(move || {
+        let path = models_config_path_for(&home)?;
+        read_json_document(&path)
+    })?
 }
 
 /// 整体替换写入 models.json（前端送完整文档）。写入前对 pi ModelsConfig
 /// schema 校验（providers 唯一性等）。
 #[tauri::command(async)]
-pub fn pi_set_models_config(value: serde_json::Value) -> Result<(), String> {
+pub fn pi_set_models_config(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
-        write_json_document(&models_config_path(), &value, validate_models_document)
+        let path = models_config_path_for(&home)?;
+        write_json_document(&path, &value, validate_models_document)
     })?
 }
 
@@ -215,9 +244,14 @@ pub fn pi_set_models_config(value: serde_json::Value) -> Result<(), String> {
 /// 语义：**读-改-写**（保留 settings.json 里其余全部字段，只动这两个）。
 /// 读失败 / 校验失败一律 Err（规矩 12：错误就是错误）；文件不存在 = 从
 /// 空对象起（上游缺文件即默认配置，同 read_json_document 语义）。
-/// 调用方 = pi_session.rs 的 `set_model`（2026-11-14 模型切换接真）。
-pub(crate) fn persist_default_model(provider: &str, model_id: &str) -> Result<(), String> {
-    let path = settings_path();
+/// 调用方 = pi_session.rs 的 `set_model`（2026-11-14 模型切换接真；2026-11-25
+/// 配置绑定：写**该会话所属环境**的 settings.json）。
+pub(crate) fn persist_default_model(
+    home: &rpi_cli::config::AgentHome,
+    provider: &str,
+    model_id: &str,
+) -> Result<(), String> {
+    let path = settings_path_for(home)?;
     let mut doc = read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({}));
     let Some(obj) = doc.as_object_mut() else {
         return Err(format!(
@@ -259,7 +293,9 @@ pub(crate) fn persist_voice_live_config(
     voice: Option<String>,
     moss_api_key: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let path = settings_path();
+    // 语音是本进程级能力（麦克风/WebRTC，不分环境）——读写**本体 home** 的
+    // settings.json；会话/技能/模型面已按活动环境绑定（见 home_for_profile）。
+    let path = settings_path_for(&rpi_cli::config::AgentHome::process())?;
     let mut doc = read_json_document(&path)?.unwrap_or_else(|| serde_json::json!({}));
     let Some(obj) = doc.as_object_mut() else {
         return Err(format!(
@@ -346,10 +382,15 @@ fn apply_voice_live_field(
 /// 列出的提供方 = auth.json 与 models.json 中出现的（内置目录 ~104 个
 /// 提供方不逐个罗列——pi_list_models 已覆盖"凭据就绪即可用"的视图）。
 #[tauri::command(async)]
-pub fn pi_auth_status() -> Result<serde_json::Value, String> {
+pub fn pi_auth_status(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
-        let auth_path = pi_paths::auth_path().map_err(|e| e)?;
-        let models_path = models_config_path();
+        // 配置绑定：凭据/模型状态 = **活动环境** home 的 auth.json /
+        // models.json（切 bot 后状态页显示那个环境自己的凭据面）。
+        let auth_path = home.auth_path().map_err(|e| format!("auth.json 路径解析失败: {e}"))?;
+        let models_path = models_config_path_for(&home)?;
 
         // auth.json：原始 JSON 解析（不用 AuthStorage::load——它对损坏
         // JSON 静默返回空目录，设置页必须把坏文件如实报出来）
@@ -461,7 +502,7 @@ pub fn pi_auth_status() -> Result<serde_json::Value, String> {
 
         Ok(serde_json::json!({
             "authPath": auth_path.display().to_string(),
-            "settingsPath": settings_path().display().to_string(),
+            "settingsPath": settings_path_for(&home)?.display().to_string(),
             "modelsPath": models_path.display().to_string(),
             "authFileExists": auth_file_exists,
             "providers": rows,

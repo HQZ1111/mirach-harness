@@ -184,6 +184,15 @@ export function profileScopeKey(scope?: ProfileScope): string {
   return (scope ?? '').trim() || 'default'
 }
 
+/** 作用域里的环境名（空串 = 无显式环境 → Rust 侧按活动环境解析），
+ *  2026-11-25 配置绑定：技能装/卸/列都按目标环境 home 走。 */
+function profileScopeName(scope?: ProfileScope): string {
+  if (scope && typeof scope === 'object') {
+    return (scope.profile ?? '').trim()
+  }
+  return (scope ?? '').trim()
+}
+
 /** The gateway client type. Upstream `@/hermes` re-exports the real class from
  *  `api/client.ts` (`class HermesGateway extends JsonRpcGatewayClient`), and the
  *  mirrored consumers call `request()` / `on()` on it. The host has no socket, so
@@ -399,16 +408,22 @@ function noteLocalAction(name: string, lines: string[]): ActionResponse {
 /** 安装一个本地技能：整个目录复制到 `~/.rpi/agent/skills/<name>`（rpi 的技能
  *  发现目录，下次会话/刷新即生效）。identifier 是 official 行的标识
  *  （`<name>`；老形态 `official/<name>` 兼容剥前缀）。失败原样传播（规矩 12）。 */
-export async function installSkillFromHub(identifier: string, _profile?: ProfileScope): Promise<ActionResponse> {
+export async function installSkillFromHub(identifier: string, profile?: ProfileScope): Promise<ActionResponse> {
   const name = identifier.startsWith('official/') ? identifier.slice('official/'.length) : identifier
-  const res = await invokeOnce<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', { name })
+  const res = await invokeOnce<{ installed?: boolean; name?: string; path?: string }>('pi_skill_install', {
+    name,
+    profile: profileScopeName(profile),
+  })
   return noteLocalAction(identifier, [`已安装「${res.name ?? name}」→ ${res.path ?? `~/.rpi/agent/skills/${name}`}`])
 }
 
-/** 卸载一个本地技能：删除 `~/.rpi/agent/skills/<name>` 目录（不在场 = 幂等
+/** 卸载一个本地技能：删除目标环境 home 的 `skills/<name>` 目录（不在场 = 幂等
  *  的 removed:false，如实记一行，不当失败）。 */
-export async function uninstallSkillFromHub(name: string, _profile?: ProfileScope): Promise<ActionResponse> {
-  const res = await invokeOnce<{ removed?: boolean; name?: string }>('pi_skill_remove', { name })
+export async function uninstallSkillFromHub(name: string, profile?: ProfileScope): Promise<ActionResponse> {
+  const res = await invokeOnce<{ removed?: boolean; name?: string }>('pi_skill_remove', {
+    name,
+    profile: profileScopeName(profile),
+  })
   return noteLocalAction(
     name,
     [res.removed === false ? `「${res.name ?? name}」本来就不在场` : `已删除「${res.name ?? name}」`]

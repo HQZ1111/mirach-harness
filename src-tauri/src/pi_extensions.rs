@@ -15,7 +15,8 @@
 //!   `NATIVE_PACKAGES_FILE`）。条目直接反序列化成上游类型
 //!   [`rpi_cli::install::InstalledNativePackage`]（`pub mod install`），schema
 //!   零漂移：`name/version/source/prebuilt{repository,target,plugin_abi,…}/artifacts`。
-//!   路径用宿主自己的 `pi_paths::agent_dir()`（与 `rpi-cli/src/config.rs:71`
+//!   路径用环境 home（`AgentHome::root()`，配置绑定 2026-11-25——本体 =
+//!   `~/.rpi/agent`；具名环境 = `<agent>/profiles/<name>`；与 `rpi-cli/src/config.rs:71`
 //!   同语义：`~/.rpi/agent` + `RPI_CODING_AGENT_DIR` 绝对路径覆盖），
 //!   路径权威留在宿主一侧。
 //!
@@ -43,8 +44,6 @@ use std::path::Path;
 
 use rpi_cli::install::InstalledNativePackage;
 use serde::Serialize;
-
-use crate::pi_paths;
 
 /// 全局扩展库目录名（`rpi-cli/src/install.rs:450` 同值）。
 const EXTENSIONS_DIR: &str = "extensions";
@@ -294,10 +293,18 @@ fn scan_extensions(
     Ok((rows, diagnostics))
 }
 
-/// 扩展列表（只读投影：文件 + 登记表，不含加载动作）。
+/// 扩展列表（只读投影：文件 + 登记表，不含加载动作）。目录按**活动环境
+/// home** 解析（配置绑定 2026-11-25：切 bot 后列表 = 该环境自己的
+/// `<home>/extensions`，与引擎给该环境会话装载的扩展同源）。
 #[tauri::command(async)]
-pub fn pi_extensions(_cwd: Option<String>) -> Result<serde_json::Value, String> {
-    let agent_dir = pi_paths::agent_dir()?;
+pub fn pi_extensions(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    _cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
+    let agent_dir = home
+        .root()
+        .map_err(|e| format!("环境 home 解析失败: {e}"))?;
     let dir = agent_dir.join(EXTENSIONS_DIR);
     let records = read_native_registry(&agent_dir)?.unwrap_or_default();
     let (extensions, diagnostics) = scan_extensions(&dir, &records)?;

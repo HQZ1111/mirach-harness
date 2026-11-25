@@ -688,6 +688,10 @@ struct HarnessLive {
     sessions_root: PathBuf,
     provider: String,
     model_id: String,
+    /// 该会话所属环境（配置绑定）：会话级设置（set_model 等）写回**这个**
+    /// 环境的 home，而不是引擎当前活动环境——bot 聊天跨环境打开时不能把
+    /// 默认模型写进别人的 settings.json。
+    profile: Option<String>,
 }
 
 pub struct PiEngine {
@@ -1122,6 +1126,7 @@ impl PiEngine {
             sessions_root: built.sessions_root,
             provider: built.provider,
             model_id: built.model_id,
+            profile: session_profile,
         })
     }
 
@@ -2631,7 +2636,11 @@ fn prompt_inner(
     /// 空配置 → 空数组（真实状态，不是兜底）。provider 的 api 协议无法识别
     /// → Err：静默跳过会让目录整整少一个 provider 而无人知晓（规矩 12）。
     pub fn list_models(&self) -> Result<serde_json::Value, String> {
-        let cfg = rpi_cli::config::load_models_config()
+        // 配置绑定：模型目录 = **活动环境** home 的 models.json（切 bot 后
+        // 设置页/模型选择器看到的是那个环境自己的已配置集）。
+        let home = crate::pi_profiles::home_for_profile(self.active_profile()?.as_deref())?;
+        let cfg = home
+            .models_config()
             .map_err(|e| format!("读 models.json 失败: {e}"))?;
         let mut rows: Vec<serde_json::Value> = Vec::new();
         for (provider_id, provider_cfg) in &cfg.providers {
@@ -2681,7 +2690,12 @@ fn prompt_inner(
     /// 都 Err 传播（规矩 12），绝不假装成功。
     pub fn set_model(&self, provider: &str, model_id: &str) -> Result<(), String> {
         let live = self.live()?;
-        let cfg = rpi_cli::config::load_models_config()
+        // 配置绑定：校验与默认值写回都按**该会话所属环境**的 home——
+        // bot 聊天跨环境打开时不能拿活动环境的 models.json 校验，也不能把
+        // 默认模型写进别人的 settings.json。
+        let home = crate::pi_profiles::home_for_profile(live.profile.as_deref())?;
+        let cfg = home
+            .models_config()
             .map_err(|e| format!("读 models.json 失败: {e}"))?;
         let provider_cfg = cfg.providers.get(provider).ok_or_else(|| {
             format!(
@@ -2718,7 +2732,7 @@ fn prompt_inner(
         })?;
         // 默认值写回：不写 → 新会话回旧默认（2026-10-26 历史坑："选哪个都用
         // 之前那个"）。失败必须传播——当前会话已切但默认未落，调用方要看得见。
-        crate::pi_settings::persist_default_model(provider, model_id)?;
+        crate::pi_settings::persist_default_model(&home, provider, model_id)?;
         *self
             .shared
             .model_line

@@ -111,10 +111,26 @@ fn scan(root: &Path) -> Result<Vec<SkillEntry>, String> {
     Ok(out)
 }
 
-fn installed_root() -> Result<PathBuf, String> {
-    let dir = crate::pi_paths::agent_dir()?.join("skills");
+/// 技能安装落点 = **环境 home** 的 `skills/` 目录（配置绑定 2026-11-25：
+/// 本体 → `~/.rpi/agent/skills`；具名环境 → `<home>/skills`——机器人编辑框
+/// 的技能选择器给哪个 bot 装，就落在那个 bot 自己的环境里）。
+fn installed_root(home: &rpi_cli::config::AgentHome) -> Result<PathBuf, String> {
+    let dir = home
+        .global_dir("skills")
+        .ok_or_else(|| "技能目录路径解析失败（agent home 不可用）".to_string())?;
     fs::create_dir_all(&dir).map_err(|e| format!("技能目录创建失败 {}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+/// 技能目录命令共用的环境解析：显式 profile（bot 编辑框）> 活动环境。
+fn catalog_home(
+    state: &tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    profile: Option<&str>,
+) -> Result<rpi_cli::config::AgentHome, String> {
+    match profile.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(name) => crate::pi_profiles::home_for_profile(Some(name)),
+        None => crate::pi_profiles::active_home(&state.engine),
+    }
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
@@ -135,10 +151,16 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// `skills.manage action=search` 的宿主实现：本地技能目录检索。
+/// `profile` = 目标环境（bot 编辑框随请求带上；缺省 = 活动环境）。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_skills_search(app: tauri::AppHandle, query: Option<String>) -> Result<Value, String> {
+pub fn pi_skills_search(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    query: Option<String>,
+    profile: Option<String>,
+) -> Result<Value, String> {
     let root = catalog_root(&app);
-    let installed = installed_root()?;
+    let installed = installed_root(&catalog_home(&state, profile.as_deref())?)?;
     let needle = query.unwrap_or_default().trim().to_lowercase();
     let entries = scan(&root)?;
     let rows: Vec<Value> = entries
@@ -161,9 +183,14 @@ pub fn pi_skills_search(app: tauri::AppHandle, query: Option<String>) -> Result<
     Ok(json!({ "entries": rows }))
 }
 
-/// 安装一个技能（整目录复制到 `~/.rpi/agent/skills/<name>`）。
+/// 安装一个技能（整目录复制到目标环境 home 的 `skills/<name>`）。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_skill_install(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+pub fn pi_skill_install(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    name: String,
+    profile: Option<String>,
+) -> Result<Value, String> {
     let name = name.trim();
     if !valid_name(name) {
         return Err(format!("非法技能名: {name}"));
@@ -173,7 +200,7 @@ pub fn pi_skill_install(app: tauri::AppHandle, name: String) -> Result<Value, St
         .into_iter()
         .find(|entry| entry.name == name)
         .ok_or_else(|| format!("技能目录里没有「{name}」"))?;
-    let dest = installed_root()?.join(name);
+    let dest = installed_root(&catalog_home(&state, profile.as_deref())?)?.join(name);
     if dest.is_dir() {
         // 升级：整目录覆盖（先清后拷，避免旧文件残留）。
         fs::remove_dir_all(&dest).map_err(|e| format!("清理旧技能失败 {}: {e}", dest.display()))?;
@@ -182,14 +209,18 @@ pub fn pi_skill_install(app: tauri::AppHandle, name: String) -> Result<Value, St
     Ok(json!({ "installed": true, "name": name, "path": dest.display().to_string() }))
 }
 
-/// 删除一个已安装技能。
+/// 删除一个已安装技能（目标环境 home 的 `skills/<name>`）。
 #[tauri::command(rename_all = "camelCase", async)]
-pub fn pi_skill_remove(name: String) -> Result<Value, String> {
+pub fn pi_skill_remove(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    name: String,
+    profile: Option<String>,
+) -> Result<Value, String> {
     let name = name.trim();
     if !valid_name(name) {
         return Err(format!("非法技能名: {name}"));
     }
-    let dest = installed_root()?.join(name);
+    let dest = installed_root(&catalog_home(&state, profile.as_deref())?)?.join(name);
     if dest.is_dir() {
         fs::remove_dir_all(&dest).map_err(|e| format!("删除技能失败 {}: {e}", dest.display()))?;
         return Ok(json!({ "removed": true, "name": name }));

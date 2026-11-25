@@ -81,23 +81,31 @@ pub fn pi_endpoint_validate(base_url: String, api_key: Option<String>) -> Result
 /// （端点公开则成功、需鉴权则 401 如实报，不假装）。
 #[tauri::command(async)]
 pub fn pi_discover_models(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
     provider_id: String,
     base_url: String,
     api_key: Option<String>,
 ) -> Result<Value, String> {
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
         let key = match api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
             Some(k) => Some(k.to_string()),
-            None => stored_api_key(&provider_id)?,
+            None => stored_api_key(&home, &provider_id)?,
         };
         probe_models(&base_url, key.as_deref())
     })?
 }
 
-/// 从 models.json 读 provider 的已存 apiKey（编辑态发现探测的凭据回退）。
-/// 文件不存在 = 没有已存密钥（Ok(None)，正常态）；坏文件/坏 JSON = Err。
-fn stored_api_key(provider_id: &str) -> Result<Option<String>, String> {
-    let path = crate::pi_paths::models_path()?;
+/// 从**活动环境 home** 的 models.json 读 provider 的已存 apiKey（编辑态
+/// 发现探测的凭据回退）。文件不存在 = 没有已存密钥（Ok(None)，正常态）；
+/// 坏文件/坏 JSON = Err。
+fn stored_api_key(
+    home: &rpi_cli::config::AgentHome,
+    provider_id: &str,
+) -> Result<Option<String>, String> {
+    let path = home
+        .models_path()
+        .map_err(|e| format!("models.json 路径解析失败: {e}"))?;
     let raw = match std::fs::read_to_string(&path) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

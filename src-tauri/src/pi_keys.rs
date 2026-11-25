@@ -16,16 +16,15 @@
 //! 纪律：禁止兜底——损坏的 auth.json 写入时报错不覆盖（坏文件不得被
 //! "修复"成空目录）。
 
-use std::path::PathBuf;
-
-use crate::pi_paths;
 use crate::pi_session::on_big_stack;
 use crate::pi_settings::read_json_document;
 
-/// auth.json 实际路径（pi Config::auth_path = `~/.pi/agent/auth.json`，
-/// PI_CONFIG_PATH 覆盖时 pi 读的也是覆盖路径——与 pi_settings 同语义）。
-fn auth_path() -> PathBuf {
-    pi_paths::auth_path().unwrap_or_else(|_| PathBuf::from("."))
+/// auth.json 实际路径 = **活动环境 home** 的 auth.json（配置绑定
+/// 2026-11-25：本体 → `~/.rpi/agent/auth.json`；具名环境 →
+/// `<home>/auth.json`。设置页的凭据面跟随当前生效环境）。
+fn auth_path(home: &rpi_cli::config::AgentHome) -> Result<std::path::PathBuf, String> {
+    home.auth_path()
+        .map_err(|e| format!("auth.json 路径解析失败: {e}"))
 }
 
 /// provider 名合法性：非空、无路径分隔/控制字符（auth.json 的键是
@@ -43,13 +42,18 @@ fn validate_provider(provider: &str) -> Result<(), String> {
 /// 写入/覆盖一个 provider 的 api_key 凭据（hermes keys-settings 的
 /// 「set key」等价面）。auth.json 不存在时创建只含该条目的新文档。
 #[tauri::command(async)]
-pub fn pi_set_provider_key(provider: String, key: String) -> Result<(), String> {
+pub fn pi_set_provider_key(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    provider: String,
+    key: String,
+) -> Result<(), String> {
     validate_provider(&provider)?;
     if key.trim().is_empty() {
         return Err("key 不能为空".into());
     }
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
-        let path = auth_path();
+        let path = auth_path(&home)?;
         let existing = read_json_document(&path)?;
         let mut doc = match existing {
             Some(v) => v,
@@ -78,10 +82,14 @@ pub fn pi_set_provider_key(provider: String, key: String) -> Result<(), String> 
 /// 一并删除——auth.json 里该 provider 键整体移除）。键不存在 → Ok(false)
 /// （真实状态：幂等删除）。
 #[tauri::command(async)]
-pub fn pi_delete_provider_key(provider: String) -> Result<bool, String> {
+pub fn pi_delete_provider_key(
+    state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
+    provider: String,
+) -> Result<bool, String> {
     validate_provider(&provider)?;
+    let home = crate::pi_profiles::active_home(&state.engine)?;
     on_big_stack(move || {
-        let path = auth_path();
+        let path = auth_path(&home)?;
         let existing = read_json_document(&path)?;
         let Some(mut doc) = existing else {
             return Ok(false);

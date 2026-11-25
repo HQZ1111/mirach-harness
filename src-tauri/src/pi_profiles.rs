@@ -127,6 +127,13 @@ pub fn home_for_profile(name: Option<&str>) -> Result<rpi_cli::config::AgentHome
     }
 }
 
+/// 引擎**当前活动环境**的 home（设置页/能力面 IPC 的配置绑定入口）。
+pub fn active_home(
+    engine: &crate::pi_session::PiEngine,
+) -> Result<rpi_cli::config::AgentHome, String> {
+    home_for_profile(engine.active_profile()?.as_deref())
+}
+
 /// 会话文件路径 → 所属环境：`<agent>/profiles/<name>/sessions/...` →
 /// `Some(name)`。其余路径（本体 home 的会话 / 工作区 `<cwd>/.rpi/sessions`
 /// / 自定义根）= `None`（本体口径）——**打开会话即绑定文件自己所在环境的
