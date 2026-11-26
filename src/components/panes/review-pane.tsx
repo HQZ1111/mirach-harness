@@ -7,35 +7,27 @@
  * index / file-tree / scope-row / ship-bar / churn-bar / tree-data）。
  *
  * 本文件只做两件事：
- * 1. 面板挂载时把仓库根对齐到活动会话的 cwd（上游 `$currentCwd` 订阅的
- *    宿主对偶；dockview 面板是常驻的，所以还要在 cwd 变化时跟随）；
+ * 1. 面板挂载时把仓库根对齐到**工作区根**（用户可见的文件树根——文件树
+ *    与审查同源，2026-11-26 用户："审查页也是假的"：此前绑活动会话 cwd，
+ *    本机会话多为 `C:/Users/<user>`，不是仓库 → 审查恒空）；
  * 2. 渲染移植后的 `ReviewPane`，关闭按钮走 dockview 面板关闭。
  */
 import { useEffect } from 'react'
 import type { IDockviewPanelProps } from 'dockview-react'
 
 import { ReviewPane } from '@/components/panes/review'
-import { activeSessionCwd, reviewStore } from '@/components/panes/review-store'
+import { reviewStore } from '@/components/panes/review-store'
+import { workspaceRootStore } from '@/lib/workspace-root'
 
 export function ReviewPanelHost(props: IDockviewPanelProps) {
-  // 挂载即对齐仓库根（无会话 cwd 时保持空 → 面板显示"不是仓库"的真空态，
-  // 而不是拿某个硬编码目录冒充）。
+  // 挂载即对齐工作区根；用户以后在文件树里换目录，这里跟着换。
   useEffect(() => {
-    const cwd = activeSessionCwd()
-    if (cwd) reviewStore.getState().setRepoCwd(cwd)
-  }, [])
-
-  // 活动会话切换 → 仓库根跟随（上游 `$currentCwd.subscribe` 同语义：
-  // 未定向到其它工作区时跟随活动会话）。
-  useEffect(() => {
-    let last = activeSessionCwd()
-    return reviewStore.subscribe(() => {
-      const cwd = activeSessionCwd()
-      if (cwd && cwd !== last) {
-        last = cwd
-        reviewStore.getState().setRepoCwd(cwd)
-      }
-    })
+    const apply = (): void => {
+      const root = workspaceRootStore.getState().root
+      if (root) reviewStore.getState().setRepoCwd(root)
+    }
+    apply()
+    return workspaceRootStore.subscribe(apply)
   }, [])
 
   return <ReviewPane onClose={() => props.api.close()} />

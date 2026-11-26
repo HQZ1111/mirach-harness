@@ -54,6 +54,7 @@ import {
 } from '@/components/panes/hub/bots-store'
 import { hiddenSessionsStore } from '@/components/panes/hub/hidden-sessions'
 import { isBackfilledFacePng } from '@/lib/bot-avatar-image'
+import { renameProfileRailPrefs } from '@/lib/profile-rail-pref'
 import {
   approveCanonicalAction,
   canonicalDriverStatus,
@@ -171,6 +172,82 @@ export async function deleteBotProfile(name: string): Promise<{ removed: boolean
   return { removed: outcome.removed || Boolean(bot) }
 }
 
+/**
+ * 重命名机器人/环境（hermes `profiles.rename` 的宿主对偶；2026-11-26）。
+ *
+ * 磁盘目录由 Rust `pi_profile_rename` 改名；成功后同步本地注册表与缓存
+ * （botsStore / 插件 bot-meta-v2 / 选中项 / ui_meta 余字段 / 档案栏
+ * 颜色与顺序）。失败原样抛出，本地注册表不动——不出现"页面改名了、
+ * 磁盘还是旧名"的半态。
+ *
+ * 活动环境由调用方先切走（命令层会拒绝）；改名后调用方决定是否切回。
+ */
+export async function renameBotProfile(
+  name: string,
+  newName: string,
+): Promise<{ name: string; renamed: boolean }> {
+  const from = name.trim()
+  const to = newName.trim()
+  if (!from || !to) throw new Error('重命名机器人：名字不能为空')
+  if (from === to) return { renamed: false, name: to }
+
+  const bot = findBot(from)
+  const outcome = await invoke<{ name: string; renamed: boolean }>('pi_profile_rename', {
+    name: from,
+    newName: to,
+  })
+
+  if (outcome.renamed) {
+    if (bot) {
+      botsStore.getState().upsert({ ...bot, name: to }, from)
+    }
+    try {
+      const metaKey = 'mirach.plugin.hermes-bots.bot-meta-v2'
+      const raw = localStorage.getItem(metaKey)
+      if (raw) {
+        const parsed: unknown = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const meta = parsed as Record<string, unknown>
+          let changed = false
+          for (const key of [`local::${from}`, from]) {
+            if (Object.prototype.hasOwnProperty.call(meta, key)) {
+              meta[key.replace(from, to)] = meta[key]
+              delete meta[key]
+              changed = true
+            }
+          }
+          if (changed) localStorage.setItem(metaKey, JSON.stringify(meta))
+        }
+      }
+      const selectedKey = 'mirach.plugin.hermes-bots.selected-roster-bot-v1'
+      const selectedRaw = localStorage.getItem(selectedKey)
+      if (selectedRaw) {
+        const selected: unknown = JSON.parse(selectedRaw)
+        if (selected === `local::${from}` || selected === from) {
+          localStorage.setItem(selectedKey, JSON.stringify(`local::${to}`))
+        }
+      }
+    } catch (e) {
+      console.error('[host-rpc] 重命名机器人后迁移插件缓存失败', e)
+    }
+
+    try {
+      const extras = readMetaExtras()
+      if (Object.prototype.hasOwnProperty.call(extras, from)) {
+        extras[to] = { ...(extras[to] ?? {}), ...extras[from] }
+        delete extras[from]
+        writeMetaExtras(extras)
+      }
+    } catch (e) {
+      console.error('[host-rpc] 重命名机器人后迁移 ui_meta 余字段失败', e)
+    }
+
+    renameProfileRailPrefs(from, to)
+  }
+
+  return outcome
+}
+
 /** ui_meta 里由 BotPreset 直接持有的字段（不进余字段表）。 */
 const MAPPED_META_KEYS = new Set([
   'created',
@@ -179,6 +256,7 @@ const MAPPED_META_KEYS = new Set([
   'description',
   'hidden',
   'image',
+  'imageKind',
   'pinned',
   'sectionId',
   'sectionName',
@@ -215,6 +293,7 @@ function botBotMeta(bot: BotPreset): UnknownMeta {
     color: bot.color,
     shape: bot.shape,
     image: bot.image ?? null,
+    imageKind: bot.imageKind ?? null,
     custom: bot.custom ?? false,
     pinned: bot.pinned ?? false,
     hidden: bot.hidden ?? false,
@@ -270,6 +349,7 @@ function applyBotMeta(name: string, meta: UnknownMeta): void {
   if (typeof meta.shape === 'string') patch.shape = meta.shape
   if (typeof meta.image === 'string') patch.image = meta.image
   if (meta.image === null) patch.image = null
+  if (typeof meta.imageKind === 'string') patch.imageKind = meta.imageKind
   if (typeof meta.custom === 'boolean') patch.custom = meta.custom
   if (typeof meta.pinned === 'boolean') patch.pinned = meta.pinned
   if (typeof meta.hidden === 'boolean') patch.hidden = meta.hidden
@@ -295,6 +375,8 @@ interface PiSessionRow {
   name: null | string
   path: string
   cwd?: string
+  /** `pi_sessions_index` 的 profile 标签（null/缺省 = 本体）。 */
+  profile?: null | string
   messageCount?: number
   lastModified?: number
   lastModifiedMs?: number
@@ -360,13 +442,24 @@ async function requireSession(sessionId: string): Promise<PiSessionRow> {
 /** 按 id **或标题**找会话（上游 session.resume 的二者皆可语义：stored id
  *  优先，没命中时按 title 找——群聊成员会话在 room 里存的是 stored id，
  *  rehydrate 后丢了指针的旧房间按 `Group: <room> · <thread>` 标题找回）。 */
-async function findSessionByAnyIdOrTitle(target: string): Promise<null | PiSessionRow> {
+async function findSessionByAnyIdOrTitle(
+  target: string,
+  /** 限定到某个环境（`default` = 本体）。群聊成员必须按 profile 解析：
+   *  同名标题在别的环境也有一份时，不能用那边的 path 去 `pi_bot_open`
+   *  （会报 "No session found ... in <profile>/sessions"）。 */
+  profile?: string,
+): Promise<null | PiSessionRow> {
   const rows = await readSessions()
-  const byId = rows.find((r) => r.id === target)
+  const scoped = profile
+    ? rows.filter((row) =>
+        profile === 'default' ? (row.profile ?? null) === null : row.profile === profile,
+      )
+    : rows
+  const byId = scoped.find((r) => r.id === target)
   if (byId) return byId
   const trimmed = target.trim()
   if (!trimmed) return null
-  return rows.find((r) => (r.name ?? '') === trimmed) ?? null
+  return scoped.find((r) => (r.name ?? '') === trimmed) ?? null
 }
 
 // ── session.resume 的消息投影（上游 transcript 形状）───────────────────────
@@ -473,10 +566,13 @@ async function createSessionForBot(
    *  - 显式 `'default'` → 本体（全局根）；
    *  - 缺省/空 → **当前活动环境**（普通新聊天语义）。 */
   profile?: string,
-): Promise<{ path?: string; session_id: string; stored_session_id: string }> {
+  /** 草稿里用户选中的工作区（缺省 = bot.cwd → 引擎默认）。 */
+  cwdOverride?: string,
+): Promise<{ cwd?: string; path?: string; session_id: string; stored_session_id: string }> {
   const systemPrompt = bot ? composeSystemPrompt(bot) : ''
   const { provider, modelId } = splitModel(bot?.model ?? '')
   const enabledTools = bot ? await enabledToolsFor(bot) : null
+  const sessionCwd = (cwdOverride ?? bot?.cwd ?? '').trim()
   let scopedProfile = (profile ?? '').trim()
   if (!scopedProfile) {
     try {
@@ -493,7 +589,7 @@ async function createSessionForBot(
       ...(sessionDirProfile ? { profile: sessionDirProfile } : {}),
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(provider ? { provider, modelId } : {}),
-      ...(bot?.cwd ? { cwd: bot.cwd } : {}),
+      ...(sessionCwd ? { cwd: sessionCwd } : {}),
       ...(enabledTools ? { enabledTools } : {}),
     },
   )
@@ -502,10 +598,24 @@ async function createSessionForBot(
     throw new Error('pi_create_bot_session 未返回 sessionId')
   }
   return {
+    ...(sessionCwd ? { cwd: sessionCwd } : {}),
     ...(typeof state.path === 'string' && state.path ? { path: state.path } : {}),
     session_id: sid,
     stored_session_id: sid,
   }
+}
+
+/**
+ * 插件 bot 新聊天的**草稿落点**（host.newChat 的 bots 草稿路径）：第一条
+ * 消息时才建会话；bot 的 SOUL/模型/工具集仍由 createSessionForBot 施加，
+ * cwd = 用户选的文件夹（`pendingCwd`）或 bot.cwd / 引擎默认。
+ */
+export async function createBotDraftSession(
+  profile: string,
+  cwd: string | null,
+): Promise<{ cwd?: string; path?: string; session_id: string; stored_session_id: string }> {
+  const bot = findBot(profile)
+  return createSessionForBot(bot, '', profile, cwd ?? undefined)
 }
 
 // ── bot 泳道（后台成员会话）────────────────────────────────────────────────
@@ -529,7 +639,7 @@ async function botLaneConfig(profile: string): Promise<Record<string, unknown>> 
 /** 按会话 id/标题定位并懒重开泳道会话（附件面的入口；prompt.submit 自带
  *  懒重开，不走这里）。 */
 async function openBotLaneSession(sessionId: string, profile: string): Promise<PiSessionRow> {
-  const row = await findSessionByAnyIdOrTitle(sessionId)
+  const row = await findSessionByAnyIdOrTitle(sessionId, profile)
   if (!row) throw missingSession(sessionId)
   const config = await botLaneConfig(profile)
   await invoke('pi_bot_open', {
@@ -922,8 +1032,13 @@ export async function dispatchHostRequest<T>(
     case 'session.create': {
       const profile = typeof params.profile === 'string' ? params.profile : ''
       // `default` = 应用本体环境：没有 bot 预设可套（人格/模型/cwd 走引擎
-      // 默认），标题也不该退化成 "default"。具名 profile 才查预设。
-      const bot = profile && profile !== 'default' ? findBot(profile) : null
+      // 默认），标记也不该退化成 "default"。**但双锚必须照记**（2026-11-26
+      // 用户："机器人页点击一下就新建一个会话"）：此前 default 被排除在
+      // bot 之外，Mirach 行的 canonical Bot Chat 每次点击都无锚可认领 →
+      // session.list 恒空 → 插件每次 mint 一条新会话。锚记在 anchorBot 上，
+      // 预设仍只对具名环境生效。
+      const anchorBot = profile ? findBot(profile) : null
+      const bot = anchorBot && profile !== 'default' ? anchorBot : null
       // **未命名就是未命名**（2026-11-25 用户："切换 bot 后会话名显示的是
       // bot 的名字"）：hermes 的 session.create 不拿档案名冒充会话名——新
       // 会话保持无标题，首条消息后由自动命名/派生标题接管。此前回落
@@ -957,12 +1072,12 @@ export async function dispatchHostRequest<T>(
       // 显示层按 bots-store 的双锚路径集过滤。canonical Bot Chat 一创建就
       // 记双锚 → 侧栏会话列表立刻隐藏（花名册是唯一入口）。路径优先用
       // pi 回传值（跨环境时 pi_list_sessions 扫不到活动环境之外的会话）。
-      if (bot && title === 'Bot Chat') {
+      if (anchorBot && title === 'Bot Chat') {
         const path = created.path ?? (await findSessionPath(created.stored_session_id))
         if (path) {
           botsStore
             .getState()
-            .patchMeta(bot.name, { chatSessionPath: path, chatSessionId: created.stored_session_id })
+            .patchMeta(anchorBot.name, { chatSessionPath: path, chatSessionId: created.stored_session_id })
         } else {
           console.error(`[host-rpc] bot 会话 ${created.stored_session_id} 未回报路径——双锚未记录`)
         }
@@ -1027,8 +1142,10 @@ export async function dispatchHostRequest<T>(
     case 'session.resume': {
       const target = String(params.session_id ?? '')
       if (!target) throw new Error('session.resume 缺少 session_id')
+      const profile = typeof params.profile === 'string' ? params.profile : ''
       // stored id 优先、标题兜底（上游语义；群聊 rehydrate 后按标题找回）。
-      const row = await findSessionByAnyIdOrTitle(target)
+      // 带 profile 时必须在该环境内解析（同名标题跨环境不能混用 path）。
+      const row = await findSessionByAnyIdOrTitle(target, profile || undefined)
       if (!row) throw missingSession(target)
       const omitMessages = params.omit_messages === true
       let messages: ResumeMessage[] = []
@@ -1087,9 +1204,9 @@ export async function dispatchHostRequest<T>(
       const text = String(params.text ?? '')
       if (!target) throw new Error('prompt.submit 缺少 session_id')
       if (!text.trim()) throw new Error('prompt.submit 缺少 text')
-      const row = await findSessionByAnyIdOrTitle(target)
-      if (!row) throw missingSession(target)
       const profile = typeof params.profile === 'string' ? params.profile : ''
+      const row = await findSessionByAnyIdOrTitle(target, profile || undefined)
+      if (!row) throw missingSession(target)
       const config = await botLaneConfig(profile)
       const result = await invoke<Record<string, unknown>>('pi_bot_prompt', {
         sessionId: row.id,

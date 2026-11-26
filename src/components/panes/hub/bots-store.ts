@@ -28,6 +28,7 @@
 
 import { createStore, useStore } from 'zustand'
 import type { BotMeta } from './bots-types'
+import { isBackfilledFacePng } from '@/lib/bot-avatar-image'
 
 /** 机器人预设（hermes bot 的 pi 对偶：一份 SessionOptions 参数包 + 花名册元数据）。 */
 export interface BotPreset {
@@ -45,6 +46,12 @@ export interface BotPreset {
   color?: string
   shape?: string
   image?: null | string
+  /** 插件 meta 的图片来源（`imageKind`：photo / pet / generated…）。
+   *  **photo/pet 即使用户图正好 160×160 也按用户图显示**——
+   *  `isBackfilledFacePng` 的尺寸启发式只用于"不知道来源"的旧数据
+   *  （2026-11-26 用户："配置档案人名怎么没跟头像"：160×160 的
+   *  imageKind=photo 被当成回填脸，橙色头像被绿色实时脸顶掉）。 */
+  imageKind?: string
   /** 用户改过头像后置位（默认外观停止套用——hermes 同语义）。 */
   custom?: boolean
   pinned?: boolean
@@ -84,7 +91,7 @@ export interface BotPreset {
 
 /** patchMeta 接受的元数据补丁形状（BotPreset 的展示/行为字段子集）。 */
 export type BotPatch = Partial<
-  Pick<BotPreset, 'pinned' | 'hidden' | 'sectionId' | 'sectionName' | 'color' | 'shape' | 'image' | 'custom' | 'title' | 'chatSessionPath' | 'chatSessionId' | 'connectionId' | 'skills' | 'toolsets' | 'mcpServers'>
+  Pick<BotPreset, 'pinned' | 'hidden' | 'sectionId' | 'sectionName' | 'color' | 'shape' | 'image' | 'imageKind' | 'custom' | 'title' | 'chatSessionPath' | 'chatSessionId' | 'connectionId' | 'skills' | 'toolsets' | 'mcpServers'>
 >
 
 /** 本体环境（hermes 默认 profile "Hermes" 的宿主对偶，2026-11-22）：
@@ -106,6 +113,78 @@ const DEFAULT_LOGO_MIGRATION_KEY = 'mirach.harness.default-bot-logo.v1'
  *  仍是旧头。 */
 const PLUGIN_BOT_META_V2_KEY = 'mirach.plugin.hermes-bots.bot-meta-v2'
 const DEFAULT_LOGO_PLUGIN_MIGRATION_KEY = 'mirach.harness.default-bot-logo.plugin.v1'
+
+/**
+ * 插件 meta 里的**真头像**（相对 botsStore 的落后副本）。
+ *
+ * 背景（2026-11-25 用户："bot 的自定义头像在左侧栏中失效了"）：机器人页
+ * 从插件 meta（bot-meta-v2）画头像，宿主面（左栏底栏/消息头像）读
+ * botsStore。插件曾把矢量脸栅格化 160×160 经 `profiles.set_asset` 推给
+ * 宿主——botsStore.image 停在旧栅格，而插件 meta 已换成用户上传的
+ * 256×256 照片 → 底栏显示旧矢量脸，机器人页显示照片（两处不一致）。
+ * 判据与插件一致：160×160 PNG = 回填栅格，不算用户头像。
+ */
+function pluginMetaFor(name: string): { image: null | string; kind: null | string } | null {
+  try {
+    const raw = localStorage.getItem(PLUGIN_BOT_META_V2_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const meta = parsed as Record<string, unknown>
+    for (const key of [`local::${name}`, name]) {
+      const entry = meta[key]
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      const record = entry as { image?: unknown; imageKind?: unknown }
+      return {
+        image:
+          typeof record.image === 'string' && record.image.startsWith('data:')
+            ? record.image
+            : null,
+        kind: typeof record.imageKind === 'string' ? record.imageKind : null,
+      }
+    }
+    return null
+  } catch (e) {
+    console.error('[bots] 插件头像读取失败（保留 botsStore 现值）', e)
+    return null
+  }
+}
+
+/** 用插件 meta 的真头像/来源修复落后的 botsStore 副本（只在 botsStore 值
+ *  是回填栅格、或插件明确标了 photo/pet 时才动——用户自定义永远优先）。
+ *  返回是否修复。 */
+function reconcileAvatarImages(bots: BotPreset[]): BotPreset[] {
+  let changed = false
+  const next = bots.map((b) => {
+    const meta = pluginMetaFor(b.name)
+    let out = b
+    if (meta?.kind && b.imageKind !== meta.kind) {
+      out = { ...out, imageKind: meta.kind }
+      changed = true
+    }
+    if (meta?.image) {
+      const userChosen = meta.kind === 'photo' || meta.kind === 'pet'
+      const shouldReplace =
+        !out.image ||
+        (isBackfilledFacePng(out.image) && (userChosen || !isBackfilledFacePng(meta.image)))
+      if (shouldReplace && meta.image !== out.image) {
+        out = { ...out, image: meta.image }
+        changed = true
+      }
+    }
+    return out
+  })
+  return changed ? next : bots
+}
+
+/** 用户真正选过的头像图（photo/pet 无条件；未知来源时排除 160 回填脸）。
+ *  渲染面统一用这个——不要各自再写 `isBackfilledFacePng` 判据。 */
+export function botPhotoImage(bot: null | undefined | BotPreset): null | string {
+  const image = bot?.image
+  if (!image) return null
+  if (bot?.imageKind === 'photo' || bot?.imageKind === 'pet') return image
+  return isBackfilledFacePng(image) ? null : image
+}
 
 function migrateDefaultBotPluginMeta(): void {
   try {
@@ -263,6 +342,17 @@ export const botsStore = createStore<BotsState>((set, get) => ({
         localStorage.setItem(DEFAULT_LOGO_MIGRATION_KEY, '1')
       } catch (e) {
         console.error('[bots] 记录默认头像迁移标记失败', e)
+      }
+    }
+    // 落后副本修复：botsStore 停在 160×160 回填栅格、插件 meta 已有真照片
+    // 时以插件 meta 为准（左侧栏底栏不再显示旧矢量脸）。
+    const reconciled = reconcileAvatarImages(bots)
+    if (reconciled !== bots) {
+      bots = reconciled
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(bots))
+      } catch (e) {
+        console.error('[bots] 头像修复回写失败（本次会话内有效）', e)
       }
     }
     set({ bots, sections: parseSections(localStorage.getItem(SECTIONS_KEY)) })

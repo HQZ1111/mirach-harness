@@ -56,6 +56,16 @@ export const CONTEXT_MENU_OWNER_SELECTOR =
 
 export type ContextMenuScope = 'editable' | 'owned' | 'app'
 
+/** 右键落点所在的可编辑元素（表单字段 / contenteditable 宿主）。 */
+export function contextMenuEditable(target: Element | null): HTMLElement | null {
+  if (!target) return null
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    return target.disabled || target.readOnly ? null : target
+  }
+  const host = target.closest('[contenteditable]')
+  return host instanceof HTMLElement && host.isContentEditable ? host : null
+}
+
 export function resolveContextMenuScope(target: ContextMenuScopeTarget | null): ContextMenuScope {
   if (!target) return 'app'
   if (target.isContentEditable || target.closest(CONTEXT_MENU_EDITABLE_SELECTOR)) return 'editable'

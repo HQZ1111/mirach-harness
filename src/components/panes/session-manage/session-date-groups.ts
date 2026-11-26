@@ -33,8 +33,11 @@ export type SessionListRow =
   | {
       readonly kind: 'session'
       readonly id: string
-      /** fork 谱系缩进层级（父会话可见时的挂载深度；0/缺省 = 顶层行）。 */
+      /** fork 谱系缩进层级（父会话可见时的挂载深度；缺省 = 顶层行）。 */
       readonly depth?: number
+      /** fork 分支干（hermes session-branch-tree 的 `├─ `/`└─ `；直接挂在
+       *  可见父行下的子行才有——渲染层画在行首）。 */
+      readonly branchStem?: string
     }
   | {
       readonly kind: 'divider'

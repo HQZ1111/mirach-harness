@@ -16,14 +16,14 @@
  */
 import { createStore } from 'zustand'
 
-export type StatusPanelVariant = 'auto' | 'panel' | 'mini'
+export type StatusPanelVariant = 'auto' | 'panel' | 'mini' | 'hidden'
 
 const KEY = 'mirach:status-panel-variant'
 
 const readOverride = (): StatusPanelVariant | null => {
   try {
     const raw = window.localStorage.getItem(KEY)
-    return raw === 'panel' || raw === 'mini' || raw === 'auto' ? raw : null
+    return raw === 'panel' || raw === 'mini' || raw === 'auto' || raw === 'hidden' ? raw : null
   } catch {
     return null
   }
@@ -92,6 +92,9 @@ export function resolveStatusPanelShift(params: {
   variant: StatusPanelVariant
 }): { offset: boolean; topClearance: 'none' | 'always' | 'below-wide' } {
   if (params.scoped || !params.present) {
+    return { offset: false, topClearance: 'none' }
+  }
+  if (params.variant === 'hidden') {
     return { offset: false, topClearance: 'none' }
   }
   if (params.variant === 'mini') {

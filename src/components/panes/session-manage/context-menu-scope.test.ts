@@ -60,11 +60,11 @@ describe('resolveContextMenuScope', () => {
     ).toBe('owned')
   })
 
-  it('终端窗格根（data-slot="terminal-pane"，2026-11-18）→ owned', () => {
-    // 右键 = ZCode TerminalSession 的复制/粘贴菜单（terminal-pane.tsx 自管）
+  it('配置档案栏根（data-slot="profile-rail"，2026-11-26）→ owned', () => {
+    // 方块右键 = hermes ProfileRail 的颜色/编辑/删除；全局窗口动词菜单不得抢。
     expect(
       resolveContextMenuScope(
-        stubElMatching(['[data-slot="terminal-pane"]', CONTEXT_MENU_OWNER_SELECTOR]),
+        stubElMatching(['[data-slot="profile-rail"]', CONTEXT_MENU_OWNER_SELECTOR]),
       ),
     ).toBe('owned')
   })

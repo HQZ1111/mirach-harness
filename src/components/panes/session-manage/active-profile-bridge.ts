@@ -17,9 +17,36 @@ export type ProfileSwitcher = (profile: null | string) => Promise<boolean>
 
 let switcher: ProfileSwitcher | null = null
 
+/** 轻量跟随器（不拆会话）：打开某环境的会话/机器人会话时把该环境设为
+ *  活动环境（侧栏随之换源）。与显式切换的区别 = 不 discard 当前会话，
+ *  打开动作自己会换前台。runtime 挂载时注册。 */
+let follower: ProfileSwitcher | null = null
+
+/** 新聊天草稿请求（不切环境）：`host.newChat` 的 bots 草稿路径用。runtime
+ *  挂载时注册；动作 = 丢当前会话 + RESET，但不改活动 profile。 */
+type DraftRequester = () => Promise<boolean>
+let draftRequester: DraftRequester | null = null
+
 /** runtime 挂载时注册（卸载清空；未注册 = 错误可见，规矩 12）。 */
 export function setProfileSwitcher(fn: ProfileSwitcher | null) {
   switcher = fn
+}
+
+export function setProfileFollower(fn: ProfileSwitcher | null) {
+  follower = fn
+}
+
+export function setNewChatDraftRequester(fn: DraftRequester | null) {
+  draftRequester = fn
+}
+
+/** 丢当前会话并回到 New Chat 草稿（活动环境保持不变）。 */
+export function requestNewChatDraftBridge(): Promise<boolean> {
+  if (!draftRequester) {
+    console.error('[active-profile] 草稿请求器未注册（runtime 未挂载）——未回到 New Chat')
+    return Promise.resolve(false)
+  }
+  return draftRequester()
 }
 
 /** 切换活动环境；返回 false = 失败（引擎未切换，调用方不得按成功继续）。 */
@@ -29,6 +56,16 @@ export function switchProfileBridge(profile: null | string): Promise<boolean> {
     return Promise.resolve(false)
   }
   return switcher(profile)
+}
+
+/** 跟随活动环境（打开会话/点机器人时用）：只改引擎活动 home + UI 投影，
+ *  不打断当前会话。未注册 = 错误可见。 */
+export function followProfileBridge(profile: null | string): Promise<boolean> {
+  if (!follower) {
+    console.error('[active-profile] 跟随器未注册（runtime 未挂载）——环境未跟随')
+    return Promise.resolve(false)
+  }
+  return follower(profile)
 }
 
 export function readPersistedProfile(): null | string {

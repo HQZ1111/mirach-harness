@@ -62,7 +62,11 @@ fn skills_env() -> Arc<dyn rpi_tools::ExecutionEnv> {
 pub(crate) fn active_home_for(
     state: &tauri::State<'_, Arc<crate::agui::AguiState>>,
 ) -> Result<rpi_cli::config::AgentHome, String> {
-    crate::pi_profiles::home_for_profile(state.engine.active_profile()?.as_deref())
+    let profile = state.engine.active_profile()?;
+    // 读面顺带补种：具名环境缺 skills/extensions 时从本体克隆（copy-if-missing），
+    // 否则技能页/插件目录读到的空目录不是"没有"，而是从没被种过。
+    crate::pi_profiles::ensure_profile_dirs(profile.as_deref())?;
+    crate::pi_profiles::home_for_profile(profile.as_deref())
 }
 
 /// 技能目录集（会话 home 的解析：项目 `.rpi/skills` + 该 home 的全局技能根，
@@ -125,10 +129,8 @@ pub struct CapabilityPrefs {
 impl CapabilityPrefs {
     /// 工具集当前是否启用（见类型注释的语义式）。
     ///
-    /// rpi 迁移注记：工具过滤尚未接线到 rpi 会话（build 不再收
-    /// enabled_tools）——开关落盘照常，接线后由 session_enabled_tools /
-    /// enabled_tools_for 消费。
-    #[allow(dead_code)] // session_enabled_tools 链待 rpi 工具过滤接线
+    /// 会话接线走 [`toolset_exclusions_for`]（只把用户关掉的组展开成
+    /// `Args.exclude_tools` denylist）；这个谓词只用于列表/开关显示。
     fn toolset_enabled(&self, key: &str) -> bool {
         if self.enabled_toolsets.iter().any(|k| k == key) {
             return true;
@@ -137,11 +139,13 @@ impl CapabilityPrefs {
             && !self.disabled_toolsets.iter().any(|k| k == key)
     }
 
-    /// 当前会话应传给引擎的 `enabled_tools`。
+    /// 当前会话应传给引擎的 `enabled_tools`（allowlist 形状）。
     ///
     /// `None` = 用户没动过任何开关（禁用集与显式启用集都空）——此时不传，
     /// 让引擎用自己的默认集（引擎升级加了新默认工具时自动跟上）。
-    /// rpi 迁移后暂无调用方（工具过滤未接线），接线点保留。
+    /// 当前接线走 denylist（[`toolset_exclusions_for`]），不做 allowlist：
+    /// allowlist 会误杀宿主目录之外的扩展工具；保留此函数供未来需要
+    /// 严格 allowlist 的场景。
     #[allow(dead_code)]
     fn session_enabled_tools(&self) -> Option<Vec<String>> {
         if self.disabled_toolsets.is_empty() && self.enabled_toolsets.is_empty() {
@@ -320,8 +324,8 @@ pub const TOOLSETS: &[ToolsetDef] = &[
 /// 默认工具集（hermes/旧 pi CLI 默认的超集形状保留 + rpi 的 `docs`）。
 ///
 /// rpi 引擎自身的默认 = `BUILTIN_TOOL_NAMES`（read/bash/edit/write/docs）；
-/// 工具过滤接线到 rpi 之前，此表只驱动 **UI 默认组开关**
-/// （`default_enabled_toolsets`），不影响引擎实际工具面。
+/// 此表驱动 **UI 默认组开关** 与"关掉的组 → `Args.exclude_tools`" 的
+/// denylist（[`toolset_exclusions_for`]），不定义引擎默认工具面。
 pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
     "read",
     "bash",
@@ -354,7 +358,8 @@ pub const DEFAULT_ENABLED_TOOLS: &[&str] = &[
 ///
 /// 顺序按 `TOOLSETS` 声明序 + 组内声明序（`enabled_tools` 是
 /// `Vec<&str>`，顺序不影响语义，但稳定序便于日志比对）。
-/// rpi 迁移后 bin 构建暂无调用方（工具过滤未接线；测试仍消费），接线点保留。
+/// 当前会话接线走 denylist（[`toolset_exclusions_for`]）；本函数仍被
+/// allowlist 形状的测试消费，接线点保留。
 #[allow(dead_code)]
 pub fn enabled_tools_for(enabled_keys: &BTreeSet<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -380,12 +385,59 @@ pub fn default_enabled_toolsets() -> BTreeSet<String> {
         .collect()
 }
 
-/// 会话创建用：当前应传给引擎 `enabled_tools` 的工具名。
+/// 会话创建用：当前 home 的禁用技能名。
+///
+/// 引擎 `Args.exclude_skills` 的宿主来源；`session::build` 在装载后、
+/// 组装系统提示前把这些技能剔除（新会话生效，与开关注释一致）。
+pub(crate) fn skill_exclusions_for(
+    home: &rpi_cli::config::AgentHome,
+) -> Result<Vec<String>, String> {
+    Ok(read_prefs_for(home)?.disabled_skills)
+}
+
+/// 会话创建用：当前 home 被用户关掉的工具集展开成工具名 denylist。
+///
+/// 走引擎 `Args.exclude_tools`（denylist 不会误杀目录外的扩展工具）；
+/// 显式启用的 key 优先于禁用（与 `CapabilityPrefs::toolset_enabled` 同义）。
+pub(crate) fn toolset_exclusions_for(
+    home: &rpi_cli::config::AgentHome,
+) -> Result<Vec<String>, String> {
+    let prefs = read_prefs_for(home)?;
+    Ok(toolset_exclusions_from_prefs(&prefs))
+}
+
+fn toolset_exclusions_from_prefs(prefs: &CapabilityPrefs) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for toolset in TOOLSETS {
+        if prefs
+            .enabled_toolsets
+            .iter()
+            .any(|key| key == toolset.key)
+        {
+            continue;
+        }
+        if !prefs
+            .disabled_toolsets
+            .iter()
+            .any(|key| key == toolset.key)
+        {
+            continue;
+        }
+        for tool in toolset.tools {
+            if !out.iter().any(|existing| existing == tool) {
+                out.push((*tool).to_string());
+            }
+        }
+    }
+    out
+}
+
+/// 会话创建用：当前应传给引擎 `enabled_tools` 的工具名（allowlist 形状）。
 ///
 /// 委托给 `CapabilityPrefs::session_enabled_tools`（双向语义：禁用集 +
 /// 显式启用集）。`None` = 用户没动过任何开关——**不传比传一份算出来的
 /// 列表更安全**：引擎升级加了新默认工具时，不传能自动拿到。
-/// rpi 迁移后暂无调用方（工具过滤未接线），接线点保留；本体 home 口径。
+/// 当前接线走 denylist（[`toolset_exclusions_for`]），本函数保留；本体 home 口径。
 #[allow(dead_code)]
 pub(crate) fn enabled_tools_for_session() -> Result<Option<Vec<String>>, String> {
     let home = rpi_cli::config::AgentHome::process();
@@ -682,7 +734,8 @@ pub fn pi_validate_skill(name: String, description: String) -> serde_json::Value
 ///
 /// 返回 `Ok(None)` = 没有可见技能（不注入空块）；读配置/装载失败一律 Err
 /// （用户以为技能生效了、实际没生效，比报错难查得多）。
-/// rpi 迁移后暂无调用方——注入点（rpi AgentHarnessResources 组装）待接回。
+/// 会话侧技能由引擎 `session::build` 自己装载（禁用项经 `Args.exclude_skills`
+/// 过滤）；本函数保留给需要宿主渲染技能块的场景。
 /// **本体 home** 口径（进程级兜底；会话侧技能由引擎按 AgentHome 自己装）。
 #[allow(dead_code)]
 pub(crate) fn skills_prompt_for_session() -> Result<Option<String>, String> {
@@ -852,5 +905,34 @@ mod tests {
         prefs.enabled_toolsets.retain(|k| k != "memory");
         prefs.disabled_toolsets.push("memory".to_string());
         assert!(!prefs.toolset_enabled("memory"));
+    }
+
+    /// 没动过开关 → 引擎 denylist 为空（不改引擎默认工具面）。
+    #[test]
+    fn untouched_prefs_exclude_no_tools() {
+        assert!(toolset_exclusions_from_prefs(&CapabilityPrefs::default()).is_empty());
+    }
+
+    /// 关掉的组展开成工具名 denylist（会话创建时经 Args.exclude_tools）。
+    #[test]
+    fn disabled_toolset_expands_to_tool_names() {
+        let prefs = CapabilityPrefs {
+            disabled_toolsets: vec!["search".to_string()],
+            ..CapabilityPrefs::default()
+        };
+        let deny = toolset_exclusions_from_prefs(&prefs);
+        assert_eq!(deny, vec!["grep".to_string()]);
+    }
+
+    /// 显式启用优先于禁用（与 toolset_enabled 同义）——既在禁用集又在启用集
+    /// 的组不该被 deny。
+    #[test]
+    fn explicit_enable_overrides_stale_disable_entry() {
+        let prefs = CapabilityPrefs {
+            disabled_toolsets: vec!["search".to_string()],
+            enabled_toolsets: vec!["search".to_string()],
+            ..CapabilityPrefs::default()
+        };
+        assert!(toolset_exclusions_from_prefs(&prefs).is_empty());
     }
 }

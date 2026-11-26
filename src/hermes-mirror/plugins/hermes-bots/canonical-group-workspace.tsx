@@ -712,7 +712,7 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack, onReplace
       {sendHint && <p aria-live="polite" className="px-4 pb-1 text-xs text-(--ui-text-secondary)">{sendHint}</p>}
       <div className="px-4">
       <RoomComposer
-        above={reply && <RoomReplyChip cancelLabel={labels.cancelReply} label={fill(labels.replyingTo, { name: reply.name })}
+        aboveSurface={reply && <RoomReplyChip cancelLabel={labels.cancelReply} label={fill(labels.replyingTo, { name: reply.name })}
           onCancel={() => { draftThread.current = undefined; setReply(null) }} quote={reply.quote} />}
         attach={<CanonicalGroupAttachments attachments={attachments} binding={binding} disabled={composerLocked} downloads={offersGroupMethod(methods, 'groups.attachment.download')} onChange={setAttachments} onUploadingChange={setUploading} ref={uploader} uploads={offersGroupMethod(methods, 'groups.attachment.upload')} />}
         canSend={canSend}

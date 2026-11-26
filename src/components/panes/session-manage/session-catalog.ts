@@ -26,6 +26,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { inTauri } from '@/lib/tauri-window'
 import { createStore, useStore } from 'zustand'
 
+import { botsStore } from '@/components/panes/hub/bots-store'
+
 import { pruneOrder, prunePins, togglePinId } from './session-order'
 
 // ── 持久化键 ──────────────────────────────────────────────────────────────
@@ -931,9 +933,42 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
 
 // ── 统一选择器 ───────────────────────────────────────────────────────────
 
-/** 统一显示名（所有消费方同源）：pi name ?? 派生标题 ?? New Chat。 */
-export const sessionDisplayName = (e: SessionCatalogEntry | undefined): string =>
-  e?.piName ?? e?.derivedTitle ?? 'New Chat'
+/**
+ * 会话真名是否其实"不是会话名"（显示层降级判据，2026-11-25 用户：
+ * "切换 bot 后会话名显示的是 bot 的名字，不是会话名了"）：
+ * - `Bot Chat` = 引擎侧机器人常驻会话的规范名（hermes 同款身份名），
+ *   要展示的是派生标题/新会话，不是这串管道名；
+ * - 会话真名恰好等于**所属环境 bot 的显示名/环境名** = 旧版
+ *   `session.create` 拿档案名冒充会话名的历史污染（新代码已不再写，
+ *   但已落盘的名字要按未命名显示——派生标题接管）。
+ */
+const isPlaceholderSessionName = (e: SessionCatalogEntry, name: string): boolean => {
+  if (name === 'Bot Chat') return true
+  // 环境名本身就是旧 bug 写的名字（session.create 曾回落 bot.name）；历史
+  // 会话可能没有 profile 标签（隔离前的铸造），所以再来一道花名册判据。
+  if (e.profile && name === e.profile) return true
+  for (const bot of botsStore.getState().bots) {
+    if (name === bot.name) return true
+    const title = bot.title.trim()
+    if (title.length > 0 && name === title) return true
+  }
+  return false
+}
+
+/** 统一显示名（所有消费方同源）：pi name ?? 派生标题 ?? New Chat——但
+ *  "不是会话名"的 pi name（Bot Chat / 档案名污染）降级为派生标题。 */
+export const sessionDisplayName = (e: SessionCatalogEntry | undefined): string => {
+  const name = e?.piName
+  if (name && name.length > 0 && !isPlaceholderSessionName(e!, name)) return name
+  return e?.derivedTitle ?? 'New Chat'
+}
+
+/** 行的 **pi 真名**（Bot Mode 管道过滤专用：显示名会把 `Bot Chat` 降级成
+ *  `New Chat`，过滤必须看真名，否则降级后的管道会话会以 New Chat 露进侧栏
+ *  ——2026-11-26 用户："机器人页点击一下就新建一个会话"的可见症状）。
+ *  目录条目缺席时回落调用方给的行标题。 */
+export const sessionRawTitle = (id: string, fallback?: string): string | undefined =>
+  sessionCatalog.getState().entries[id]?.piName ?? fallback
 
 /** 统一项目名来源：会话 cwd ?? 待落盘新会话 cwd。 */
 export const sessionProjectCwd = (

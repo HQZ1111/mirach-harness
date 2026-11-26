@@ -94,6 +94,7 @@ let workspaceProjectsBackfilled = false
 import { sidebarViewStore } from '@/components/panes/session-manage/sidebar-view'
 import { mainViewStore } from '@/components/panes/main-view-store'
 import { fsList } from '@/lib/fs'
+import { pendingBotChatStore } from '@/lib/pending-bot-chat'
 import {
   activeSessionCwd,
   reviewStore,
@@ -104,12 +105,18 @@ import {
   setStoredSessionOpener,
 } from '@/components/panes/session-manage/session-tab-bridge'
 import { setSessionListRefresher } from '@/components/panes/session-manage/session-refresh-bridge'
-import { botsStore, botDisplayName } from '@/components/panes/hub/bots-store'
+import { botsStore } from '@/components/panes/hub/bots-store'
+import { selectBotsRoster } from '@/plugins/bots-selection-bridge'
 import {
+  followProfileBridge,
   profileStore,
   setActiveProfileLocal,
+  setNewChatDraftRequester,
+  setProfileFollower,
   setProfileSwitcher,
+  useActiveProfile,
 } from '@/components/panes/session-manage/active-profile-bridge'
+import { useBotsFeatureDesired } from '@/plugins/bots-gate'
 
 import {
   BoundarySpeechSynthesisAdapter,
@@ -146,9 +153,22 @@ function botOwnerForSession(sessionId: null | string): null | { connectionId: st
   return { connectionId: '', profile: bot.name }
 }
 
+/** 打开某个会话应当进入的环境（undefined = 该会话还未进目录且不是 bot
+ *  会话，无法判定——不跟随）。bot 双锚优先（插件刚 mint 的 Bot Chat 还没
+ *  进 pi_list_sessions，此时只有锚知道它属于哪个环境）。 */
+function profileForSession(sessionId: string): string | null | undefined {
+  const owner = botOwnerForSession(sessionId)
+  if (owner) return owner.profile
+  const entry = sessionCatalog.getState().entries[sessionId]
+  return entry ? entry.profile ?? null : undefined
+}
+
 /** 自动命名已尝试过的会话（每会话只做一次——含失败，失败 console 可见、
  * 不静默重试；跨重启由 pi 持久的 name 字段 + 默认态判定兜住重名） */
 const autoNamedSessions = new Set<string>()
+
+/** 0 消息 Bot Chat 启动清扫只跑一次（跨重连不重复扫） */
+let emptyBotChatSwept = false
 
 /** 朗读适配器（read-aloud）：speechSynthesis 不存在的环境不注册（核心
  * capabilities.speech=false → UI 钮隐藏），console.info 一次 */
@@ -219,6 +239,20 @@ function describeWorkspaceDirectoryError(code: string, cwd: string): string {
     default:
       return `无法读取文件夹（${code}）：${cwd}`
   }
+}
+
+/** 会话文件路径比较（Windows：分隔符统一、去 `\\?\` 前缀、去尾分隔符、
+ *  大小写不敏感）。lastSessionPath 与目录行的 path 可能一个来自 pi（`\`）
+ *  一个来自前端登记表（`/`）——直接 `===` 会漏清"已删空会话"的启动恢复
+ *  记录，下次启动对已删文件报「会话文件无法打开」（2026-11-26 实报）。 */
+function sameStoredSessionPath(a: null | string | undefined, b: null | string | undefined): boolean {
+  if (!a || !b) return false
+  const key = (path: string) => {
+    const raw = path.replace(/\//g, '\\').replace(/^\\\\\?\\/, '')
+    const trimmed = raw.length > 3 ? raw.replace(/\\+$/, '') : raw
+    return trimmed.toLowerCase()
+  }
+  return key(a) === key(b)
 }
 
 /** 渲染错误兜底：归约链路的任何意外不得白屏整个应用（只隔离聊天树）。 */
@@ -385,7 +419,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       if (!currentThreadId) return
       const path = sessionCatalog.getState().entries[currentThreadId]?.path
       if (typeof path !== 'string' || path.length === 0) return
-      if (cachedAppPrefs()?.lastSessionPath === path) return
+      if (sameStoredSessionPath(cachedAppPrefs()?.lastSessionPath, path)) return
       void updateAppPrefs({ lastSessionPath: path }).catch((e) =>
         console.error('[app-prefs] 记录上次会话失败（启动恢复将使用旧路径）', e),
       )
@@ -407,6 +441,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   }, [currentThreadId, derivedTitle])
 
   const refreshThreads = useCallback(async () => {
+    // 花名册先加载（会话显示名的降级判据要用 bot 名/显示名——旧
+    // session.create 把档案名写进 pi name 的历史行按未命名显示）。
+    if (botsStore.getState().bots.length === 0) botsStore.getState().load()
     // 项目注册表（侧栏 project 分组 / 行菜单归属标签的数据面）：只成功拉
     // 一次；失败置 projectsError（设置页可见、可手动重试），不自动循环重试。
     // includeDeleted=true：软删项目的名字仍要能解析（归属映射保留）。
@@ -518,29 +555,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           : { custom: row.custom as Record<string, unknown> }),
       }),
     )
-    // bot 常驻会话（canonical "Bot Chat"）的**显示名**：会话真名固定是
-    // "Bot Chat"（引擎落盘 + registry 身份不动），但对话区标题（ChatTabLabel
-    // 下行）与页签读 catalog 显示名——直接显示 "Bot Chat" 既不是会话名也
-    // 无法区分 bot（2026-11-23 用户："下面是会话名，现在会话名变成 bot chat
-    // 了"）。显示层与普通会话同款：优先派生标题（首条用户消息），还没有
-    // 派生标题时回落到机器人显示名（新 bot 会话）。
-    const botChatNames = new Map<string, string>()
-    for (const b of botsStore.getState().bots) {
-      if (b.chatSessionId) botChatNames.set(b.chatSessionId, botDisplayName(b))
-    }
-    if (botChatNames.size > 0) {
-      const priorEntries = sessionCatalog.getState().entries
-      for (const row of rows) {
-        const botLabel = botChatNames.get(row.id)
-        if (!botLabel) continue
-        // 规范名 "Bot Chat" 才换成显示名；用户手动重命名过（pi name 不是
-        // "Bot Chat"）必须尊重原名，不能被显示层覆盖。
-        if (row.title && row.title !== 'Bot Chat') continue
-        row.title = priorEntries[row.id]?.derivedTitle || botLabel
-      }
-    }
     // 单一真相源灌入：未读播种已并入 ingest（hermes ingestRows 语义）；
-    // 侧栏 threads（assistant-ui）title 用统一显示名。
+    // 侧栏 threads（assistant-ui）title 用统一显示名。会话真名保持 pi 原值
+    // ——Bot Chat / 档案名污染由 sessionDisplayName 统一降级（2026-11-25
+    // 用户："切换 bot 后会话名显示的是 bot 的名字"；此前的显示名覆写会把
+    // bot 名当 piName 灌回 catalog，见 session-catalog 的降级判据注释）。
     sessionCatalog.getState().ingest(rows, currentThreadIdRef.current)
     setThreads(
       rows.map((r) => ({
@@ -548,6 +567,56 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         title: sessionDisplayName(sessionCatalog.getState().entries[r.id]),
       })),
     )
+  }, [])
+
+  /**
+   * 启动清扫：0 消息的 `Bot Chat` 管道会话（历史铸造/点击 bot 但从未发言）
+   * 不留在磁盘上（2026-11-26 用户："没有消息的会话不要落盘啊"）。只清
+   * **0 消息 + 名字恰为 Bot Chat** 的行；有内容/正在看的/其它名字一律不动。
+   * 进程内只跑一次（跨重启执行）。
+   */
+  const sweepEmptyBotChats = useCallback(async (): Promise<void> => {
+    if (emptyBotChatSwept) return
+    emptyBotChatSwept = true
+    try {
+      const index = await invoke<{
+        sessions?: { id: string; messageCount?: number; name?: string; path: string }[]
+      }>('pi_sessions_index')
+      const active = currentThreadIdRef.current
+      let liveId: string | null = null
+      try {
+        liveId = (await invoke<{ sessionId?: null | string }>('pi_get_state')).sessionId ?? null
+      } catch {
+        /* 无 live 会话 */
+      }
+      const victims = (index.sessions ?? []).filter(
+        (s) =>
+          (s.messageCount ?? 0) === 0 &&
+          (s.name ?? '') === 'Bot Chat' &&
+          s.id !== active &&
+          s.id !== liveId,
+      )
+      for (const victim of victims) {
+        try {
+          await invoke('pi_delete_session', { path: victim.path })
+          for (const bot of botsStore.getState().bots) {
+            if (bot.chatSessionId === victim.id) {
+              botsStore.getState().patchMeta(bot.name, {
+                chatSessionId: null,
+                chatSessionPath: null,
+              })
+            }
+          }
+        } catch (e) {
+          console.error(`[pi] 清理 0 消息 Bot Chat 失败（${victim.path}）`, e)
+        }
+      }
+      if (victims.length > 0) {
+        console.info(`[pi] 已清理 ${victims.length} 条 0 消息 Bot Chat（不落盘规则）`)
+      }
+    } catch (e) {
+      console.error('[pi] 0 消息 Bot Chat 清扫失败', e)
+    }
   }, [])
 
 
@@ -672,6 +741,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         if (cancelled) return
         await refreshThreads()
         if (cancelled) return
+        void sweepEmptyBotChats()
         try {
           let st: { sessionId: string | null } | null = null
           try {
@@ -706,16 +776,32 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
                 }).then(() => undefined)
                 pendingOpenRef.current = restoreOpen
                 setEngineAttaching(true)
-                await restoreOpen
-                setEngineAttaching(false)
+                try {
+                  await restoreOpen
+                } finally {
+                  // 失败也必须撤掉「正在准备会话」——否则红条/错误之后提示
+                  // 永远停在 composer 上方（2026-11-26 用户："引擎还在准备
+                  // 中这是为什么"）。
+                  setEngineAttaching(false)
+                }
                 if (cancelled) return
                 st = await invoke<{ sessionId: string | null }>('pi_get_state')
               }
             } catch (e) {
+              const message = e instanceof Error ? e.message : String(e)
               console.error(
                 '[runtime] 恢复上次会话失败（文件被删 / 锁冲突？）——保持新会话空态',
                 e,
               )
+              // 启动恢复失败必须可见（规矩 12：不静默降级）。文件已不存在
+              // 时清掉记录，避免每次启动重复对同一个已删文件报错；锁冲突等
+              // 瞬时错误保留记录，下次启动还可以恢复。
+              errorBridge.getState().setError(`恢复上次会话失败：${message}`, false)
+              if (/os error 2|找不到指定的文件|not found|no such file/i.test(message)) {
+                void updateAppPrefs({ lastSessionPath: null }).catch((err) =>
+                  console.error('[app-prefs] 清理失效的上次会话记录失败', err),
+                )
+              }
             }
           }
           if (cancelled) return
@@ -750,7 +836,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       cancelled = true
       es?.close()
     }
-  }, [actorRef, refreshThreads, hydrateTranscriptTail, reconnectSeq, bootRetrySeq])
+  }, [
+    actorRef,
+    refreshThreads,
+    hydrateTranscriptTail,
+    reconnectSeq,
+    bootRetrySeq,
+    sweepEmptyBotChats,
+  ])
 
   /** 自动会话命名（规则段，hermes title_generator 两段式的即时段）：
    * POST 成功后对「默认态名」（pi SessionIndex 的 name 为 null/空 = 用户
@@ -958,6 +1051,172 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     void timelineMarkerBridge.getState().refresh(sessionId)
   }, [])
 
+  /**
+   * 「没有消息的会话不要落盘」（2026-11-26 用户）。
+   *
+   * 离开一个**从未发过消息**的会话（典型：点 bot 行刚铸出来还没说话的
+   * canonical Bot Chat、空的工作区会话）时，把它的文件删掉并清掉指向它的
+   * bot 双锚——不留 0 消息空壳。判据以引擎 `pi_get_state.messageCount`
+   * 为准（当前 live 会话才可信）；有消息 / 无法确认一律不动。
+   *
+   * 只在“离开当前会话”的入口调用（切会话 / New Chat / 切环境）；打开中的
+   * 空会话不会凭空消失。
+   */
+  const pruneEmptyCurrentSession = useCallback(
+    async (sessionId: string | null): Promise<void> => {
+      if (!sessionId) return
+      let path: string | undefined
+      let count: number | undefined
+      try {
+        const st = await invoke<{ messageCount?: unknown; sessionId?: null | string }>(
+          'pi_get_state',
+        )
+        if (st?.sessionId !== sessionId) return
+        if (typeof st.messageCount !== 'number' || st.messageCount !== 0) return
+        count = st.messageCount
+        path = sessionCatalog.getState().entries[sessionId]?.path
+      } catch (e) {
+        console.error('[pi] 读取空会话状态失败——不清理（避免误删有内容的会话）', e)
+        return
+      }
+      if (count !== 0) return
+      try {
+        await invoke('pi_discard_session')
+      } catch (e) {
+        console.error('[pi] 丢弃空会话失败——保留文件', e)
+        return
+      }
+      if (typeof path === 'string' && path.length > 0) {
+        try {
+          await invoke('pi_delete_session', { path })
+        } catch (e) {
+          console.error('[pi] 删除空会话文件失败（文件保留）', e)
+          return
+        }
+      }
+      workspaceSessionIndex.getState().remove(sessionId)
+      clearThreadScroll(sessionId)
+      // 删掉的会话若是「上次打开的会话」，清记录——否则下次启动恢复它
+      // 会报文件不存在（错误循环）。
+      if (path && sameStoredSessionPath(cachedAppPrefs()?.lastSessionPath, path)) {
+        void updateAppPrefs({ lastSessionPath: null }).catch((e) =>
+          console.error('[app-prefs] 清理已删空会话的 lastSessionPath 失败', e),
+        )
+      }
+      // 双锚指向已删会话 = 悬空身份：清掉，下次点击重新铸造并记新锚。
+      for (const bot of botsStore.getState().bots) {
+        if (bot.chatSessionId === sessionId) {
+          botsStore.getState().patchMeta(bot.name, {
+            chatSessionId: null,
+            chatSessionPath: null,
+          })
+        }
+      }
+    },
+    [],
+  )
+
+  /**
+   * 首个消息发送时把「待落点草稿」落成真会话（2026-11-26 用户：
+   * "没有消息的会话不要落盘"——选择工作区文件夹只进入草稿态，不再
+   * 立即 `pi_new_session`）。返回新会话 id；无 pendingCwd（普通 New Chat）
+   * 返回 null（由 agui ensure 按当前环境懒创建，既有路径不变）。
+   */
+  const ensureDraftSession = useCallback(async (): Promise<string | null> => {
+    if (currentThreadIdRef.current) return currentThreadIdRef.current
+    const pendingCwd = sessionCatalog.getState().pendingCwd
+    const pendingBot = pendingBotChatStore.getState().pending
+    if (!pendingCwd && !pendingBot) return null
+    try {
+      let sessionId: string
+      let createdPath: string | null = null
+      let draftCwd: string | null = pendingCwd
+      if (pendingBot) {
+        // bot 草稿（host.newChat 的 bots 路径）：第一条消息才建会话，
+        // SOUL/模型/工具集由 createBotDraftSession 施加；cwd = 用户选的
+        // 文件夹优先，否则 bot.cwd / 引擎默认。
+        const { createBotDraftSession } = await import('@/sdk/host-rpc')
+        const created = await createBotDraftSession(pendingBot.profile, pendingCwd)
+        sessionId = created.stored_session_id
+        createdPath = created.path ?? null
+        draftCwd = created.cwd ?? pendingCwd
+        pendingBotChatStore.getState().set(null)
+      } else {
+        await invoke('pi_new_session', { cwd: pendingCwd })
+        const st = await invoke<{ messageCount?: unknown; sessionId?: null | string }>(
+          'pi_get_state',
+        )
+        if (typeof st?.sessionId !== 'string' || st.sessionId.length === 0) {
+          throw new Error('pi 没有返回新会话 id')
+        }
+        sessionId = st.sessionId
+      }
+      let resolution: SessionPathResolution = { root: '', path: null, reason: '未定位' }
+      if (createdPath) {
+        resolution = { root: '', path: createdPath, reason: '宿主创建回传' }
+      } else {
+        try {
+          const sessions = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
+          const hit = (sessions ?? []).find((s) => s.id === sessionId)
+          resolution = hit
+            ? { root: '', path: hit.path }
+            : await resolveSessionPath(draftCwd ?? '', sessionId)
+        } catch (e) {
+          console.error(`[pi] 工作区会话文件定位失败（${draftCwd ?? ''} / ${sessionId}）`, e)
+        }
+      }
+      const now = Date.now()
+      workspaceSessionIndex.getState().register({
+        id: sessionId,
+        cwd: draftCwd ?? '',
+        ...(resolution.path ? { path: resolution.path } : {}),
+        profile: profileStore.getState().profile,
+        messageCount: 0,
+        createdAtMs: now,
+        lastModifiedMs: now,
+      })
+      sessionCatalog.getState().setPendingCwd(null)
+      setCurrentThreadId(sessionId)
+      sessionCatalog.getState().setActive(sessionId)
+      await refreshThreads()
+      resetSessionScopedBridges(sessionId)
+      branchBridge.getState().requestRefresh()
+      return sessionId
+    } catch (e) {
+      // 让 assistant-ui 把草稿/附件回填（MessageNotSentError 语义）
+      throw new MessageNotSentError(
+        `在所选工作区创建会话失败：${e instanceof Error ? e.message : String(e)}`,
+      )
+    }
+  }, [refreshThreads, resetSessionScopedBridges])
+
+  /** 离开当前前台会话 → New Chat 草稿（不切环境）。切环境与 host.newChat
+   *  的 bot 草稿共用同一条拆除链。 */
+  const teardownToNewChat = useCallback(async (): Promise<void> => {
+    const leavingEmpty = currentThreadIdRef.current
+    try {
+      if (actorRef.getSnapshot().matches('streaming')) await invoke('pi_interrupt')
+      // 空会话（bot 行刚铸出来还没说话）不留在磁盘上
+      await pruneEmptyCurrentSession(leavingEmpty)
+      await invoke('pi_discard_session')
+    } catch (e) {
+      // 会话拆除失败不阻断落点切换（环境/草稿真相已定），但必须可见。
+      console.error('[profile] 离开当前会话失败（侧栏仍会按新落点重扫）', e)
+    }
+    actorRef.send({ type: 'RESET' })
+    resetTranscriptTail()
+    setCurrentThreadId(null)
+    sessionCatalog.getState().setActive(null)
+    sessionCatalog.getState().setPendingCwd(null)
+    resetSessionScopedBridges(null)
+    try {
+      await refreshThreads()
+    } catch (e) {
+      console.error('[profile] 落点切换后会话目录刷新失败（侧栏保持旧列表）', e)
+    }
+    branchBridge.getState().requestRefresh()
+  }, [actorRef, pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges])
+
   /** 切换活动环境（hermes Desktop「配置档案」选择的对偶；2026-11-22）。
    *
    *  引擎侧 `pi_profile_set_active` 只改活动 home/会话根；「离开当前会话、
@@ -980,33 +1239,92 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // **退出聚合视图**——侧栏回到「只看当前环境」（$showAllProfiles=false
       // 的对偶）。复位放这里，任何切换入口（设置页/菜单/插件）都走同一条。
       sidebarViewStore.getState().setShowAllProfiles(false)
-      try {
-        if (actorRef.getSnapshot().matches('streaming')) await invoke('pi_interrupt')
-        await invoke('pi_discard_session')
-      } catch (e) {
-        // 会话拆除失败不阻断环境切换（环境真相已改），但必须可见。
-        console.error('[profile] 离开当前会话失败（侧栏仍会按新环境重扫）', e)
-      }
-      actorRef.send({ type: 'RESET' })
-      resetTranscriptTail()
-      setCurrentThreadId(null)
-      sessionCatalog.getState().setActive(null)
-      resetSessionScopedBridges(null)
-      try {
-        await refreshThreads()
-      } catch (e) {
-        console.error('[profile] 环境切换后会话目录刷新失败（侧栏保持旧列表）', e)
-      }
-      branchBridge.getState().requestRefresh()
+      // 显式切环境 = 作废上一份 bot 新聊天草稿归属。
+      pendingBotChatStore.getState().set(null)
+      await teardownToNewChat()
       return true
     },
-    [actorRef, refreshThreads, resetSessionScopedBridges],
+    [teardownToNewChat],
   )
+
+  /** host.newChat 的 bot 草稿入口：丢当前会话但不改活动环境。 */
+  const requestNewChatDraft = useCallback(async (): Promise<boolean> => {
+    await teardownToNewChat()
+    return true
+  }, [teardownToNewChat])
 
   useEffect(() => {
     setProfileSwitcher(switchProfile)
-    return () => setProfileSwitcher(null)
-  }, [switchProfile])
+    setNewChatDraftRequester(requestNewChatDraft)
+    return () => {
+      setProfileSwitcher(null)
+      setNewChatDraftRequester(null)
+    }
+  }, [switchProfile, requestNewChatDraft])
+
+  // bots 插件关闭 = 回到本体 Mirach 环境（用户 2026-11-26："bots关闭后不是
+  // 要回到默认的mirach配置吗？"）。插件关掉后具名环境没有管理面了，留在
+  // 具名 home 会让新建会话继续落一个看不见的 bot 配置；这里走正式环境
+  // 切换（discard 当前会话 + 重扫侧栏），不是只改 UI 投影。
+  const activeProfileForBotsGate = useActiveProfile()
+  const botsFeatureDesired = useBotsFeatureDesired()
+  const botsEnabledRef = useRef(botsFeatureDesired)
+  // boot 时插件已经关着也要回落一次（设置里关掉后重启，活动环境仍可能
+  // 持久化成具名 home）；true→false 的直播切换同样置位。只回落一次——
+  // 之后用户在「环境」菜单显式选别的档案不再强行拉回，否则永远离不开默认。
+  const pendingDefaultResetRef = useRef(!botsFeatureDesired)
+  useEffect(() => {
+    const wasEnabled = botsEnabledRef.current
+    botsEnabledRef.current = botsFeatureDesired
+    if (botsFeatureDesired) {
+      pendingDefaultResetRef.current = false
+      return
+    }
+    if (wasEnabled) pendingDefaultResetRef.current = true
+    if (!pendingDefaultResetRef.current || activeProfileForBotsGate === null) return
+    pendingDefaultResetRef.current = false
+    void switchProfile(null).then((ok) => {
+      if (!ok) {
+        console.error('[bots] 插件关闭后回到默认环境失败——保持原环境')
+      }
+    })
+  }, [activeProfileForBotsGate, botsFeatureDesired, switchProfile])
+
+  /** 轻量跟随活动环境（打开会话 / 点机器人 / bot 新聊天调用）。
+   *
+   *  「三个入口一个真相」（2026-11-25 用户："左下角头像、会话选项的环境、
+   *  机器人页的选中，三个不统一"）：打开哪个环境的会话就把哪个环境设为
+   *  活动环境——侧栏换源、底栏头像、环境菜单、机器人页高亮随之一致。
+   *  与 `switchProfile`（显式切换，hermes selectProfile 语义）的区别 =
+   *  **不打断当前会话**（不 interrupt/discard/RESET），打开动作自己会把
+   *  前台切到目标会话。失败原样返回 false（调用方可见）。 */
+  const followProfile = useCallback(
+    async (profile: null | string): Promise<boolean> => {
+      const target = profile === '' ? null : (profile ?? null)
+      if (profileStore.getState().profile === target) return true
+      try {
+        const applied = await invoke<null | string>('pi_profile_set_active', { profile: target })
+        setActiveProfileLocal(applied ?? null)
+      } catch (e) {
+        console.error('[profile] 跟随环境失败——保持原环境', e)
+        return false
+      }
+      sidebarViewStore.getState().setShowAllProfiles(false)
+      // 机器人页跟随（用户："选择环境，机器人页没跟"）：打开某环境的会话/
+      // 点 bot 行时，花名册选中同步到该环境（插件经 window 事件接收）。
+      selectBotsRoster(target)
+      void refreshThreads().catch((e) =>
+        console.error('[profile] 跟随环境后会话目录刷新失败', e),
+      )
+      return true
+    },
+    [refreshThreads],
+  )
+
+  useEffect(() => {
+    setProfileFollower(followProfile)
+    return () => setProfileFollower(null)
+  }, [followProfile])
 
   /** fork 执行（「从此分支探索」）：守卫 → fork 点 index 映射 →
    * pi_fork_session → 采纳新会话（HYDRATE 重水合——switchToThread 同款
@@ -1254,21 +1572,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
 
   // ── 「选择工作区新建会话」执行器（session-workspace 请求桥，branch/
   //    checkpoint 同款请求-执行形态）──
-  // 顺序 = ZCode ProjectEditor.browse/save 的本地同构（
-  // packages/ui/src/project-sidebar/ProjectEditor.tsx:217-261 先选目录、
-  // :262-368 再校验+保存）：
-  //   ① fs_list 证明目标存在且是可读目录（ZCode `project.directory-required`，
-  //      services/src/project/index.ts:212-216；空目录合法）
-  //   ② pi_new_session（working_directory 透传 SessionOptions）
-  //   ③ pi_get_state 取 sessionId + messageCount
-  //   ④ 定位会话文件（会话根按 cwd 分裂，pi_list_sessions 扫不到）并登记
-  //   ⑤ RESET + 采纳 + refreshThreads（登记行随 pi 列表一起进侧栏）
+  // **2026-11-26 用户定稿："没有消息的会话不要落盘"**：选目录只进入
+  // **草稿态**（pendingCwd + 空白对话），不再立即 `pi_new_session`；
+  // 第一条消息发送时由 `ensureDraftSession` 建会话（cwd 随创建传入）。
+  // 顺序 = ① fs_list 校验目录（ZCode project.directory-required，空目录合法）
+  // ② 项目注册表登记（同根复用/回收站恢复；失败则整个请求失败）
+  // ③ 丢弃旧会话 + RESET → 草稿（tab/chip 立即显示待落 cwd）
   // 失败一律写 sessionWorkspaceStore.error（composer 工作区行可见），
-  // 不排队假装成功；pendingCwd 只在建会话期间存在，成功/失败都清掉。
-  // 同一目录已有会话仍新建会话：ZCode 的项目创建走 service.saveProject
-  // 且不带 reuseExistingRoot（ProjectEditor.tsx:344-352），只有系统
-  // "打开文件夹"才复用项目（useRootWorkspaceActions.ts:608）——mirach 的
-  // 等价动作（本入口）按"新建"语义，复用入口不存在。
+  // 不排队假装成功。
   const workspaceRequest = useStore(sessionWorkspaceStore, (s) => s.request)
   const handledWorkspaceSeqRef = useRef(0)
   const workspaceBusyRef = useRef(false)
@@ -1283,7 +1594,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     handledWorkspaceSeqRef.current = workspaceRequest.seq
     workspaceBusyRef.current = true
     const { seq, cwd } = workspaceRequest
-    // 先亮出将落到的目录（等待 IPC 期间 chip/tab 立即有反馈），失败回滚。
+    // 先亮出将落到的目录（草稿态 tab/chip 立即有反馈），失败回滚。
     sessionCatalog.getState().setPendingCwd(cwd)
     void (async () => {
       const fail = (message: string): void => {
@@ -1303,52 +1614,20 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           return
         }
         // ZCode 选文件夹 = 新建项目：先落项目注册表（同根复用/回收站恢复），
-        // 再建会话；失败则整个请求失败（不留下「有会话无项目」）。
+        // 再进入草稿；失败则整个请求失败（不留下「有会话无项目」）。
         await ensureProjectForWorkspace(cwd)
         await sessionCatalog.getState().loadProjects(true)
-        await invoke('pi_new_session', { cwd })
-        const st = await invoke<{ sessionId: string | null; messageCount?: unknown }>(
-          'pi_get_state',
-        )
-        if (typeof st?.sessionId !== 'string' || st.sessionId.length === 0) {
-          console.error('[pi] 工作区新建会话后 pi_get_state 无 sessionId——不采纳', st)
-          fail('pi 没有返回新会话 id——未切换到该文件夹')
-          return
-        }
-        let resolution: SessionPathResolution = { root: '', path: null, reason: '未定位' }
+        // 草稿态：旧会话（若为 0 消息空壳）删掉，其余只 flush 不删文件。
+        await pruneEmptyCurrentSession(currentThreadIdRef.current)
         try {
-          // 环境隔离下 pi_list_sessions 只扫活动环境的会话根，具名环境里
-          // 任意 cwd 的新会话都在其中；本体环境仍可能扫不到别的 cwd，退回
-          // 按 cwd 推路径（既有行为）。
-          const sessions = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
-          const hit = (sessions ?? []).find((s) => s.id === st.sessionId)
-          resolution = hit
-            ? { root: '', path: hit.path }
-            : await resolveSessionPath(cwd, st.sessionId)
+          await invoke('pi_discard_session')
         } catch (e) {
-          console.error(`[pi] 工作区会话文件定位失败（${cwd} / ${st.sessionId}）`, e)
+          console.error('[pi] 丢弃旧会话失败（仍进入工作区草稿）', e)
         }
-        if (!resolution.path) {
-          // 会话是真的（引擎已切过去），但缺 path 会让该行的打开/删除
-          // 动作明确失败——错误必须可见，不能默默展示一个坏行。
-          console.error(`[pi] 工作区会话文件未定位：${resolution.reason ?? '未知原因'}`)
-        }
-        const now = Date.now()
-        workspaceSessionIndex.getState().register({
-          id: st.sessionId,
-          cwd,
-          ...(resolution.path ? { path: resolution.path } : {}),
-          profile: profileStore.getState().profile,
-          messageCount:
-            typeof st.messageCount === 'number' && Number.isFinite(st.messageCount)
-              ? st.messageCount
-              : 0,
-          createdAtMs: now,
-          lastModifiedMs: now,
-        })
         actorRef.send({ type: 'RESET' })
         resetTranscriptTail()
-        setCurrentThreadId(st.sessionId)
+        setCurrentThreadId(null)
+        sessionCatalog.getState().setActive(null)
         // ZCode 侧栏按项目分组；mirach 默认"更新时间"分组下新工作区没有
         // 可见的组头。仅在默认分组时切到"项目"（用户显式选过 status
         // 等自定义分组时不覆盖）。
@@ -1356,16 +1635,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           sidebarViewStore.getState().setGrouping('project')
         }
         await refreshThreads()
-        resetSessionScopedBridges(st.sessionId)
+        resetSessionScopedBridges(null)
         // 新会话——分支条/fork 点投影清空（同 New Chat 语义）
         branchBridge.getState().requestRefresh()
-        // 会话行已带 cwd 才丢 pendingCwd；refresh 失败时保留它让 tab 仍
-        // 显示真实工作区（New Chat/删除活动会话会清，不会遗留到下一个会话）。
-        if (sessionCatalog.getState().entries[st.sessionId]?.cwd) {
-          sessionCatalog.getState().setPendingCwd(null)
-        }
       } catch (e) {
-        console.error(`[pi] 在工作区新建会话失败（${cwd}）——保持当前会话`, e)
+        console.error(`[pi] 进入工作区草稿失败（${cwd}）——保持当前会话`, e)
         fail(`新建文件夹会话失败：${e instanceof Error ? e.message : String(e)}`)
       } finally {
         sessionWorkspaceStore.getState().clearRequest(seq)
@@ -1373,7 +1647,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     })().finally(() => {
       workspaceBusyRef.current = false
     })
-  }, [workspaceRequest, interruptIfRunning, refreshThreads, resetSessionScopedBridges, actorRef])
+  }, [
+    workspaceRequest,
+    interruptIfRunning,
+    pruneEmptyCurrentSession,
+    refreshThreads,
+    resetSessionScopedBridges,
+    actorRef,
+  ])
 
   // ── run 收尾（streaming → idle 迁移，RUN_FINISHED 与 RUN_ERROR 都走
   // 此迁移）三件事 ─────────────────────────────────────────────────────
@@ -1584,11 +1865,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   )
 
   const switchToThreadPath = useCallback(
-    async (id: string, path: string) => {
+    async (id: string, path: string, force = false) => {
       // 已是当前会话 = 无操作（hermes openSession 的 focusOpenSession 命中
       // main 分支对偶）。不回家重建 harness，也不重扫目录——这是点击已在
       // 看的那一行时唯一正确的响应，也避免了无意义的全量水合。
-      if (id === currentThreadIdRef.current) {
+      // `force` = 插件 openSession 明确要求打开该会话（即使 ref 已是它）：
+      // 后台 profile follow 可能只改了 ref/catalog 而没换 transcript，早退
+      // 会把界面留在旧线程（机器人行"点了没反应"）。
+      if (id === currentThreadIdRef.current && !force) {
         mainViewStore.getState().showChat()
         return
       }
@@ -1604,6 +1888,20 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           return
         }
       }
+      // 环境跟随（2026-11-25）：打开哪个环境的会话就进入哪个环境——侧栏
+      // 作用域/底栏/环境菜单/机器人页选中四处同源。**聚合视图（全部配置
+      // 档案）下不跟随**：那是在浏览所有环境，点行不该把浏览态拆掉。
+      if (!sidebarViewStore.getState().showAllProfiles) {
+        const targetProfile = profileForSession(id)
+        if (targetProfile !== undefined && targetProfile !== profileStore.getState().profile) {
+          const followed = await followProfileBridge(targetProfile)
+          if (!followed) {
+            console.error(`[profile] 会话 ${id} 的环境跟随失败（继续打开，侧栏仍按原环境）`)
+          }
+        }
+      }
+      // 离开的空会话不落盘（2026-11-26）：先清理当前 0 消息会话，再切目标。
+      await pruneEmptyCurrentSession(currentThreadIdRef.current)
       // 乐观高亮（hermes focusOpenSession 先前端面后等 RPC 的对偶）：点行
       // 立即把选中态切过去，侧栏/页签不用干等 open_session + 全量水合。
       // 打开失败时下面 catch 会拉一次真值把选中态纠正回来。
@@ -1639,8 +1937,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             threadScrollBridge.getState().requestRestore(id)
           }
           if (!openSettled) setEngineAttaching(true)
-          await openPromise
-          setEngineAttaching(false)
+          try {
+            await openPromise
+          } finally {
+            setEngineAttaching(false)
+          }
           if (openError) throw openError
           // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
           // 下一次 RUN_STARTED 的归约自然覆盖）。
@@ -1676,7 +1977,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         }
         })
     },
-    [actorRef, hydrateTranscriptTail, refreshThreads, resetSessionScopedBridges],
+    [actorRef, hydrateTranscriptTail, pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges],
   )
 
   const switchToThread = useCallback(
@@ -1702,23 +2003,38 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
    */
   const openStoredSession = useCallback(
     async (storedId: string) => {
+      // 主区前台化：机器人页点行时 active dockview 面板仍是「机器人」栏；
+      // 只切 sessionCatalog 不会把 workspace 拉到前景，用户看起来"点了没
+      // 反应"（2026-11-26 "机器人为什么无法回复" 实锤）。side 栏路径不走这
+      // 里（host.openSession intent=tab 直接开新栏）。
+      const activateWorkspace = (): void => {
+        const api = (globalThis as {
+          __dvApi?: { getPanel?: (id: string) => { api?: { setActive?: () => void } } | undefined }
+        }).__dvApi
+        api?.getPanel?.('workspace')?.api?.setActive?.()
+      }
       const row = threadsRef.current.find((t) => t.id === storedId)
       const knownPath = row?.custom?.path
-      if (typeof knownPath === 'string') {
-        await switchToThreadPath(storedId, knownPath)
-        return
-      }
+      // 插件 openSession 的 path 以引擎活动环境的 `pi_list_sessions` 为准：
+      // 侧栏/目录行可能来自切换前的环境（旧 path 会在 pi_open_session 里
+      // 被当成另一个会话/直接失败）。list 找不到才回落目录行的 path。
       try {
         const sessions = await invoke<{ id: string; path: string }[]>('pi_list_sessions')
         const path = (sessions ?? []).find((s) => s.id === storedId)?.path
-        if (!path) {
-          console.error(`[pi] 存储会话 ${storedId} 不在 pi_list_sessions——无法打开`)
+        if (path) {
+          await switchToThreadPath(storedId, path, true)
+          activateWorkspace()
           return
         }
-        await switchToThreadPath(storedId, path)
       } catch (e) {
-        console.error(`[pi] 存储会话 ${storedId} 打开失败（路径解析）`, e)
+        console.error(`[pi] 存储会话 ${storedId} 路径解析失败（回落目录行 path）`, e)
       }
+      if (typeof knownPath === 'string') {
+        await switchToThreadPath(storedId, knownPath, true)
+        activateWorkspace()
+        return
+      }
+      console.error(`[pi] 存储会话 ${storedId} 不在 pi_list_sessions——无法打开`)
     },
     [switchToThreadPath],
   )
@@ -1755,6 +2071,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // New Chat：flush 旧会话落盘 + 清 handle（不立即建空会话文件），
       // 下一次发送按需创建全新会话；失败保持当前会话（不更新本地态）
       try {
+        // 旧会话如果是 0 消息空壳（bot 行刚铸出来的），直接删掉不留盘
+        await pruneEmptyCurrentSession(currentThreadIdRef.current)
         await invoke('pi_discard_session')
         actorRef.send({ type: 'RESET' })
         resetTranscriptTail()
@@ -1785,11 +2103,28 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error('[pi] 仅当前活跃会话支持重命名')
         return
       }
+      const name = newTitle.trim()
+      if (!name) return
+      // 标题唯一性（hermes core 的 UNIQUE(title) 语义，2026-11-26）：同一
+      // 环境里已有同名会话 → 拒绝改名（上游报 "already in use"）。pi 的
+      // name 没有唯一索引，宿主在写前守一道；查询失败不假装成功但也
+      // 不阻断（console 可见）。
       try {
-        await invoke('pi_rename_session', { name: newTitle })
+        const rows = await invoke<PiSessionMeta[]>('pi_list_sessions')
+        if ((rows ?? []).some((r) => r.id !== id && (r.name ?? '') === name)) {
+          errorBridge
+            .getState()
+            .setError(`会话名「${name}」已被当前环境的另一个会话使用`, false)
+          return
+        }
+      } catch (e) {
+        console.error('[pi] 重命名前查重失败（继续改名，可能产生同名会话）', e)
+      }
+      try {
+        await invoke('pi_rename_session', { name })
         // 选择文件夹建的会话不在 pi_list_sessions：名字同步进登记表，
         // 否则刷新后该行又变回 New Chat。
-        workspaceSessionIndex.getState().setTitle(id, newTitle)
+        workspaceSessionIndex.getState().setTitle(id, name)
         await refreshThreads()
       } catch (e) {
         console.error('[pi] 会话重命名失败', e)
@@ -1979,6 +2314,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         }
         return
       }
+      // 「没有消息的会话不要落盘」（2026-11-26）：工作区草稿在这里才真正
+      // 建会话（cwd 随 pi_new_session 传入）；普通 New Chat 的 ensure 仍由
+      // agui POST 懒创建。
+      await ensureDraftSession()
       actorRef.send({
         type: 'USER_SUBMIT',
         text,

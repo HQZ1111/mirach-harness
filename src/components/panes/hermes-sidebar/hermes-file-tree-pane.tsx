@@ -14,15 +14,17 @@ import { open } from '@tauri-apps/plugin-dialog'
 
 import { fsGitRoot } from '@/lib/fs'
 import { inTauri } from '@/lib/tauri-window'
+import {
+  DEFAULT_WORKSPACE_ROOT,
+  setWorkspaceRoot,
+  workspaceRootStore,
+} from '@/lib/workspace-root'
 import { LoaderCircle } from 'lucide-react'
 import { WorkspaceFileTree } from '@/components/panes/workspace-file-tree/WorkspaceFileTree'
 import { openFilePreview } from './preview-opener'
 
-/** 会话/项目 cwd 概念未接线前的缺省浏览起点（与旧窗格一致）。 */
-const DEFAULT_CWD = 'G:/mirach-harness'
-
 export function HermesFileTreePane() {
-  const [cwd, setCwd] = useState<string | null>(null)
+  const [cwd, setCwd] = useState<string | null>(() => workspaceRootStore.getState().root || DEFAULT_WORKSPACE_ROOT)
   const [root, setRoot] = useState<string | null>(null)
   const [resolveError, setResolveError] = useState<string | null>(null)
 
@@ -31,7 +33,10 @@ export function HermesFileTreePane() {
     try {
       const gitRoot = await fsGitRoot(dir)
       // null = dir 不在 git 仓库内（fs_git_root 的明确返回值）：按 cwd 本身浏览。
-      setRoot(gitRoot ?? dir)
+      const nextRoot = gitRoot ?? dir
+      setRoot(nextRoot)
+      // 审查面板/文件树同源：发布解析后的工作区根（仓库优先）。
+      setWorkspaceRoot(nextRoot)
     } catch (error) {
       console.error('[FileTreePane] fs_git_root 失败', error)
       setResolveError(error instanceof Error ? error.message : String(error))
@@ -40,8 +45,9 @@ export function HermesFileTreePane() {
 
   useEffect(() => {
     if (!inTauri) return
-    setCwd(DEFAULT_CWD)
-    void resolveRoot(DEFAULT_CWD)
+    const initial = workspaceRootStore.getState().root || DEFAULT_WORKSPACE_ROOT
+    setCwd(initial)
+    void resolveRoot(initial)
   }, [inTauri, resolveRoot])
 
   const pickFolder = useCallback(async () => {

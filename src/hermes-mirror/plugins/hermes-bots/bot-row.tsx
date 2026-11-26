@@ -30,7 +30,7 @@ import {
 } from '@hermes/plugin-sdk'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
-import { isBackfilledFacePng } from './avatar-image'
+import { isChosenAvatarImage } from './avatar-image'
 import {
   $botChatFocused,
   $focusedBotOwner,
@@ -130,8 +130,9 @@ export function BotRow({ bot, onDelete, onEdit, onGroup, onNewSection, showHandl
   const isActive = botRowOwnsWorkspace(bot, activeGroup, botChatFocused, focusedOwner, selectedRosterKey)
 
   const { color, image } = botAppearance(bot.name, meta)
-  // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
-  const photo = Boolean(image && !isBackfilledFacePng(image))
+  // Keep user photos/pets (even 160×160 ones); drop only the unknown-source
+  // 160px SVG backfill so the math face can move.
+  const photo = isChosenAvatarImage(image, meta?.imageKind)
   const turnBusy = useTurnBusy()
   // Preview identity must match click identity (#88200): when the backend
   // resolved the pinned canonical chat, preview THAT session — not the

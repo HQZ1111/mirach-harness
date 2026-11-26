@@ -1,6 +1,12 @@
 import { host, useI18n, useValue } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 
+import {
+  type BotsActionRequest,
+  consumeBotsRequest,
+  subscribeBotsRequests
+} from '@/plugins/bots-request-bridge'
+
 import { BotRow } from './bot-row'
 import {
   $botChatFocused,
@@ -244,6 +250,9 @@ export function BotsPane() {
   const [createOpen, setCreateOpen] = useState(false)
   const [groupCreateOpen, setGroupCreateOpen] = useState(false)
   const [editing, setEditing] = useState<null | RosterRow>(null)
+  // 配置档案栏的「+ / 编辑 / 删除」请求（插件外入口，见
+  // src/plugins/bots-request-bridge.ts）。挂载时先取 pending，之后订阅。
+  const [pendingAction, setPendingAction] = useState<null | BotsActionRequest>(() => consumeBotsRequest())
   // `path` is the profile directory the gateway reports on a profiles.list row;
   // it is not part of the shared RosterRow model, so it rides as an extra here.
   const [deleting, setDeleting] = useState<null | (RosterRow & { path?: string })>(null)
@@ -301,6 +310,25 @@ export function BotsPane() {
     selectionHydrated && rosterHydrated ? rosterWithSelectedOwner(source, sourceSnapshot, selectedRosterKey) : source
 
   const { roster, activityOf, isPinned } = sortRosterBots(sourceWithSelectedOwner, allMeta)
+
+  // 档案栏请求：新建 → 插件自己的新建对话框；编辑/删除 → 对应行（花名册
+  // 未到时保持 pending，数据到达后再开——不从 rail 复制一套表单）。
+  useEffect(() => subscribeBotsRequests(setPendingAction), [])
+  useEffect(() => {
+    if (!pendingAction) return
+    if (pendingAction.kind === 'create') {
+      setCreateOpen(true)
+      setPendingAction(null)
+      return
+    }
+    const row = source.find(
+      candidate => candidate.name === pendingAction.name || candidate.targetProfile === pendingAction.name
+    )
+    if (!row) return
+    if (pendingAction.kind === 'edit') setEditing(row)
+    else setDeleting(row)
+    setPendingAction(null)
+  }, [pendingAction, source])
 
   // Sections made on ANOTHER desktop arrive as id + name on each member's
   // ui_meta; rebuild the records this machine has never seen so the roster

@@ -22,7 +22,6 @@ import {
   DownloadIcon,
   FolderIcon,
   GitForkIcon,
-  GitPullRequestIcon,
   HashIcon,
   InboxIcon,
   GripVerticalIcon,
@@ -30,7 +29,6 @@ import {
   MailIcon,
   MailOpenIcon,
   MoreVerticalIcon,
-  NetworkIcon,
   PencilIcon,
   UserIcon,
   UsersIcon,
@@ -67,6 +65,7 @@ import { approvalBridge } from "@/components/assistant-ui/approval-bridge";
 import {
   isRowUnread,
   sessionCatalog,
+  sessionRawTitle,
   useSessionArchive,
   useSessionManage,
   useSessionUnread,
@@ -75,6 +74,7 @@ import {
 import { botChatPaths, botDisplayName, botsStore, DEFAULT_BOT_AVATAR, DEFAULT_BOT_NAME, useBotsStore } from "@/components/panes/hub/bots-store";
 import { switchProfileBridge, useActiveProfile } from "@/components/panes/session-manage/active-profile-bridge";
 import { isBotModePlumbingTitle, useHiddenSessions } from "@/components/panes/hub/hidden-sessions";
+import { selectBotsRoster } from "@/plugins/bots-selection-bridge";
 import { useBotsFeatureDesired } from "@/plugins/bots-gate";
 import {
   projectSessionActions,
@@ -167,6 +167,8 @@ interface SessionListCtxValue {
   /** 该行的展示元数据（SessionRowMeta 投影——figures/未读/归档/导出从
    *  这里读，行组件不再各自订阅 threadItems）。 */
   meta?: SessionRowMeta;
+  /** fork 分支干（`├─ `/`└─ `；hermes session-branch-tree 同款，缺省 = 顶层行）。 */
+  branchStem?: string;
   commitListMove(sessionId: string, group: SessionRowGroup, beforeId: string | null): void;
 }
 
@@ -185,12 +187,13 @@ const SessionListContext = createContext<SessionListCtxValue | null>(null);
 const SessionRowScope: FC<{
   group: SessionListCtxValue["group"];
   meta?: SessionRowMeta;
+  branchStem?: string;
   children: ReactNode;
-}> = ({ group, meta, children }) => {
+}> = ({ group, meta, branchStem, children }) => {
   const parent = useContext(SessionListContext);
   const value = useMemo<SessionListCtxValue>(
-    () => ({ ...(parent ?? ({} as SessionListCtxValue)), group, meta }),
-    [parent, group, meta],
+    () => ({ ...(parent ?? ({} as SessionListCtxValue)), group, meta, branchStem }),
+    [parent, group, meta, branchStem],
   );
   return <SessionListContext.Provider value={value}>{children}</SessionListContext.Provider>;
 };
@@ -375,6 +378,13 @@ const useSessionRowMetas = (): SessionRowMeta[] => {
     return threadIds.map((id) => projectRowMeta(id, byId.get(id)));
   }, [threadIds, threadItems]);
 };
+
+/** 行的 **pi 真名**（显示名会把 `Bot Chat` 降级成 `New Chat`——管道过滤
+ *  必须看真名，否则降级后的行会被当成普通会话显示出来；2026-11-26 用户
+ *  "点击一下就新建一个会话"的可见症状就是这些行以 New Chat 露头）。
+ *  实现收敛在 session-catalog 的 `sessionRawTitle`（有单测锁定语义）。 */
+const rawRowTitle = (m: SessionRowMeta): string | undefined =>
+  sessionRawTitle(m.id, m.title);
 const useThreadDisplay = (searchQuery: string) => {
   const threadIds = useAuiState((s) => s.threads.threadIds);
   const threadItems = useAuiState((s) => s.threads.threadItems);
@@ -442,7 +452,7 @@ const useThreadDisplay = (searchQuery: string) => {
           // Agent Inbox / Group: *，hermes session-sweep 同判据——历史铸造
           // 没有双锚记录的行靠这道兜住）任一命中即隐藏。
           !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))) &&
-          !(botsEnabled && isBotModePlumbingTitle(m.title)) &&
+          !(botsEnabled && isBotModePlumbingTitle(rawRowTitle(m))) &&
           // 档案作用域（hermes $profileScope，2026-11-25）：默认只列**活动
           // 环境**自己的会话（切 bot = 侧栏换源）；「显示全部配置档案」打开
           // 才跨环境聚合。历史行没有 profile 标签 = 本体（default）。
@@ -551,12 +561,6 @@ const VIEW_MENU_CONTENT_CLASS = "min-w-52";
 const VIEW_MENU_ITEM_BASE = "gap-2 text-[13px]";
 
 const VIEW_OPTION_GLYPH = "text-(--text-3) size-3.5 shrink-0";
-
-/** 禁用但带 title 说明的行（Show 子菜单 PR/配置档案）：观感固定为
- *  opacity-50 + cursor-default；native title 要能 hover 才显示，所以不能
- *  带 pointer-events-none（beui ContextMenuItem 对带 title 的 disabled 项
- *  已按此处理）。 */
-const VIEW_DISABLED_HINT_ITEM = "opacity-50 cursor-default";
 
 /** 排序/分组选项行（图标 + 文案；hermes OptionGlyph 的 lucide 等价物）。 */
 const ViewOptionRow: FC<{ icon: FC<{ className?: string }>; label: string }> = ({ icon: Icon, label }) => (
@@ -738,9 +742,10 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           </ContextMenuSubContent>
         </ContextMenuSub>
 
-        {/* 3. 显示 ▸（子菜单 = 用户截图：更新时间/词元数 + PR/配置档案
-            disabled——无「成本」无「紧凑行高」。PR = pi 未集成 gh、配置
-            档案 = pi 单配置档案：disabled + title 说明，不许假可点。） */}
+        {/* 3. 显示 ▸（子菜单 = 更新时间/词元数；hermes ROW_META 的 PR/
+            配置档案两项在宿主无独立数据面——PR = pi 未集成 gh，配置档案
+            已由「网关与配置」分组 + 聚合视图行头像承担。**不渲染灰项**
+            （2026-11-26 用户："左侧栏选项里面还有灰色的"）。 */}
         <ContextMenuSub>
           <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE}>
             <span>显示</span>
@@ -763,28 +768,6 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
                 <ViewOptionRow icon={option.icon} label={option.label} />
               </ContextMenuCheckboxItem>
             ))}
-            {/* PR/配置档案（hermes ROW_META 的 pr/profile 两项，图标
-                git-pull-request/account → lucide GitPullRequest/User）：
-                专用 class 固定 disabled 观感（不用 VIEW_MENU_ITEM_BASE 的
-                data-[disabled]:pointer-events-none——native title 需要
-                hover，说明文字必须可触发）。profile 行标签未实现：bot 会话
-                只在「配置档案 ▸」筛选视图出现，此时行内档案名是恒值。 */}
-            <ContextMenuCheckboxItem
-              checked={false}
-              className={VIEW_DISABLED_HINT_ITEM}
-              disabled
-              title="pi 未集成 gh，PR 数据不可用"
-            >
-              <ViewOptionRow icon={GitPullRequestIcon} label="PR" />
-            </ContextMenuCheckboxItem>
-            <ContextMenuCheckboxItem
-              checked={false}
-              className={VIEW_DISABLED_HINT_ITEM}
-              disabled
-              title="配置档案行标签未实现——bot 会话只在按档案筛选时出现"
-            >
-              <ViewOptionRow icon={UserIcon} label="配置档案" />
-            </ContextMenuCheckboxItem>
           </ContextMenuSubContent>
         </ContextMenuSub>
 
@@ -798,17 +781,8 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           <ViewOptionRow icon={InboxIcon} label="收件箱样式" />
         </ContextMenuCheckboxItem>
 
-        {/* 5. 配置档案栏（hermes $profileRailVisible：侧栏左缘的 profile
-            rail）——视觉条待实现；配置档案筛选已以本菜单的「配置档案 ▸」
-            承担（bot=profile，真数据面）。 */}
-        <ContextMenuCheckboxItem
-          checked={false}
-          className={VIEW_DISABLED_HINT_ITEM}
-          disabled
-          title="配置档案栏（视觉条）待实现——筛选以「配置档案 ▸」为准"
-        >
-          <ViewOptionRow icon={NetworkIcon} label="配置档案栏" />
-        </ContextMenuCheckboxItem>
+        {/* 5. （已删除）配置档案栏显隐——2026-11-26 横向档案栏改为左栏底部
+            常驻档案切换器（头像+名字弹窗），不再有可隐藏的独立栏。 */}
 
         {/* 6. ── 筛选（hermes「Filters」label 组：Status/PR/Profile/
             AllProfiles/Archived；分组区与筛选区之间的分隔线。 */}
@@ -841,15 +815,9 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
             ))}
           </ContextMenuSubContent>
         </ContextMenuSub>
-        {/* 8. 拉取请求 ▸（子菜单：打开/草稿/已合并/已关闭/无 PR）——
-            pi 无 gh → 整个 SubTrigger disabled（诚实：无数据面）。 */}
-        <ContextMenuSub>
-          <ContextMenuSubTrigger className={VIEW_MENU_ITEM_BASE} disabled>
-            <ViewOptionRow icon={GitPullRequestIcon} label="拉取请求" />
-            <ChevronRightIcon className="text-(--text-3) ml-auto size-[var(--size-icon-sm)]" />
-          </ContextMenuSubTrigger>
-        </ContextMenuSub>
-{/* 9. 环境 ▸（hermes Filters>Profile 的宿主对偶）：本地 bot = 一份
+        {/* 8. 拉取请求筛选：宿主无 gh 数据面——**整项不渲染**（2026-11-26
+            用户："左侧栏选项里面还有灰色的"；不造灰项）。 */}
+        {/* 9. 环境 ▸（hermes Filters>Profile 的宿主对偶）：本地 bot = 一份
             环境配置（独立 home + 独立会话面），选中 = 切引擎活动环境——
             侧栏整体换源、新聊天落该环境。不是前端过滤。hermes 的「新建/
             导入配置档案」依赖 gateway profiles 后端，宿主用机器人页管理
@@ -867,11 +835,14 @@ const SidebarViewMenu: FC<{ dividerKeys: readonly string[]; foldCollapsed: boole
           </ContextMenuSubTrigger>
           <ContextMenuSubContent>
             <ContextMenuRadioGroup
-              onValueChange={(value) =>
-                void switchProfileBridge(
-                  value === DEFAULT_BOT_NAME ? null : value,
-                )
-              }
+              onValueChange={(value) => {
+                const target = value === DEFAULT_BOT_NAME ? null : value
+                void switchProfileBridge(target).then((ok) => {
+                  // 机器人页选中跟随（用户："选择环境，机器人页没跟"）：
+                  // 切换成功后才同步，失败保持原选中。
+                  if (ok) selectBotsRoster(target)
+                })
+              }}
               value={activeProfile ?? DEFAULT_BOT_NAME}
             >
               {bots.map((b) => (
@@ -1038,7 +1009,7 @@ function useThreadVisibleMetas(): SessionRowMeta[] {
         !(m.path !== undefined && (botPathSet.has(m.path) || hiddenPathSet.has(m.path))) &&
         // 与 useThreadDisplay 同判据：Bot Mode 管道标题（Bot Chat / Agent
         // Inbox / Group: *）不进未读统计——侧栏看不见的行不能算进"全部已读"。
-        !(botsEnabled && isBotModePlumbingTitle(m.title)) &&
+        !(botsEnabled && isBotModePlumbingTitle(rawRowTitle(m))) &&
         // 档案作用域同判据（活动环境之外的会话不在可视面）。
         (showAllProfiles || (m.profile ?? null) === activeProfile),
     );
@@ -1384,6 +1355,16 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     );
   }, [mode, display]);
 
+  // fork 分支干（display 管线产出；搜索面无嵌套，恒空）。
+  const rowStemById = useMemo(() => {
+    const map = new Map<string, string>();
+    if (mode !== "groups") return map;
+    for (const row of display.rows) {
+      if (row.kind === "session" && row.branchStem) map.set(row.id, row.branchStem);
+    }
+    return map;
+  }, [mode, display]);
+
   const renderRow = (
     id: string,
     group: SessionRowGroup | "search",
@@ -1409,7 +1390,12 @@ const ThreadListSections: FC<{ searchQuery: string; dndSensors?: ReturnType<type
     const vars: Record<string, number | string> = {};
     if (depth > 0) vars["--session-row-depth"] = `${depth * 12}px`;
     return (
-      <SessionRowScope key={key} group={group} meta={metasById.get(id)}>
+      <SessionRowScope
+        key={key}
+        group={group}
+        meta={metasById.get(id)}
+        branchStem={rowStemById.get(id)}
+      >
         <div
           className={disclosure}
           style={Object.keys(vars).length === 0 ? undefined : (vars as React.CSSProperties)}
@@ -1746,6 +1732,9 @@ const ThreadListItemInner: FC = () => {
   // 行展示元数据（ThreadListSections 经 context 下发）——figures/时间戳/
   // 未读水位/导出路径从这里读，行组件不各自订阅 threadItems。
   const meta = ctx?.meta;
+  // fork 分支干（hermes session-branch-tree：子行名前的 ├─ / └─）——
+  // 2026-11-26 对齐：子行嵌套在父行下，行首画分支干。
+  const branchStem = ctx?.branchStem;
   const path = meta?.path;
   const messageCount = meta?.messageCount ?? 0;
   const aui = useAui();
@@ -2057,6 +2046,15 @@ const ThreadListItemInner: FC = () => {
                 onPointerLeave={disarmMarquee}
               >
                 <span className="hover-marquee-inner">
+                  {branchStem ? (
+                    <span
+                      aria-hidden
+                      className="text-(--text-4) mr-0.5 font-mono text-[0.625rem] leading-none"
+                      data-slot="aui_thread-list-item-branch-stem"
+                    >
+                      {branchStem}
+                    </span>
+                  ) : null}
                   <ThreadListItemPrimitive.Title fallback="New Chat" />
                 </span>
               </span>

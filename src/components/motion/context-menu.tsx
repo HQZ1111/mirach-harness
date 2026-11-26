@@ -35,6 +35,8 @@ import {
 import { holdSelection, TOUCH_GESTURE_CONTENT_CLASS } from "@/lib/touch";
 import { cn } from "@/lib/utils";
 
+import { menuPortalDescendsFrom } from "./context-menu-portal";
+
 type OpenModality = "pointer" | "keyboard" | "touch";
 type MenuPoint = { x: number; y: number };
 
@@ -102,6 +104,9 @@ interface ContextMenuContextValue {
    */
   openSubmenuId: string | null;
   setOpenSubmenuId: (id: string | null) => void;
+  /** 根菜单的关闭入口（子菜单实例持有父级链上的同一个回调）。选中任意
+   *  菜单项时一并关根——二级项点完父面板不能还挂着（Radix 选择语义）。 */
+  closeRoot: () => void;
   reduce: boolean;
 }
 
@@ -173,6 +178,8 @@ export interface ContextMenuProps {
   goo?: boolean;
   /** 祖先菜单 id 链（子菜单内部用，宿主不必传）。 */
   ancestorIds?: string[];
+  /** 根菜单关闭入口（子菜单内部用，宿主不必传）。 */
+  rootClose?: () => void;
   /**
    * 外部锚点元素（本地扩展，2026-10-26）：`anchor='trigger'` 时用这个元素
    * 当锚点，而不是等 `ContextMenuTrigger` 注册。
@@ -199,6 +206,7 @@ export function ContextMenu({
   goo = false,
   ancestorIds = [],
   anchorEl = null,
+  rootClose: rootCloseProp,
 }: ContextMenuProps) {
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
   const [point, setPoint] = useState<MenuPoint>({ x: 0, y: 0 });
@@ -243,6 +251,13 @@ export function ContextMenu({
     },
     [controlled, onOpenChange],
   );
+
+  /** 关根：本实例是根菜单时 = 关自己；是子菜单时 = 调父级链上的根关闭。
+   *  菜单项选中一律走它（Radix：选中项关闭整棵菜单树）。 */
+  const closeRoot = useCallback(() => {
+    if (rootCloseProp) rootCloseProp();
+    else setOpen(false);
+  }, [rootCloseProp, setOpen]);
 
   const openAt = useCallback(
     (nextPoint: MenuPoint, nextModality: OpenModality) => {
@@ -322,6 +337,14 @@ export function ContextMenu({
         for (const id of owned) {
           if (target.closest(`[data-menu-portal="${id}"]`)) return;
         }
+        // **后代 portal 也是内部**（2026-11-25 用户实报"分组选项全部不能点"）：
+        // 子菜单是兄弟 portal，但它声明了祖先 id 链（data-menu-ancestors）。
+        // 只查本菜单/祖先的选择器看不见它 → 点二级项时父菜单先把整棵树卸了，
+        // pointerup/click 根本到不了二级项按钮。记录祖先链后按链判定。
+        const portal = target.closest<HTMLElement>("[data-menu-portal]");
+        if (portal) {
+          if (menuPortalDescendsFrom(portal.getAttribute("data-menu-ancestors"), menuId)) return;
+        }
         setOpen(false);
       };
       const onKey = (event: KeyboardEvent) => {
@@ -374,6 +397,7 @@ export function ContextMenu({
       setActiveId,
       openSubmenuId,
       setOpenSubmenuId,
+      closeRoot,
       reduce,
     }),
     [
@@ -396,6 +420,7 @@ export function ContextMenu({
       triggerRect,
       activeId,
       openSubmenuId,
+      closeRoot,
       reduce,
     ],
   );
@@ -839,6 +864,7 @@ export function ContextMenuContent({
         size.width > 0 && !context.reduce && "animate-in fade-in-0 zoom-in-95",
         className,
       )}
+      data-menu-ancestors={context.ancestorIds.join("|")}
       data-menu-portal={context.menuId}
       id={context.menuId}
       onContextMenu={(event) => event.preventDefault()}
@@ -1072,6 +1098,7 @@ export function ContextMenuSubContent({
       onOpenChange={sub.setOpen}
       open={sub.open}
       panelRadius={parent.panelRadius}
+      rootClose={parent.closeRoot}
       side="right"
       sideOffset={4}
     >
@@ -1143,7 +1170,10 @@ function ContextMenuItemBase({
       onClick={() => {
         if (disabled) return;
         onSelect?.();
-        if (closeOnSelect) context.setOpen(false);
+        if (closeOnSelect) {
+          // 选中 = 关整棵菜单树（二级项选完父面板也要收——Radix 语义）。
+          context.closeRoot();
+        }
       }}
       className={cn(
         "relative isolate flex w-full select-none items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] outline-none",

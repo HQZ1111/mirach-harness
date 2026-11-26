@@ -40,6 +40,7 @@ import type { ReactNode } from 'react'
 import { queryClient } from '@/hermes-shim/lib/query-client'
 import { $pluginDecisions } from '@/hermes-shim/contrib/plugins-store'
 import { openPluginWorkspace } from '@/components/layout/plugin-workspaces'
+import { pendingBotChatStore } from '@/lib/pending-bot-chat'
 import type { RpcEvent } from './types'
 
 /** 上游 `host.agents()` 的 UnionRoster 形状（单机 = 一个 local source）。
@@ -773,9 +774,55 @@ export const host = {
       typeof profile === 'string'
         ? profile
         : String(profile?.targetProfile ?? profile?.profile ?? '')
+    const route = profile && typeof profile === 'object'
+      ? (profile as { connectionId?: unknown; mode?: unknown })
+      : null
+    const localRoute =
+      route === null ||
+      String(route.connectionId ?? '').trim() === '' ||
+      String(route.connectionId ?? '').trim() === 'local' ||
+      route.mode === 'local'
+    // 插件 bot 新聊天（hermes `host.newChat` 的 fresh draft）：插件调用带
+    // workspaceOwnerKey + route；配置栏「在新分栏打开」只传 profile 字符串，
+    // 仍是立即建会话列。草稿只在本机 profile 上成立。
+    const pluginBotDraft =
+      options.workspaceMode === 'bots' &&
+      route !== null &&
+      typeof options.workspaceOwnerKey === 'string' &&
+      localRoute &&
+      name !== ''
     void (async () => {
       try {
+        // 环境跟随（2026-11-25）：本地 bot 的新聊天把活动环境切到该 bot——
+        // 侧栏/底栏/环境菜单/机器人页四处一致；空名（沿用当前环境）不动。
+        if (name && localRoute) {
+          const { followProfileBridge } = await import(
+            '@/components/panes/session-manage/active-profile-bridge'
+          )
+          const followed = await followProfileBridge(name === 'default' ? null : name)
+          if (!followed) {
+            console.error(`[host] newChat：环境跟随 ${name} 失败（继续建会话）`)
+          }
+        }
+        if (pluginBotDraft) {
+          // 只登记待落点 bot，丢当前会话回 New Chat 草稿；第一条消息由
+          // runtime `ensureDraftSession` 用 bot 的 SOUL/模型/工具集 + 选中
+          // 工作区建真会话（hermes openNewSessionTab 的宿主对偶）。
+          const { requestNewChatDraftBridge } = await import(
+            '@/components/panes/session-manage/active-profile-bridge'
+          )
+          // 先登记归属再回草稿：草稿态一出现用户就可能立刻发第一条消息，
+          // ensureDraftSession 必须已经能看到 bot；失败则清掉。
+          pendingBotChatStore.getState().set({ profile: name })
+          const drafted = await requestNewChatDraftBridge()
+          if (!drafted) {
+            pendingBotChatStore.getState().set(null)
+            throw new Error('回到 New Chat 草稿失败')
+          }
+          return
+        }
         const { dispatchHostRequest } = await import('./host-rpc')
+        pendingBotChatStore.getState().set(null)
         const created = await dispatchHostRequest<{ stored_session_id: string }>('session.create', {
           // 空 = 当前活动环境（普通新聊天）；'default' = 本体；具名 = 该环境。
           profile: name,
@@ -974,6 +1021,33 @@ export const host = {
       return
     }
     warmLocalProfileHome(name)
+  },
+  /**
+   * 把某环境设为**活动环境**（宿主扩展；上游 `ensureGatewayAgent` 激活
+   * 档案的对偶，2026-11-25 用户："左下角头像、会话选项的环境、机器人页
+   * 的选中，三个不统一"）。
+   *
+   * 插件打开本地 bot 会话 / 新建 bot 聊天时调用：活动环境跟随该 bot，
+   * 侧栏作用域/底栏身份/环境菜单/机器人页高亮随之一致。与显式切换
+   * （`pi_profile_set_active` 的菜单路径）不同——不打断当前会话（轻量
+   * 跟随，见 runtime 的 followProfile）。远程 route 不动本机环境。
+   * 返回 false = 未跟随（远程行或引擎拒绝；调用方可继续打开）。
+   */
+  focusProfile: async (profile: unknown): Promise<boolean> => {
+    if (profile && typeof profile === 'object') {
+      const route = profile as { connectionId?: unknown; mode?: unknown; profile?: unknown; targetProfile?: unknown }
+      const connectionId = String(route.connectionId ?? '').trim()
+      if (route.mode === 'remote' && connectionId && connectionId !== 'local') return false
+      profile = route.targetProfile ?? route.profile
+    }
+    const name = typeof profile === 'string' ? profile.trim() : ''
+    if (!name) return false
+    // 切到/打开某个 bot 的任何路径都作废上一份"新建 bot 聊天"草稿归属。
+    pendingBotChatStore.getState().set(null)
+    const { followProfileBridge } = await import(
+      '@/components/panes/session-manage/active-profile-bridge'
+    )
+    return followProfileBridge(name === 'default' ? null : name)
   },
   /** 确保 agent 存在（激活路径；宿主没有待拉起的进程池，保持空壳）。 */
   ensureAgent: (_connectionId?: unknown, _name?: unknown): void => {},

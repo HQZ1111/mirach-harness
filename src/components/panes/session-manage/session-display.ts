@@ -134,6 +134,14 @@ export function workspaceGroupLabel(cwd: string | undefined): string {
   return pathLeaf(cwd) || '主页'
 }
 
+/** cwd 的分组身份：Windows 大小写/斜杠方向/尾分隔符不制造第二个同名组。
+ *  仅用于判等；组 key 仍保留首个原始 cwd（折叠存档键不变）。 */
+export function workspaceCwdIdentity(cwd: string | undefined): string {
+  const raw = (cwd ?? '').trim()
+  if (!raw) return ''
+  return raw.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
 /**
  * 按工作区分组（hermes grouping='project' 的 cwd 投影）：组 = cwd 桶
  * （同 cwd 的行**全部收进同一组**——不管全局排序里它们隔多远，hermes
@@ -149,11 +157,12 @@ export function groupEntriesByWorkspace(
 
   for (const entry of entries) {
     const key = `w:${entry.cwd ?? ''}`
-    let at = indexOf.get(key)
+    const identity = workspaceCwdIdentity(entry.cwd)
+    let at = indexOf.get(identity)
 
     if (at === undefined) {
       at = groups.length
-      indexOf.set(key, at)
+      indexOf.set(identity, at)
       groups.push({ key, cwd: entry.cwd, ids: [] })
     }
 
@@ -240,6 +249,8 @@ export function groupEntriesByProject(
   }
   const buckets: Bucket[] = []
   const index = new Map<string, Bucket>()
+  /** cwd 身份 → 首见组的 raw key（防止斜杠/大小写变体生成两个同名组）。 */
+  const cwdKeyByIdentity = new Map<string, string>()
   let unknownSeq = 0
   let cwdSeq = 0
 
@@ -258,9 +269,11 @@ export function groupEntriesByProject(
       label = projectGroupLabel(entry.projectId, registered)
       rank = [1, unknownSeq]
     } else if (entry.cwd !== undefined && entry.cwd !== '') {
-      key = `w:${entry.cwd}`
+      const identity = workspaceCwdIdentity(entry.cwd)
+      const existing = cwdKeyByIdentity.get(identity)
+      key = existing ?? `w:${entry.cwd}`
       label = pathLeaf(entry.cwd)
-      rank = [2, cwdSeq]
+      rank = existing === undefined ? [2, cwdSeq] : [2, 0]
     } else {
       key = 'w:'
       label = '主页'
@@ -273,6 +286,13 @@ export function groupEntriesByProject(
       buckets.push(bucket)
       if (rank[0] === 1) unknownSeq += 1
       else if (rank[0] === 2) cwdSeq += 1
+      if (
+        entry.projectId === undefined &&
+        entry.cwd !== undefined &&
+        entry.cwd !== ''
+      ) {
+        cwdKeyByIdentity.set(workspaceCwdIdentity(entry.cwd), key)
+      }
     }
     bucket.ids.push(entry.id)
   }
@@ -422,6 +442,74 @@ export function groupEntriesByStatus(
 }
 
 /**
+ * fork 分支排序 + 分支干（hermes `lib/session-branch-tree.ts`
+ * `flattenSessionsWithBranches` 的宿主对偶，2026-11-26 用户："分叉的会话在
+ * 左侧栏是怎么显示的"）：
+ * - 子会话直接挂在**可见父会话**后面（DFS；深度不限），不再按 recency
+ *   排到父会话上面；
+ * - 分支干 `├─ `/`└─ ` 按同父兄弟的末位判定；
+ * - 根组按**子树最新活动**排序（任一分支有新活动 → 整个父链一起上浮），
+ *   preserveOrder（手动拖拽序）时保持输入根序；
+ * - 父行不可见（被归档/筛掉）的子行回落到顶层；环/自指有 seen 守卫。
+ * 迁移压缩谱系（lineage）宿主索引没有 `_lineage_root_id`，按空处理——
+ * 比 hermes 少一层「压缩链折叠」，不影响 fork 的嵌套语义。
+ */
+export function flattenBranchOrder(
+  entries: readonly SessionRowMeta[],
+  preserveOrder = false,
+): { entries: SessionRowMeta[]; stems: Map<string, string> } {
+  if (entries.length < 2) return { entries: [...entries], stems: new Map() }
+  const byId = new Map(entries.map((e) => [e.id, e] as const))
+  const childrenByParent = new Map<string, SessionRowMeta[]>()
+  const nestedIds = new Set<string>()
+  for (const entry of entries) {
+    const parentId = entry.parentSessionId
+    if (!parentId || parentId === entry.id || !byId.has(parentId)) continue
+    nestedIds.add(entry.id)
+    const siblings = childrenByParent.get(parentId) ?? []
+    siblings.push(entry)
+    childrenByParent.set(parentId, siblings)
+  }
+  for (const siblings of childrenByParent.values()) siblings.sort(recencyCompare)
+
+  const groupRecencyMemo = new Map<string, number>()
+  const groupRecency = (entry: SessionRowMeta): number => {
+    const cached = groupRecencyMemo.get(entry.id)
+    if (cached !== undefined) return cached
+    groupRecencyMemo.set(entry.id, entry.lastActiveMs ?? 0) // 环守卫
+    let max = entry.lastActiveMs ?? 0
+    for (const child of childrenByParent.get(entry.id) ?? []) {
+      max = Math.max(max, groupRecency(child))
+    }
+    groupRecencyMemo.set(entry.id, max)
+    return max
+  }
+
+  const roots = entries.filter((e) => !nestedIds.has(e.id))
+  if (!preserveOrder) {
+    roots.sort((a, b) => groupRecency(b) - groupRecency(a))
+  }
+
+  const out: SessionRowMeta[] = []
+  const stems = new Map<string, string>()
+  const seen = new Set<string>()
+  const emit = (entry: SessionRowMeta, stem?: string): void => {
+    if (seen.has(entry.id)) return
+    seen.add(entry.id)
+    out.push(entry)
+    if (stem) stems.set(entry.id, stem)
+    const children = childrenByParent.get(entry.id) ?? []
+    children.forEach((child, index) =>
+      emit(child, index === children.length - 1 ? '└─ ' : '├─ '),
+    )
+  }
+  for (const root of roots) emit(root)
+  // 病态环里没有被 DFS 收进来的行：原序补在末尾，绝不丢行。
+  for (const entry of entries) if (!seen.has(entry.id)) out.push(entry)
+  return { entries: out, stems }
+}
+
+/**
  * 常态分组投影（含侧栏选项管线，hermes index.tsx + sessions-section.tsx
  * flatRows 同构）：
  * 1. 会话区全集按新近排序（日历桶成员由 recency 钉死——排序键不改桶；
@@ -464,17 +552,21 @@ export function buildSessionDisplay(
         : ordering === 'status' || ordering === 'tokens'
           ? rankIdsByOrdering(unpinned, ordering, opts.view?.aux)
           : []
-  const allUnpinnedIds = rankIds.length > 0 ? rankIds : unpinned.map((m) => m.id)
+  const baseIds = rankIds.length > 0 ? rankIds : unpinned.map((m) => m.id)
   const byId = new Map(unpinned.map((m) => [m.id, m] as const))
-  // 排名序展开成行输入（status/project 直接吃排名序；date 桶成员由 recency
-  // 钉死——groupEntriesByRecency 要求 ms 降序输入，排名稍后在桶内应用）。
   const toEntry = (id: string): SessionRowMeta => byId.get(id) ?? ({ id, lastActiveMs: 0 })
-  const rankedEntries = allUnpinnedIds.map(toEntry)
+  // fork 分支：子会话挂到父会话后面（DFS + 分支干）。**根组按子树最新活动
+  // 重排只用于默认 updated**——created/status/tokens/manual 是用户显式选择
+  // 的排序键，根序必须由该键决定（子行仍紧跟父行）。
+  const flattened = flattenBranchOrder(baseIds.map(toEntry), ordering !== 'updated')
+  const orderedEntries = flattened.entries
+  const branchStems = flattened.stems
+  const allUnpinnedIds = orderedEntries.map((m) => m.id)
   // 状态桶组输入（id → bucket，仅 grouping='status' 构建——桶面必须覆盖
   // 全部行，缺失 = 接线 bug，throw 可见（禁止兜底）；其余分组不消费桶面）。
   const statusEntries = (): { readonly id: string; readonly bucket: SessionStatusBucket }[] => {
     const buckets = opts.view?.aux?.statusBuckets
-    return rankedEntries.map((m) => {
+    return orderedEntries.map((m) => {
       const bucket = buckets?.get(m.id)
       if (bucket === undefined) {
         throw new Error(`[session-display] status 分组的行缺状态桶（${m.id}）——statusBuckets 必须覆盖全部行`)
@@ -488,11 +580,13 @@ export function buildSessionDisplay(
       ? groupEntriesByStatus(statusEntries())
       : grouping === 'project'
         ? opts.view?.projects !== undefined
-          ? groupEntriesByProject(rankedEntries, opts.view.projects)
-          : groupEntriesByWorkspace(rankedEntries)
+          ? groupEntriesByProject(orderedEntries, opts.view.projects)
+          : groupEntriesByWorkspace(orderedEntries)
         : grouping === 'gateway'
-          ? groupEntriesByProfile(rankedEntries, opts.view?.profiles ?? [])
+          ? groupEntriesByProfile(orderedEntries, opts.view?.profiles ?? [])
           : groupEntriesByRecency(
+              // 日期桶成员仍由 **recency** 钉死（排序键不改桶——hermes
+              // session-date-groups 语义；fork 子行在桶内按分支序重排）。
               unpinned.map((m) => ({ id: m.id, ms: m.lastActiveMs })),
               opts,
             )
@@ -505,11 +599,17 @@ export function buildSessionDisplay(
   const visible = hideCollapsedGroupRows(ordered, (key) => !isHidden(collapsed, key))
   // fork 谱系缩进：只沿**本次可见**的父行链走；父行被归档/筛掉则回顶层。
   const depths = branchDepths(visible, byId)
-  const rows = visible.map((row) =>
-    row.kind === 'session' && (depths.get(row.id) ?? 0) > 0
-      ? { ...row, depth: depths.get(row.id) }
-      : row,
-  )
+  const rows = visible.map((row) => {
+    if (row.kind !== 'session') return row
+    const stem = branchStems.get(row.id)
+    const depth = depths.get(row.id) ?? 0
+    if (!stem && depth === 0) return row
+    return {
+      ...row,
+      ...(stem ? { branchStem: stem } : {}),
+      ...(depth > 0 ? { depth } : {}),
+    }
+  })
 
   return { pinnedIds, rows, allUnpinnedIds }
 }

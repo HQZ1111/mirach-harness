@@ -35,7 +35,8 @@ import {
   $selectedBot,
   $selectedRosterHydrated,
   $selectedRosterKey,
-  focusedMentionProfile
+  focusedMentionProfile,
+  saveSelectedRosterBot
 } from './bot-state'
 import { isCanonicalChatOnScreen, openBotCanonicalChat } from './canonical-chat'
 import { BotChatEmpty } from './chat-empty'
@@ -84,7 +85,7 @@ import { botRosterMeta, botWorkspaceOwnerKey, setBotsWorkspaceOwner } from './ro
 import { startScreenAutoRaise } from './screen-autoraise'
 import { ProfileGroupScreenPortal } from './screen-portal'
 import { startHideSweepScheduler } from './session-sweep'
-import { bumpBotOpenGeneration, getBotOpenGeneration, ID, setPluginCtx } from './shared'
+import { bumpBotOpenGeneration, getBotOpenGeneration, getPluginCtx, ID, setPluginCtx } from './shared'
 import { TeammateWaits } from './teammate-waits'
 import type { GroupChat, RosterRow } from './types'
 import { loadBotSections } from './user-sections'
@@ -129,6 +130,31 @@ export default {
     // Opt-in per bot: raise a bot's Screen tab on its first live screen tool call.
     const stopScreenAutoRaise = startScreenAutoRaise()
 
+    // 宿主适配（非上游，2026-11-26 用户："选择环境，机器人页没跟"）：环境
+    // 菜单 / 配置档案栏切换活动环境时，宿主经 `mirach:bots:select` 事件
+    // 要求花名册把对应行选中（`$selectedRosterKey`）。花名册未到位时只记
+    // atom + 持久化，行刷新后 `botRowOwnsWorkspace` 按选中键高亮。
+    const onHostSelect = (event: Event) => {
+      const detail = (event as CustomEvent<{ profile?: null | string }>).detail
+      const profile = String(detail?.profile ?? 'default').trim() || 'default'
+      const key = `local::${profile}`
+      const row = selectedRosterBot($lastRoster.get(), key)
+      if (row) {
+        saveSelectedRosterBot(row)
+        return
+      }
+      $selectedRosterKey.set(key)
+      try {
+        Promise.resolve(
+          getPluginCtx()?.storage?.set?.('selected-roster-bot-v1', key)
+        ).catch(() => undefined)
+      } catch {
+        /* storage unavailable — selection lasts for this window */
+      }
+    }
+    const stopHostSelection = () => window.removeEventListener('mirach:bots:select', onHostSelect)
+    window.addEventListener('mirach:bots:select', onHostSelect)
+
     // Disabling the plugin (or a hot reload) must actually stop the clock —
     // before this, the rAF loop + 1Hz document scan ran until app restart.
     if (typeof ctx.onDispose === 'function') {
@@ -136,6 +162,7 @@ export default {
       ctx.onDispose(stopFaceClock)
       ctx.onDispose(stopBotRelay)
       ctx.onDispose(stopScreenAutoRaise)
+      ctx.onDispose(stopHostSelection)
     }
 
     // @-mention autocomplete: typing "@rese…" in ANY composer offers the

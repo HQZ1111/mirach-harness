@@ -36,6 +36,7 @@ import {
 } from 'lucide-react'
 
 import { buttonVariants } from '@/components/ui/button'
+import { useRadioFeatureEnabled } from '@/plugins/radio-gate'
 import { cn } from '@/lib/utils'
 
 export type OpenPageKind = 'files' | 'terminal' | 'preview' | 'review' | 'radio'
@@ -101,6 +102,8 @@ function LauncherRow({
 }
 
 export function OpenPage({ onOpen }: { onOpen(kind: OpenPageKind): void }) {
+  const radioEnabled = useRadioFeatureEnabled()
+  const actions = radioEnabled ? ACTIONS : ACTIONS.filter((action) => action.kind !== 'radio')
   return (
     <div className="@container/openpage flex h-full min-h-0 flex-col" data-slot="open-page">
       <div className="min-h-0 flex-1 overflow-y-auto px-7 py-6">
@@ -113,7 +116,7 @@ export function OpenPage({ onOpen }: { onOpen(kind: OpenPageKind): void }) {
             </p>
           </div>
           <div className="grid min-w-0 grid-cols-1 gap-x-8 gap-y-1 @min-[36rem]/openpage:grid-cols-2">
-            {ACTIONS.map((a) => (
+            {actions.map((a) => (
               <LauncherRow
                 key={a.kind}
                 itemId={a.kind}

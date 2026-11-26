@@ -76,6 +76,18 @@ export function toggleBotsPanel(): void {
   addBotsPanel(a)
 }
 
+/** 打开机器人栏（幂等；档案栏「管理机器人」/「+」入口用——hermes
+ *  导航到配置文件页的对偶，不因已开而关掉）。 */
+export function openBotsPanel(): void {
+  const a = apiOf()
+  if (!a) {
+    console.error('[bots] 布局 api 不在场——机器人栏打开放弃')
+    return
+  }
+  if (a.getPanel(BOTS_PANEL_ID)) return
+  addBotsPanel(a)
+}
+
 export function syncBotsPanelOpen(): void {
   const a = apiOf()
   if (!a) return

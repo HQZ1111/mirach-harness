@@ -929,12 +929,43 @@ html:not([data-maximized='true']) .aui-width-handle {
 /* 顶带右下的当前视图指示已删（2026-10-06 用户定稿：Mirach 文字是唯一切换钮，
    指示字冗余——组件已移除，规则随之删除） */
 
-/* ── 左栏底部用户区（2026-10-19，用户："参考 zcode 下面的用户，
-   一个头像，一个设置按钮"）——贴栏底单行：左头像 + 中名字 + 右齿轮。
-   2026-11-25 用户："改成当前生效的配置bot配置头像和名字"——内容归
-   rail-user-zone.tsx 从 active-profile + 花名册读取。
-   内容线走 --rail-gutter（与左栏其余行同一条竖线）；行高固定，
-   列表区（.left-rail-body）吃剩余高度，故本行永远贴底。 */
+/* ── 左栏底部「配置档案栏」（hermes ProfileRail 单网关路径，2026-11-26）──
+   一条横向档案带：home/layers 药丸 + 具名档案首字方块（横滚、拖拽重排、
+   长按/右键调色）+「+」+ 管理省略号。方块 20px（hermes size-5），活动项
+   1.5px 同色描边。容器只做布局；方块/颜色全在组件内联（与上游一致）。 */
+.profile-rail {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px var(--rail-gutter) 4px;
+}
+
+.profile-rail-scroll {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.profile-rail-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.profile-rail-strip {
+  align-items: center;
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+/* ── 左栏底部档案切换器（2026-11-26：原底部用户区 + 横向档案栏合并）──
+   一行贴底：头像+名字（点击弹垂直档案列表） + 右齿轮。内容线走
+   --rail-gutter；行高固定，列表区吃剩余高度，故本行永远贴底。 */
 .rail-user-zone {
   align-items: center;
   border-top: 1px solid var(--stroke-soft);
@@ -945,7 +976,41 @@ html:not([data-maximized='true']) .aui-width-handle {
   padding: 0 var(--rail-gutter);
 }
 
-.rail-user-avatar,
+.profile-switcher-trigger {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  display: flex;
+  /* 只包住头像+名字：不再 flex:1 铺满整条底栏（用户："现在底部一条都能
+     触发弹窗了"——空白区域不该是按钮）。 */
+  flex: 0 1 auto;
+  gap: var(--rail-user-gap);
+  height: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  /* button 的 UA 默认 text-align:center 会让名字在头像右侧的剩余宽度里居中
+     （用户 2026-11-26："人名怎么在中间，不应该在头像的右边吗"）——显式左对齐。 */
+  text-align: left;
+}
+
+.profile-switcher-trigger .rail-user-name {
+  text-align: left;
+}
+
+/* 点击头像后 button 获得焦点会画一圈 UA outline（截图里那圈框，蓝色
+   focus-visible 环同样圈住整行）——底栏是常驻身份行，统一不画焦点框。 */
+.profile-switcher-trigger:focus,
+.profile-switcher-trigger:focus-visible {
+  outline: none;
+}
+
+.profile-switcher-trigger:hover .rail-user-name {
+  color: var(--brand);
+}
+
 .rail-user-settings {
   align-items: center;
   background: transparent;
@@ -956,17 +1021,6 @@ html:not([data-maximized='true']) .aui-width-handle {
   flex: none;
   justify-content: center;
   padding: 0;
-}
-
-.rail-user-avatar {
-  /* 2026-11-25 用户："切换bot后，头像叠加了" —— 旧 "M" 占位用 --fl-accent
-     圆底；换成 bot 头像图后，脸图 PNG 自带透明边（回填的脸是圆外透明），
-     圆底会从透明边透出来，蓝盘 + 橙脸叠成两层。按钮不再画底，头像图自己
-     就是圆。 */
-  background: transparent;
-  height: var(--rail-user-avatar);
-  overflow: hidden;
-  width: var(--rail-user-avatar);
 }
 
 /* 生效 bot 头像（机器人页同源 image；本体 = 品牌 logo）——统一圆形。 */

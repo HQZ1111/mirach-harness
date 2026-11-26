@@ -11,11 +11,14 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { botsStore } from '@/components/panes/hub/bots-store'
+
 import {
   isRowUnread,
   sessionCatalog,
   sessionDisplayName,
   sessionProjectCwd,
+  sessionRawTitle,
   type SessionCatalogState,
 } from './session-catalog'
 
@@ -131,6 +134,35 @@ describe('sessionDisplayName / sessionProjectCwd（统一显示名公式）', ()
     expect(sessionProjectCwd({ id: 'a', cwd: 'C:\\a' }, 'C:\\p')).toBe('C:\\a')
     expect(sessionProjectCwd(undefined, 'C:\\p')).toBe('C:\\p')
     expect(sessionProjectCwd(undefined, null)).toBeUndefined()
+  })
+
+  it('sessionRawTitle 保留 pi 真名（Bot Mode 管道过滤用），显示名单独降级', () => {
+    sessionCatalog.getState().ingest([row('b', 0, { title: 'Bot Chat' })], null)
+    // 显示名降级为 New Chat，但管道过滤必须还能认出真名 Bot Chat
+    expect(sessionDisplayName(sessionCatalog.getState().entries.b)).toBe('New Chat')
+    expect(sessionRawTitle('b', 'fallback')).toBe('Bot Chat')
+    expect(sessionRawTitle('missing', 'fallback')).toBe('fallback')
+    expect(sessionRawTitle('missing')).toBeUndefined()
+  })
+
+  it('Bot Chat / 档案名污染降级为派生标题或 New Chat（2026-11-25）', () => {
+    // 花名册：环境名 微软 / 显示名 二万人（降级判据的第二来源）
+    localStorage.setItem(
+      'mirach.harness.bots.v2',
+      JSON.stringify([{ name: '微软', title: '二万人', systemPrompt: '', model: '', cwd: '', description: '', createdAt: 0 }]),
+    )
+    botsStore.getState().load()
+
+    // 管道名 Bot Chat：有派生标题用派生标题，否则 New Chat——绝不显示 Bot Chat
+    expect(sessionDisplayName({ id: 'a', piName: 'Bot Chat', derivedTitle: '真实标题' })).toBe('真实标题')
+    expect(sessionDisplayName({ id: 'a', piName: 'Bot Chat' })).toBe('New Chat')
+    // 旧 session.create 把档案名/显示名写成 pi name：按未命名降级
+    expect(sessionDisplayName({ id: 'a', piName: '微软', profile: '微软' })).toBe('New Chat')
+    expect(sessionDisplayName({ id: 'a', piName: '二万人', profile: '微软', derivedTitle: '首条消息' })).toBe('首条消息')
+    // 历史行无 profile 标签也按花名册降级（隔离前铸造的污染名）
+    expect(sessionDisplayName({ id: 'a', piName: '微软' })).toBe('New Chat')
+    // 正常会话名不受影响
+    expect(sessionDisplayName({ id: 'a', piName: '正式名', profile: '微软' })).toBe('正式名')
   })
 })
 

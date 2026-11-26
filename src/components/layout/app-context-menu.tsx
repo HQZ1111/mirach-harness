@@ -70,28 +70,40 @@ import {
 } from './dockview-column-ops'
 import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 import { resetWindowToFactory } from '@/lib/window-reset'
+import { readText, writeClipboardText } from '@/lib/clipboard'
 
-// ── store（hermes store.ts 的 $contextMenu 同构：单份菜单，两个菜单永不
-//    同开；open 载荷 = 坐标 + 右键落点所在分栏 id（「隐藏标签」行的目标，
-//    hermes toggleTargetZoneTabStrip 的"哪个栏"归属） ───────────────────────
+interface DomMenuTarget {
+  editable: HTMLElement | null
+  selectionText: string
+}
 
 interface AppContextMenuState {
   /** 打开中的菜单（viewport 坐标 + 落点分栏），null = 无菜单。 */
   open: { x: number; y: number; tabsetId?: string } | null
+  /** 文本/输入框右键的目标（hermes domSections 的 editable/selection 两段）。 */
+  dom: DomMenuTarget | null
   openAt(x: number, y: number, tabsetId?: string): void
+  openDomAt(x: number, y: number, target: DomMenuTarget): void
   close(): void
 }
 
 export const appContextMenuStore = createStore<AppContextMenuState>((set) => ({
   open: null,
-  openAt: (x, y, tabsetId) => set({ open: { x, y, tabsetId } }),
-  close: () => set({ open: null }),
+  dom: null,
+  openAt: (x, y, tabsetId) => set({ open: { x, y, tabsetId }, dom: null }),
+  openDomAt: (x, y, target) => set({ open: { x, y }, dom: target }),
+  close: () => set({ open: null, dom: null }),
 }))
 
 /** main.tsx scope='app' 分支的入口。tabsetId = 落点所在 .flexlayout__tabset
  *  的模型 id（无落点/不落分栏 = undefined，「隐藏标签」行随之缺席）。 */
 export function openAppContextMenu(x: number, y: number, tabsetId?: string): void {
   appContextMenuStore.getState().openAt(x, y, tabsetId)
+}
+
+/** 文本选中 / 输入框右键（hermes domSections 的 editable + selection）。 */
+export function openDomContextMenu(x: number, y: number, target: DomMenuTarget): void {
+  appContextMenuStore.getState().openDomAt(x, y, target)
 }
 
 function closeAppContextMenu(): void {
@@ -536,9 +548,129 @@ const SettingsHost: FC = () => {
 const APP_MENU_CONTENT_CLASS = 'w-56'
 const APP_MENU_ITEM_CLASS = 'gap-2'
 const APP_MENU_ICON_CLASS = 'text-(--text-3) size-[var(--size-icon-md)] shrink-0'
+const DOM_MENU_SHORTCUT_CLASS = 'text-(--text-4) ml-auto text-[0.65rem]'
+const IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
+
+function formFieldOf(editable: HTMLElement | null): HTMLInputElement | HTMLTextAreaElement | null {
+  return editable instanceof HTMLInputElement || editable instanceof HTMLTextAreaElement
+    ? editable
+    : null
+}
+
+function editableSelectionText(editable: HTMLElement): string {
+  const field = formFieldOf(editable)
+  if (field) return field.value.slice(field.selectionStart ?? 0, field.selectionEnd ?? 0)
+  return window.getSelection()?.toString() ?? ''
+}
+
+/** 菜单关闭后再 focus（浮层是焦点陷阱，关闭前 focus 会被抢回）。 */
+function withDomFocus(editable: HTMLElement | null, action: () => void): void {
+  closeAppContextMenu()
+  requestAnimationFrame(() => {
+    editable?.focus()
+    action()
+  })
+}
+
+function replaceInputSelection(
+  field: HTMLInputElement | HTMLTextAreaElement,
+  text: string,
+  mode: 'insert' | 'delete',
+): void {
+  const start = field.selectionStart ?? field.value.length
+  const end = field.selectionEnd ?? start
+  field.setRangeText(mode === 'delete' ? '' : text, start, end, 'end')
+  field.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+function DomEditMenu({ target }: { target: DomMenuTarget }) {
+  const { editable, selectionText } = target
+  const field = formFieldOf(editable)
+  const selected = editable ? editableSelectionText(editable) || selectionText : selectionText
+  const canCutCopy = selected.trim().length > 0
+  const hasText = field ? field.value.length > 0 : Boolean(editable?.textContent)
+  const shortcut = (key: string) => (IS_MAC ? `⌘${key}` : `Ctrl+${key}`)
+
+  const copy = () => {
+    if (selected) void writeClipboardText(selected)
+  }
+  const cut = () => {
+    if (!editable || !selected) return
+    withDomFocus(editable, () => {
+      if (field) {
+        void writeClipboardText(selected)
+        replaceInputSelection(field, '', 'delete')
+        return
+      }
+      if (!document.execCommand('cut')) {
+        void writeClipboardText(selected)
+        document.execCommand('delete')
+      }
+    })
+  }
+  const paste = () => {
+    if (!editable) return
+    void readText().then((text) => {
+      if (text === null) return
+      withDomFocus(editable, () => {
+        if (field) {
+          replaceInputSelection(field, text, 'insert')
+          return
+        }
+        document.execCommand('insertText', false, text)
+      })
+    })
+  }
+  const selectAll = () => {
+    if (!editable) return
+    withDomFocus(editable, () => {
+      if (field) {
+        field.select()
+        return
+      }
+      const range = document.createRange()
+      range.selectNodeContents(editable)
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+    })
+  }
+
+  if (!editable) {
+    return (
+      <ContextMenuItem className={APP_MENU_ITEM_CLASS} disabled={!canCutCopy} onSelect={copy}>
+        <span>复制</span>
+        <span className={DOM_MENU_SHORTCUT_CLASS}>{shortcut('C')}</span>
+      </ContextMenuItem>
+    )
+  }
+
+  return (
+    <>
+      <ContextMenuItem className={APP_MENU_ITEM_CLASS} disabled={!canCutCopy} onSelect={cut}>
+        <span>剪切</span>
+        <span className={DOM_MENU_SHORTCUT_CLASS}>{shortcut('X')}</span>
+      </ContextMenuItem>
+      <ContextMenuItem className={APP_MENU_ITEM_CLASS} disabled={!canCutCopy} onSelect={copy}>
+        <span>复制</span>
+        <span className={DOM_MENU_SHORTCUT_CLASS}>{shortcut('C')}</span>
+      </ContextMenuItem>
+      <ContextMenuItem className={APP_MENU_ITEM_CLASS} onSelect={paste}>
+        <span>粘贴</span>
+        <span className={DOM_MENU_SHORTCUT_CLASS}>{shortcut('V')}</span>
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem className={APP_MENU_ITEM_CLASS} disabled={!hasText} onSelect={selectAll}>
+        <span>全选</span>
+        <span className={DOM_MENU_SHORTCUT_CLASS}>{shortcut('A')}</span>
+      </ContextMenuItem>
+    </>
+  )
+}
 
 export function AppContextMenu() {
   const open = useStore(appContextMenuStore, (s) => s.open)
+  const dom = useStore(appContextMenuStore, (s) => s.dom)
   const ctx: AppMenuContext = open ? { tabsetId: open.tabsetId } : {}
 
   // ── beui ContextMenu（2026-10-26）────────────────────────────────
@@ -562,25 +694,29 @@ export function AppContextMenu() {
           open
           point={{ x: open.x, y: open.y }}
         >
-          <ContextMenuContent ariaLabel="应用菜单" className={APP_MENU_CONTENT_CLASS}>
-            {buildShellMenuSections(ctx)
-              .filter((section) => section.length > 0)
-              .map((section, index) => (
-                <div className="contents" key={index}>
-                  {index > 0 && <ContextMenuSeparator />}
-                  {section.map((item) => (
-                    <ContextMenuItem
-                      className={APP_MENU_ITEM_CLASS}
-                      disabled={item.disabled}
-                      key={item.id}
-                      onSelect={() => runShellAction(item.id, ctx)}
-                    >
-                      <CodiconGlyph className={APP_MENU_ICON_CLASS} name={item.icon} />
-                      <span>{item.label}</span>
-                    </ContextMenuItem>
-                  ))}
-                </div>
-              ))}
+          <ContextMenuContent ariaLabel={dom ? '文本菜单' : '应用菜单'} className={APP_MENU_CONTENT_CLASS}>
+            {dom ? (
+              <DomEditMenu target={dom} />
+            ) : (
+              buildShellMenuSections(ctx)
+                .filter((section) => section.length > 0)
+                .map((section, index) => (
+                  <div className="contents" key={index}>
+                    {index > 0 && <ContextMenuSeparator />}
+                    {section.map((item) => (
+                      <ContextMenuItem
+                        className={APP_MENU_ITEM_CLASS}
+                        disabled={item.disabled}
+                        key={item.id}
+                        onSelect={() => runShellAction(item.id, ctx)}
+                      >
+                        <CodiconGlyph className={APP_MENU_ICON_CLASS} name={item.icon} />
+                        <span>{item.label}</span>
+                      </ContextMenuItem>
+                    ))}
+                  </div>
+                ))
+            )}
           </ContextMenuContent>
         </ContextMenu>
       )}

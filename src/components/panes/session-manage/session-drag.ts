@@ -126,6 +126,8 @@ export function startSessionRowDrag(e: ReactPointerEvent<Element>, spec: Session
     )
   )
     return
+  // 选中文字上的按下 = 文本选择/拖选，不是"把文字当标签拖走"（2026-11-26 用户）。
+  if (window.getSelection()?.toString().trim()) return
 
   const handle = e.currentTarget as HTMLElement
   const { pointerId } = e

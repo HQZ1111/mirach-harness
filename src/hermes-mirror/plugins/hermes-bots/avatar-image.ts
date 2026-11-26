@@ -155,3 +155,19 @@ export function isBackfilledFacePng(dataUrl: null | string | undefined) {
     return false
   }
 }
+
+/** A user-chosen avatar image: `imageKind` = photo/pet wins even when the
+ *  picture happens to be 160×160 (mirach 2026-11-26: a 160px photo was
+ *  mistaken for the generated face backfill and the rail showed a green
+ *  math face instead of the user's orange avatar). Unknown kinds keep the
+ *  size heuristic. */
+export function isChosenAvatarImage(
+  image: null | string | undefined,
+  imageKind: null | string | undefined
+) {
+  if (!image) {
+    return false
+  }
+
+  return imageKind === 'photo' || imageKind === 'pet' || !isBackfilledFacePng(image)
+}

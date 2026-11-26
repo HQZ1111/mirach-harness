@@ -109,6 +109,59 @@ pub fn seed_profile_home_config(name: &str) -> Result<(), String> {
             }
         }
     }
+    // 技能 / 原生扩展 / 原生包登记表：hermes `profile create --clone-all`
+    // 同语义，只补缺不覆盖。没有它们，具名环境的新会话拿不到全局技能，
+    // 也加载不到任何原生插件（2026-11-26 用户："目录还要啊……bots 和
+    // 收音机是插件"——插件列表按环境 home 解析，空目录不是"没有插件"）。
+    for dir in ["skills", "extensions"] {
+        copy_dir_missing(&default_home.join(dir), &home.join(dir))?;
+    }
+    let registry_src = default_home.join("native-packages.json");
+    let registry_dst = home.join("native-packages.json");
+    if !registry_dst.exists() && registry_src.is_file() {
+        std::fs::copy(&registry_src, &registry_dst).map_err(|e| {
+            format!(
+                "环境原生包登记表克隆失败 {} → {}: {e}",
+                registry_src.display(),
+                registry_dst.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// 只补缺的递归目录复制（同名文件/目录已存在就跳过；符号链接跳过，
+/// 不把链接目标带进别的 home）。
+fn copy_dir_missing(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(src) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("环境资源目录读取失败 {}: {e}", src.display())),
+    };
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("环境资源目录创建失败 {}: {e}", dst.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("环境资源目录项读取失败 {}: {e}", src.display()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("环境资源目录项类型读取失败 {}: {e}", src.display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_missing(&from, &to)?;
+        } else if file_type.is_file() && !to.exists() {
+            std::fs::copy(&from, &to).map_err(|e| {
+                format!(
+                    "环境资源克隆失败 {} → {}: {e}",
+                    from.display(),
+                    to.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -189,6 +242,289 @@ pub struct ProfileDeleteOutcome {
     pub removed: bool,
 }
 
+/// 重命名具名环境（hermes `profiles.rename` 的宿主对偶，2026-11-26）：
+/// 改 `<agent>/profiles/<name>` 目录名。默认环境拒绝、目标已存在拒绝、
+/// 符号链接拒绝；名字相同 = `renamed:false` 幂等。
+///
+/// **活动环境由调用方先切走**：live 会话的路径/句柄还指在旧目录里，
+/// 原地改名会让引擎持有悬空路径——命令层（main.rs）对活动环境直接拒绝。
+#[derive(serde::Serialize)]
+pub struct ProfileRenameOutcome {
+    pub renamed: bool,
+    pub name: String,
+}
+
+pub fn rename_profile_home(
+    from: &str,
+    to: &str,
+) -> Result<ProfileRenameOutcome, String> {
+    let Some(from_name) = normalize_profile(Some(from))? else {
+        return Err("默认环境不可重命名".to_owned());
+    };
+    let Some(to_name) = normalize_profile(Some(to))? else {
+        return Err("目标名字非法（不能为空或 default）".to_owned());
+    };
+    if from_name == to_name {
+        return Ok(ProfileRenameOutcome {
+            renamed: false,
+            name: from_name,
+        });
+    }
+    let source = profile_home(Some(&from_name))?;
+    let target = profile_home(Some(&to_name))?;
+    let profiles_root = pi_paths::agent_dir()?.join("profiles");
+    if !source.starts_with(&profiles_root) || !target.starts_with(&profiles_root) {
+        return Err(format!(
+            "拒绝重命名 profile 目录之外的路径：{} → {}",
+            source.display(),
+            target.display()
+        ));
+    }
+    match std::fs::symlink_metadata(&source) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(format!("拒绝重命名符号链接环境目录：{}", source.display()));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(format!("环境路径不是目录：{}", source.display()));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("环境不存在：{from_name}"));
+        }
+        Err(e) => {
+            return Err(format!("环境目录读取失败 {}: {e}", source.display()));
+        }
+    }
+    if target.exists() {
+        return Err(format!("同名环境已存在：{to_name}"));
+    }
+    std::fs::rename(&source, &target)
+        .map_err(|e| format!("环境目录重命名失败 {} → {}: {e}", source.display(), target.display()))?;
+    Ok(ProfileRenameOutcome {
+        renamed: true,
+        name: to_name,
+    })
+}
+
+/// 导出具名环境为 `.tar.gz`（hermes `profiles.export` 的宿主对偶；2026-11-26）。
+///
+/// 归档 = 该环境 home 的整棵目录（配置/技能/扩展/会话），排除 `*.lock`
+/// 运行锁。默认环境拒绝（它是 agent 根，包含所有 profile，导出会递归
+/// 套娃且泄露全部环境）。输出缺省 = `<agent>/exports/<name>-<时间>.tar.gz`。
+pub fn export_profile_home(
+    name: &str,
+    output: Option<&str>,
+) -> Result<PathBuf, String> {
+    let Some(normalized) = normalize_profile(Some(name))? else {
+        return Err("默认环境不可导出".to_owned());
+    };
+    let home = profile_home(Some(&normalized))?;
+    if !home.is_dir() {
+        return Err(format!("环境不存在：{normalized}"));
+    }
+    let archive = match output.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            pi_paths::agent_dir()?
+                .join("exports")
+                .join(format!("{normalized}-{stamp}.tar.gz"))
+        }
+    };
+    if let Some(parent) = archive.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("导出目录创建失败 {}: {e}", parent.display()))?;
+    }
+    let status = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&home)
+        .arg("--exclude=*.lock")
+        .arg(".")
+        .status()
+        .map_err(|e| format!("tar 启动失败（导出配置档案）：{e}"))?;
+    if !status.success() {
+        return Err(format!("tar 导出失败（退出码 {:?}）", status.code()));
+    }
+    Ok(archive)
+}
+
+/// 导入 `.tar.gz` 为新的具名环境（hermes `profiles/import` 的宿主对偶）。
+///
+/// 先解到 `<agent>/imports/` 临时目录并做安全校验（绝对路径 / `..` /
+/// 符号链接一律拒绝），再整体搬到 `<agent>/profiles/<name>`。目标已存在
+/// 直接拒绝；名字缺省取归档文件名。
+pub fn import_profile_home(
+    archive: &str,
+    name: Option<&str>,
+) -> Result<(String, PathBuf), String> {
+    let archive_path = PathBuf::from(archive);
+    if !archive_path.is_file() {
+        return Err(format!("归档不存在：{archive}"));
+    }
+    let fallback = archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".tgz")
+        .to_owned();
+    let requested = name.map(str::trim).filter(|value| !value.is_empty()).unwrap_or(&fallback);
+    let Some(normalized) = normalize_profile(Some(requested))? else {
+        return Err("导入目标不能是 default；请提供新的环境名".to_owned());
+    };
+    let target = profile_home(Some(&normalized))?;
+    if target.exists() {
+        return Err(format!("同名环境已存在：{normalized}"));
+    }
+
+    // 归档条目安全校验：绝对路径 / 盘符开头 / `..` 组件 / 反斜杠越界。
+    let listing = std::process::Command::new("tar")
+        .arg("-tzf")
+        .arg(&archive_path)
+        .output()
+        .map_err(|e| format!("tar 启动失败（读取归档清单）：{e}"))?;
+    if !listing.status.success() {
+        return Err(format!(
+            "归档清单读取失败（退出码 {:?}）：{}",
+            listing.status.code(),
+            String::from_utf8_lossy(&listing.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&listing.stdout);
+    for entry in text.lines() {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let has_drive = trimmed.as_bytes().get(1) == Some(&b':');
+        if trimmed.starts_with('/') || trimmed.starts_with('\\') || has_drive {
+            return Err(format!("归档包含绝对路径条目，拒绝导入：{trimmed}"));
+        }
+        if trimmed.split(['/', '\\']).any(|part| part == "..") {
+            return Err(format!("归档包含越界路径条目，拒绝导入：{trimmed}"));
+        }
+    }
+
+    let imports_root = pi_paths::agent_dir()?.join("imports");
+    std::fs::create_dir_all(&imports_root)
+        .map_err(|e| format!("导入临时目录创建失败 {}: {e}", imports_root.display()))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let staging = imports_root.join(format!(".import-{}-{stamp}", std::process::id()));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|e| format!("旧导入临时目录清理失败 {}: {e}", staging.display()))?;
+    }
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| format!("导入临时目录创建失败 {}: {e}", staging.display()))?;
+
+    let extract = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(&staging)
+        .status()
+        .map_err(|e| format!("tar 启动失败（解包配置档案）：{e}"))?;
+    if !extract.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("归档解包失败（退出码 {:?}）", extract.code()));
+    }
+    if contains_symlink(&staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err("归档包含符号链接，拒绝导入".to_owned());
+    }
+
+    // 兼容"单层目录包"：归档里只有一个顶层目录且没有顶层文件时，把它当内容根。
+    let entries = std::fs::read_dir(&staging)
+        .map_err(|e| format!("导入临时目录读取失败 {}: {e}", staging.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("导入临时目录项读取失败：{e}"))?;
+    let content_root = if entries.len() == 1 && entries[0].path().is_dir() {
+        entries[0].path()
+    } else {
+        staging.clone()
+    };
+
+    let profiles_root = pi_paths::agent_dir()?.join("profiles");
+    std::fs::create_dir_all(&profiles_root)
+        .map_err(|e| format!("环境根目录创建失败 {}: {e}", profiles_root.display()))?;
+    std::fs::rename(&content_root, &target).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging);
+        format!(
+            "导入落盘失败 {} → {}: {e}",
+            content_root.display(),
+            target.display()
+        )
+    })?;
+    if content_root != staging {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    Ok((normalized, target))
+}
+
+fn contains_symlink(root: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            return true;
+        };
+        if file_type.is_symlink() {
+            return true;
+        }
+        if file_type.is_dir() && contains_symlink(&entry.path()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 单环境信息（配置档案管理页的详情面；hermes `ProfileInfo` 的宿主子集：
+/// path / skills 计数；model 由 BotPreset 提供，不在引擎层重复）。
+#[derive(serde::Serialize)]
+pub struct ProfileInfoOutcome {
+    pub name: String,
+    pub path: String,
+    pub exists: bool,
+    pub skills: u32,
+}
+
+pub fn profile_info(name: &str) -> Result<ProfileInfoOutcome, String> {
+    let normalized = normalize_profile(Some(name))?;
+    let home = profile_home(normalized.as_deref())?;
+    let skills = count_profile_skills(&home);
+    Ok(ProfileInfoOutcome {
+        name: normalized.unwrap_or_else(|| "default".to_owned()),
+        path: home.to_string_lossy().into_owned(),
+        exists: home.is_dir(),
+        skills,
+    })
+}
+
+/// `<home>/skills/*/SKILL.md` 的技能数（管理页的 skill_count 对偶；目录
+/// 读不了 = 0，缺目录是正常态）。
+fn count_profile_skills(home: &std::path::Path) -> u32 {
+    let dir = home.join("skills");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        if entry.path().join("SKILL.md").is_file() {
+            count += 1;
+        }
+    }
+    count
+}
+
 pub fn delete_profile_home(name: &str) -> Result<ProfileDeleteOutcome, String> {
     let Some(normalized) = normalize_profile(Some(name))? else {
         return Err("默认环境不可删除".to_owned());
@@ -248,6 +584,14 @@ mod tests {
         assert!(delete_profile_home("default").is_err());
         assert!(delete_profile_home("../x").is_err());
         assert!(delete_profile_home("a/b").is_err());
+    }
+
+    #[test]
+    fn rename_refuses_default_null_and_unescaped_names() {
+        assert!(rename_profile_home("default", "x").is_err());
+        assert!(rename_profile_home("x", "default").is_err());
+        assert!(rename_profile_home("../x", "y").is_err());
+        assert!(rename_profile_home("x", "a/b").is_err());
     }
 
     #[test]

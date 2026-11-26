@@ -728,7 +728,22 @@ async function driveRoom(roomId: string): Promise<void> {
       if (result === 'cancelled') break
     }
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e)
     console.error('[canonical-driver] 驱动失败（房间保持现状，下次发送/启动会重试）', roomId, e)
+    // 用户可见（2026-11-26："群聊也是，而且任何错误提示都没有"）：驱动
+    // 失败过去只落 console，房间停在"运行中"没有任何提示。
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('mirach:toast', {
+          detail: {
+            kind: 'error',
+            title: '群聊驱动失败',
+            message,
+            persistent: true,
+          },
+        }),
+      )
+    }
   } finally {
     runs.delete(roomId)
     notify()

@@ -250,6 +250,23 @@ export async function openRosterBot(bot: RosterRow, { intent = 'in-place' }: Ope
   haptic('tap')
   saveSelectedRosterBot(bot)
   setBotsWorkspaceOwner(botWorkspaceOwnerKey(bot), bot)
+
+  // 宿主适配（非上游）：点本地 bot 行 = 进入该 bot 的环境——活动环境跟随，
+  // 侧栏换源 / 左栏底栏 / 环境菜单 / 本行高亮四处同源（2026-11-25 用户：
+  // "左侧栏底部头像、会话选项的环境、机器人页的选中，三个不统一"）。
+  // 远端行不动本机环境；跟随失败不阻断打开（host.focusProfile 里已 console
+  // 可见）。
+  if ((bot.connectionId ?? '') === '' || bot.connectionId === 'local') {
+    const focus = host.focusProfile
+    if (typeof focus === 'function') {
+      try {
+        await focus.call(host, bot.name)
+      } catch (error) {
+        console.error('[bots] focusProfile 失败（继续打开）', error)
+      }
+    }
+  }
+
   const dismissedGroup = dismissGroupChatForBotOpen()
 
   if (!dismissedGroup) {

@@ -163,11 +163,15 @@ import { useStore } from "zustand";
 import { createPortal } from "react-dom";
 import { appearanceStore } from "@/lib/appearance-prefs";
 
-import { ContribBoundary } from "@/hermes-shim/contrib/react/contrib-boundary";
-import { useContributions } from "@/hermes-shim/contrib/react/use-contributions";
-import { I18nProvider } from "@/hermes-mirror/i18n";
 import { sessionCatalog } from "@/components/panes/session-manage/session-catalog";
-import { readLocale } from "@/lib/ui-prefs";
+import {
+  botDisplayName,
+  botPhotoImage,
+  useBotsStore,
+  type BotPreset,
+} from "@/components/panes/hub/bots-store";
+import { useActiveProfile } from "@/components/panes/session-manage/active-profile-bridge";
+import { avatarColor, botAppearance, BotFace } from "@/hermes-mirror/plugins/hermes-bots/avatar";
 
 export type ThreadGroupPart = WorkGroupPart;
 
@@ -1069,63 +1073,95 @@ const EmptyStateWelcome: FC = () => {
   );
 };
 
-// ── chat.empty 贡献槽（2026-11-17）──────────────────────────────────────────
-// 上游语义（components/assistant-ui/thread/index.tsx:166）：**草稿**（无会话）
-// 看核心 splash；**已存在但为空**的会话交给 chat.empty 贡献（hermes-bots 的
-// BotChatEmpty 用机器人名字/头像替换 splash）。宿主对偶 = 有活动会话 id 时
-// 挂贡献（每个都挂，返回 null 即不渲染——上游同款：各贡献自行认领自己的
-// 会话，首个认领不到的不能压掉真正的主人），无会话 id 时保留核心欢迎屏。
-const CHAT_EMPTY_AREA = "chat.empty";
+// ── 空对话开场标识（2026-11-25 用户定稿：所有配置都要粒子效果）──────────────
+// 背景：
+// - 2026-11-23 起「空对话开场标识 = 启动页同款 ParticleText」（用户定稿）；
+// - 但 hermes 的 chat.empty 贡献（hermes-bots 的 BotChatEmpty）在**已有会话
+//   id 的空会话**（bot 聊天 / 选了工作区文件夹的新会话）里接管空态，画的是
+//   hermes 的静态 Wordmark——于是「其他配置」看不到粒子效果，且选完文件夹
+//   开场文字立刻消失（用户实报：「选择工作区文件夹后开场文字就没了，不是
+//   发送消息后消失」）。
+// 现行裁定：**空对话开场由宿主统一自绘**（不再挂 chat.empty 贡献）：
+// - 会话属于某个 bot（canonical 双锚，或所在环境 = bot）→ 机器人脸 +
+//   机器人名粒子字标 +「说点什么开始吧。」（沿用 hermes BotChatEmpty 的
+//   结构与文案，只把静态 Wordmark 换成本地粒子组件）；
+// - 其余（本体/普通会话）→ MIRACH 粒子 +「有什么可以帮你的？」。
+// 状态门 = `isNewChatView`（messages.length === 0）：**只有首条消息**才会
+// 换掉开场，选工作区/建空会话都留在开场。
+const botForEmptySession = (
+  bots: readonly BotPreset[],
+  sessionId: null | string,
+  profile: string | undefined,
+): BotPreset | undefined => {
+  if (sessionId) {
+    const canonical = bots.find((b) => b.chatSessionId === sessionId);
+    if (canonical) return canonical;
+  }
+  return profile ? bots.find((b) => b.name === profile) : undefined;
+};
 
-type ChatEmptyRender = (props: { sessionId: string }) => ReactNode;
-
-function ChatEmptyEntry({
-  id,
-  render,
-  sessionId,
-}: {
-  id: string;
-  render: ChatEmptyRender;
-  sessionId: string;
-}) {
-  // 稳定组件身份：每次 render 换闭包会把插件的空态整个重挂（上游同款注释）。
-  const Render = useMemo(() => render, [render]);
+const BotEmptyWelcome: FC<{ bot: BotPreset }> = ({ bot }) => {
+  const appearance = botAppearance(bot.name, {
+    color: bot.color ?? undefined,
+    shape: bot.shape ?? undefined,
+    image: bot.image ?? undefined,
+    custom: bot.custom === true,
+  });
+  // 与机器人行/底栏同判据：photo/pet 无条件用图，未知来源的 160 回填脸
+  // 走实时矢量脸（botPhotoImage 单源）。
+  const photo = botPhotoImage(bot);
   return (
-    <ContribBoundary id={id} key={id}>
-      {/* 插件贡献的宿主树没有 I18nProvider（dockview 的 PluginPane 各自挂）；
-          不挂时 `usePluginI18n(id)` 的 locale 恒 DEFAULT_LOCALE('en')——
-          BotChatEmpty 的中文文案会显示成英文（2026-11-20 实点发现）。 */}
-      <I18nProvider
-        configClient={null}
-        initialLocale={readLocale() === "zh-CN" ? "zh" : "en"}
+    <EmptyState className="aui-thread-welcome-root mx-auto my-6 w-full max-w-none">
+      <div className="mb-4 flex justify-center" data-slot="aui_bot_intro_face">
+        <BotFace
+          color={avatarColor(appearance.color, bot.name)}
+          image={photo}
+          mood="idle"
+          name={bot.name}
+          shape={appearance.shape}
+          size={96}
+        />
+      </div>
+      <div
+        className="aui-intro-particle aui-intro-particle--bot mb-1"
+        data-slot="aui_intro_particle"
       >
-        <Render sessionId={sessionId} />
-      </I18nProvider>
-    </ContribBoundary>
+        <ParticleText
+          clickBurst={false}
+          density={4}
+          fontSize="min(18cqw, 12rem)"
+          fontWeight={800}
+          gatherDuration={1400}
+          glow
+          highlightColor="#5aa2ff"
+          idleDrift={0.45}
+          intro="gather"
+          particleSize={1.7}
+          pointerRepel={20}
+          repelRadius={90}
+          stagger={340}
+          text={botDisplayName(bot)}
+        />
+      </div>
+      <EmptyStateGreeting>说点什么开始吧。</EmptyStateGreeting>
+    </EmptyState>
   );
-}
+};
 
 const ChatEmptyBody: FC<{ Welcome: ComponentType }> = ({ Welcome }) => {
-  const contributions = useContributions(CHAT_EMPTY_AREA);
   // 宿主的活动会话 id（stored id；pi 的 id 空间单一）。
   const sessionId = useStore(sessionCatalog, (s) => s.activeId);
-  if (!sessionId || contributions.length === 0) return <Welcome />;
-  return (
-    <>
-      {contributions.map((contribution) => {
-        const render = (contribution.data as { render?: unknown } | undefined)?.render;
-        if (typeof render !== "function") return null;
-        return (
-          <ChatEmptyEntry
-            id={contribution.id}
-            key={contribution.id}
-            render={render as ChatEmptyRender}
-            sessionId={sessionId}
-          />
-        );
-      })}
-    </>
+  const entry = useStore(sessionCatalog, (s) =>
+    s.activeId ? s.entries[s.activeId] : undefined,
   );
+  const bots = useBotsStore((s) => s.bots);
+  const activeProfile = useActiveProfile();
+  // 已知目录条目：profile 缺省 = 本体（不能拿活动环境冒充）；条目还没进
+  // 目录（刚建的会话）才用活动环境兜底。
+  const profile = entry ? entry.profile : (activeProfile ?? undefined);
+  const bot = botForEmptySession(bots, sessionId, profile);
+  if (bot) return <BotEmptyWelcome bot={bot} />;
+  return <Welcome />;
 };
 
 export const Thread: FC<ThreadProps> = ({
@@ -1240,7 +1276,14 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
         // 让位形态写在这里：panes.css 的 --dsh-column-width / --dsh-panel-offset
         // 由它选择（面板在场且非胶囊 → "wide"，仅 ≥1280 平移；与 ZCode 对账）。
         data-status-panel-shift={statusPanelShift.offset ? "wide" : undefined}
-        className="aui-root aui-thread-root bg-transparent @container relative flex h-full flex-col"
+        data-empty={isEmpty ? "true" : undefined}
+        className={cn(
+          "aui-root aui-thread-root bg-transparent @container relative flex h-full flex-col",
+          // 新任务/空对话：开场标识与输入框作为**一组**垂直居中（ZCode
+          // ConversationTimeline 的 centeredEmptyLayout 语义）。消息出现后
+          // 恢复「消息区 flex-1 + 输入框贴底」的常态布局。
+          isEmpty && "justify-center",
+        )}
         style={{
           // 可读列宽 = dsh 对话宽度轴（width-handle.tsx：拖拽手柄发布
           // --dsh-chat-user-width，自适应回退 = 列宽 64% 夹 [330,920]）。
@@ -1257,7 +1300,13 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             ref={viewportRef}
             onScroll={onViewportScroll}
             data-slot="aui_thread-viewport"
-            className="relative flex flex-1 flex-col overflow-x-auto overflow-y-scroll scroll-smooth"
+            className={cn(
+              "relative flex flex-col overflow-x-auto overflow-y-scroll scroll-smooth",
+              // 空对话：viewport 只占开场标识自身高度（flex-none），footer
+              // 紧跟上，二者由根节点的 justify-center 作为一组居中；有消息
+              // 时 viewport 吃掉剩余高度、footer 贴底（既有布局不变）。
+              isEmpty ? "flex-none" : "flex-1",
+            )}
           >
         <div
           className={cn(

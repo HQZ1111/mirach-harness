@@ -225,9 +225,11 @@
 @keyframes beui-disclose-row-out {
   from {
     opacity: 1;
+    transform: none;
   }
   to {
     opacity: 0;
+    transform: translateY(-2px);
   }
 }
 .disclose-row--closing {

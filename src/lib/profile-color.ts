@@ -1,33 +1,65 @@
-/** profile 颜色（hermes `lib/profile-color.ts` 的宿主对偶）。
+/**
+ * 配置档案颜色（hermes `lib/profile-color.ts` 逐字移植，2026-11-26 用户：
+ * "配置档案栏怎么和hermes不一样"——旧版是自造的 9 色 hex 板 + 取模索引，
+ * 与 hermes 的确定性色相/覆盖色/默认中性三件套不同）。
  *
- * 2026-11-16：实现从 `@/sdk/index` 内联回本文件。`@/sdk` 是 hermes 插件 SDK 的
- * shim，其 re-export 会拖入 `src/hermes-mirror/**` 里尚未接线的 hermes 内部
- * 组件（`@hermes/shared`、`@/components/pane-shell/*` 等未解析别名），一旦
- * 宿主主图 import 它，vite pre-transform 直接 500 → 整页白屏。
- * 颜色本身是纯函数，不依赖 SDK，内联后主图与插件移植解耦。
+ * 上游语义：
+ * - 具名档案有确定性色相（名字哈希 → hsl(… 68% 58%)），换设备也一致；
+ * - 默认（本体）档案没有颜色（null = 中性，不着色）；
+ * - 用户挑的颜色作为 override 优先（resolveProfileColor）；
+ * - PROFILE_SWATCHES = 12 枚同饱和/明度均匀色相（档案栏选择器 + 头像
+ *   选择器共用，hermes avatar-picker 同源）。
  */
 
-/** 上游 `ColorSwatches`：bots 头像颜色选择器的色板。 */
-export const ColorSwatches: readonly string[] = [
-  '#e5484d',
-  '#f76b15',
-  '#f5d90a',
-  '#30a46c',
-  '#12a594',
-  '#0091ff',
-  '#6e56cf',
-  '#e93d82',
-  '#8d8d8d',
-]
+/** 具名档案色相的饱和度（hermes 原值）。 */
+const PROFILE_TAG_SATURATION = 68
+/** 具名档案色相的明度（hermes 原值）。 */
+const PROFILE_TAG_LIGHTNESS = 58
 
-/** 上游 `PROFILE_SWATCHES`：profile 色板（与 ColorSwatches 同源）。 */
-export const PROFILE_SWATCHES = ColorSwatches
-
-/** 上游 `profileColor`：由名字确定性地取色。 */
-export function profileColor(name: string): string {
+function hashString(value: string): number {
   let hash = 0
-  for (let i = 0; i < name.length; i += 1) {
-    hash = (hash * 31 + name.charCodeAt(i)) >>> 0
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0
   }
-  return ColorSwatches[hash % ColorSwatches.length]!
+
+  return hash
+}
+
+/** 具名档案的确定性颜色；默认/空 = null（中性，不标色）。 */
+export function profileColor(name: null | string | undefined): null | string {
+  const key = (name ?? '').trim()
+
+  if (!key || key === 'default') {
+    return null
+  }
+
+  const hue = hashString(key) % 360
+
+  return `hsl(${hue} ${PROFILE_TAG_SATURATION}% ${PROFILE_TAG_LIGHTNESS}%)`
+}
+
+/** 档案的有效颜色：用户覆盖优先，否则确定性色相；默认档案恒 null。 */
+export function resolveProfileColor(
+  name: null | string | undefined,
+  overrides: Record<string, string>,
+): null | string {
+  const key = (name ?? '').trim()
+
+  if (!key || key === 'default') {
+    return null
+  }
+
+  return overrides[key] ?? profileColor(key)
+}
+
+/** 选择器的 12 枚预设色（hermes PROFILE_SWATCHES 原样）。 */
+export const PROFILE_SWATCHES: readonly string[] = Array.from(
+  { length: 12 },
+  (_, index) => `hsl(${index * 30} ${PROFILE_TAG_SATURATION}% ${PROFILE_TAG_LIGHTNESS}%)`,
+)
+
+/** 从档案色派生出的浅底（色块背景，hermes profileColorSoft 原样）。 */
+export function profileColorSoft(color: string, percent = 16): string {
+  return `color-mix(in srgb, ${color} ${percent}%, transparent)`
 }

@@ -161,7 +161,7 @@ if (isSettingsWindow) {
     import('./app'),
     import('./components/layout/app-context-menu'),
     import('./components/panes/session-manage/context-menu-scope'),
-  ]).then(([{ App }, { AppContextMenu, openAppContextMenu }, { resolveContextMenuScope }]) => {
+  ]).then(([{ App }, { AppContextMenu, openAppContextMenu, openDomContextMenu }, { contextMenuEditable, resolveContextMenuScope }]) => {
     // 全局右键范围裁定（hermes app-context-menu 体系的 Tauri 语义裁剪，纯函数
     // 见 context-menu-scope.ts）。capture 段一次监听、全应用一个裁定：
     // - editable（input/textarea/contenteditable）→ 放行 WebView2 原生编辑菜单；
@@ -179,7 +179,19 @@ if (isSettingsWindow) {
       'contextmenu',
       (event) => {
         if (!(event.target instanceof Element)) return
-        if (resolveContextMenuScope(event.target) !== 'app') return
+        const scope = resolveContextMenuScope(event.target)
+        if (scope === 'owned') return
+        // 可编辑区 + 选中文字 = hermes domSections 的编辑/复制段（Tauri 无
+        // contextMenuEdit 桥，动作在 renderer 用 clipboard/execCommand 对偶）。
+        // 不再放行 WebView2 原生菜单：用户要求"选中文字的右键和输入框的右键"
+        // 都走应用菜单。
+        const editable = contextMenuEditable(event.target)
+        const selectionText = window.getSelection()?.toString().trim() ?? ''
+        if (editable || selectionText) {
+          event.preventDefault()
+          openDomContextMenu(event.clientX, event.clientY, { editable, selectionText })
+          return
+        }
         event.preventDefault()
         // v8.0 dockview：右键落点分栏解析已随「隐藏标签」行废除（左/主栏组
         // 恒无条、面板栏条恒显）——菜单布局行全部从栏旗标现读。

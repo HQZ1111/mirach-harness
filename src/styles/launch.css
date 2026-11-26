@@ -184,6 +184,13 @@ html[data-launch-reveal-active] .app-titlebar {
   width: 100%;
 }
 
+/* 机器人空对话：字标在头像下方，高度比 MIRACH 核心 splash 矮一档（2026-11-25
+   用户："其他配置怎么没有粒子文字组件的效果"——机器人空态改用同一粒子组件，
+   脸 + 名字 + 提示语保持 hermes BotChatEmpty 的堆叠结构）。 */
+.aui-intro-particle--bot {
+  height: clamp(88px, 13vh, 150px);
+}
+
 .aui-intro-particle .particle-text {
   min-height: 0;
 }

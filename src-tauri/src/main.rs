@@ -1225,6 +1225,53 @@ fn pi_profile_delete(name: String) -> Result<pi_profiles::ProfileDeleteOutcome, 
     pi_profiles::delete_profile_home(&name)
 }
 
+/// 重命名具名环境（hermes `profiles.rename` 的宿主对偶；2026-11-26）。
+///
+/// 活动环境直接拒绝——live 会话的路径/句柄还指在旧目录里，调用方必须先
+/// 切到别的环境（前端在改名流程里先 `pi_profile_set_active` 切走）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_rename(
+    state: tauri::State<'_, std::sync::Arc<agui::AguiState>>,
+    name: String,
+    new_name: String,
+) -> Result<pi_profiles::ProfileRenameOutcome, String> {
+    let from = name.trim().to_owned();
+    if let Some(active) = state.engine.active_profile()? {
+        if active == from {
+            return Err("该环境正在使用——先切换到别的环境再重命名".to_owned());
+        }
+    }
+    pi_profiles::rename_profile_home(&from, &new_name)
+}
+
+/// 导出具名环境为 `.tar.gz`（hermes `profiles.export` 对偶；2026-11-26）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_export(name: String, output: Option<String>) -> Result<serde_json::Value, String> {
+    let archive = pi_profiles::export_profile_home(&name, output.as_deref())?;
+    Ok(serde_json::json!({
+        "archive": archive.to_string_lossy(),
+    }))
+}
+
+/// 导入 `.tar.gz` 为新的具名环境（hermes `profiles/import` 对偶；2026-11-26）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_import(
+    archive: String,
+    name: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let (name, path) = pi_profiles::import_profile_home(&archive, name.as_deref())?;
+    Ok(serde_json::json!({
+        "name": name,
+        "path": path.to_string_lossy(),
+    }))
+}
+
+/// 单环境信息（配置档案管理页：home 路径 + 技能计数）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_profile_info(name: String) -> Result<pi_profiles::ProfileInfoOutcome, String> {
+    pi_profiles::profile_info(&name)
+}
+
 /// 预热具名环境 home（hermes `host.warmProfile` 的宿主对偶；2026-11-25）。
 ///
 /// hermes 的 warmProfile 预热的是**进程池里的 profile socket**；宿主是单
@@ -2043,6 +2090,10 @@ fn main() {
             pi_profile_get_active,
             pi_profile_set_active,
             pi_profile_delete,
+            pi_profile_rename,
+            pi_profile_export,
+            pi_profile_import,
+            pi_profile_info,
             pi_profile_ensure,
             pi_discard_session,
             pi_new_session,

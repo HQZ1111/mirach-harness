@@ -1819,7 +1819,7 @@ function ConversationStatusPanelImpl() {
   // **必须与渲染闸门同判**（`activeId !== null && hasContent`）：组件总会
   // 挂载，早先无条件 setMounted(true) 会让"面板渲染为 null 的会话"也把
   // 对话列左移收窄 10.5rem / 24rem，右侧留一片空白（用户 11-18 报障）。
-  const panelVisible = activeId !== null && model.hasContent
+  const panelVisible = variant !== 'hidden' && activeId !== null && model.hasContent
   useEffect(() => {
     statusPanelStore.getState().setMounted(panelVisible)
     return () => statusPanelStore.getState().setMounted(false)
@@ -1970,6 +1970,9 @@ function ConversationStatusPanelImpl() {
 
   // draft（无会话）不挂（上游同款）。
   if (activeId === null) return null
+  // 列头开关的「整个隐藏」= 连 mini 胶囊都不画；overlay 与让位都归零
+  //（panelVisible 已排除 hidden，内容列不会留空白）。
+  if (variant === 'hidden') return null
   // 上游卸载闸门：没有任何活内容就整块不渲染（2026-11-17 用户"全部对齐"
   // 轮推翻了 2026-11-15 的"常驻空态"宿主选择）。
   if (!model.hasContent) return null

@@ -84,9 +84,13 @@ export function ReviewPane({ onClose }: { onClose?: () => void }) {
   const showDiffSkeleton = useDelayedTrue(diffLoading)
 
   return (
+    // 2026-11-26 用户："审查页和工具页都叠加了容器，有个背景"——dockview
+    // 的 .dv-groupview 已画 --surface 卡片底；这里再叠
+    // --ui-sidebar-surface-background 会把该栏提亮一层（实测 55% + 55%
+    // → 79.75%）。面板内容统一透出 group 底色，不再自带背景。
     <aside
       aria-label='审查'
-      className='relative flex h-full w-full min-w-0 flex-col overflow-hidden bg-(--ui-sidebar-surface-background) text-(--ui-text-tertiary)'
+      className='relative flex h-full w-full min-w-0 flex-col overflow-hidden text-(--ui-text-tertiary)'
       data-slot='review-pane'
     >
       {showChrome && (

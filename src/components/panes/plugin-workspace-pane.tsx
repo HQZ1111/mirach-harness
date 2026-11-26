@@ -12,6 +12,7 @@
 
 import { QueryClientProvider } from '@tanstack/react-query'
 import { useSyncExternalStore } from 'react'
+import { ArrowLeftIcon } from 'lucide-react'
 import type { IDockviewPanelProps } from 'dockview-react'
 
 import { I18nProvider } from '@/hermes-mirror/i18n'
@@ -31,8 +32,8 @@ export function PluginWorkspacePane(props: IDockviewPanelProps<{ workspaceId?: s
   const record = pluginWorkspaceRecord(workspaceId)
 
   if (!record) return null
-  return (
-    <div data-panel-id={workspaceId} style={{ display: 'contents' }}>
+  const body = (
+    <>
       {/* 上游 workspace 的可见性探针按 `plugin-workspace:<id>` 查（插件
           GroupChatMainView：`host.paneVisibility(\`plugin-workspace:${ID}:group:…\`)`）。
           宿主 dockview 面板 id 是 `<id>`，这里补一个同层标记，否则插件面永远
@@ -45,6 +46,31 @@ export function PluginWorkspacePane(props: IDockviewPanelProps<{ workspaceId?: s
           ) : null}
         </I18nProvider>
       </QueryClientProvider>
+    </>
+  )
+
+  // 群聊的返回按钮在插件自己的 RoomHeader；屏幕页没有，宿主补一个浮层返回钮
+  // （2026-11-26 用户："群聊和屏幕也不要有标签，直接给个返回的按钮"）。
+  if (!workspaceId.includes(':screen:')) {
+    return (
+      <div data-panel-id={workspaceId} style={{ display: 'contents' }}>
+        {body}
+      </div>
+    )
+  }
+  return (
+    <div className="relative h-full min-h-0" data-panel-id={workspaceId}>
+      <div className="h-full min-h-0">{body}</div>
+      <button
+        aria-label="返回主对话"
+        className="absolute left-2 top-2 z-20 inline-flex items-center gap-1 rounded-md border border-(--stroke-soft) bg-(--surface) px-2 py-1 text-[0.7rem] text-foreground shadow-sm hover:bg-(--hover-wash)"
+        data-slot="plugin-workspace-back"
+        onClick={() => props.api.close()}
+        type="button"
+      >
+        <ArrowLeftIcon className="size-3.5" />
+        返回
+      </button>
     </div>
   )
 }

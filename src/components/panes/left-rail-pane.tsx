@@ -9,7 +9,7 @@ import { useEffect } from 'react'
 
 import { AssistantSessionsPane } from '@/components/panes/assistant-sessions-pane'
 import { RailLogoLeading } from '@/components/layout/rail-logo-leading'
-import { RailUserZone } from '@/components/layout/rail-user-zone'
+import { ProfileSwitcher } from '@/components/layout/profile-rail'
 import {
   botsPanelStore,
   syncBotsPanelOpen,
@@ -38,10 +38,10 @@ export function LeftRailPane() {
       <div className="left-rail-body">
         <AssistantSessionsPane />
       </div>
-      {/* 底部用户区（2026-10-19，用户："参考 zcode 下面的用户"）：
-          头像 + 设置钮，贴左栏底。通知卡留位：将来在 .rail-user-zone
-          **上方**加，本行结构不用改。 */}
-      <RailUserZone />
+      {/* 配置档案切换器（2026-11-26 用户："档案栏改成头像+名字，点击头像
+          弹窗切换档案，上下排列"）——替代原底部用户区（RailUserZone 已删）：
+          当前环境头像+名字 + 齿轮；点头像/名字弹出垂直档案列表。 */}
+      <ProfileSwitcher />
     </div>
   )
 }

@@ -10,7 +10,7 @@
 import { host, useValue, Wordmark } from '@hermes/plugin-sdk'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
-import { isBackfilledFacePng } from './avatar-image'
+import { isChosenAvatarImage } from './avatar-image'
 import { $botMeta, $lastRoster } from './data'
 import { useBots } from './i18n'
 import { displayName } from './labels'
@@ -75,9 +75,10 @@ export function BotChatEmpty({ sessionId }: { sessionId: string }) {
   const meta = botRosterMeta(bot, allMeta)
   const name = displayName(bot, meta)
   const { color, image, shape } = botAppearance(bot.name, meta)
-  // Same rule the rows use: keep a real photo or pet, drop the SVG backfill so
-  // the math face can animate.
-  const photo = Boolean(image && !isBackfilledFacePng(image))
+  // Same rule the rows use: keep a real photo or pet (photo/pet wins even at
+  // 160×160), drop only the unknown-source SVG backfill so the math face can
+  // animate.
+  const photo = isChosenAvatarImage(image, meta?.imageKind)
 
   return (
     <div

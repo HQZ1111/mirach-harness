@@ -37,9 +37,11 @@ export interface ParticleTextProps {
   glow?: boolean;
   className?: string;
   style?: CSSProperties;
+  /** 宿主扩展：粒子聚合成完整文字后回调一次（启动页等文字画完再接力）。 */
+  onComplete?: () => void;
 }
 
-type Settings = Required<Omit<ParticleTextProps, 'className' | 'style'>>;
+type Settings = Required<Omit<ParticleTextProps, 'className' | 'style' | 'onComplete'>>;
 type Intro = Settings['intro'];
 type Shape = Settings['shape'];
 type Rgb = { r: number; g: number; b: number };
@@ -142,12 +144,19 @@ const ParticleText = ({
   fontFamily = 'inherit',
   glow = true,
   className = '',
-  style
+  style,
+  onComplete
 }: ParticleTextProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const settingsRef = useRef<Settings | null>(null);
   const wakeRef = useRef<() => void>(() => {});
+  const onCompleteRef = useRef<typeof onComplete>(onComplete);
+  const completedRef = useRef(false);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
 
   useEffect(() => {
     settingsRef.current = {
@@ -518,7 +527,13 @@ const ParticleText = ({
         buckets[fade * TONES + tone].push(particle);
       }
 
-      if (gathering && complete) gathering = false;
+      if (gathering && complete) {
+        gathering = false;
+        if (!completedRef.current) {
+          completedRef.current = true;
+          onCompleteRef.current?.();
+        }
+      }
       if (bursting && !settling) bursting = false;
 
       ctx.setTransform(1, 0, 0, 1, 0, 0);

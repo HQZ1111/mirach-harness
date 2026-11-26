@@ -64,9 +64,19 @@ export function LaunchOverlay() {
     !preview && connectionBridge.getState().connected === true ? 'gone' : 'live',
   )
   const [minElapsed, setMinElapsed] = useState(false)
+  // 文字先画完，再接力去左上角（用户 2026-11-26："启动页文字显示完再移动
+  // 到左上角进入主页"）。粒子聚合约 1.5s + stagger；onComplete 是准信，
+  // 2.6s 兜底防 reduce/异常不回调。
+  const [textComplete, setTextComplete] = useState(prefersReducedMotion())
   const logoRef = useRef<HTMLImageElement | null>(null)
   const wordRef = useRef<HTMLSpanElement | null>(null)
   const handoffTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (textComplete) return
+    const id = window.setTimeout(() => setTextComplete(true), 2600)
+    return () => window.clearTimeout(id)
+  }, [textComplete])
 
   useEffect(() => {
     const id = window.setTimeout(() => setMinElapsed(true), MIN_SHOW_MS)
@@ -182,7 +192,7 @@ export function LaunchOverlay() {
     }, HANDOFF_MS + 60)
   }, [])
 
-  // 就绪 → 接力（dev 预览下不退出）。
+  // 就绪 → 等文字画完 → 接力（dev 预览下不退出）。
   useEffect(() => {
     if (preview) return
     if (phase !== 'live' || bootPhase !== 'ready' || !minElapsed) return
@@ -190,8 +200,9 @@ export function LaunchOverlay() {
       setPhase('gone')
       return
     }
+    if (!textComplete) return
     runHandoff()
-  }, [bootPhase, minElapsed, phase, preview, runHandoff])
+  }, [bootPhase, minElapsed, phase, preview, runHandoff, textComplete])
 
   if (phase === 'gone') return null
 
@@ -237,6 +248,7 @@ export function LaunchOverlay() {
               highlightColor="#5aa2ff"
               idleDrift={0.5}
               intro="gather"
+              onComplete={() => setTextComplete(true)}
               particleSize={2.2}
               pointerRepel={24}
               repelRadius={110}

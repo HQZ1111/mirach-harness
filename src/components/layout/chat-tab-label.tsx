@@ -9,33 +9,49 @@
  * CSS 见 styles/panes.css 的 .chat-tab-label 规则集。
  */
 import { useStore } from 'zustand';
+import { ActivityIcon } from 'lucide-react';
 import { workspaceGroupLabel } from '@/components/panes/session-manage/session-display';
 import {
   sessionCatalog,
   sessionDisplayName,
   sessionProjectCwd,
 } from '@/components/panes/session-manage/session-catalog';
-import { botDisplayName, botsStore } from '@/components/panes/hub/bots-store';
 import { VoiceLiveButton } from '@/components/assistant-ui/voice-live-panel';
+import { statusPanelStore } from '@/components/assistant-ui/status-panel-store';
 import { ChatHistoryButton } from '@/components/layout/chat-history-button';
+
+/** 活动状态面板开合（2026-11-26 用户："对话区的语音通话图标左边再做个
+ *  对话区活动面板的开关按钮"；随后："它不是折叠展开，点击连胶囊都没有，
+ *  整个隐藏起来"——直接写 hidden，不再用 mini 胶囊当"关"）。 */
+function StatusPanelToggle(): React.ReactElement | null {
+  const override = useStore(statusPanelStore, (s) => s.override);
+  const hidden = override === 'hidden';
+  return (
+    <button
+      aria-label={hidden ? '显示活动面板' : '隐藏活动面板'}
+      className={`pointer-events-auto flex size-8 shrink-0 items-center justify-center rounded-[4px] transition-colors ${
+        hidden ? 'text-muted-foreground' : 'text-foreground'
+      } hover:text-foreground`}
+      data-slot="status-panel-toggle"
+      onClick={() => statusPanelStore.getState().setOverride(hidden ? 'panel' : 'hidden')}
+      title={hidden ? '显示活动面板' : '隐藏活动面板'}
+      type="button"
+    >
+      <ActivityIcon className="size-[20px]" />
+    </button>
+  );
+}
 
 export function ChatTabLabel(): React.ReactElement | null {
   const entry = useStore(sessionCatalog, (s) =>
     s.activeId ? s.entries[s.activeId] : undefined,
   );
   const pendingCwd = useStore(sessionCatalog, (s) => s.pendingCwd);
-  // bot canonical chat 的**真名**固定 "Bot Chat"（引擎/registry 身份），
-  // 但对话区下行要显示"会话名"：手动重命名过就显示自定义名；否则与普通
-  // 会话同款优先派生标题（首条用户消息），尚未说过话时显示机器人名。
-  // 2026-11-23 用户："下面是会话名，现在会话名变成 bot chat 了"。
-  const botChat = entry
-    ? botsStore.getState().bots.find((b) => b.chatSessionId === entry.id)
-    : undefined;
-  const customName =
-    entry?.piName && entry.piName !== 'Bot Chat' ? entry.piName : undefined;
-  const title = botChat
-    ? customName ?? entry?.derivedTitle ?? botDisplayName(botChat)
-    : sessionDisplayName(entry);
+  // 会话显示名统一走 sessionDisplayName（2026-11-25 用户："切换 bot 后会话名
+  // 显示的是 bot 的名字，不是会话名了"）：pi 真名优先，但 **Bot Chat**
+  // （机器人常驻会话的管道名）与**档案名污染**（旧 session.create 把 bot 名
+  // 写成会话名）都降级为派生标题/「New Chat」——不再回落到机器人显示名。
+  const title = sessionDisplayName(entry);
   const cwd = sessionProjectCwd(entry, pendingCwd);
   // 未选工作区（新会话 pendingCwd=null / 会话无 cwd）→ WORK SPACE 占位
   // （用户定稿 2026-10-03）。
@@ -64,6 +80,7 @@ export function ChatTabLabel(): React.ReactElement | null {
           {title || '\u00a0'}
         </span>
         <div className="chat-tab-label__actions" data-slot="chat-tab-label-actions">
+          <StatusPanelToggle />
           <VoiceLiveButton />
           <ChatHistoryButton />
         </div>

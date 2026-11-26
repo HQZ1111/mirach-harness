@@ -40,16 +40,17 @@ import { readFileBrowserOpen, subscribeFileBrowser, writeFileBrowserOpen } from 
 import { SessionThreadPane } from '@/components/panes/session-thread-pane'
 import { LeftRailPane } from '@/components/panes/left-rail-pane'
 import { PluginPane } from '@/components/panes/plugin-pane'
-import { botsFeatureDesiredNow, useBotsFeatureEnabled } from '@/plugins/bots-gate'
+import { botsFeatureDesiredNow, useBotsFeatureDesired, useBotsFeatureEnabled } from '@/plugins/bots-gate'
+import { radioFeatureEnabledNow, useRadioFeatureEnabled } from '@/plugins/radio-gate'
 import { PluginWorkspacePane } from '@/components/panes/plugin-workspace-pane'
 import { pruneOrphanWorkspacePanels, workspacePanelClosed } from '@/components/layout/plugin-workspaces'
 import { registry } from '@/hermes-shim/contrib/registry'
 import { BOTS_PANEL_ID, botsPanelStore } from '@/components/panes/hub/bots-panel-actions'
-import { botDisplayName, botsStore } from '@/components/panes/hub/bots-store'
 import { HermesFileTreePane } from '@/components/panes/hermes-sidebar/hermes-file-tree-pane'
 import { HermesPreviewPane } from '@/components/panes/hermes-sidebar/hermes-preview-pane'
 import { setPreviewOpener } from '@/components/panes/hermes-sidebar/preview-opener'
 import { ReviewPanelHost } from '@/components/panes/review-pane'
+import { ProfilesPage } from '@/components/layout/profiles-page'
 import { RadioPane } from '@/components/panes/radio-pane'
 import { SubagentDetailPane } from '@/components/panes/subagent-detail-pane'
 import { setSubagentDetailOpener } from '@/components/panes/subagent-detail-opener'
@@ -244,7 +245,14 @@ function syncChatGroupStrip(a: DockviewApi): void {
   const strip = group.element.querySelector<HTMLElement>('.dv-tabs-and-actions-container')
   if (!strip) return
   const extras = group.panels.filter((panel) => !CHAT_STRIP_ANCHORS.has(panel.id))
-  const want = extras.length > 0 ? '' : 'none'
+  // 主对话没有标签，插件工作区（群聊 / 屏幕）也不要有标签——它们的返回
+  // 按钮在内容里（群聊 RoomHeader / 屏幕宿主返回钮）。只有非插件工作区的
+  // 额外面板（例如拖进 chat 组的终端）才需要标签条来切换。
+  const nonPluginExtras = extras.filter((panel) => {
+    const view = (panel as unknown as { view?: { contentComponent?: string } }).view
+    return view?.contentComponent !== 'plugin-workspace'
+  })
+  const want = nonPluginExtras.length > 0 ? '' : 'none'
   if (strip.style.display !== want) strip.style.display = want
 }
 
@@ -264,6 +272,41 @@ export function DockviewShell() {
   const anchorBusyRef = useRef(false)
   /** 拖出分栏进行中（dockview 重摊期间不能把列宽记成目标宽）。 */
   const splitBusyRef = useRef(false)
+
+  // bots 插件关闭 = 机器人栏/例程栏一并移除（用户 2026-11-26："机器人页和
+  // 配置档案栏一起消失"）。不能只靠 bundled 插件的 deactivateExtras：
+  // 运行时切换路径在某些加载顺序下拿不到 handle，面板会留成空标签；这里以
+  // 插件决策为唯一真相，关掉就摘面板（配置档案栏在 profile-rail 内同门隐藏）。
+  const botsDesired = useBotsFeatureDesired()
+  useEffect(() => {
+    if (botsDesired) return
+    const a = apiRef.current
+    if (!a) return
+    for (const id of [BOTS_PANEL_ID, 'routines']) {
+      const panel = a.getPanel(id)
+      if (!panel) continue
+      try {
+        a.removePanel(panel)
+      } catch (e) {
+        console.error(`[dv-shell] 关闭 ${id} 面板失败`, e)
+      }
+    }
+  }, [botsDesired])
+
+  // 电台开关（2026-11-26）：关闭时已开的电台窗格一并移除；打开页/标签条
+  // 入口由 radio-gate 过滤。boot 时布局存档里的 radio 面板在 hydrate 段剪。
+  const radioEnabled = useRadioFeatureEnabled()
+  useEffect(() => {
+    if (radioEnabled) return
+    const a = apiRef.current
+    const panel = a?.getPanel('radio')
+    if (!panel) return
+    try {
+      a?.removePanel(panel)
+    } catch (e) {
+      console.error('[dv-shell] 关闭电台面板失败', e)
+    }
+  }, [radioEnabled])
 
   // ── 打开页生命周期（ZCode 语义，2026-11-01 用户定稿） ──────────────────
   // "zcode打开页是没有标签的，只有一个标签的时候是关闭是会关闭面板栏的"：
@@ -742,6 +785,9 @@ export function DockviewShell() {
       />
     ),
     review: (props: IDockviewPanelProps) => <ReviewPanelHost {...props} />,
+    // 配置档案管理页（hermes `PROFILES_ROUTE` 的宿主对偶，2026-11-26）：
+    // 列表 + 详情 + SOUL 编辑；由档案栏省略号 / 侧栏入口打开。
+    profiles: () => <ProfilesPage />,
     // 电台（2026-11-15）：hermes radio 插件改成 dockview 窗格——宿主已撤除
     // 底栏（用户定稿），所以不再走状态栏注入。播放器随面板挂载/卸载，
     // 关面板即停止播放并释放音频资源（上游 `ctx.onDispose` 同语义）。
@@ -968,6 +1014,11 @@ export function DockviewShell() {
           const botsPanel = a.getPanel(BOTS_PANEL_ID)
           if (botsPanel) a.removePanel(botsPanel)
         }
+        // 电台功能关闭：存档恢复出来的电台面板不要留成死窗格。
+        if (!radioFeatureEnabledNow()) {
+          const radioPanel = a.getPanel('radio')
+          if (radioPanel) a.removePanel(radioPanel)
+        }
         // 终端面板**保持挂载**（`renderer: 'always'`）——旧存档里的终端面板
         // 没有这个标记，恢复时补写：切到别的标签/收起侧栏时终端不卸载、
         // PTY 不中断（ZCode side pane terminal 的 keepalive 语义）。
@@ -988,21 +1039,18 @@ export function DockviewShell() {
         a.getPanel('open')?.api.setTitle(OPEN_PANEL_TITLE)
         // Bot Chat 页签标题改写（2026-11-23 用户："下面是会话名，现在会话名
         // 变成 bot chat 了"）：旧存档里是宿主自加的 `Bot Chat · <机器人>`
-        // （或旧版 `机器人 · Bot Chat`），现在标题以该 bot 的会话名（机器人
-        // 显示名）为准。会话真名仍是 "Bot Chat"（registry 身份不动）。
+        // （或旧版 `机器人 · Bot Chat`），恢复时改写为**会话名**。2026-11-25
+        // 用户："切换 bot 后会话名显示的是 bot 的名字"——不再回落机器人
+        // 显示名；目录里还没有该会话时按未命名显示（New Chat）。会话真名
+        // 仍是 "Bot Chat"（registry 身份不动）。
         for (const p of a.panels) {
           const oldTitle = p.title ?? ''
           const isOldBotTitle =
             oldTitle.startsWith('Bot Chat · ') || oldTitle.endsWith(' · Bot Chat')
           if (!isOldBotTitle) continue
           const threadId = typeof p.params?.threadId === 'string' ? p.params.threadId : ''
-          const bot = threadId
-            ? botsStore.getState().bots.find((b) => b.chatSessionId === threadId)
-            : undefined
           const entry = threadId ? sessionCatalog.getState().entries[threadId] : undefined
-          p.api.setTitle(
-            entry ? sessionDisplayName(entry) : bot ? botDisplayName(bot) : 'Bot Chat',
-          )
+          p.api.setTitle(entry ? sessionDisplayName(entry) : 'New Chat')
         }
         // 两轨宽度**按绝对值**钉回（2026-10-22）：dockview 存档按比例记宽，
         // 恢复时如果窗口尺寸和存的时候不同（用户拖过窗口 / 换屏），300 会

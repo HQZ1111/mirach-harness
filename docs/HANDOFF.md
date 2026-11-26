@@ -6,6 +6,230 @@
 
 ## 当前状态
 
+**✅ 2026-11-26（二十）：群聊显示对齐主对话 + 群聊回复恢复 + 右键菜单 / 启动页 / 技能包**
+
+- **群聊显示**（用户实报截图）：
+  - 作者判定补 `local-user`：宿主 `pi_groups.rs` 的 `groups.send` actor 是
+    `{kind:'user',id:'local-user'}`（hermes 桌面端是 `desktop`）。此前只认
+    `desktop` → 自己的消息显示作者 `local-user`、回复条「正在回复 local-user」；
+    现在作者 = **你**，且名字/时间靠气泡右缘。
+  - **自己的消息不再给回复入口**（`canReply` 排除 own）；回复条经
+    `RoomComposer.aboveSurface` 移到**输入卡外面**（轮次状态同层），
+    用户："正在回复 ... 怎么不在输入框上面，跑输入框里面了"。
+  - 头像统一 **40px**（`ROOM_AVATAR_SIZE` / `w-[40px]` / `h-[40px]`；Tailwind
+    `size-10` 在 15px 根字号下只有 37.5px，已改绝对 px），AI 左/用户右、
+    头像在外侧、名字行中线与头像中线对齐；用户气泡 24px 圆角 + 同款留白。
+  - `RoomHeader` 标题行改为全栏宽、左内距 `--rail-gutter`、`pt-6`（22.5px）
+    → 标题中心 47.5px，与其它栏 75px 标签条里的标签中心对齐；成员 chips
+    仍在 `max-w-3xl` 内容列。
+  - 群聊 bot 头像以宿主 `botsStore`（`botPhotoImage`）优先——自定义上传图
+    在群聊/消息行/机器人页一致。
+- **群聊回复恢复（真根因）**：`BotLane` 的成员会话在**创建时**解析 provider
+  凭据；改 `profiles/<name>/models.json` 不会热更新已存在的 live 会话。
+  风格和 home 的 key 是旧的 → 一直 401 invalid token；进程重启后同一房间两条
+  回复都正常（实测：风格和 / 二万人各回一句）。**换 key 后必须重启宿主**。
+- **右键**：选中文字 / 输入框右键 = DOM 编辑菜单（复制/剪切/粘贴/全选），
+  选中文字不再触发会话行拖拽；其余区域仍是宿主壳菜单。
+- **启动页**：ParticleText 画完（`onComplete`，2.6s 兜底）才做品牌接力，
+  用户："启动页文字显示完再移动到左上角进入主页"。
+- **对话工作区名**用主题色（`--chat-tab-workspace-color: var(--brand)`）。
+- **技能**：已把 `addyosmani/agent-skills` 的 26 个技能装进
+  `~/.rpi/agent/skills`（本机资产，不在仓库）。
+- **启动恢复空会话报错 / 「正在准备会话」卡死**（用户 2026-11-26 实报）：
+  `lastSessionPath` 指向已被清理的 0 消息草稿时，启动 `pi_open_session` 失败，
+  旧代码只 console、且 `setEngineAttaching(false)` 不在 finally 里 → 红条
+  + 提示永久停留。现在：恢复失败写 `errorBridge`（「恢复上次会话失败：…」）
+  可见；`finally` 必撤提示；文件不存在（os error 2）时清空
+  `lastSessionPath`，不再每次启动重复报同一错。lastSessionPath 与目录 path
+  的相等判定改成 Windows 路径键（`/`↔`\`、大小写、`\\?\`），空会话清理
+  时能真正清掉记录。
+- 门禁：vitest **1135 / 97 文件**；touched 文件 tsc 无新增错误。
+
+**✅ 2026-11-26（十九）：bots 关闭回落默认 + 活动面板开关 + 插件工作区无标签 + 收音机开关**
+
+- **bots 关 → 默认 Mirach**：runtime 在 true→false 边沿（含 boot 已关的首次
+  profile 载入）调用 `switchProfile(null)`，只回落一次；之后环境菜单显式
+  切具名档案不再被强行拉回。实机：二万人 → 关 bots → 再开 = Mirach。
+- **对话区活动面板开关**：列头 actions 顺序 = 活动面板 → 语音 → 聊天记录；
+  点击写 `hidden`（整块消失，不是 mini 胶囊），再点写 `panel`；按钮常驻。
+- **bot 新聊天 = hermes 草稿**：插件 `host.newChat`（带 workspaceOwnerKey）
+  只跟随 profile + 回 New Chat 草稿，记 `pending-bot-chat`；首条消息由
+  `ensureDraftSession` → `createBotDraftSession` 用 bot SOUL/模型/工具集 +
+  选中工作区建会话。机器人页新聊天现在和底栏一样有文件夹选择器；配置栏
+  「在新分栏打开」仍是立即建会话列。
+- **群聊 / 屏幕无标签**：chat 组仅有 `plugin-workspace` extras 时隐藏标签条；
+  群聊用 RoomHeader 返回，屏幕由 `PluginWorkspacePane` 渲染宿主「返回」浮层
+  （`plugin-workspace-back`）。实机 dummy screen workspace 验证通过。
+- **收音机开关**：`hermes-radio` 决策（默认开，`radio-gate`）；关闭移除已开
+  电台面板并过滤打开页/标签条入口。原生扩展 DLL 仍无 per-extension 开关。
+- 门禁：tsc 1310（无新增）；vitest 1134 / 97。
+
+**✅ 2026-11-26（十八）：Bots 插件关闭 = 机器人面整个关（机器人页 + 配置档案栏）**
+
+- 用户："bots关了之后是整个关吗，机器人页和配置档案栏一起消失。" 现在：
+  - `DockviewShell` 订阅 `useBotsFeatureDesired()`，false 时直接摘 `bots` /
+    `routines` 面板（不依赖 bundled 插件 handle，boot 与 live 切换都干净）；
+  - 底部 `ProfileSwitcher` 同门隐藏，只留设置齿轮（侧栏「环境」菜单仍是
+    核心 profile 切换兜底，不会把用户锁在具名环境里）。
+- 实机（CDP 真实点击插件开关）：off → panels 只剩 leftrail/review/workspace、
+  profile trigger 消失、Mirach 文字变 SPAN；on → trigger/Mirach 按钮恢复，
+  机器人栏从 Mirach 重新打开（不自动复活）。
+
+**✅ 2026-11-26（十七）：「技能与工具」主区页 = 纯本地清单（技能 / 工具 / 插件分明）**
+
+- `CapabilitiesPane` 不再渲染 hermes `CapabilitiesView` 四页签；改为
+  `LocalCapabilitiesPane`：顶部保留 hermes `TextTab` 同形的三页签
+  「技能 / 工具 / 插件」（带计数，默认技能；**无标题**，页签条
+  `pt-[21px]` 对齐其它栏标签中心 47.5px），每个页签只显示自己的本地清单：
+  技能（本机已装，名称/描述/来源/路径/Switch）+
+  **工具**（17 组 / 36 个，逐个列出 read/write/bash… + 组开关）+
+  **插件**（Bots 内置插件真开关、收音机打开窗格、原生扩展 DLL 目录清单）+
+  诊断。页面根不再叠 `--surface`（审查页同步去掉 sidebar 底色）。
+- **开关已接引擎**：工具集 `disabledToolsets` → `Args.exclude_tools`；
+  技能 `disabledSkills` → 引擎新增 `Args.exclude_skills`（本地补丁
+  `rpi-cli/src/{args,session}.rs`）。**新会话/重开的会话生效**，旧会话不
+  热改；Bots 插件开关即时。
+- 无 Scope selector、Skills Hub/Optional、连接器、安装更新按钮；
+  `ensureCapabilitiesWiring` 保留给机器人编辑高级页与 cron。
+- **具名环境补种**：`seed_profile_home_config` 现在也 copy-if-missing 克隆
+  `skills/`、`extensions/`、`native-packages.json`；`pi_capabilities` /
+  `pi_extensions` 读前 ensure。风格和实测从 0/0 → 1 技能 / 27 扩展。
+- 门禁：vitest 1134 / 97；tsc 1310；cargo test 744 过 / 1 ignored；
+  引擎 `exclude_skills_filters_by_name` 1 过。
+
+**✅ 2026-11-26（十六）：档案栏改底部「头像+名字 → 弹窗垂直切换」（横向横条删、原底栏组件删）**
+
+- 横向 `ProfileRail` 不再挂载；左栏底部 = `ProfileSwitcher`（当前环境头像+
+  名字+齿轮），点击弹出**垂直**档案列表：每行头像+显示名+状态点，活动勾选，
+  可垂直拖拽重排；底部「全部配置档案 / 管理配置档案 / 新建 / 导入」；
+  行悬停「在新分栏打开」= `host.newChat(workspaceMode:'bots')`（多栏对偶，
+  用户纠正主窗单实例但支持分栏）。底栏名字显式左对齐贴头像右边
+  （button UA 居中会把名字推到行中间），并去掉整行焦点框；触发区收窄为
+  头像+名字（无向上箭头，底栏空白/齿轮不弹窗）。
+- **头像 = 用户选图优先**：`imageKind` 直映射进 BotPreset；`photo/pet`
+  即使 160×160 也用原图（此前被当回填脸，橙色头像显示成绿色数学脸）；
+  宿主/插件渲染面统一 `botPhotoImage` / `isChosenAvatarImage`。
+- `rail-user-zone.tsx` 已删除；`$profileRailVisible` 偏好与菜单项退休；
+  颜色改到「管理配置档案」页详情（12 色+自动）。
+- 实机：弹窗三行头像正常（二万人橙色原图）、切换同步底栏、拖拽写 order、
+  全部档案开关、管理页入口、分栏打开新会话均通。门禁 vitest 1134 / 97；
+  tsc 1310。
+
+**✅ 2026-11-26（十五）：「管理配置档案」= 真管理页（列表 / 详情 / SOUL / 重命名 / 删除）**
+
+- 旧入口只 `openBotsPanel()`（机器人花名册，且面板已开时点击无变化）——
+  现已换成主区单例面板 `profiles`（`openProfilesPanel`，标签「配置档案」）。
+- 页面 = hermes `app/profiles/index.tsx` 移植：左列表（搜索/首字色块/
+  行菜单/新建/导入）+ 右详情（显示名、id、home 路径、模型、技能数、
+  内联 SOUL.md 编辑器）；默认档案重命名 = 显示名称、不可删；具名档案
+  真改目录/可删（活动先切走）。新增 `pi_profile_info` IPC。
+- 表单与 rail 共用 `profile-dialogs.tsx`。实机：tab 打开、三行列表、
+  微软详情 path/skills/SOUL、重命名/命名/删除确认全部正确。
+- 门禁：vitest 1135 / 97；tsc 1310；cargo test 741 过 / 1 ignored。
+
+**✅ 2026-11-26（十四）：引擎 0.29.0（main@6d69712）+ 档案栏终态（重命名/SOUL/导出导入/状态点）**
+
+- **引擎**：upstream main@6d69712（0.29.0，含 #414 AgentHome 即时校验 /
+  #411 消息级 fork / #424 mini mode）。本地 15 文件补丁 `--3way` 全清；
+  宿主零代码改动即编译过；实机 `pi_engine_version` = 0.29.0。
+- **档案栏补全**：状态点（未读 + 运行中 `$hostBusy` + 待输入
+  `approvalBridge`）、身份重命名（`pi_profile_rename`，实机 e2e
+  rail/botsStore/磁盘三同步）、编辑 SOUL.md（bot.systemPrompt）、导出/导入
+  配置档案（tar.gz，安全清单校验 + 单层目录包），rail 加导入按钮。
+- **仍未移植**：每档案远端覆盖 / 多网关 fleet——宿主只有 local 连接且无
+  添加远程连接入口，hermes 单连接下也不渲染，无数据面不写假 UI。
+- 门禁：vitest 1135 / 97；tsc 1310；宿主 cargo test 741 过 / 1 ignored；
+  引擎 lib 1276 过 / 3 ignored；agent_dir_home 5/5。
+
+**✅ 2026-11-26（十三）：配置档案栏按 hermes 真源重做（首字色块 / 拖拽 / 调色 / 直达机器人页）**
+
+- 真源 = hermes `profile-switcher.tsx` 单网关路径。旧宿主版是自造头像栏，
+  现已换成：**首字 + 档案色方块**（`lib/profile-color.ts` /
+  `profile-short-label.ts` 逐字移植：名字哈希 hsl、默认中性、override
+  优先、12 色板）、**home/layers 单药丸**、横滚条（滚轮/渐隐遮罩/
+  dnd-kit 拖拽重排 + `profileRailOrder.v1`）、长按 450ms / 右键调色
+  （`profileRailColors.v1`）、「+」/省略号 → 插件新建/编辑/删除对话框
+  （`plugins/bots-request-bridge.ts` + `openBotsPanel`）、>13 折叠下拉、
+  未读状态点（按 profile 聚合）。
+- **不移植（宿主无数据面）**：档案导入/导出、远端覆盖、多网关 fleet
+  分组、档案身份重命名（没有 `pi_profile_rename`；右键编辑的是显示名/
+  外观/人格）。方块右键不再叠全局菜单（context-menu-scope 登记 owned）。
+- 实机：切环境三同步、右键/长按/选色/拖拽/「+」「编辑」「删除」全部走通；
+  门禁 vitest **1135 / 97 文件**；tsc **1310**。
+
+**✅ 2026-11-26（十二）：空会话不落盘 / 重名 / 分叉 / 档案栏 / 审查页**
+
+- **空会话不落盘三层**：选工作区文件夹只进草稿态（首条消息
+  `ensureDraftSession` 才 `pi_new_session`）；离开 0 消息会话
+  `pruneEmptyCurrentSession`（discard + delete + 清锚/登记/恢复位）；
+  启动 `sweepEmptyBotChats` 清 0 消息 `Bot Chat`（实机造会话验证：
+  reload 后文件消失 + 日志「已清理 1 条」）。`pi_delete_session` 连
+  `.lock` / `.progress.jsonl` 伴生文件一起清。有名字的旧 0 消息会话
+  （API session 等 8 条）有意不删。
+- **重名**：hermes core 是 UNIQUE(title) per profile，两个同名会话不允许；
+  宿主 `onRename` 查 `pi_list_sessions`，同环境重名红条拒绝。
+- **分叉显示**：`flattenBranchOrder` DFS 嵌套 + `├─`/`└─` 分支干，子行
+  紧跟父行（created/updated 都保持），根组按子树最新活动排序。
+- **ProfileRail**：首版是自造头像栏；已由（十三）按 hermes 真源重做成
+  首字色块栏，**现行口径见（十三）**。切换环境同步机器人页 roster 选中保留。
+- **灰项**：删 PR 过滤子菜单/行 PR 项；仅「全部标记为已读」条件灰。
+- **审查页**：改绑 `workspaceRootStore`（与文件树同根），实测
+  `G:/mirach-harness` / 1175 文件。
+- 门禁：vitest **1134 / 97 文件**；tsc 1312（0 新错）；cargo check 0 错误。
+
+**✅ 2026-11-26（十一）：机器人行点击不再重复 mint 会话**
+
+- hermes 语义：首次点 bot 行建该 bot 的隐藏永久 Bot Chat，之后复用；
+  不是每次点击都建。
+- **default（Mirach）从不记双锚** → 每次点击都 mint 新的
+  （39→40→40 实测修后）。修 = `host-rpc` session.create 拆 `anchorBot`
+  （default 也记 `chatSessionId/Path`），预设仍只对具名环境生效。
+- **显示名降级把管道会话漏进侧栏**：Bot Chat 过滤改看 **pi 真名**
+  （`sessionRawTitle`），不再看被降级成 `New Chat` 的显示标题——侧栏不再
+  出现"点一下 bot 多一条 New Chat"。
+- 门禁：vitest **1132 / 97 文件**；tsc 1312（0 新错）。
+
+**✅ 2026-11-25（十）：新建任务开场统一（粒子 + 输入框居中 + 选文件夹不消失）**
+
+- **空对话开场 = 宿主统一自绘**（不再挂 `chat.empty` 贡献）：bot 会话 →
+  机器人脸 + **机器人名 ParticleText** +「说点什么开始吧。」；本体/普通会话
+  → MIRACH 粒子 +「有什么可以帮你的？」。状态门 = `messages.length === 0`
+  ——**选工作区文件夹会建会话，但 0 消息仍显示开场**，首条消息才换掉。
+- **新任务布局**：空对话时开场标识与输入框作为一组垂直居中（ZCode
+  `centerEmptyStateWithDock` 对偶：root justify-center + viewport
+  flex-none）；有消息恢复贴底。
+- hermes 的 `chat-empty.tsx` 保持原文（静态 Wordmark），宿主不再挂该贡献
+  是有意为之：用户要求其他配置也有粒子效果。
+- 实机：本体 MIRACH 粒子 + 输入居中；微软 = 橙脸 +「二万人」粒子；选最近
+  工作区后开场仍在；重载后仍在。门禁 vitest 1131 / tsc 1312（0 新错）。
+
+**✅ 2026-11-25（九）：侧栏二级项可点 / 环境跟随（三面统一）/ 头像 / 会话名**
+
+- **侧栏二级菜单全部点不中（真根因）**：子菜单是兄弟 portal，父菜单的
+  window-capture pointerdown 外部点击判定看不见它 → 父菜单在按下当帧卸载
+  整棵树，click 到不了二级项。修法 = portal 写 `data-menu-ancestors` +
+  `menuPortalDescendsFrom` 判后代内部 + 选中项 `closeRoot()` 关整棵树。
+  真鼠标实测：分组→项目、排序→创建时间均生效并持久化。
+  **合成 `el.click()` 测不出这个 bug，验证必须用真实鼠标事件。**
+- **三处身份统一**（用户："底栏头像、会话选项的环境、机器人页的选中，
+  三个不统一"）：底栏 = 活动环境 bot；`followProfileBridge`（轻量，不拆
+  会话）由 `switchToThreadPath`（非聚合视图）/ `host.focusProfile`
+  （bot 行点击，mirror roster-actions 调用）/ `host.newChat`（本地 bot）
+  触发。点「二万人」→ activeProfile=微软 + 侧栏换源 + 底栏 二万人，实测三处
+  同步。聚合视图（全部配置档案）下点侧栏行不跟随。
+- **左栏头像失效**：botsStore 停在插件推来的 160×160 人脸回填，插件 meta
+  已是 256 照片 → `botsStore.load()` 用插件 meta 的非回填图修复。实机
+  风格和底栏从蓝六边形变上传照片。
+- **会话名 = bot 名**：`sessionDisplayName` 降级 `Bot Chat` / 档案名污染
+  （旧 session.create 回落 bot.name）为派生标题/New Chat；页签不再回落
+  bot 显示名；`refreshThreads` 删除写 bot 名的覆写。
+- **折叠/展开**：维持单一默认过渡（160ms 淡入 / 120ms 淡出后提交），收起
+  补 translateY(-2px)；不加逐行步进。
+- **composer.top 贡献补 QueryClientProvider**（顺带修）：teammate-waits 用
+  TanStack useQuery，此前每次渲染报 `No QueryClient set` 并被隐藏；
+  `ComposerTopSlot` 现在自包 Provider。
+- 门禁：vitest **1131 / 97 文件**；tsc 1312（既有镜像基线，touched 0 新错）。
+
 **✅ 2026-11-25（八）：对照 hermes 真源（D:\hermes-agent-main）修档案作用域 / 过渡 / 头像 / 开场宽 / 子菜单**
 
 - **档案作用域校正**：hermes `$showAllProfiles` **默认 false**（opt-in 聚合），

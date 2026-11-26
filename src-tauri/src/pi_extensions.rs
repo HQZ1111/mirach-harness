@@ -301,7 +301,11 @@ pub fn pi_extensions(
     state: tauri::State<'_, std::sync::Arc<crate::agui::AguiState>>,
     _cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let home = crate::pi_profiles::active_home(&state.engine)?;
+    let profile = state.engine.active_profile()?;
+    // 读面顺带补种 skills/extensions（同 pi_capabilities）：具名环境第一次
+    // 打开时从本体克隆缺失的原生扩展，插件目录不会平白是空的。
+    crate::pi_profiles::ensure_profile_dirs(profile.as_deref())?;
+    let home = crate::pi_profiles::home_for_profile(profile.as_deref())?;
     let agent_dir = home
         .root()
         .map_err(|e| format!("环境 home 解析失败: {e}"))?;

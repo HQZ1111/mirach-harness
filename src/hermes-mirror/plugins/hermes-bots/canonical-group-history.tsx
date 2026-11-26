@@ -39,9 +39,15 @@ interface CanonicalGroupHistoryProps {
   pause?: Pick<CanonicalGroupPausedRowProps, 'busy' | 'stopping' | 'onContinue' | 'onStop'> & { maxContinues?: number }
 }
 
-/** The server stamps every `groups.send` from this Desktop as this principal, so it has no name of its own. */
+/** The server stamps every `groups.send` from this Desktop as this principal, so it has no name of its own.
+ *  宿主 `pi_groups.rs` 的 user 事件 actor.id = `local-user`（hermes 桌面端 = `desktop`）；
+ *  两个 id 都是「本机用户」，不认会导致作者显示 `local-user`、回复条变成
+ *  「正在回复 local-user」（2026-11-26 用户实报）。 */
 const isOwnDesktopMessage = (event: CanonicalGroupEvent) =>
-  event.kind === 'message.user' && event.actor?.kind === 'user' && event.actor.id === 'desktop' && !event.actor.display_name
+  event.kind === 'message.user' &&
+  event.actor?.kind === 'user' &&
+  (event.actor.id === 'desktop' || event.actor.id === 'local-user') &&
+  !event.actor.display_name
 
 function eventAuthor(event: CanonicalGroupEvent, roster: Map<string, CanonicalRoomMember>, isMessage: boolean, you: string) {
   if (isOwnDesktopMessage(event)) {return you}
@@ -251,8 +257,11 @@ function MessageRow({ author, avatarFor, binding, disabled, event, member, membe
 }) {
   const labels = useCanonicalGroupLabels()
   const isUser = event.actor?.kind !== 'member'
+  const isOwn = isOwnDesktopMessage(event)
   const text = event.payload.text || event.payload.content || ''
-  const canReply = !!onReply && !!text && (!!member || typeof event.payload.thread_id === 'string')
+  // 自己的消息不给回复入口（2026-11-26 用户："我自己回复我自己吗？"——
+  // 宿主每个 user payload 都带 thread_id，上游判据会放行自回复）。
+  const canReply = !!onReply && !!text && !isOwn && (!!member || typeof event.payload.thread_id === 'string')
   const face = isUser ? undefined : avatarFor?.(member?.profile || member?.handle || memberId || author || 'bot', ROOM_AVATAR_SIZE)
 
   const badge = isScheduledPost(event)

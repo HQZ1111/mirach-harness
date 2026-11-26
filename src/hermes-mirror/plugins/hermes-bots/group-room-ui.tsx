@@ -19,6 +19,7 @@ import {
 } from '@hermes/plugin-sdk'
 import { type ComponentProps, type FormEvent, type ReactNode, useLayoutEffect, useReducer, useSyncExternalStore } from 'react'
 
+import { useUserAvatar } from '@/lib/user-avatar'
 import type { GroupReasonMessages } from './group-reason-locales'
 import { groupReasonText } from './group-reason-text'
 import { busyAt, type BusyMember, formatElapsed, isBusyStatus, type MemberStatus, type RoomCycle } from './group-room-status'
@@ -173,9 +174,15 @@ export function MemberStatusChip({ avatar, badge, labels, name, phase, status: g
   </Tip>
 }
 
-/** Avatar column width shared by message, typing and notice rows, so every body starts on one edge. */
-export const ROOM_AVATAR_SIZE = 28
-const AVATAR_COLUMN = 'w-7 shrink-0'
+/** Avatar column width shared by message, typing and notice rows, so every body starts on one edge.
+ *  2026-11-26 用户："头像的大小都对吗？对话显示和正常对话一下啊"——与主 thread
+ *  的身份头像同尺寸（40px，`h-[40px]` 名字行中线对齐）。 */
+export const ROOM_AVATAR_SIZE = 40
+/** 绝对 px（不是 Tailwind 的 rem 档位）：宿主根字号 15px 时 `size-10` 只有
+ *  37.5px，与主 thread 的 40px 头像不一致（2026-11-26 实测）。 */
+const AVATAR_COLUMN = 'w-[40px] shrink-0'
+/** 名字行高度 = 头像直径：名字中线与头像中线对齐（主 thread 同款）。 */
+const IDENTITY_ROW = 'h-[40px]'
 
 /** One transcript row: avatar, name and time over the body, like a chat thread. Members'
  *  bodies read like the main thread's assistant answer (bare markdown); the user's own body
@@ -184,19 +191,27 @@ export function RoomMessage({ actions, author, avatar, badge, children, isUser =
   actions?: ReactNode; author?: ReactNode; avatar?: ReactNode; badge?: ReactNode; children: ReactNode; isUser?: boolean; timestampMs?: number
 }) {
   const { locale } = useI18n()
+  const userAvatar = useUserAvatar()
+  const face = avatar ?? (isUser
+    ? <img alt="" className="size-[40px] rounded-full object-cover" draggable={false} src={userAvatar} />
+    : null)
 
-  return <div className="group/room-message flex items-start gap-3 py-2" data-room-message={isUser ? 'user' : 'member'}>
-    <div className={cn(AVATAR_COLUMN, 'mt-0.5')}>{avatar}</div>
-    <div className="min-w-0 flex-1">
-      <div className="flex min-h-5 items-center gap-2">
-        {author && <span className="truncate text-[0.8125rem] font-semibold text-foreground">{author}</span>}
+  // 与主对话一致：AI 在左（头像外侧左缘），用户在右（头像外侧右缘）。
+  // 名字行 **h-10 + items-center**，与 40px 头像中线对齐；用户的名字/时间
+  // 靠内容右缘，操作（悬停回复）移到最左——此前 `ml-auto` 把名字顶到了
+  // 左边（2026-11-26 用户："local-user ... 在左边吗？"）。
+  return <div className={cn('group/room-message flex items-start gap-2.5 py-2', isUser && 'flex-row-reverse')} data-room-message={isUser ? 'user' : 'member'}>
+    <div className={cn(AVATAR_COLUMN, isUser && 'flex justify-end')}>{face}</div>
+    <div className={cn('min-w-0 flex-1', isUser && 'flex flex-col items-end')}>
+      <div className={cn('flex w-full items-center gap-2', IDENTITY_ROW, isUser && 'justify-end')}>
+        {author && <span className="truncate text-[12px] leading-[18px] text-muted-foreground">{author}</span>}
         {badge}
         {typeof timestampMs === 'number' && Number.isFinite(timestampMs) &&
           <time className="shrink-0 text-[0.6875rem] tabular-nums text-(--ui-text-tertiary)" dateTime={new Date(timestampMs).toISOString()}>{relativeTime(timestampMs, undefined, locale)}</time>}
-        {actions && <div className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/room-message:opacity-100 focus-within:opacity-100">{actions}</div>}
+        {actions && <div className={cn('flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/room-message:opacity-100 focus-within:opacity-100', isUser ? 'order-first mr-auto' : 'ml-auto')}>{actions}</div>}
       </div>
-      <div className={cn(ROOM_TEXT_SCALE, 'wrap-anywhere mt-0.5 min-w-0 text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground [&_pre]:whitespace-pre-wrap',
-        isUser && 'w-fit max-w-full rounded-xl border border-(--ui-stroke-tertiary) bg-(--dt-user-bubble) px-3 py-2')} data-selectable-text="true" dir="auto">
+      <div className={cn(ROOM_TEXT_SCALE, 'wrap-anywhere min-w-0 text-pretty text-[length:var(--conversation-text-font-size)] leading-(--dt-line-height) text-foreground [&_pre]:whitespace-pre-wrap',
+        isUser && 'w-fit max-w-full rounded-[24px] border border-(--stroke-soft) bg-(--dt-user-bubble) px-4 py-3 text-left')} data-selectable-text="true" dir="auto">
         {children}
       </div>
     </div>
@@ -227,8 +242,8 @@ export function RoomTypingRow({ avatar, labels, name, status: given }: {
   const status = useShownStatus(given) as ReturnType<typeof busyAt>  // a busy member always resolves busy
   const line = status.tool ? fill(labels.typingTool, { name, tool: status.tool }) : fill(labels.typing, { name })
 
-  return <div className="flex items-start gap-3 py-2" data-room-typing={status.kind}>
-    <div className={cn(AVATAR_COLUMN, 'mt-0.5')}>{avatar}</div>
+  return <div className="flex items-start gap-2.5 py-2" data-room-typing={status.kind}>
+    <div className={AVATAR_COLUMN}>{avatar}</div>
     <Tip label={line}><div className="inline-flex min-w-0 items-center gap-2 rounded-2xl bg-(--ui-bg-quaternary) px-3 py-1.5">
       <span aria-hidden="true" className="inline-flex shrink-0 gap-1">
         {[0, 160, 320].map(delay => <span className="size-1.5 animate-pulse rounded-full bg-(--ui-text-secondary)" key={delay} style={{ animationDelay: `${delay}ms` }} />)}
@@ -271,9 +286,12 @@ export function RoomHeader({ backLabel, children, onBack, onStop, onTitle, stopD
   backLabel?: string; children?: ReactNode; onBack?: () => void; onStop?: () => void; onTitle?: () => void
   stopDisabled?: boolean; stopLabel: string; title: ReactNode; titleExpanded?: boolean; titleLabel?: string; trailing?: ReactNode; working: boolean
 }) {
-  // Inner column matches the transcript and composer (max-w-3xl) so every left edge lines up.
-  return <header className="shrink-0 border-b border-(--ui-stroke-secondary) px-4 pb-2.5 pt-2">
-    <div className="mx-auto flex w-full max-w-3xl min-w-0 flex-col gap-2">
+  // Title row = full pane width on the host content line (`--rail-gutter`), so
+  // the room title sits on the same X/Y as the other panes' tab labels:
+  // tab strip is 75px and its label is centered (37.5px); pt-6 = 22.5px puts
+  // the 30px title row center on that line. Roster chips stay in the centered
+  // transcript column (max-w-3xl).
+  return <header className="shrink-0 border-b border-(--ui-stroke-secondary) pb-2.5 pe-4 ps-[var(--rail-gutter)] pt-6">
     <div className="flex min-w-0 items-center gap-1">
       {onBack && <Tip label={backLabel}>
         <Button aria-label={backLabel} className="text-(--ui-text-tertiary)" onClick={onBack} size="icon-sm" variant="ghost"><Codicon name="arrow-left" /></Button>
@@ -292,8 +310,7 @@ export function RoomHeader({ backLabel, children, onBack, onStop, onTitle, stopD
         {trailing}
       </div>
     </div>
-    {children}
-    </div>
+    {children && <div className="mx-auto mt-2 flex w-full max-w-3xl min-w-0 flex-col gap-2">{children}</div>}
   </header>
 }
 
@@ -312,15 +329,20 @@ export function AvatarStack({ avatars, max = 4 }: { avatars: { key: string; node
  *  composer), not a lookalike — the room input must feel identical to "my input
  *  box". `attach` renders straight into the surface grid: its parts pick
  *  `ROOM_COMPOSER_AREAS` (the attach button, the pending-file chips). */
-export function RoomComposer({ above, attach, canSend, children, onSubmit, sendLabel, status, ...form }: {
+export function RoomComposer({ above, aboveSurface, attach, canSend, children, onSubmit, sendLabel, status, ...form }: {
   above?: ReactNode; attach?: ReactNode; canSend: boolean; children: ReactNode; onSubmit: () => void; sendLabel: string
   /** The room's slim status strip (round, who works), docked on the surface's top edge. */
   status?: ReactNode
+  /** Rows that belong above the composer **surface** itself (回复引用条). 用户
+   *  2026-11-26："正在回复 ... 怎么不在输入框上面，跑输入框里面了"——上游把
+   *  它放在 surface 的 reply 行，宿主按用户口径移到卡外（与轮次状态同层）。 */
+  aboveSurface?: ReactNode
 } & Omit<ComponentProps<'form'>, 'onSubmit'>) {
   return <form {...form} className={cn('pb-3 pt-1', form.className)} onSubmit={(event: FormEvent) => { event.preventDefault(); onSubmit() }}>
     {/* 轮次状态（已结束/进行中）在输入卡**上面**——用户 2026-11-23：
         "群聊的输入框里面有个已结束，这个提示应该在输入框的上面"。 */}
     {status}
+    {aboveSurface ? <div className="min-w-0 px-2 pb-1.5">{aboveSurface}</div> : null}
     <ComposerBar>
       {above ? <div className="min-w-0">{above}</div> : null}
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-2 [grid-template-areas:'files_files_files''input_input_input''attach_._send']">

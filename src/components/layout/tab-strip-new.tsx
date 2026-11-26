@@ -20,6 +20,7 @@ import type { IDockviewHeaderActionsProps } from 'dockview-react'
 import { regionOfGroup } from './dockview-column-ops'
 import { openPagePanel } from './open-page-actions'
 import { Tooltip } from '@/components/motion/tooltip'
+import { useRadioFeatureEnabled } from '@/plugins/radio-gate'
 import {
   ContextMenu,
   ContextMenuAnchor,
@@ -40,11 +41,13 @@ const NEW_TAB_OPTIONS: readonly { kind: OpenPageKind; label: string; icon: typeo
 const MENU_CONTENT_CLASS = 'min-w-36'
 
 export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
+  const radioEnabled = useRadioFeatureEnabled()
   // 条可见性守卫（与箭头/总览钮同款：hideHeader 组 + 竖条不渲染）。
   if (props.headerPosition !== 'top' && props.headerPosition !== 'bottom') return null
   if (props.group.model.header.hidden) return null
   // 仅面板域（"打开其他标签"的数据面 = 文件树/终端/预览）。
   if (regionOfGroup(props.group) !== 'panels') return null
+  const options = radioEnabled ? NEW_TAB_OPTIONS : NEW_TAB_OPTIONS.filter((option) => option.kind !== 'radio')
 
   return (
     // goo 已退役（2026-11-22）：面板 = 默认 fade+zoom 的独立圆角矩形 +
@@ -66,7 +69,7 @@ export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
         </ContextMenuAnchor>
       </Tooltip>
       <ContextMenuContent ariaLabel="打开标签" className={MENU_CONTENT_CLASS}>
-        {NEW_TAB_OPTIONS.map(({ kind, label, icon: Icon }) => (
+        {options.map(({ kind, label, icon: Icon }) => (
           <ContextMenuItem
             className="gap-2"
             key={kind}

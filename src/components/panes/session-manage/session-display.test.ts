@@ -15,6 +15,7 @@ import {
   workspaceGroupLabel,
 } from './session-display'
 import { createdCompare } from './sidebar-view'
+import type { SessionListRow } from './session-date-groups'
 import type { SessionRowMeta } from './session-order'
 
 describe('pathLeaf / workspaceGroupLabel（hermes display-path 照抄面）', () => {
@@ -50,6 +51,20 @@ describe('groupEntriesByWorkspace', () => {
       { id: 'e', kind: 'session' },
       { key: 'w:C:\\w\\beta', kind: 'divider', label: 'beta', variant: 'project' },
       { id: 'd', kind: 'session' },
+    ])
+  })
+
+  it('Windows 大小写 / 斜杠方向 / 尾分隔符变体不生成第二个同名组', () => {
+    const rows = groupEntriesByWorkspace([
+      { id: 'a', cwd: 'C:\\Users\\Administrator' },
+      { id: 'b', cwd: 'c:/users/administrator/' },
+      { id: 'c', cwd: 'C:\\Users\\Administrator' },
+    ])
+    expect(rows).toEqual([
+      { key: 'w:C:\\Users\\Administrator', kind: 'divider', label: 'Administrator', variant: 'project' },
+      { id: 'a', kind: 'session' },
+      { id: 'b', kind: 'session' },
+      { id: 'c', kind: 'session' },
     ])
   })
 })
@@ -244,5 +259,44 @@ describe('buildSessionDisplay：project 分组 × created 排序', () => {
       { nowMs },
     )
     expect(depthOf(withoutParent, 'child')).toBe(0)
+  })
+
+  it('fork 分支干：子行紧跟父行（即使子更新）、兄弟按末位出 └─/├─、根组按子树最新上浮', () => {
+    const nowMs = 10_000_000
+    const metasWithLineage: SessionRowMeta[] = [
+      // child 比 parent 新——旧行为会把它排在父行上面并单独缩进
+      { id: 'parent', lastActiveMs: nowMs - 30_000, title: 'parent' },
+      { id: 'child1', lastActiveMs: nowMs - 10_000, title: 'child1', parentSessionId: 'parent' },
+      { id: 'child2', lastActiveMs: nowMs - 20_000, title: 'child2', parentSessionId: 'parent' },
+      { id: 'other', lastActiveMs: nowMs - 40_000, title: 'other' },
+    ]
+    const display = buildSessionDisplay(metasWithLineage, [], {}, {}, { nowMs })
+    // 根组按子树最新活动：parent 组（child1 最新）在 other 前
+    expect(display.allUnpinnedIds).toEqual(['parent', 'child1', 'child2', 'other'])
+    const stems = new Map(
+      display.rows
+        .filter((r): r is Extract<SessionListRow, { kind: 'session' }> => r.kind === 'session')
+        .map((r) => [r.id, r.branchStem] as const),
+    )
+    // 兄弟按 recency 降序：child1 先（非末位 = ├─），child2 末位 = └─
+    expect(stems.get('parent')).toBeUndefined()
+    expect(stems.get('child1')).toBe('├─ ')
+    expect(stems.get('child2')).toBe('└─ ')
+    expect(stems.get('other')).toBeUndefined()
+  })
+
+  it('fork 嵌套在显式排序键下保持（created 键：子行仍紧跟父行）', () => {
+    const metasWithLineage: SessionRowMeta[] = [
+      { id: 'parent', lastActiveMs: 100, createdMs: 1, title: 'parent' },
+      { id: 'child', lastActiveMs: 200, createdMs: 2, title: 'child', parentSessionId: 'parent' },
+      { id: 'other', lastActiveMs: 300, createdMs: 3, title: 'other' },
+    ]
+    const display = buildSessionDisplay(metasWithLineage, [], {}, {}, {
+      view: { grouping: 'project', ordering: 'created' },
+    })
+    // created 降序根序 = other, parent（child 跟随父）；不能再把 child 拆开
+    const ids = display.allUnpinnedIds
+    expect(ids.indexOf('child')).toBe(ids.indexOf('parent') + 1)
+    expect(ids[0]).toBe('other')
   })
 })

@@ -789,6 +789,12 @@ pub(crate) fn build_harness_impl(
     extension_filter: Option<&[String]>,
     session_dir: Option<&Path>,
 ) -> Result<BuiltHarness, String> {
+    // 能力开关（设置/主区页的技能与工具开关）落在这个 home 的
+    // harness-capabilities.json；建会话时转成引擎策略：禁用技能经
+    // Args.exclude_skills 从提示/注册表剔除，禁用工具集展开成
+    // Args.exclude_tools denylist。只影响**新会话**（旧会话的提示已定）。
+    let skill_exclusions = crate::pi_capabilities::skill_exclusions_for(home)?;
+    let tool_exclusions = crate::pi_capabilities::toolset_exclusions_for(home)?;
     let (harness, events, reload, resolved_provider, model_id, id) = rt.block_on(async {
         let t_open = std::time::Instant::now();
         // 配置绑定（2026-11-25）：provider/model 解析读的是**这个 home** 的
@@ -805,6 +811,12 @@ pub(crate) fn build_harness_impl(
             }
         }
         let mut args = rpi_cli::args::Args::default();
+        if !skill_exclusions.is_empty() {
+            args.exclude_skills = skill_exclusions.clone();
+        }
+        if !tool_exclusions.is_empty() {
+            args.exclude_tools = Some(tool_exclusions.clone());
+        }
         if let Some(p) = session_path {
             args.session = Some(p.to_string());
         }
@@ -2569,7 +2581,25 @@ fn prompt_inner(
         if side_is_target {
             return Err("该会话正在窗格中打开（先关闭窗格）".into());
         }
-        std::fs::remove_file(path).map_err(|e| format!("删除失败: {e}"))
+        std::fs::remove_file(path).map_err(|e| format!("删除失败: {e}"))?;
+        // rpi 会话带两个伴生文件：`<path>.lock` 与 `<path>.progress.jsonl`。
+        // 主文件删掉后一并清理，否则「0 消息不落盘」的清扫会留下孤儿文件
+        //（索引扫描会跳过它们，但磁盘上仍是残留）。伴生文件不存在是正常
+        // 态；清理失败只记 stderr——主文件已删，不能把整体结果谎报成失败。
+        for suffix in [".lock", ".progress.jsonl"] {
+            let companion = std::path::PathBuf::from(format!("{path}{suffix}"));
+            match std::fs::remove_file(&companion) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    eprintln!(
+                        "会话主文件已删除，但伴生文件清理失败（{}）：{e}",
+                        companion.display()
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 会话状态快照（形状与旧 pi_get_state 对齐）。
