@@ -44,6 +44,13 @@
   的相等判定改成 Windows 路径键（`/`↔`\`、大小写、`\\?\`），空会话清理
   时能真正清掉记录。
 - 门禁：vitest **1135 / 97 文件**；touched 文件 tsc 无新增错误。
+- **仓库/发布（2026-11-26）**：分支收拢为 **只有 `main`**（本地与 origin 的
+  `bots-plugin-complete`、`sync/local-main-2026-11-15` 已删）；origin 改为
+  SSH（HTTPS push 被 reset，SSH 可用）。打包命令 =
+  `npx tauri build --config src-tauri/tauri.prod.conf.json --config <override>`
+  （override 只把 beforeBuildCommand 换成 `npx vite build`，绕过 tsc 镜像基线）；
+  产物 84.38 MiB，Release `v0.1.0`：
+  `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.0`。
 
 **✅ 2026-11-26（十九）：bots 关闭回落默认 + 活动面板开关 + 插件工作区无标签 + 收音机开关**
 
