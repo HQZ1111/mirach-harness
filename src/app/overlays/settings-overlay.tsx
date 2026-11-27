@@ -1124,7 +1124,23 @@ export function SettingsOverlay({
   initialSection?: SectionId
 }) {
   // 退场编排（2026-10-18，见 lib/overlay-exit.ts）：关闭先播退场再卸载。
-  const { closing, requestClose } = useOverlayExit(onClose)
+  const { closing, requestClose, reset } = useOverlayExit(onClose)
+  // 独立窗口形态：关闭只是 hide（React 树不卸载），useOverlayExit 的
+  // closedRef/closing 会留到下次打开 → 第二次点 ✕ 无效（2026-11-27
+  // 用户"设置页关闭按钮失灵，无法关闭"）。重新获得焦点/可见时复位。
+  useEffect(() => {
+    if (variant !== 'window') return
+    const onShow = () => reset()
+    const onVisibility = () => {
+      if (!document.hidden) onShow()
+    }
+    window.addEventListener('focus', onShow)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('focus', onShow)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [reset, variant])
   // Esc 关闭（escape-layers overlay 层=40）：拖拽层（50）在拖拽中更高，
   // Esc 只中止拖拽不关浮层；编辑模式（20）更低，浮层开着时 Esc 不退编辑模式。
   useEffect(() => {

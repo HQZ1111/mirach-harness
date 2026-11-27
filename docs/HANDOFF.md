@@ -52,9 +52,14 @@
   → 桌面快捷方式重建并指向安装目录，双击可启动。
 - **v0.1.3 边框补丁**：公司电脑（Win10 经典框架）主窗/设置窗都出现
   **左/右/下 1px 灰色边框**。Win10 不支持 `DWMWA_BORDER_COLOR`，经典
-  `WS_THICKFRAME` 在客户区外画线；`top_line` 钩子把 `rgrc[0]` 四边各
-  外扩 1px（仅非最大化，且只在 `DWMWA_BORDER_COLOR` 失败时），让
-  webview 盖住左右下框架线。Win11 仍只修顶部。版本升 0.1.3。
+  `WS_THICKFRAME` 在客户区外画线；`top_line` 钩子把 `rgrc[0]` **四边各
+  外扩 1px**（仅非最大化；Win11 上也实测有这条线，所以不再按 DWM 属性
+  成败分支），让 webview 盖住框架线。版本升 0.1.3。
+- **设置页关闭按钮第二次失灵**：设置窗是 `hide()` 不卸载 React 树，
+  `useOverlayExit` 的 `closedRef` 第一次关闭后永久为 true → 再打开点 ✕
+  直接 return。`useOverlayExit` 增加 `reset()`；`SettingsOverlay` 在
+  `variant === 'window'` 时监听 `focus` / `visibilitychange` 重新复位。
+  实机：打开→关→再开→再关，第二次也能关（修复前第二次 title 仍为「设置」）。
 
 **✅ 2026-11-26（二十）：群聊显示对齐主对话 + 群聊回复恢复 + 右键菜单 / 启动页 / 技能包**
 

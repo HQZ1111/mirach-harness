@@ -25,6 +25,8 @@ const EXIT_MS = 160
 export function useOverlayExit(onClose: () => void): {
   closing: boolean
   requestClose: () => void
+  /** 窗口形态重新显示时复位（隐藏窗口的 React 树不会卸载）。 */
+  reset: () => void
 } {
   const [closing, setClosing] = useState(false)
   const timerRef = useRef<number | null>(null)
@@ -36,6 +38,15 @@ export function useOverlayExit(onClose: () => void): {
     },
     [],
   )
+
+  const reset = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    closedRef.current = false
+    setClosing(false)
+  }, [])
 
   const requestClose = useCallback(() => {
     if (closedRef.current) return
@@ -55,7 +66,7 @@ export function useOverlayExit(onClose: () => void): {
     }, EXIT_MS)
   }, [onClose])
 
-  return { closing, requestClose }
+  return { closing, requestClose, reset }
 }
 
 export const OVERLAY_EXIT_MS = EXIT_MS
