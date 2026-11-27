@@ -13,7 +13,7 @@
  * 数据面：主题走镜像 `ThemeProvider`；其余走 `lib/appearance-prefs.ts`
  * （localStorage，跨窗口生效）。文件浏览器镜像主窗 dockview 面板 `files`。
  */
-import { Check, Image as ImageIcon, Monitor, Moon, RotateCcw, Sun, Upload } from 'lucide-react'
+import { Check, ChevronDown, Image as ImageIcon, Monitor, Moon, RotateCcw, Sun, Upload } from 'lucide-react'
 import { useStore as useNanoStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
@@ -205,6 +205,9 @@ export function AppearanceSettings() {
   const translucency = useNanoStore($translucency)
   const [query, setQuery] = useState('')
   const [fileBrowserOpen, setFileBrowserOpen] = useState(readFileBrowserOpen)
+  // 内置背景画廊默认折叠：11 张图横向滚动永远看不全（2026-11-27 用户：
+  // "内置图片看不全，做成折叠的"）。展开后换行网格，页面滚动就能看全。
+  const [backdropGalleryOpen, setBackdropGalleryOpen] = useState(false)
 
   useEffect(() => subscribeFileBrowser(setFileBrowserOpen), [])
 
@@ -670,47 +673,74 @@ export function AppearanceSettings() {
               </div>
 
               {builtinBackdrop ? (
-                <div>
-                  <div className="flex gap-2 overflow-x-auto pb-1">
-                    {BUILTIN_BACKDROPS.map((item) => {
-                      const active = prefs.backdropImage === item.path
-                      return (
-                        <button
-                          aria-label={item.label}
-                          aria-pressed={active}
-                          className={cn(
-                            'relative h-20 w-28 shrink-0 overflow-hidden rounded-lg border-2 transition-colors',
-                            active
-                              ? 'border-(--brand)'
-                              : 'border-transparent hover:border-(--stroke)',
-                          )}
-                          key={item.path}
-                          onClick={() => {
-                            // 再点当前图 = 回到第一张内置图（默认）。
-                            prefs.setBackdropImage(
-                              active ? BUILTIN_BACKDROPS[0].path : item.path,
-                            )
-                            prefs.setBackdrop(true)
-                          }}
-                          title={item.label}
-                          type="button"
-                        >
-                          <img alt="" className="h-full w-full object-cover" loading="lazy" src={item.path} />
-                          {active && (
-                            <span className="absolute right-1 bottom-1 grid size-5 place-items-center rounded-full bg-(--brand) text-(--on-brand)">
-                              <Check className="size-3" />
-                            </span>
-                          )}
-                          <span className="absolute inset-x-0 bottom-0 truncate bg-black/45 px-1.5 py-0.5 text-left text-[10px] text-white">
-                            {item.label}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                  <p className="mt-1 text-[length:var(--settings-desc-size)] text-(--ui-text-tertiary)">
-                    当前：{currentBuiltin.label}。已选图片再点一次恢复第一张内置图。
-                  </p>
+                <div className="overflow-hidden rounded-lg border border-(--stroke-soft)">
+                  <button
+                    aria-expanded={backdropGalleryOpen}
+                    className="hover:bg-(--hover-wash) flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors"
+                    onClick={() => setBackdropGalleryOpen((open) => !open)}
+                    type="button"
+                  >
+                    <ImageIcon className="size-[var(--size-icon-md)] shrink-0 text-(--brand)" />
+                    <span className="text-sm font-medium">内置图片</span>
+                    <span className="text-[length:var(--settings-desc-size)] text-(--ui-text-tertiary)">
+                      当前：{currentBuiltin.label} · 共 {BUILTIN_BACKDROPS.length} 张
+                    </span>
+                    <ChevronDown
+                      className={cn(
+                        'ml-auto size-[var(--size-icon-md)] shrink-0 text-(--ui-text-tertiary) transition-transform',
+                        !backdropGalleryOpen && '-rotate-90',
+                      )}
+                    />
+                  </button>
+                  {backdropGalleryOpen && (
+                    <div className="border-t border-(--stroke-soft) p-3">
+                      {/* 换行网格：11 张全部可见，页面自然向下滚动（不再横向
+                          截断——2026-11-27 用户："内置图片看不全"）。 */}
+                      <div
+                        className="grid gap-2"
+                        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(112px, 1fr))' }}
+                      >
+                        {BUILTIN_BACKDROPS.map((item) => {
+                          const active = prefs.backdropImage === item.path
+                          return (
+                            <button
+                              aria-label={item.label}
+                              aria-pressed={active}
+                              className={cn(
+                                'relative h-20 w-full overflow-hidden rounded-lg border-2 transition-colors',
+                                active
+                                  ? 'border-(--brand)'
+                                  : 'border-transparent hover:border-(--stroke)',
+                              )}
+                              key={item.path}
+                              onClick={() => {
+                                // 再点当前图 = 回到第一张内置图（默认）。
+                                prefs.setBackdropImage(
+                                  active ? BUILTIN_BACKDROPS[0].path : item.path,
+                                )
+                                prefs.setBackdrop(true)
+                              }}
+                              title={item.label}
+                              type="button"
+                            >
+                              <img alt="" className="h-full w-full object-cover" loading="lazy" src={item.path} />
+                              {active && (
+                                <span className="absolute right-1 bottom-1 grid size-5 place-items-center rounded-full bg-(--brand) text-(--on-brand)">
+                                  <Check className="size-3" />
+                                </span>
+                              )}
+                              <span className="absolute inset-x-0 bottom-0 truncate bg-black/45 px-1.5 py-0.5 text-left text-[10px] text-white">
+                                {item.label}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <p className="mt-2 text-[length:var(--settings-desc-size)] text-(--ui-text-tertiary)">
+                        当前：{currentBuiltin.label}。已选图片再点一次恢复第一张内置图。
+                      </p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-wrap items-center gap-2 rounded-lg border border-(--stroke-soft) px-3 py-2.5">

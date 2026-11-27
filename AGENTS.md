@@ -684,6 +684,116 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
   「Mirach + /brand/logo.png + 圆形」。**切换态**走同一条 store 订阅
   （profileStore/botsStore 与「环境」菜单同源），未做菜单实机切换。
 
+## 2026-11-27（二十二）v0.1.5：随包技能/插件 + 数据目录 + 软件内更新（当前有效）
+
+用户："打包版的技能插件都是空的，默认到c盘了固定位置了，安装到其他盘怎么办？
+能进行软件内更新推送吗？" + "关闭主窗口，设置页也要跟着关闭"。
+
+### 随包技能 / 原生扩展（打包版不再空）
+
+- 资产：`src-tauri/bundled/skills/`（27 个技能，0.57MB）+
+  `src-tauri/bundled/rpi-extensions.zip`（27 个原生扩展 DLL，zip 31.9MB /
+  解开 77MB）；`tauri.conf.json` 的 `bundle.resources` 加这两项。安装器
+  v0.1.5 = **120,339,536 B（114.76 MiB）**。
+- 新模块 `pi_bundled.rs`：`seed_home(home)` = copy-if-missing。
+  · 技能：目标 home 缺同名目录才复制（用户改过的不覆盖）；
+  · 扩展：目标 `extensions/` **一个 DLL 都没有**时才用系统 `tar.exe`
+    解 zip 到 `%TEMP%/mirach-bundled-ext-<pid>`，再逐文件补缺（不覆盖
+    本地补丁版 rpi_goal / rpi_background_tasks）。已有 DLL = 直接跳过，
+    避免每次 `ensure_profile_dirs` 解 32MB。
+  · 资产根：打包 = `resource_dir()/bundled`；开发树回退
+    `CARGO_MANIFEST_DIR/bundled`；两处都没有 = 记日志跳过（旧安装包），
+    有资产但复制/解包失败 = Err 上传（规矩 12）。
+  · 接入：`pi_profiles::ensure_profile_dirs`（本体 + 具名环境都种；技能页/
+    插件页/建会话前都会走）+ setup 后台线程主动种本体 home（不阻塞首屏）；
+    `SEED_LOCK` 串行化并发种子。
+- 实机（干净 `RPI_CODING_AGENT_DIR=G:\MirachHarnessTest\data-test`）：
+  启动后 `skills=27`、`dlls=27`；技能页「27 个 · …\data-test\skills」、
+  插件页「27 个 · …\data-test\extensions」。
+- **`native-packages.json` 没有随包**：扩展页显示「未登记（手动放入）」是
+  如实状态（registry 里是各包 hash 元数据，本地补丁 DLL 的 hash 对不上，
+  硬塞一份假登记反而错误）。
+
+### 数据目录可配置（默认仍在 C 盘用户目录）
+
+- 事实口径：pi 数据根默认 `~/.rpi/agent`，与安装盘无关（升级/多用户/多安装
+  共存的既有语义）。现在可选任意盘覆盖。
+- 新模块 `data_dir.rs`：配置 `%APPDATA%\com.mirach.harness\data-dir.json`
+  （与 agent home 无关的固定位置，保证"改回默认"永远读得到）。`main()` 在
+  Tauri/引擎初始化之前 `apply_early()` 设置 `RPI_CODING_AGENT_DIR`；显式
+  环境变量优先（界面标注"环境变量生效中，应用内设置被忽略"）。坏 JSON /
+  相对路径 = MessageBox 明示路径+原因后退出，**不静默落回默认**。
+- IPC：`pi_data_dir_get` / `pi_data_dir_set(agentDir|null)` /
+  `pi_data_dir_reveal`（explorer）。UI = 设置 →「版本与更新 → 数据目录」：
+  当前/默认路径、打开目录、更改…（plugin-dialog 选目录）、恢复默认；
+  写明**重启生效、不移动现有数据**。
+- 实机：写 data-dir.json → 启动 → `data-test2` 自动种出 27 技能 + 27 DLL，
+  运行信息三个路径全部指向 data-test2；删除配置即回默认。
+
+### 软件内更新（Tauri updater + GitHub Releases）
+
+- 依赖：`tauri-plugin-updater` / `tauri-plugin-process` 3.0.0-alpha.3
+  （crate 与 npm；JS 包若 npm 装不上可 `npm pack` 解到 node_modules，
+  package.json 已钉 3.0.0-alpha.3）。
+- `tauri.conf.json`：`bundle.createUpdaterArtifacts: true`；
+  `plugins.updater.endpoints =
+  ["https://github.com/HQZ1111/mirach-harness/releases/latest/download/latest.json"]`；
+  `pubkey` = minisign 公钥。签名私钥在
+  `%USERPROFILE%\.tauri\mirach-updater.key`（**无密码、不进仓库**；丢了
+  以后就不能再签更新包）。构建时设
+  `TAURI_SIGNING_PRIVATE_KEY=<key路径>`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`
+  → 产出 `Mirach Harness_<ver>_x64-setup.exe.sig`。
+- 发布三件套（缺 latest.json = 客户端报 "Could not fetch a valid release
+  JSON from the remote"，已实测错误可见）：setup.exe + .exe.sig +
+  `latest.json`（`platforms.windows-x86_64.signature` = .sig 文件内容，
+  `url` = release 资产 URL；GitHub 会把资产名空格换成点）。
+- 前端：`lib/app-updater.ts`（check/install/auto-check 偏好
+  `mirach:update.auto-check.v1`，默认关）；`app/settings/updates-settings.tsx`
+  整页（检查/立即更新/自动检查开关/更新渠道/运行信息/数据目录）；
+  `components/update-boot-check.tsx` 启动只检查+系统通知，**不自动安装**。
+- **0.1.4 及更早没有更新器**：用户必须先手动安装 0.1.5 一次，之后才能
+  应用内更新（页面已写明）。
+- 历史：旧「版本与更新」是 hermes about 的静态占位（"本地构建"+禁用按钮
+  + hermes 文案），2026-11-27 整块删除重做。
+
+### 关闭主窗 = 设置窗一并关闭
+
+- `wire_window` 的 `CloseAction::HideToTray` 分支：先
+  `get_webview_window("settings").hide()` + `force_hide`（透明窗 tao hide
+  不生效的 Win32 兜底），再隐藏主窗。实机：主窗 WM_CLOSE → 进程存活（托盘）
+  + UIA 无任何可见窗口。
+
+### 顶部拖拽带（30px）判定
+
+- 旧实现 pointerdown 立即 `startDragging`：系统拖拽模态循环会吞掉快速
+  双击的第二击（用户："点快了点不住"）。现在：
+  · pointerdown 只登记 `{x,y,pointerId}`；pointermove 位移 ≥3px 才
+    `startDragging`（拖动几乎无感延迟，单击/双击保持原生 click 语义）。
+  · 双击 = **自记判定**（450ms / 6px），不依赖 `PointerEvent.detail`
+    （WebView2 快速双击时实测 detail 常为 1）。
+  · pointerup/pointercancel 清 pending；监听全 capture。
+- 实机：顶带按下拖动 → 窗口 dx=100 dy=20 跟随；快速双击 → 最大化。
+
+### 外观：内置背景折叠
+
+- 聊天背景 →「内置图片」由横向 `overflow-x-auto`（11 张永远看不全）改为
+  **折叠行**（默认收起，行内显示当前图 + 张数）；展开后
+  `grid-template-columns: repeat(auto-fill, minmax(112px, 1fr))` 换行网格，
+  页面自然滚动完整显示。
+
+### 其它
+
+- **错误 toast 是浮层**（用户 2026-11-27："错误卡还出现在上方把内容挤下面"）：
+  `ToastHost` 的 `AnimatedToastStack` 从默认 `static`（叠在 app 根文档流里，
+  toast 一出现把整个壳往下推）改为 **`fixed`**（portal 到 body、右下角、
+  `z-[90]`）。同时有标题时不再丢弃 `detail`——description = message + 换行 +
+  原始错误（opacity-70），错误 toast `line-clamp-4` + `break-words`。插件侧
+  「无法打开 X 的聊天 / 请重试」现在能看到 RPC/模型解析的真实原因。
+- `package.json` 的 `@assistant-ui/react-mcp` 从 `^0.1.40`（registry 根本
+  没有该版本，`npm install` 必失败）改回 lock 实际值 `^0.1.20`。
+- 版本：0.1.5（package.json / package-lock / tauri.conf / Cargo.toml /
+  Cargo.lock）。
+
 ## 工具链钉版（升级前必读）
 
 | 包 | 版本 | 为什么 |

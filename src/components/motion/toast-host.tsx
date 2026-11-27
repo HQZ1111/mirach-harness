@@ -40,9 +40,25 @@ export function ToastHost() {
               ? 'info'
               : 'neutral'
       const title = String(payload.title ?? '').trim()
+      const detail = String(payload.detail ?? '').trim()
       showToast({
         title: title || message,
-        description: title ? message : (payload.detail ?? undefined),
+        // 有标题时 message 是说明、detail 是原始错误（RPC/连接错误原文）。
+        // 旧实现有标题就丢掉 detail——插件侧"无法打开 … 的聊天"这类 toast
+        // 只剩"请重试"，用户看不到真正原因（2026-11-27 实报）。
+        description: title ? (
+          <>
+            {message}
+            {detail ? (
+              <>
+                <br />
+                <span className="break-words opacity-70">{detail}</span>
+              </>
+            ) : null}
+          </>
+        ) : (
+          (detail || undefined)
+        ),
         status,
         // persistent = 不自动消失（hermes notify 的 persistent 语义）。
         ...(payload.persistent ? { duration: 0 } : {}),
@@ -52,5 +68,8 @@ export function ToastHost() {
     return () => window.removeEventListener('mirach:toast', onToast)
   }, [showToast])
 
-  return <AnimatedToastStack toasts={stack.toasts} onDismiss={stack.dismissToast} />
+  // fixed = portal 到 body 的浮层（用户 2026-11-27："错误卡出现在上方把内容
+  // 挤下面"）——旧实现 static 叠在 app 根文档流里，toast 一出现就把整个壳
+  // 往下推。位置 = 右下角，不挡主区内容。
+  return <AnimatedToastStack fixed toasts={stack.toasts} onDismiss={stack.dismissToast} />
 }

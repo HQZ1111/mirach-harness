@@ -458,7 +458,10 @@ const ToastItem = memo(function ToastItem({
                   {toast.description ? (
                     <p
                       className={cn(
-                        "mt-0.5 line-clamp-2 text-xs leading-4 text-muted-foreground",
+                        "mt-0.5 text-xs leading-4 break-words text-muted-foreground",
+                        // 错误 toast 给 4 行：RPC/模型解析的原始错误常带路径，
+                        // 2 行会被截成看不出原因（2026-11-27）。
+                        status === "error" ? "line-clamp-4" : "line-clamp-2",
                         classNames?.description,
                       )}
                     >

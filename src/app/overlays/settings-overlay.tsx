@@ -95,7 +95,6 @@ import {
   type AppPrefs,
   type KeepAwakeMode,
 } from '@/lib/app-prefs'
-import pkg from '../../../package.json'
 import { inTauri } from '@/lib/tauri-window'
 import { GatewaySettings } from '@/app/settings/gateway-settings'
 import { ProvidersSettings } from '@/app/settings/providers-settings'
@@ -107,6 +106,7 @@ import { VoiceSettings } from '@/app/settings/voice-settings'
 import { AgentBehaviorSettings } from '@/app/settings/agent-behavior-settings'
 import { DataSyncSettings } from '@/app/settings/data-sync-settings'
 import { SkillsToolsSettings } from '@/app/settings/skills-tools-settings'
+import { UpdatesSettings } from '@/app/settings/updates-settings'
 import {
   LOCALE_OPTIONS,
   deviceTimeZone,
@@ -158,25 +158,6 @@ interface PiModelEntry {
   id: string
   name: string
   contextWindow: number
-}
-
-/** pi_auth_status 行——存在性与凭据类型，绝不携带 key 内容。 */
-interface PiAuthRow {
-  provider: string
-  configured: boolean
-  source: string
-  credentialType: string | null
-  envVar?: string
-  envSet?: boolean
-  envKeys?: { name: string; set: boolean }[]
-}
-
-interface PiAuthStatus {
-  authPath: string
-  settingsPath: string
-  modelsPath: string
-  authFileExists: boolean
-  providers: PiAuthRow[]
 }
 
 type SettingsDoc = Record<string, unknown>
@@ -1162,8 +1143,6 @@ export function SettingsOverlay({
   // ── 数据面：挂载即拉取（§4.5 IPC）；null = 载入中（可见状态）──
   const [models, setModels] = useState<PiModelEntry[] | null>(null)
   const [modelsError, setModelsError] = useState<string | null>(null)
-  const [auth, setAuth] = useState<PiAuthStatus | null>(null)
-  const [authError, setAuthError] = useState<string | null>(null)
   const [settingsText, setSettingsText] = useState<string | null>(null)
   const [settingsMissing, setSettingsMissing] = useState(false)
   const [settingsError, setSettingsError] = useState<string | null>(null)
@@ -1172,8 +1151,6 @@ export function SettingsOverlay({
   const [notifyPrefs, setNotifyPrefs] = useState<NativeNotifyPrefs>(() =>
     inTauri || typeof window !== 'undefined' ? readNotifyPrefs() : { enabled: true, kinds: {} as NativeNotifyPrefs['kinds'] },
   )
-  // pi 引擎版本（编译期 vendored Cargo.toml 真值）
-  const [engineVersion, setEngineVersion] = useState<string | null>(null)
   // 凭据写入面（密码与登录）：provider → 草稿密钥输入 + 行内状态
   const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({})
   const [keyBusy, setKeyBusy] = useState<string | null>(null)
@@ -1581,15 +1558,6 @@ export function SettingsOverlay({
     })()
     void (async () => {
       try {
-        const res = await invoke<PiAuthStatus>('pi_auth_status')
-        if (!cancelled) setAuth(res)
-      } catch (e) {
-        console.error('[pi] 凭据状态获取失败', e)
-        if (!cancelled) setAuthError(describeIpcError(e))
-      }
-    })()
-    void (async () => {
-      try {
         const doc = await invoke<SettingsDoc | null>('pi_get_settings')
         if (!cancelled) {
           setSettingsText(doc ? JSON.stringify(doc, null, 2) : '')
@@ -1612,18 +1580,7 @@ export function SettingsOverlay({
         if (!cancelled) setModelsConfigError(describeIpcError(e))
       }
     })()
-    // ── hermes 设置移植面（2026-10-24）：引擎版本（AG-UI 端点由
-    //    GatewaySettings 组件自行拉取）──
-    void (async () => {
-      try {
-        const v = await invoke<string>('pi_engine_version')
-        if (!cancelled) setEngineVersion(v)
-      } catch (e) {
-        console.error('[pi] 引擎版本获取失败', e)
-        if (!cancelled) setEngineVersion(describeIpcError(e))
-      }
-    })()
-    // 应用级偏好（常规节）：与引擎 settings.json 无关的一份独立真相。
+    // ── 应用级偏好（常规节）：与引擎 settings.json 无关的一份独立真相。──
     void (async () => {
       try {
         const prefs = await loadAppPrefs()
@@ -1733,18 +1690,6 @@ export function SettingsOverlay({
       })
   }, [modelsConfigText, modelsConfigParsed])
 
-  const refreshAuth = useCallback(() => {
-    void invoke<PiAuthStatus>('pi_auth_status')
-      .then((res) => {
-        setAuth(res)
-        setAuthError(null)
-      })
-      .catch((e) => {
-        console.error('[pi] 凭据状态获取失败', e)
-        setAuthError(describeIpcError(e))
-      })
-  }, [])
-
   // ── 凭据写入面（hermes keys-settings 的 set/delete 移植）────────────
   // 写入 = pi auth.json 的 api_key 凭据（上游形状 {"type":"api_key","key"}，
   // 其余条目原样保留）；删除 = 该 provider 键整体移除（幂等）。读回只报
@@ -1759,10 +1704,6 @@ export function SettingsOverlay({
         .then(() => {
           setKeyDrafts((prev) => ({ ...prev, [provider]: '' }))
           setKeyResult({ provider, ok: true, message: `已写入 ${provider} 的凭据（auth.json）` })
-          // 凭据状态刷新（存在性变化）
-          void invoke<PiAuthStatus>('pi_auth_status')
-            .then((res) => setAuth(res))
-            .catch(() => {})
         })
         .catch((e) => {
           console.error('[pi] 凭据写入失败', e)
@@ -1783,9 +1724,6 @@ export function SettingsOverlay({
           ok: true,
           message: removed ? `已清除 ${provider} 的凭据（auth.json）` : `${provider} 本无 auth.json 凭据`,
         })
-        void invoke<PiAuthStatus>('pi_auth_status')
-          .then((res) => setAuth(res))
-          .catch(() => {})
       })
       .catch((e) => {
         console.error('[pi] 凭据删除失败', e)
@@ -2975,97 +2913,10 @@ export function SettingsOverlay({
 
           {activeSection === 'skills-tools' && <SkillsToolsSettings />}
 
-          {/* ── 版本与更新（关于 / 版本与更新）：hermes about-settings 的
-              结构重移植（2026-11-24 用户："版本与更新对齐 hermes 的关于
-              重新完整移植"）。
-              hermes = VersionHero（BrandMark + 版本）→ 更新状态卡（检查/
-              更新/发行说明）→ 自动更新行 → 卸载区。宿主没有更新服务端、
-              自动更新器与卸载器（本地构建），所以状态恒为"本地构建"，按钮
-              禁用并写明真实升级路径——不画假进度、不假装能检查。 ── */}
-          {activeSection === 'updates' && (
-          <section className="set-section">
-            <div className="set-about-hero set-about-hero--center">
-              <img alt="Mirach Harness" className="set-about-logo set-about-logo--lg" src="/brand/logo.png" />
-              <div>
-                <div className="set-about-name">{pkg.productName}</div>
-                <div className="set-row-env">版本 {pkg.version}</div>
-              </div>
-            </div>
-
-            <div className="set-acct-card">
-              <div className="set-acct-card-head">更新</div>
-              <div className="set-acct-card-body">
-                <div className="set-acct-field">
-                  <div className="set-acct-field-text">
-                    <span className="set-acct-field-label">本地构建</span>
-                    <p className="set-acct-field-desc">
-                      宿主没有更新服务端与自动更新器；当前版本即运行中的构建。
-                      升级 = 更新上游源 + 重拷 vendor 后重新构建。
-                    </p>
-                  </div>
-                  <div className="set-acct-field-control">
-                    <div className="set-actions">
-                      <button
-                        className="set-btn"
-                        disabled
-                        title="没有更新服务端，无法检查远端版本"
-                        type="button"
-                      >
-                        检查更新
-                      </button>
-                      <button
-                        className="set-btn set-btn-primary"
-                        disabled
-                        title="没有更新通道，无法在线更新"
-                        type="button"
-                      >
-                        立即更新
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <SetPrefRow
-                  label="自动更新"
-                  desc="hermes 在后台自动检查并安装桌面更新；宿主没有更新器，无法开启。"
-                >
-                  <Switch aria-label="自动更新" disabled />
-                </SetPrefRow>
-                <SetPrefRow
-                  label="更新渠道"
-                  desc="hermes 提供稳定版 / 每日构建两条通道；宿主是本地构建，没有渠道可选。"
-                >
-                  <span className="set-code">本地构建（唯一）</span>
-                </SetPrefRow>
-              </div>
-            </div>
-
-            <h4 className="set-sub-title">运行信息</h4>
-            <div className="set-acct-card">
-              <div className="set-acct-card-body">
-                <dl className="set-about-defs" style={{ padding: '12px 16px' }}>
-                  <dt>应用名</dt>
-                  <dd>
-                    {pkg.productName}（{pkg.name}）
-                  </dd>
-                  <dt>应用版本</dt>
-                  <dd>{pkg.version}</dd>
-                  <dt>引擎版本</dt>
-                  <dd>rpi {engineVersion ?? '…'}</dd>
-                  {auth !== null && (
-                    <>
-                      <dt>settings</dt>
-                      <dd className="set-row-env">{auth.settingsPath}</dd>
-                      <dt>models</dt>
-                      <dd className="set-row-env">{auth.modelsPath}</dd>
-                      <dt>auth</dt>
-                      <dd className="set-row-env">{auth.authPath}</dd>
-                    </>
-                  )}
-                </dl>
-              </div>
-            </div>
-          </section>
-          )}
+          {/* ── 版本与更新：真更新（Tauri updater，GitHub Releases latest.json
+              + minisign 签名校验）+ 运行信息 + 数据目录。2026-11-27 重做：
+              去掉 hermes 文案与禁用按钮。 ── */}
+          {activeSection === 'updates' && <UpdatesSettings />}
 
           {/* ── 通知（基础设置 / 通知）：hermes notifications-settings 的
               全链路复制（2026-11-24 用户："通知项移植的 hermes 的设置里的

@@ -52,6 +52,7 @@ import { inTauri } from './lib/tauri-window'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ThemeProvider } from './hermes-mirror/themes/context'
 import { GlobalBackdrop } from './components/backdrop'
+import { UpdateBootCheck } from './components/update-boot-check'
 // 外观偏好必须在根组件挂载前应用（缩放 / 字体 / 字号跨窗口一致）。
 import './lib/appearance-prefs'
 
@@ -205,6 +206,8 @@ if (isSettingsWindow) {
         <ThemeProvider>
           <GlobalBackdrop />
           <App />
+          {/* 启动时自动检查更新（偏好默认关；只检查 + 系统通知，不自动安装） */}
+          <UpdateBootCheck />
           {/* app 右键菜单（唯一右键菜单）+ 命令面板/设置浮层开关（app 根挂载，
               树外——详情见 app-context-menu.tsx 文件头） */}
           <AppContextMenu />

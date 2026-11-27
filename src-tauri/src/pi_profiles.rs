@@ -63,12 +63,22 @@ pub fn profile_sessions_dir(name: Option<&str>) -> Result<Option<PathBuf>, Strin
 }
 
 /// 写面：确保具名环境的 home/sessions 目录存在（建会话前调用）。
+///
+/// 顺带补种**随包默认资产**（技能 + 原生扩展 zip，`pi_bundled::seed_home`）：
+/// 本体与具名环境都种，打包版在新机器上首次打开就有技能与插件可用
+/// （2026-11-27 用户："打包版的技能插件都是空的"）。copy-if-missing，
+/// 已存在的技能目录 / DLL 一个不动。
 pub fn ensure_profile_dirs(name: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let normalized = normalize_profile(name)?;
+    let home = profile_home(normalized.as_deref())?;
+    std::fs::create_dir_all(&home)
+        .map_err(|e| format!("环境 home 创建失败 {}: {e}", home.display()))?;
+    crate::pi_bundled::seed_home(&home)?;
     let Some(dir) = profile_sessions_dir(name)? else {
         return Ok(None);
     };
     std::fs::create_dir_all(&dir).map_err(|e| format!("环境目录创建失败 {}: {e}", dir.display()))?;
-    if let Some(n) = normalize_profile(name)? {
+    if let Some(n) = normalized {
         seed_profile_home_config(&n)?;
     }
     Ok(Some(dir))

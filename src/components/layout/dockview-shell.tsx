@@ -1176,9 +1176,21 @@ export function DockviewShell() {
   // 栏卡片归属各自的手势。再叠加 `--shell-shadow-margin`（当前 0；最大化态
   // 也是 0），clientY 相对窗口矩形。
   const TOP_BAND_PX = 30
+  // 按下后移动超过这个距离才真正开始系统拖窗。旧实现 pointerdown 立即
+  // startDragging：系统进入拖拽模态循环后，快速双击的第二击常被吞掉
+  // （2026-11-27 用户："点快了点不住"）。3px 阈值让单击/双击保持原生
+  // click 语义，拖动仍然几乎无感延迟。
+  const DRAG_THRESHOLD_PX = 3
   useEffect(() => {
     if (!inTauri || !appWindow) return
     const win = appWindow
+    let pending: { x: number; y: number; pointerId: number } | null = null
+    // 自记双击（不依赖 `PointerEvent.detail`——WebView2 上实测快速双击时
+    // detail 常为 1，靠它永远最大化不了；用户："点快了点不住"）。
+    let lastDown: { at: number; x: number; y: number } | null = null
+    const DOUBLE_CLICK_MS = 450
+    const DOUBLE_CLICK_SLOP_PX = 6
+
     const onWinPointerDown = (e: PointerEvent) => {
       if (e.button !== 0) return
       const t = e.target as Element | null
@@ -1195,16 +1207,58 @@ export function DockviewShell() {
       const onBandSurface =
         t.closest('.app-shell, .app-main, .rail-logo-leading, .left-rail-logo-row, .app-titlebar') !== null
       if (!onBandSurface) return
-      e.preventDefault()
-      e.stopPropagation()
-      if (e.detail === 2) {
-        void win.toggleMaximize().catch(() => {})
+
+      // 双击判定：与上一次按下同点（≤6px）且间隔 ≤450ms。
+      const now = performance.now()
+      const isDouble =
+        lastDown !== null &&
+        now - lastDown.at <= DOUBLE_CLICK_MS &&
+        Math.abs(e.clientX - lastDown.x) <= DOUBLE_CLICK_SLOP_PX &&
+        Math.abs(e.clientY - lastDown.y) <= DOUBLE_CLICK_SLOP_PX
+      lastDown = { at: now, x: e.clientX, y: e.clientY }
+      if (isDouble) {
+        lastDown = null
+        pending = null
+        e.preventDefault()
+        e.stopPropagation()
+        void win.toggleMaximize().catch((err) => {
+          console.error('[window] 最大化切换失败', err)
+        })
         return
       }
-      void win.startDragging().catch(() => {})
+
+      // 只登记按下位置；是否拖窗由 pointermove 的阈值决定。
+      pending = { x: e.clientX, y: e.clientY, pointerId: e.pointerId }
     }
+
+    const onWinPointerMove = (e: PointerEvent) => {
+      if (!pending || e.pointerId !== pending.pointerId) return
+      const dx = e.clientX - pending.x
+      const dy = e.clientY - pending.y
+      if (dx * dx + dy * dy < DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX) return
+      pending = null
+      // 拖拽真正开始才拦截默认行为（单击/双击不受影响）。
+      e.preventDefault()
+      e.stopPropagation()
+      void win.startDragging().catch((err) => {
+        console.error('[window] 拖窗失败', err)
+      })
+    }
+
+    const onWinPointerEnd = () => {
+      pending = null
+    }
+
     window.addEventListener('pointerdown', onWinPointerDown, true)
-    return () => window.removeEventListener('pointerdown', onWinPointerDown, true)
+    window.addEventListener('pointermove', onWinPointerMove, true)
+    window.addEventListener('pointerup', onWinPointerEnd, true)
+    window.addEventListener('pointercancel', onWinPointerEnd, true)
+    return () => {
+      window.removeEventListener('pointerdown', onWinPointerDown, true)
+      window.removeEventListener('pointermove', onWinPointerMove, true)
+      window.removeEventListener('pointerup', onWinPointerEnd, true)
+      window.removeEventListener('pointercancel', onWinPointerEnd, true)
+    }
   }, [])
 
   // ── 渲染 ────────────────────────────────────────────────────────────────────

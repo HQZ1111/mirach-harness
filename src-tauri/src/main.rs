@@ -23,6 +23,12 @@ mod pi_plugin_state;
 mod pi_goal_verify;
 mod agui;
 mod pi_paths;
+// 数据目录（agent home）覆盖：启动前读 `%APPDATA%\com.mirach.harness\data-dir.json`
+// 并设置 RPI_CODING_AGENT_DIR（2026-11-27 用户："安装到其他盘怎么办"）。
+mod data_dir;
+// 随包默认资产：技能 + 原生扩展 DLL，首次进 home 时 copy-if-missing 种下
+// （2026-11-27 用户："打包版的技能插件都是空的"）。
+mod pi_bundled;
 // 环境（profile）隔离——hermes `~/.hermes/profiles/<name>/` 的宿主对偶：
 // 具名环境 = `~/.rpi/agent/profiles/<name>/`（会话落 <home>/sessions，
 // 列表只扫活动环境；切环境 = 左侧栏会话面整体切换，2026-11-22）
@@ -610,6 +616,17 @@ fn wire_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, close_acti
                 }
                 eprintln!("[close-tray] CloseRequested fired, preventing + hiding");
                 api.prevent_close();
+                // 设置窗是独立顶层窗：主窗隐藏后它会留在桌面上（用户
+                // 2026-11-27："关闭主窗口，设置页也要跟着关闭"）。先跟主窗
+                // 一起隐藏；下次打开设置 = 新会话语义，不残留旧状态。
+                if let Some(settings) = app_for_close.get_webview_window(SETTINGS_LABEL) {
+                    match settings.hide() {
+                        Ok(_) => eprintln!("[close-tray] 设置窗已随主窗隐藏"),
+                        Err(e) => eprintln!("[close-tray] 设置窗隐藏失败：{e}"),
+                    }
+                    #[cfg(windows)]
+                    force_hide(&settings);
+                }
                 // 立即刷存档（防抖窗口内退出不丢几何）
                 persist();
                 match win.hide() {
@@ -1854,6 +1871,27 @@ fn set_app_user_model_id() {
 #[cfg(not(windows))]
 fn set_app_user_model_id() {}
 
+/// 启动期致命错误提示（GUI 子系统没有控制台，只 eprintln 等于用户看不到）。
+#[cfg(windows)]
+fn show_fatal_message(text: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let title: Vec<u16> = "Mirach Harness\0".encode_utf16().collect();
+    let message: Vec<u16> = format!("{text}\0").encode_utf16().collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn show_fatal_message(text: &str) {
+    eprintln!("{text}");
+}
+
 /// 单实例守卫（2026-11-27 用户实报：安装版和正在运行的 dev 版同时开 → 进程
 /// 101 闪退）。两个实例共用同一 WebView2 user-data 目录/引擎会话锁，第二个
 /// 实例在 webview 创建阶段就会 panic；这里在 Tauri 启动前用命名互斥量拦住，
@@ -1943,12 +1981,22 @@ fn main() {
         return;
     }
     install_crash_log();
+    // 数据目录覆盖必须在任何引擎/会话初始化之前生效（AgentHome::process 读
+    // RPI_CODING_AGENT_DIR）。配置坏了 = 明确对话框 + 退出，不静默落回默认。
+    if let Err(e) = data_dir::apply_early() {
+        eprintln!("[data-dir] {e}");
+        show_fatal_message(&format!("数据目录配置无效，应用无法启动：\n\n{e}"));
+        return;
+    }
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
     // 删除立即可见；默认 balanced 是定时 autosave，列表会延迟出现且
     // rename 可能撞未落盘文件的锁）。桌面壳本地 JSONL append 开销可忽略。
     std::env::set_var("PI_SESSION_DURABILITY_MODE", "strict");
 
     tauri::Builder::default()
+        // 软件内更新：检查/下载/安装走 Rust 侧（签名校验），前端只拿状态。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
             // ── 应用级偏好最先进状态 ──
@@ -1959,6 +2007,17 @@ fn main() {
             pi_engine_bridges::install(app.handle());
             // 本机屏幕 RFB 服务（随机端口；前端经 pi_display_ws_port 读）。
             pi_display::start_server();
+            // 随包默认资产（技能 + 原生扩展）：先定资产根，再后台种本体
+            // home。扩展 zip 解包 ~77MB，不能阻塞首屏；插件/技能页首次读取
+            // 时 ensure_profile_dirs 也会幂等补种（命令路径可上报错误）。
+            pi_bundled::init(app.handle());
+            tauri::async_runtime::spawn_blocking(|| {
+                if let Ok(home) = rpi_cli::config::AgentHome::process().root() {
+                    if let Err(e) = pi_bundled::seed_home(&home) {
+                        eprintln!("[bundled] 本体环境种子失败：{e}");
+                    }
+                }
+            });
             // 跨网关 peer 服务（hosted-room lending）：固定回环端口 + Bearer 配对令牌。
             // 起不来只影响「借出本机 bot」这一面，如实打日志、不阻塞主壳。
             if let Err(e) = pi_peer::ensure_server(app.handle().clone()) {
@@ -2318,6 +2377,9 @@ fn main() {
             pi_hub_send,
             pi_hub_inbox,
             pi_settings::pi_get_settings,
+            data_dir::pi_data_dir_get,
+            data_dir::pi_data_dir_set,
+            data_dir::pi_data_dir_reveal,
             pi_settings::pi_set_settings,
             pi_settings::pi_get_models_config,
             pi_settings::pi_set_models_config,

@@ -1,6 +1,6 @@
 [package]
 name = "mirach-harness"
-version = "0.1.4"
+version = "0.1.5"
 description = "Mirach harness — layout testbed Tauri shell"
 edition = "2021"
 
@@ -9,6 +9,11 @@ tauri-build = { version = "3.0.0-alpha.4", features = [] }
 
 [dependencies]
 tauri-plugin-dialog = "3.0.0-alpha.4"
+# 软件内更新（2026-11-27 用户："能进行软件内更新推送吗"）：GitHub Releases
+# 的 latest.json + minisign 签名；v0.1.5 起安装版可自查自装。
+tauri-plugin-updater = "3.0.0-alpha.3"
+# 更新安装完成后重启应用（updater 官方配套）。
+tauri-plugin-process = "3.0.0-alpha.3"
 # features 与主工程一致（unstable），最大化复用 cargo 缓存
 tauri = { version = "3.0.0-alpha.6", features = ["unstable", "tray-icon"] }
 # v3 alpha：webview 后端外置成 runtime crate——Builder 必须显式选运行时
