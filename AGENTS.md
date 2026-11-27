@@ -875,16 +875,22 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
 
 ### 已知边界（如实标注）
 
-- **后台审批仍被取消**：引擎 `retire_previous`/`install_live` 会 cancel
-  ui_dialog + `approvals.cleanup()`——后台 run 走到审批点依然会失败
-  （审批注册表按进程单份，per-session 化是下一轮）。流式 run（最常见的
-  "后台继续跑"）不受影响。
-- **retired 句柄上限 4 + live 1**：第 6 个并发后台 run 的句柄被逐（lease
-  释放）——引擎侧既有约束，未动。
-- **后台会话无 busy 投影**：$hostBusy 只绑焦点 actor——侧栏"谁在跑"的
-  per-session 化（hermes $workingSessionIds 对偶）是下一轮。
 - **重载（F5/HMR）时在途消息**：与旧行为同——文件水合 + SEEK(缓冲头)，
   在途增量等落盘后出现（引擎进程存活，run 本身不丢）。
+- **多会话流**（v0.1.7 补）：后台 streaming 会话的 **ES 不断开**——
+  `streamsRef` 按键持有 EventSource，焦点流 + 后台流共存（上限 = actor
+  注册表容量）；流对账 reconcile：焦点必开 / streaming 保流 / 空闲非焦点
+  关流。后台 actor 持续消费事件（投影实时更新 + 队列收尾可触发）。
+- **后台审批存活**（v0.1.7 补）：`retire_previous`/`install_live`/
+  `open_session`/`discard_session` 撤销 `cancel_all` + `cleanup`——后台
+  run 走到审批点**不再被杀**，审批条目留在邮箱里，切回该会话时轮询恢复、
+  卡片可答。真正的取消只发生在 retired 驱逐（句柄真正消失时）。
+- **retired 句柄上限 12**（v0.1.7 补：4→12，对齐 actor 注册表容量）。
+- **后台 drain**（v0.1.7 补）：2s 对账周期内，所有空闲且有排队消息的
+  会话逐条续发（hermes background drain 同语义——"drains even when no
+  composer is mounted"）。
+- **后台会话无 busy 投影**：$hostBusy 只绑焦点 actor——侧栏"谁在跑"的
+  per-session 化（hermes $workingSessionIds 对偶）是下一轮。
 
 ### 门禁
 

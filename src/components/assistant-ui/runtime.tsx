@@ -895,85 +895,155 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     sweepEmptyBotChats,
   ])
 
-  // ── 焦点流（per-session SSE，多会话并存）──────────────────────────────
-  // thread = 焦点会话键 `main:<id>`（与 POST 事件路由键同源）；游标 = 焦点
-  // actor 的 lastEventId——切走期间该会话缓冲里累积的增量在重订时整段续放
-  // （在跑 run 不因切换中断，切回来接着看）。New Chat 哨兵键上没有引擎事
-  // 件（首条消息前 runtime 先 pi_ensure_main_session 拿真 id），不订阅。
+  // ── 多会话流（per-session SSE，hermes "background sessions keep
+  // painting" 对偶）────────────────────────────────────────────────────
+  // thread = `main:<id>`（与 POST 事件路由键同源）。**流的生命周期**：
+  // - 焦点会话：始终有流（切走期间缓冲累积的增量在重订时整段续放）；
+  // - 后台 streaming 会话：**流不断开**——actor 持续消费事件（投影实时
+  //   更新，侧栏"谁在跑"有数据面），run 收尾后队列 drain 正常触发；
+  // - 空闲且非焦点：流关掉（省连接——空闲会话没有增量可收）。
+  // 连接数量上限 = actorRegistry.size ≤ ACTOR_CAP(12)。
+  const streamsRef = useRef(new Map<string, EventSource>())
+  const endpointRefForStreams = useRef(endpoint)
+  endpointRefForStreams.current = endpoint
+
+  const openStream = useCallback(
+    (key: string, actor: TurnActor): void => {
+      if (streamsRef.current.has(key)) return
+      const ep = endpointRefForStreams.current
+      if (!ep) return
+      const cursor = actor.getSnapshot().context.lastEventId
+      let url = `http://127.0.0.1:${ep.port}/ag-ui/stream?thread=${encodeURIComponent(key)}&token=${encodeURIComponent(ep.token)}`
+      if (cursor > 0) url += `&lastEventId=${cursor}`
+      const es = new EventSource(url)
+      es.onmessage = (e: MessageEvent) => {
+        try {
+          const parsed = JSON.parse(e.data)
+          if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
+            approvalBridge
+              .getState()
+              .refresh()
+              .catch((err) => console.error('[pi] 审批列表拉取失败', err))
+          }
+          if (parsed?.type === 'CUSTOM' && parsed?.name === 'ask_request') {
+            askBridge
+              .getState()
+              .refresh()
+              .catch((err) => console.error('[pi] 问题列表拉取失败', err))
+          }
+          if (parsed?.type === 'CUSTOM' && parsed?.name === 'tool_execution') {
+            dispatchToolDetails(parsed.name, parsed.value)
+          }
+          // 事件喂本流所属会话的 actor（键在闭包里——后台流的增量落后台
+          // 会话的投影，不串台）。
+          actor.send({
+            type: 'AGUI_EVENT',
+            event: parsed as { type: string } & Record<string, unknown>,
+            id: Number(e.lastEventId || 0),
+          })
+        } catch (err) {
+          console.error('[agui] 事件解析失败', err)
+        }
+      }
+      es.onopen = () => {
+        connectionBridge.getState().setConnected(true)
+        bootBridge.getState().setReady()
+      }
+      es.onerror = (e) => {
+        // EventSource 自动重连（Last-Event-ID 续放）；CLOSED = 浏览器放弃
+        const source = e.target as EventSource
+        if (source.readyState === EventSource.CLOSED) {
+          // 放弃：移除映射（下次 reconcile 重新开）
+          streamsRef.current.delete(key)
+          connectionBridge.getState().setDisconnected(true)
+        }
+      }
+      streamsRef.current.set(key, es)
+    },
+    [],
+  )
+
+  const closeStream = useCallback((key: string): void => {
+    const es = streamsRef.current.get(key)
+    if (es) {
+      es.close()
+      streamsRef.current.delete(key)
+    }
+  }, [])
+
+  // 流对账（focus 变化 + 周期兜底）：焦点会话始终有流；后台 streaming
+  // 会话保流；空闲且非焦点的流关掉。
   const focusedThreadKeyForStream = sessionThreadKey(currentThreadId)
+  const reconcileStreams = useCallback(() => {
+    const ep = endpointRefForStreams.current
+    if (!ep) return
+    // 焦点流必开
+    const focusActor = actorRegistry.get(focusedThreadKeyForStream)
+    if (focusedThreadKeyForStream !== NEW_CHAT_THREAD_KEY && focusActor) {
+      openStream(focusedThreadKeyForStream, focusActor)
+    }
+    // 后台 streaming 保流；空闲非焦点关流
+    for (const [key, actor] of actorRegistry.entries()) {
+      const streaming = actor.getSnapshot().matches('streaming')
+      const has = streamsRef.current.has(key)
+      if (key === focusedThreadKeyForStream) continue // 焦点流已开
+      if (streaming && !has) openStream(key, actor)
+      if (!streaming && has) closeStream(key)
+    }
+  }, [focusedThreadKeyForStream, openStream, closeStream])
+
+  // 焦点变化 → 立即对账（保证焦点流立刻开）
+  useEffect(() => {
+    reconcileStreams()
+  }, [focusedThreadKeyForStream, endpoint, reconcileStreams])
+
+  // 周期对账（2s）：捕获后台 run 起跑（run start 时 actor 可能不在焦点）
+  // 与收尾（idle → 关流 + drain 该会话的队列）。
   useEffect(() => {
     if (!endpoint) return
-    if (focusedThreadKeyForStream === NEW_CHAT_THREAD_KEY) {
-      // New Chat 草稿态：没有会话流可订（引擎事件都落真会话键）；引擎可用
-      // 性由启动链保证，连接态置 online（无流可断）。
-      connectionBridge.getState().setConnected(true)
-      bootBridge.getState().setReady()
-      return
-    }
-    let es: EventSource | null = null
-    let cancelled = false
-    const streamActor = getOrCreateActor(focusedThreadKeyForStream, focusedThreadKeyForStream)
-    void (async () => {
-      try {
-        const cursor = streamActor.getSnapshot().context.lastEventId
-        let url = `http://127.0.0.1:${endpoint.port}/ag-ui/stream?thread=${encodeURIComponent(focusedThreadKeyForStream)}&token=${encodeURIComponent(endpoint.token)}`
-        if (cursor > 0) url += `&lastEventId=${cursor}`
-        if (cancelled) return
-        es = new EventSource(url)
-        es.onmessage = (e: MessageEvent) => {
-          try {
-            const parsed = JSON.parse(e.data)
-            // 审批/ask 请求进流（§4.4）：卡片详情以 Rust 注册表为真相，经
-            // IPC 拉取挂起列表（重放流不会造成卡片重复）。
-            if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
-              approvalBridge
-                .getState()
-                .refresh()
-                .catch((err) => console.error('[pi] 审批列表拉取失败', err))
-            }
-            if (parsed?.type === 'CUSTOM' && parsed?.name === 'ask_request') {
-              askBridge
-                .getState()
-                .refresh()
-                .catch((err) => console.error('[pi] 问题列表拉取失败', err))
-            }
-            // 活动面板 sidecar（todo / agent roster / jobs）：tool_execution
-            // 的 details.schema 分派到对应 store。纯桥读取，不改消息段。
-            if (parsed?.type === 'CUSTOM' && parsed?.name === 'tool_execution') {
-              dispatchToolDetails(parsed.name, parsed.value)
-            }
-            // 事件喂**本流所属会话**的 actor（键在闭包里——切走后旧流的尾
-            // 事件也落旧会话的投影，不串台）。
-            streamActor.send({
-              type: 'AGUI_EVENT',
-              event: parsed as { type: string } & Record<string, unknown>,
-              id: Number(e.lastEventId || 0),
-            })
-          } catch (err) {
-            console.error('[agui] 事件解析失败', err)
-          }
-        }
-        es.onopen = () => {
-          connectionBridge.getState().setConnected(true)
-          // 启动页就绪信号：事件流首连成功 = 引擎真的可用了（端点成功只
-          // 说明 HTTP 面在，SSE 打开才代表 run 事件链就绪）。
-          bootBridge.getState().setReady()
-        }
-        es.onerror = (e) => {
-          console.error('[agui] SSE 连接错误', e)
-          // readyState：CONNECTING = 自动重试中；CLOSED = 浏览器放弃（dropped）
-          const source = e.target as EventSource
-          connectionBridge.getState().setDisconnected(source.readyState === EventSource.CLOSED)
-        }
-      } catch (e) {
-        console.error('[agui] 焦点流连接失败', e)
+    const timer = window.setInterval(() => {
+      reconcileStreams()
+      // 后台 drain：所有空闲且有排队消息的会话都续发（hermes background
+      // drain 同语义——"drains even when no composer is mounted"）。
+      const state = sessionQueue.getState()
+      for (const [key, items] of Object.entries(state.bySession)) {
+        if (items.length === 0) continue
+        if (key === state.activeKey) continue // 焦点 drain 由收尾边沿触发
+        const actor = actorRegistry.get(key)
+        if (!actor || actor.getSnapshot().matches('streaming')) continue
+        // 空闲 + 有排队 → 逐条发出（出队 = USER_SUBMIT + postRun）
+        const next = sessionQueue.getState().takeFirst(key)
+        if (!next) continue
+        actor.send({
+          type: 'USER_SUBMIT',
+          text: next.text,
+          messageId: `user-bg-${Date.now()}`,
+          ...(next.imageDataUrls && next.imageDataUrls.length > 0
+            ? { images: next.imageDataUrls }
+            : {}),
+          ...(next.files && next.files.length > 0 ? { files: next.files } : {}),
+        })
+        // postRun 的 sessionPath 需要按该会话的 catalog path 取——postRun
+        // 用 currentThreadIdRef（焦点），后台 drain 需要按 key 发。这里
+        // 直接 POST（复用 postRun 的路由逻辑但不切焦点）。
+        const ep = endpointRefForStreams.current
+        if (!ep) continue
+        const path = sessionCatalog.getState().entries[key.replace(/^main:/, '')]?.path
+        void fetch(`http://127.0.0.1:${ep.port}/ag-ui?token=${encodeURIComponent(ep.token)}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            threadId: key,
+            message: next.submission ?? next.text,
+            ...(path ? { sessionPath: path } : {}),
+            ...(next.images && next.images.length > 0 ? { images: next.images } : {}),
+          }),
+        }).catch((e) => console.error('[queue] 后台 drain POST 失败', e))
+        void refreshThreads()
       }
-    })()
-    return () => {
-      cancelled = true
-      es?.close()
-    }
-  }, [focusedThreadKeyForStream, endpoint, reconnectSeq])
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [endpoint, reconcileStreams, refreshThreads])
 
   /** 自动会话命名（规则段，hermes title_generator 两段式的即时段）：
    * POST 成功后对「默认态名」（pi SessionIndex 的 name 为 null/空 = 用户

@@ -574,7 +574,10 @@ pub(crate) fn peek_session_tail(path: &str, limit: usize) -> Result<serde_json::
 }
 
 /// 退役会话的保留上限（最近 N 个）。切回这些会话仍免重建；更老的淘汰。
-const RETIRED_HARNESS_CAP: usize = 4;
+/// retired 句柄上限（多会话并存 2026-11-28：4→12，对齐前端 actor 注册表
+/// ACTOR_CAP=12——每个后台 run 都需要一个 retired 句柄来保住写者租约与
+/// 邮箱；被逐的句柄释放租约，对应 run 的后台继续跑即终止）。
+const RETIRED_HARNESS_CAP: usize = 12;
 
 /// 退役会话表：`HashMap` + 进入顺序。
 ///
@@ -1426,8 +1429,10 @@ impl PiEngine {
         // host reports a verdict (`_verify-start`/`_verify-result`). Idempotent;
         // a session without rpi-goal just logs and moves on.
         crate::pi_goal_verify::arm_goal_verification(&self.shared);
-        self.approvals.cleanup();
-        self.asks.cleanup();
+        // **不 cleanup**（多会话并存 2026-11-28）：install_live 换装时不清
+        // 全局审批/ask 注册表——后台会话的挂起审批必须存活。旧会话的孤儿
+        // 条目由删除会话（dropActor 路径）和 retired 驱逐（cancel_all +
+        // responder 断）清理。
         Ok(())
     }
 
@@ -1534,11 +1539,15 @@ impl PiEngine {
 
     /// 把活动会话移入 retired 缓存（不 drop：见 EngineShared::retired 注释）。
     /// 没有 session_path 的在场态（不应存在）直接丢弃。
+    ///
+    /// **不 cancel ui_dialog**（多会话并存 2026-11-28）：切走时后台 run 的
+    /// 挂起审批/ask 保留——切回来时邮箱轮询恢复、卡片继续可答（hermes 同
+    /// 语义："switching never cancels a turn"）。真正的取消只发生在
+    /// `release_retired_harness`（retired 容量驱逐，句柄真正消失时）。
     fn retire_previous(&self, previous: Option<Arc<HarnessLive>>) -> Result<(), String> {
         let Some(previous) = previous else {
             return Ok(());
         };
-        previous.reload.ui_dialog.cancel_all();
         let Some(path) = previous.session_path.clone() else {
             return Ok(());
         };
@@ -1754,8 +1763,7 @@ impl PiEngine {
                 .map_err(|_| "锁中毒".to_string())?
                 .replace(cached);
             self.retire_previous(previous)?;
-            self.approvals.cleanup();
-            self.asks.cleanup();
+            // 不 cleanup（多会话并存：后台会话的审批/ask 保留）
             return Ok(id);
         }
         // 文件损坏（header 丢失）→ 明确报错，不要让 rpi 报误导性的
@@ -1809,8 +1817,7 @@ impl PiEngine {
         if let Ok(mut pending) = self.shared.pending_plan_mode.lock() {
             *pending = false;
         }
-        self.approvals.cleanup();
-        self.asks.cleanup();
+        // 不 cleanup（多会话并存：discard 退 retired，后台 run 的审批保留）
         Ok(())
     }
 
