@@ -6,6 +6,26 @@
 
 ## 当前状态
 
+**✅ 2026-11-27（二十三）：v0.1.6 群聊成员不可用改 deferred（可重试）+ 设置标题去卡**
+
+- **群聊里被删除的机器人 = `turn.deferred`（对齐 hermes）**：`canonical-group-driver`
+  不再写 `turn.failed`，改 `turn.deferred` + reason `member_unavailable` +
+  `execution_generation`（同 task 重复 defer 代际递增，从 `groups.log` 取）。
+  `plan.rs` 的 terminals 排除 deferred（hermes："deferred is not terminal:
+  it awaits Retry or Discard"）→ 房间停在该成员；`canonicalDriverStatus`
+  的 `pending_actions` 输出 `{kind:'retry',…}` → workspace 渲染「重试」卡
+  （`groups.retry` / `retryCanonicalTask`）；Discard 写 `turn.cancelled
+  reason=discarded` 并踢一次驱动继续。重启后由启动扫描从日志重建待重试表。
+- **设置页标题去卡片**：`.set-inset-head` 透明无描边（保留 48px 拖窗带 +
+  16 内距 + 关闭钮）；实机截图确认标题为裸文字。
+- **本机安装版已更新到 0.1.6**（`G:\MirachHarnessTest`，卸载表版本 0.1.6）。
+- 门禁：cargo check 通过、cargo test 744 过 / 1 ignored、npm test 1135 过、
+  改动文件无新增 tsc 错误。
+- **v0.1.6 已发布**：
+  `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.6`
+  （安装器 120,333,529 B；资产 = setup.exe + .exe.sig + latest.json）。
+  0.1.5 起支持应用内更新（本版 latest.json 已指向 0.1.6）。
+
 **✅ 2026-11-27（二十二）：v0.1.5 随包技能/插件 + 数据目录 + 软件内更新 + 错误 toast 浮层**
 
 - **打包版技能/插件不再为空**：安装包携带 27 个技能（`src-tauri/bundled/skills`）
