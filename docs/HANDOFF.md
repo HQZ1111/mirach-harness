@@ -43,6 +43,13 @@
   Releases 删除，tag 保留作源码历史。实机复验：启动页出现 → 本机启动后
   无白容器/机器人栏正常；二次启动 exit 0 且不闪退；exe/安装器/窗口图标
   均为 Mirach。
+- **v0.1.2 补丁**：Tauri 原生只在 finish 页勾选 `createDesktop` 或
+  silent/passive 时创建桌面快捷方式（用户"桌面怎么没有图标"）。新增
+  `src-tauri/nsis/hooks.nsh` 的 `NSIS_HOOK_POSTINSTALL` 无条件
+  `CreateOrUpdateDesktopShortcut`（幂等，保留 AUMID）；版本升 0.1.2。
+  默认安装目录（currentUser）= `%LOCALAPPDATA%\Mirach Harness`；本机测试
+  安装 = `G:\MirachHarnessTest`。实机：删掉旧快捷方式 → 静默安装 0.1.2
+  → 桌面快捷方式重建并指向安装目录，双击可启动。
 
 **✅ 2026-11-26（二十）：群聊显示对齐主对话 + 群聊回复恢复 + 右键菜单 / 启动页 / 技能包**
 

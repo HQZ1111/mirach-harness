@@ -5378,4 +5378,9 @@ ellipsis），已被本节的逐段移植替换。
   （Windows `CREATE_NO_WINDOW`）。新增 `Command::new` 时同一规则，否则
   软件打开/审查刷新会闪控制台黑框。
 - **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
-  `Cargo.toml` 全部 **0.1.1**。
+  `Cargo.toml` 全部 **0.1.2**。
+- **桌面快捷方式**：Tauri 原生只在 finish 页勾选 `createDesktop` 或
+  silent/passive 时创建（用户"桌面怎么没有图标"）。`src-tauri/nsis/hooks.nsh`
+  的 `NSIS_HOOK_POSTINSTALL` 无条件 `CreateOrUpdateDesktopShortcut`（幂等，
+  保留 AUMID），并在 `tauri.conf.json` 的 `bundle.windows.nsis.installerHooks`
+  挂上。默认安装目录（currentUser）= `%LOCALAPPDATA%\Mirach Harness`。
