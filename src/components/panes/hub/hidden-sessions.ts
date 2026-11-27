@@ -109,5 +109,8 @@ export function hiddenSessionPaths(): Set<string> {
 /** 会话标题是否属于 Bot Mode 管道（侧栏应隐藏）。 */
 export function isBotModePlumbingTitle(title: null | string | undefined): boolean {
   const t = String(title ?? '').trim()
-  return t === 'Bot Chat' || t === 'Agent Inbox' || t.startsWith('Group: ')
+  // `Router: <roomId>` 是 canonical 群聊的自动路由会话（group driver 内部
+  // 会话），既不该出现在侧栏，也不该成为「上次会话」被启动恢复
+  // （2026-11-27 实机：打包版启动直接打开了 Router 的内部英文提示）。
+  return t === 'Bot Chat' || t === 'Agent Inbox' || t.startsWith('Group: ') || t.startsWith('Router: ')
 }

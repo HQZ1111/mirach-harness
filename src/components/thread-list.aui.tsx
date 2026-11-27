@@ -214,7 +214,7 @@ export const ThreadList: FC = () => {
   );
 
   return (
-    <ThreadListRoot className="flex h-full min-h-0 flex-col bg-(--surface)" data-density={density}>
+    <ThreadListRoot className="flex h-full min-h-0 flex-col bg-transparent" data-density={density}>
       <div className="shrink-0 pb-1 pt-1" style={{ paddingLeft: 'var(--rail-search-inset)', paddingRight: 'var(--rail-search-inset)' }}>
         <ThreadListSearch aria-label="搜索会话" onValueChange={setSearch} value={search} />
       </div>

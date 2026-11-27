@@ -1769,7 +1769,94 @@ fn pi_hub_inbox(
     state.engine.hub_inbox(&agent_id)
 }
 
+/// 单实例守卫（2026-11-27 用户实报：安装版和正在运行的 dev 版同时开 → 进程
+/// 101 闪退）。两个实例共用同一 WebView2 user-data 目录/引擎会话锁，第二个
+/// 实例在 webview 创建阶段就会 panic；这里在 Tauri 启动前用命名互斥量拦住，
+/// 已运行的实例置前，找不到窗口就明确提示，不再让用户看到"闪退"。
+#[cfg(windows)]
+fn ensure_single_instance() -> bool {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, MessageBoxW, SetForegroundWindow, ShowWindow, MB_ICONINFORMATION, MB_OK,
+        SW_RESTORE,
+    };
+
+    let name: Vec<u16> = "Local\\com.mirach.harness.instance\0".encode_utf16().collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        // 守卫本身失败不拦截启动，但必须可见（不静默降级）。
+        eprintln!("[single-instance] 创建互斥量失败: {}", unsafe {
+            GetLastError()
+        });
+        return true;
+    }
+    if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+        return true;
+    }
+
+    let title: Vec<u16> = "Mirach Harness\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+    } else {
+        let message: Vec<u16> = "Mirach Harness 已在运行（同一时间只允许一个实例）。\0"
+            .encode_utf16()
+            .collect();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                message.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+    }
+    false
+}
+
+#[cfg(not(windows))]
+fn ensure_single_instance() -> bool {
+    true
+}
+
+/// 发布版闪退的可诊断面：panic 写 `%LOCALAPPDATA%\com.mirach.harness\logs\crash.log`
+/// （GUI 子系统没有控制台，用户只能看到进程消失；下次闪退至少留一份调用栈）。
+fn install_crash_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let dir = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("com.mirach.harness")
+            .join("logs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    file,
+                    "[{}] {info}\n",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                let _ = file.flush();
+            }
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
+    if !ensure_single_instance() {
+        return;
+    }
+    install_crash_log();
     // pi 会话持久化：strict = 每条消息即时落盘并进索引（会话列表/重命名/
     // 删除立即可见；默认 balanced 是定时 autosave，列表会延迟出现且
     // rename 可能撞未落盘文件的锁）。桌面壳本地 JSONL append 开销可忽略。

@@ -6,6 +6,11 @@
   user-select: none;
 }
 
+/* 启动连接选择：压在启动页之上（同一个 z 令牌 + 10）。 */
+.startup-gate {
+  z-index: calc(var(--z-connecting) + 10);
+}
+
 /* 背景单独成层：品牌接力时先淡出它，下面的壳内容才能在落位动画中露出来。 */
 .launch-overlay__bg {
   background: var(--surface-shell-base);

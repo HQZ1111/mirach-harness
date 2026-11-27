@@ -421,10 +421,10 @@ export function GatewaySettings() {
         </div>
         {connectionsError !== null && <div className="set-err">{connectionsError}</div>}
         <p className="set-hint" style={{ marginTop: 8 }}>
-          本宿主的主窗口始终使用本机引擎；远程网关 / 云 / SSH 连接供跨网关机器人、
-          花名册分组与数据同步使用。hermes 的「保存并重连」（把桌面外壳切到远端
-          backend）未移植——它需要整套远端 backend 模式，宿主没有这条链路。
-          凭据一律写入 OS 凭据管理器，没有明文 token 模式。
+          主窗口默认使用本机引擎。启动页可选择本机或进入「远程连接」配置；
+          远程网关 / 云 / SSH 的地址、token 与测试都在下方「连接注册表」，
+          凭据一律写入 OS 凭据管理器。远程运行面（把主窗口切到远端引擎）
+          尚未接入——当前窗口不会假装已连到远端。
         </p>
         <div className="set-actions" style={{ justifyContent: 'space-between', marginTop: 8 }}>
           <span className="set-row-source">
@@ -434,9 +434,19 @@ export function GatewaySettings() {
                   connections.filter((row) => row.kind === 'cloud').length
                 } · SSH ${connections.filter((row) => row.kind === 'ssh').length}`}
           </span>
-          <button className="set-btn" onClick={scrollToRegistry} style={{ whiteSpace: 'nowrap' }} type="button">
-            管理连接
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              className="set-btn"
+              onClick={() => window.dispatchEvent(new CustomEvent('mirach:open-startup-gate'))}
+              style={{ whiteSpace: 'nowrap' }}
+              type="button"
+            >
+              启动与连接
+            </button>
+            <button className="set-btn" onClick={scrollToRegistry} style={{ whiteSpace: 'nowrap' }} type="button">
+              管理连接
+            </button>
+          </div>
         </div>
       </div>
 

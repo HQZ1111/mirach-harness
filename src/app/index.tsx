@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import { AppPrefsBoot } from '@/app/app-prefs-boot'
 import { EngineBridges } from '@/components/engine-bridges'
 import { LaunchOverlay } from '@/components/launch-overlay'
+import { StartupConnectionGate } from '@/components/startup-connection-gate'
 import { DockviewShell } from '@/components/layout/dockview-shell'
 import { TrayBridge } from '@/components/layout/tray-bridge'
 import { ToastHost } from '@/components/motion/toast-host'
@@ -40,6 +41,9 @@ export function App() {
           ParticleText 字标）：冷启动全屏遮挡，引擎就绪后自退场；失败时
           留在原地给错误与「重试」。放在最后 = z-(--z-connecting) 压过壳。 */}
       <LaunchOverlay />
+      {/* 启动连接选择（首次启动 / ?setup=1 / 设置页「启动与连接」）：
+          本机启动 + 远程连接管理；远程运行面下一阶段接入。 */}
+      <StartupConnectionGate />
     </>
   )
 }

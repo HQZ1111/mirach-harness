@@ -106,6 +106,7 @@ import {
 } from '@/components/panes/session-manage/session-tab-bridge'
 import { setSessionListRefresher } from '@/components/panes/session-manage/session-refresh-bridge'
 import { botsStore } from '@/components/panes/hub/bots-store'
+import { isBotModePlumbingTitle } from '@/components/panes/hub/hidden-sessions'
 import { selectBotsRoster } from '@/plugins/bots-selection-bridge'
 import {
   followProfileBridge,
@@ -417,8 +418,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   useEffect(() => {
     const persist = (): void => {
       if (!currentThreadId) return
-      const path = sessionCatalog.getState().entries[currentThreadId]?.path
+      const entry = sessionCatalog.getState().entries[currentThreadId]
+      const path = entry?.path
       if (typeof path !== 'string' || path.length === 0) return
+      // 管道会话（Router / Bot Chat / Group 成员）不是用户的「上次会话」：
+      // 记进去会让下次启动直接打开内部提示（2026-11-27 打包版实机）。
+      if (isBotModePlumbingTitle(entry.piName)) return
       if (sameStoredSessionPath(cachedAppPrefs()?.lastSessionPath, path)) return
       void updateAppPrefs({ lastSessionPath: path }).catch((e) =>
         console.error('[app-prefs] 记录上次会话失败（启动恢复将使用旧路径）', e),
@@ -762,30 +767,45 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
               const prefs = await loadAppPrefs()
               if (cancelled) return
               if (prefs.restoreLastSession && prefs.lastSessionPath) {
-                // 大会话秒开：先读文件尾把尾部画出来（不依赖引擎），
-                // 引擎 open 在后台继续；下方统一的水合会在引擎就绪后对齐。
-                const peek = await peekTranscriptTail(prefs.lastSessionPath)
-                if (cancelled) return
-                if (peek) {
-                  applyTranscriptPeek(actorRef, peek, peek.sessionId)
-                  setCurrentThreadId(peek.sessionId)
-                  mainViewStore.getState().showChat()
+                // 上次记录若是管道会话（Router: / Bot Chat / Group:），不是
+                // 用户的阅读现场：清掉记录并停在 New Chat（2026-11-27 实机：
+                // 打包版启动打开了 Router 的内部英文提示）。
+                const lastPath = prefs.lastSessionPath
+                const plumbing = Object.values(sessionCatalog.getState().entries).find(
+                  (entry) =>
+                    sameStoredSessionPath(entry.path, lastPath) &&
+                    isBotModePlumbingTitle(entry.piName),
+                )
+                if (plumbing) {
+                  void updateAppPrefs({ lastSessionPath: null }).catch((err) =>
+                    console.error('[app-prefs] 清理管道会话的上次会话记录失败', err),
+                  )
+                } else {
+                  // 大会话秒开：先读文件尾把尾部画出来（不依赖引擎），
+                  // 引擎 open 在后台继续；下方统一的水合会在引擎就绪后对齐。
+                  const peek = await peekTranscriptTail(lastPath)
+                  if (cancelled) return
+                  if (peek) {
+                    applyTranscriptPeek(actorRef, peek, peek.sessionId)
+                    setCurrentThreadId(peek.sessionId)
+                    mainViewStore.getState().showChat()
+                  }
+                  const restoreOpen = invoke('pi_open_session', {
+                    path: lastPath,
+                  }).then(() => undefined)
+                  pendingOpenRef.current = restoreOpen
+                  setEngineAttaching(true)
+                  try {
+                    await restoreOpen
+                  } finally {
+                    // 失败也必须撤掉「正在准备会话」——否则红条/错误之后提示
+                    // 永远停在 composer 上方（2026-11-26 用户："引擎还在准备
+                    // 中这是为什么"）。
+                    setEngineAttaching(false)
+                  }
+                  if (cancelled) return
+                  st = await invoke<{ sessionId: string | null }>('pi_get_state')
                 }
-                const restoreOpen = invoke('pi_open_session', {
-                  path: prefs.lastSessionPath,
-                }).then(() => undefined)
-                pendingOpenRef.current = restoreOpen
-                setEngineAttaching(true)
-                try {
-                  await restoreOpen
-                } finally {
-                  // 失败也必须撤掉「正在准备会话」——否则红条/错误之后提示
-                  // 永远停在 composer 上方（2026-11-26 用户："引擎还在准备
-                  // 中这是为什么"）。
-                  setEngineAttaching(false)
-                }
-                if (cancelled) return
-                st = await invoke<{ sessionId: string | null }>('pi_get_state')
               }
             } catch (e) {
               const message = e instanceof Error ? e.message : String(e)

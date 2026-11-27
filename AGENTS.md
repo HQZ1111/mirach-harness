@@ -5335,3 +5335,35 @@ ellipsis），已被本节的逐段移植替换。
   漏清 → 下次启动打开已删文件。
 - **技能**：`addyosmani/agent-skills` 26 个技能已装到
   `~/.rpi/agent/skills`（本机资产，不进仓库）。
+
+## 2026-11-27（二十一）启动连接页 / 单实例 / 打包版白容器与会话恢复（当前有效）
+
+- **启动连接页**：`src/components/startup-connection-gate.tsx`，挂载在
+  `app/index.tsx` 的 `LaunchOverlay` 之后。首次启动（localStorage
+  `mirach.startup.connection.v1` 缺省）、`?setup=1`、或设置「网关连接 →
+  启动与连接」事件 `mirach:open-startup-gate` 打开。本机启动 = 现有本地
+  Rust 引擎；远程 = 复用 `ConnectionsRegistrySection`（真保存/真测试/设
+  主要）。**远程运行面尚未接入**，页面明示，不提供假「远程启动」。
+- **单实例守卫（闪退根因）**：安装版与 dev 版同时启动会共用 WebView2
+  user-data / 引擎会话锁，第二个实例在 webview 创建阶段 panic（exit 101）。
+  `main()` 现在先 `ensure_single_instance()`（Windows 命名互斥量
+  `Local\com.mirach.harness.instance`）：已有实例 → `ShowWindow(SW_RESTORE)`
+  + `SetForegroundWindow`；找不到窗口 → MessageBox「已在运行」；返回
+  false 直接退出。**不要删**——删了打包版与 dev 版同开又会闪退。
+  panic 另写 `%LOCALAPPDATA%\com.mirach.harness\logs\crash.log`（GUI 无
+  控制台）。
+- **会话栏白容器**：`ThreadList` 根原 `bg-(--surface)` 在无背景图时会
+  叠出第二层白卡；已改 `bg-transparent`，底色只由外层 `.dv-groupview`
+  提供。
+- **会话数据不按安装版本隔离**：dev / 安装版共用 `~/.rpi/agent`（默认
+  `sessions/` + `profiles/<name>/sessions/`）与 AppData 偏好
+  （`lastSessionPath`），所以安装版会显示 dev 的旧会话并从上次会话恢复。
+  想干净启动需换 `RPI_CODING_AGENT_DIR` 或另做 per-install 数据根。
+- **管道会话过滤补 `Router:`**：`isBotModePlumbingTitle` 增加
+  `Router: ` 前缀（canonical group driver 的自动路由会话）。侧栏过滤 +
+  `lastSessionPath` 不再记录它；启动恢复发现旧记录指向它时清空记录，
+  避免打开内部英文 prompt。
+- **图标**：`npx tauri icon public/brand/logo.png --fit cover` 生成
+  `src-tauri/icons`（安装器/exe/任务栏用 Mirach 品牌图，不再是默认图）。
+- **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
+  `Cargo.toml` 全部 **0.1.1**。

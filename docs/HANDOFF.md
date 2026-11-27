@@ -6,6 +6,32 @@
 
 ## 当前状态
 
+**✅ 2026-11-27（二十一）：启动连接页 + 单实例守卫 + 打包版白容器/图标/会话恢复修复（v0.1.1）**
+
+- **启动连接页**：首次启动 / `?setup=1` / 设置「网关连接 → 启动与连接」
+  打开 `StartupConnectionGate`：本机启动 + 远程连接管理（复用
+  `ConnectionsRegistrySection`，真保存/真测试/设主要）。第一版范围 =
+  只做启动页和连接管理；远程运行面（主窗口切远端引擎）还没接，页面上
+  明说「下一阶段」，不放假按钮。
+- **打包版闪退根因**：安装版和正在运行的 dev 版同时开 → 两个实例共用
+  WebView2 user-data / 引擎会话锁，第二个在 webview 创建阶段 panic（exit
+  101）。已在 `main()` 加 Windows 命名互斥量单实例守卫：第二次启动只
+  置前已有窗口（找不到窗口则弹「已在运行」），不再闪退。另外 panic 现在
+  写 `%LOCALAPPDATA%\com.mirach.harness\logs\crash.log`。
+- **会话栏白容器**：`ThreadListRoot` 的 `bg-(--surface)` 在无背景图的
+  打包版里叠出第二层白卡；改 `bg-transparent`（外层 `.dv-groupview`
+  是唯一底色）。
+- **打包版显示旧会话**：桌面版/安装版共用同一份 `~/.rpi/agent` 数据根
+  （默认 `sessions/` + `profiles/<name>/sessions/`），不是按安装版本隔离；
+  启动恢复 `lastSessionPath` 是 AppData 里的同一份偏好，所以会回到 dev
+  上次看的会话。顺带修：`Router: <roomId>`（群聊自动路由的内部会话）
+  不再出现在侧栏、也不会被记成 `lastSessionPath`（旧记录启动时自动清掉）。
+- **图标**：`src-tauri/icons` 已用 `public/brand/logo.png --fit cover`
+  重新生成（安装器/任务栏/exe 不再是默认占位图）；版本号升到 **0.1.1**。
+- **本机安装验证**：v0.1.0 安装到 `G:\MirachHarnessTest` 可运行（无 Vite、
+  clean `RPI_CODING_AGENT_DIR` 都试过）；v0.1.1 构建后按同样路径安装复验，
+  通过后再发布（用户："安装到 G 盘，没问题了再发"）。
+
 **✅ 2026-11-26（二十）：群聊显示对齐主对话 + 群聊回复恢复 + 右键菜单 / 启动页 / 技能包**
 
 - **群聊显示**（用户实报截图）：
