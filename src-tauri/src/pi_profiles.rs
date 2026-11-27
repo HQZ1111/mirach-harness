@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 
 use crate::pi_paths;
+use crate::win_proc::HideConsole;
 
 /// 环境名 → 规范化名字（空 / `default` = 本体，返回 None）。
 ///
@@ -345,6 +346,7 @@ pub fn export_profile_home(
         .arg(&home)
         .arg("--exclude=*.lock")
         .arg(".")
+        .hide_console()
         .status()
         .map_err(|e| format!("tar 启动失败（导出配置档案）：{e}"))?;
     if !status.success() {
@@ -386,6 +388,7 @@ pub fn import_profile_home(
     let listing = std::process::Command::new("tar")
         .arg("-tzf")
         .arg(&archive_path)
+        .hide_console()
         .output()
         .map_err(|e| format!("tar 启动失败（读取归档清单）：{e}"))?;
     if !listing.status.success() {
@@ -430,6 +433,7 @@ pub fn import_profile_home(
         .arg(&archive_path)
         .arg("-C")
         .arg(&staging)
+        .hide_console()
         .status()
         .map_err(|e| format!("tar 启动失败（解包配置档案）：{e}"))?;
     if !extract.success() {

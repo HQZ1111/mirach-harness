@@ -23,6 +23,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::pi_session::on_big_stack;
+use crate::win_proc::HideConsole;
 
 /// OAuth 提供方列表（无宿主可用来源——空清单，前端无入口可点）。
 ///
@@ -227,6 +228,7 @@ fn probe_vault_sources() -> Value {
             .arg("--version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .hide_console()
             .status()
             .is_ok_and(|status| status.success())
     };

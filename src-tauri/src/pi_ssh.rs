@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::pi_connections;
 use crate::pi_session::on_big_stack;
+use crate::win_proc::HideConsole;
 
 const DEFAULT_GATEWAY_PORT: u16 = 8642;
 /// 隧道端口就绪等待（10s × 200ms = 2s 上限——本机 TCP accept 快）。
@@ -129,6 +130,7 @@ fn start_tunnel_inner(connection_id: &str) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .hide_console()
         .spawn()
         .map_err(|e| format!("ssh 进程启动失败: {e}"))?;
 

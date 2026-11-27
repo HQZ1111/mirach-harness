@@ -147,6 +147,7 @@ pub fn pi_engine_version() -> Result<String, String> {
 pub fn pi_notify_test(title: String, body: String) -> Result<bool, String> {
     on_big_stack(move || {
         notify_rust::Notification::new()
+            .app_id("com.mirach.harness")
             .summary(&title)
             .body(&body)
             .show()
@@ -163,7 +164,10 @@ pub fn pi_notify_test(title: String, body: String) -> Result<bool, String> {
 pub fn pi_notify(title: String, body: String, silent: bool) -> Result<bool, String> {
     on_big_stack(move || {
         let mut notification = notify_rust::Notification::new();
-        notification.summary(&title).body(&body);
+        notification
+            .app_id("com.mirach.harness")
+            .summary(&title)
+            .body(&body);
         if !silent {
             notification.sound_name("Default");
         }

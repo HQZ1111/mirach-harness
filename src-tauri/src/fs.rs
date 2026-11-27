@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use serde::Serialize;
 
+use crate::win_proc::HideConsole;
+
 /// `FS_READDIR_HIDDEN` — hermes hides these at the Electron layer, before the
 /// renderer's own `ALWAYS_EXCLUDED` pass (which is a superset).
 const READDIR_HIDDEN: &[&str] = &[
@@ -434,6 +436,7 @@ fn git_output(dir: &Path, args: &[&str]) -> Result<String, String> {
         .arg("-C")
         .arg(dir)
         .args(args)
+        .hide_console()
         .output()
         .map_err(|e| format!("git 不可用: {e}"))?;
     if !out.status.success() {
@@ -836,6 +839,7 @@ pub fn fs_git_review_diff(
                 .arg("-C")
                 .arg(&dir)
                 .args(["diff", "--no-index", "--", "/dev/null", &file])
+                .hide_console()
                 .output()
                 .map_err(|e| format!("git 不可用 {e}"))?;
             if out.status.code() == Some(1) && !out.stdout.is_empty() {
@@ -1085,6 +1089,7 @@ pub fn fs_git_ship_info(path: String) -> Result<serde_json::Value, String> {
     let authed = std::process::Command::new("gh")
         .current_dir(&dir)
         .args(["auth", "status"])
+        .hide_console()
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -1095,6 +1100,7 @@ pub fn fs_git_ship_info(path: String) -> Result<serde_json::Value, String> {
     if let Ok(out) = std::process::Command::new("gh")
         .current_dir(&dir)
         .args(["pr", "view", "--json", "url,state,number"])
+        .hide_console()
         .output()
     {
         if out.status.success() {
@@ -1140,6 +1146,7 @@ pub fn fs_git_create_pr(path: String) -> Result<serde_json::Value, String> {
     let out = std::process::Command::new("gh")
         .current_dir(&dir)
         .args(["pr", "create", "--fill"])
+        .hide_console()
         .output()
         .map_err(|e| format!("gh 不可用: {e}"))?;
     if !out.status.success() {

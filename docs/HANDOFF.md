@@ -28,6 +28,12 @@
   不再出现在侧栏、也不会被记成 `lastSessionPath`（旧记录启动时自动清掉）。
 - **图标**：`src-tauri/icons` 已用 `public/brand/logo.png --fit cover`
   重新生成（安装器/任务栏/exe 不再是默认占位图）；版本号升到 **0.1.1**。
+- **任务栏/通知中心图标**：`SetCurrentProcessExplicitAppUserModelID
+  ("com.mirach.harness")` 与 NSIS 快捷方式的 AUMID 对齐；`pi_notify` /
+  `pi_notify_test` 也带同一 `app_id`，通知不再走无名 exe 的默认图标。
+- **启动黑框**：宿主 `git` / `gh` / `tar` / `ssh` / `wsl` / `docker`
+  子进程统一走 `win_proc::HideConsole`（CREATE_NO_WINDOW），GUI 启动/审查
+  刷新不再闪控制台窗口。
 - **本机安装验证**：v0.1.0 安装到 `G:\MirachHarnessTest` 可运行（无 Vite、
   clean `RPI_CODING_AGENT_DIR` 都试过）；v0.1.1 构建后按同样路径安装复验，
   通过后再发布（用户："安装到 G 盘，没问题了再发"）。

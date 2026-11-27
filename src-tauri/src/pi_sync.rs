@@ -28,6 +28,8 @@ use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::win_proc::HideConsole;
+
 const DEVICES_FILE: &str = "data-sync-devices.json";
 const DEVICE_VERSION: i64 = 1;
 const REMOTE_AGENT_DIR: &str = "$HOME/.rpi/agent";
@@ -365,6 +367,7 @@ fn run_capture(mut command: Command) -> Result<(bool, String), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .output()
         .map_err(|e| format!("命令启动失败: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -395,6 +398,7 @@ fn run_capture_decoded(mut command: Command) -> Result<(bool, String), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .hide_console()
         .output()
         .map_err(|e| format!("命令启动失败: {e}"))?;
     let stdout = decode_text_lossy(&output.stdout);
@@ -545,6 +549,7 @@ pub fn pi_sync_probe_wsl() -> Result<Value, String> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .hide_console()
             .output()
             .map_err(|e| format!("WSL 探测失败（wsl.exe 启动失败）：{e}"))?;
         let distros = decode_wsl_output(&output.stdout);
@@ -705,6 +710,7 @@ pub fn pi_sync_push(id: String, categories: Option<Vec<String>>) -> Result<Value
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .hide_console()
             .spawn()
             .map_err(|e| format!("同步进程启动失败: {e}"))?;
         let write_result = match child.stdin.take() {

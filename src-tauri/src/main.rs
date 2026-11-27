@@ -8,6 +8,7 @@
 // 本地文件系统桥（自 G:/MIRACH 主工程逐字移植）：fs_list / fs_git_root /
 // fs_read_data_url——文件树窗格的数据源
 mod fs;
+mod win_proc;
 
 // pi SDK 集成第 1 步（docs/pi-integration.md §7-1）：会话骨架
 mod pi_session;
@@ -1769,6 +1770,23 @@ fn pi_hub_inbox(
     state.engine.hub_inbox(&agent_id)
 }
 
+/// Windows AUMID 与 NSIS 快捷方式一致（Tauri NSIS 的 SetLnkAppUserModelId
+/// 写的是 `${BUNDLEID}`）。不设的话任务栏/通知中心会把进程当成无名 exe，
+/// 通知用默认图标（2026-11-27 用户："系统任务栏和通知中心的logo"）。
+#[cfg(windows)]
+fn set_app_user_model_id() {
+    use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+    let id: Vec<u16> = "com.mirach.harness\0".encode_utf16().collect();
+    let hr = unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
+    if hr < 0 {
+        eprintln!("[shell] SetCurrentProcessExplicitAppUserModelID 失败: 0x{hr:08X}");
+    }
+}
+
+#[cfg(not(windows))]
+fn set_app_user_model_id() {}
+
 /// 单实例守卫（2026-11-27 用户实报：安装版和正在运行的 dev 版同时开 → 进程
 /// 101 闪退）。两个实例共用同一 WebView2 user-data 目录/引擎会话锁，第二个
 /// 实例在 webview 创建阶段就会 panic；这里在 Tauri 启动前用命名互斥量拦住，
@@ -1853,6 +1871,7 @@ fn install_crash_log() {
 }
 
 fn main() {
+    set_app_user_model_id();
     if !ensure_single_instance() {
         return;
     }

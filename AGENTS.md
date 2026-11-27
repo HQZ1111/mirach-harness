@@ -5365,5 +5365,17 @@ ellipsis），已被本节的逐段移植替换。
   避免打开内部英文 prompt。
 - **图标**：`npx tauri icon public/brand/logo.png --fit cover` 生成
   `src-tauri/icons`（安装器/exe/任务栏用 Mirach 品牌图，不再是默认图）。
+  NSIS 还要 `bundle.windows.nsis.installerIcon/uninstallerIcon` 显式指向
+  `icons/icon.ico`（否则安装器壳仍是 NSIS 默认图标），并有品牌
+  `headerImage`/`sidebarImage`。
+- **任务栏/通知中心 AUMID**：`main()` 启动即
+  `SetCurrentProcessExplicitAppUserModelID("com.mirach.harness")`，与 Tauri
+  NSIS 写进快捷方式的 `${BUNDLEID}` 一致；`pi_notify` / `pi_notify_test`
+  的 `notify_rust` 也 `.app_id("com.mirach.harness")`。少了这步，任务栏
+  分组/通知中心的图标会走无名 exe 的默认图。
+- **GUI 子进程黑框**：宿主所有 `git` / `gh` / `tar` / `ssh` / `wsl` /
+  `docker` spawn 一律 `crate::win_proc::HideConsole::hide_console()`
+  （Windows `CREATE_NO_WINDOW`）。新增 `Command::new` 时同一规则，否则
+  软件打开/审查刷新会闪控制台黑框。
 - **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
   `Cargo.toml` 全部 **0.1.1**。
