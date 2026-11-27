@@ -68,6 +68,13 @@
   DWM 投影。WM_NCPAINT 填壳色的试做已撤除（覆盖投影 + 顶线黑线）。
   另：面板栏空 `preview` 页签在启动时剪除，打开页/标签条菜单移除「预览」
   入口（文件树单击仍按 filePath 开预览）。
+- **v0.1.4 已发布**：
+  `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.4`
+  （安装器 84.48 MiB）。本机（Win11 26200）静默安装到
+  `G:\MirachHarnessTest` 复验：启动正常无 crash.log；二次启动 exit 0
+  且只剩一个进程；设置页连开连关两轮通过；布局无空预览页签。Win11 上
+  `apply_shadow_policy` 无操作（DWM 投影保持）；Win10 撤投影需在公司
+  机器实机复验。
 - **v0.1.3 已发布**：
   `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.3`
   （安装器 84.49 MiB）。实机复验：设置页连开连关（第二次 ✕ 可关）；
