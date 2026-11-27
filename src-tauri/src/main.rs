@@ -286,10 +286,13 @@ fn apply_window_chrome(window: &tauri::WebviewWindow) {
 
     // ② 去掉 1px 描边
     let none = COLOR_NONE;
-    if unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, 4) } != 0 {
+    let border_ok = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, 4) } == 0;
+    // Win10 / DWM 不支持该属性：经典框架会在左/右/下也画线，需四边各吃 1px。
+    top_line::set_extend_all_sides(!border_ok);
+    if !border_ok {
         static WARNED_BORDER: std::sync::Once = std::sync::Once::new();
         WARNED_BORDER.call_once(|| {
-            eprintln!("[win_chrome] DWMWA_BORDER_COLOR 不支持（Win10？）——无描边可去");
+            eprintln!("[win_chrome] DWMWA_BORDER_COLOR 不支持（Win10？）——四边客户区各吃 1px 去框架线");
         });
     }
 }
@@ -320,9 +323,20 @@ fn apply_window_chrome(_window: &tauri::WebviewWindow) {}
 #[cfg(windows)]
 mod top_line {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     type WndProc = unsafe extern "system" fn(isize, u32, usize, isize) -> isize;
+
+    /// Win10（或 DWM 不支持 `DWMWA_BORDER_COLOR` 的宿主）用：经典
+    /// `WS_THICKFRAME` 会在**左/右/下**也画 1px 深灰框架线，单靠
+    /// `DWMWA_BORDER_COLOR` 去不掉（2026-11-27 公司电脑实报"左右下灰色边框"）。
+    /// 为 true 时客户区四边各多吃 1px，由 webview 画布盖住框架线。
+    static EXTEND_ALL_SIDES: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_extend_all_sides(value: bool) {
+        EXTEND_ALL_SIDES.store(value, Ordering::Relaxed);
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -382,6 +396,13 @@ mod top_line {
             if IsZoomed(hwnd) == 0 {
                 let params = &mut *(lparam as *mut NcCalcSizeParams);
                 params.rgrc[0].top -= 1;
+                // Win10 经典框架：左右下也各吃 1px（Win11 的
+                // DWMWA_BORDER_COLOR 成功时保持 false，不动这三边）。
+                if EXTEND_ALL_SIDES.load(Ordering::Relaxed) {
+                    params.rgrc[0].left -= 1;
+                    params.rgrc[0].right += 1;
+                    params.rgrc[0].bottom += 1;
+                }
             }
             return result;
         }

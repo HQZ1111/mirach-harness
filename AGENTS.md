@@ -5378,7 +5378,14 @@ ellipsis），已被本节的逐段移植替换。
   （Windows `CREATE_NO_WINDOW`）。新增 `Command::new` 时同一规则，否则
   软件打开/审查刷新会闪控制台黑框。
 - **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
-  `Cargo.toml` 全部 **0.1.2**。
+  `Cargo.toml` 全部 **0.1.3**。
+- **Win10 左右下灰边框（2026-11-27 公司电脑实报）**：Win10 不支持
+  `DWMWA_BORDER_COLOR`，经典 `WS_THICKFRAME` 在客户区左/右/下画 1px 深灰
+  框架线（顶部由 `top_line` 已有钩子盖掉）。`top_line` 增加
+  `EXTEND_ALL_SIDES`：仅在 `DWMWA_BORDER_COLOR` 设置失败时置 true，非最大化
+  时把 `rgrc[0]` 左 `-=1` / 右 `+=1` / 下 `+=1`（顶原本已有 `-=1`），
+  让 webview 画布盖住框架线；Win11（属性设置成功）保持只吃顶部。设置窗与
+  主窗都走同一个 `wire_window` → `top_line::install`，不能只修主窗。
 - **桌面快捷方式**：Tauri 原生只在 finish 页勾选 `createDesktop` 或
   silent/passive 时创建（用户"桌面怎么没有图标"）。`src-tauri/nsis/hooks.nsh`
   的 `NSIS_HOOK_POSTINSTALL` 无条件 `CreateOrUpdateDesktopShortcut`（幂等，

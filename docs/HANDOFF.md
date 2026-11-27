@@ -50,6 +50,11 @@
   默认安装目录（currentUser）= `%LOCALAPPDATA%\Mirach Harness`；本机测试
   安装 = `G:\MirachHarnessTest`。实机：删掉旧快捷方式 → 静默安装 0.1.2
   → 桌面快捷方式重建并指向安装目录，双击可启动。
+- **v0.1.3 边框补丁**：公司电脑（Win10 经典框架）主窗/设置窗都出现
+  **左/右/下 1px 灰色边框**。Win10 不支持 `DWMWA_BORDER_COLOR`，经典
+  `WS_THICKFRAME` 在客户区外画线；`top_line` 钩子把 `rgrc[0]` 四边各
+  外扩 1px（仅非最大化，且只在 `DWMWA_BORDER_COLOR` 失败时），让
+  webview 盖住左右下框架线。Win11 仍只修顶部。版本升 0.1.3。
 
 **✅ 2026-11-26（二十）：群聊显示对齐主对话 + 群聊回复恢复 + 右键菜单 / 启动页 / 技能包**
 
