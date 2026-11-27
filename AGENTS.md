@@ -5379,12 +5379,15 @@ ellipsis），已被本节的逐段移植替换。
   软件打开/审查刷新会闪控制台黑框。
 - **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
   `Cargo.toml` 全部 **0.1.3**。
-- **Win10/部分 Win11 左右下灰边框（2026-11-27 实报）**：`DWMWA_BORDER_COLOR`
-  并不总能去掉经典 `WS_THICKFRAME` 框架线（Win10 属性直接失败；Win11 上
-  实测仍有 1px 灰线）。`top_line` 钩子在非最大化时把 `rgrc[0]` **四边各
-  外扩 1px**（left-=1/top-=1/right+=1/bottom+=1），让 webview 画布盖住
-  左右下与顶部框架线；设置窗与主窗都走同一个 `wire_window` →
-  `top_line::install`，不能只修主窗。
+- **窗口四周灰边 / 投影（2026-11-27 实报，最终口径）**：`decorations:false +
+  shadow:true` 时 tao 预留 undecorated-shadow 非客户 inset（150% DPI 约
+  6-7px），DWM 投影就画在这圈里——用户看到的"左右下灰边"是**投影在窗口
+  矩形内的渐变**。**不要**把 `rgrc[0]` 铺满窗口矩形（WebView2 子窗不跟着
+  长，底部黑带），也**不要**在 WM_NCPAINT 里 FillRect（投影被覆盖 + 黑线）。
+  最终做法：保留 tao inset/投影，只把 `DWMWA_BORDER_COLOR` 从
+  `COLOR_NONE` 改为外壳色 `0x00EFEEE9`（`BORDER_SHELL`，1px 描边融进
+  壳色）；`top_line` 仍只吃顶部 1px。要完全无灰边只能 `shadow:false`
+  （同时失去投影），默认不做。
 - **设置页第二次关闭失灵（2026-11-27）**：设置窗 `hide()` 不卸载 React 树，
   `useOverlayExit` 的 `closedRef` 第一次关闭后永久 true → 再开点 ✕ 直接
   返回。`useOverlayExit` 暴露 `reset()`；`SettingsOverlay` 在

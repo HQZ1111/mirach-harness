@@ -269,8 +269,9 @@ fn apply_window_chrome(window: &tauri::WebviewWindow) {
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     const DWMWA_BORDER_COLOR: u32 = 34;
     const DWMWCP_DONOTROUND: i32 = 1;
-    /// `DWMWA_COLOR_NONE`（0xFFFFFFFE）：语义正是"不要描边"。
-    const COLOR_NONE: i32 = -2;
+    /// 宿主 light 外壳色 #E9EEEF 的 COLORREF：把 DWM 的 1px 边框画成壳色，
+    /// 而不是 `COLOR_NONE`（后者在部分合成路径上仍残留灰线，且不影响投影）。
+    const BORDER_SHELL: i32 = 0x00EF_EEE9;
 
     let Ok(h) = window.hwnd() else { return };
     let hwnd = h.0 as isize;
@@ -284,13 +285,13 @@ fn apply_window_chrome(window: &tauri::WebviewWindow) {
         });
     }
 
-    // ② 去掉 1px 描边
-    let none = COLOR_NONE;
-    let border_ok = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, 4) } == 0;
+    // ② 去掉 1px 描边（画成壳色，避免 COLOR_NONE 在部分机器上仍留灰线）
+    let border = BORDER_SHELL;
+    let border_ok = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, 4) } == 0;
     if !border_ok {
         static WARNED_BORDER: std::sync::Once = std::sync::Once::new();
         WARNED_BORDER.call_once(|| {
-            eprintln!("[win_chrome] DWMWA_BORDER_COLOR 不支持（Win10？）——由 top_line 四边外扩盖线");
+            eprintln!("[win_chrome] DWMWA_BORDER_COLOR 不支持（Win10？）——保留系统投影/框架");
         });
     }
 }
@@ -378,17 +379,10 @@ mod top_line {
             } else {
                 CallWindowProcW(prev, hwnd, msg, wparam, lparam)
             };
-            // 再把客户区上沿多吃 1px，盖掉 DWM 顶部那条框架线。
-            // 最大化态不吃（贴屏边不该有偏移，且那里没有这条线）。
+            // 客户区上沿多吃 1px，盖掉 DWM 顶部那条框架线。
             if IsZoomed(hwnd) == 0 {
                 let params = &mut *(lparam as *mut NcCalcSizeParams);
-                // 四边各外扩 1px：Win10/部分 Win11 合成路径下
-                // `DWMWA_BORDER_COLOR` 管不到经典框架线，客户区多吃一层
-                // 由 webview 画布盖住（左右下灰边框，2026-11-27 实报）。
-                params.rgrc[0].left -= 1;
                 params.rgrc[0].top -= 1;
-                params.rgrc[0].right += 1;
-                params.rgrc[0].bottom += 1;
             }
             return result;
         }
