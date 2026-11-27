@@ -37,6 +37,12 @@
 - **本机安装验证**：v0.1.0 安装到 `G:\MirachHarnessTest` 可运行（无 Vite、
   clean `RPI_CODING_AGENT_DIR` 都试过）；v0.1.1 构建后按同样路径安装复验，
   通过后再发布（用户："安装到 G 盘，没问题了再发"）。
+- **v0.1.1 已发布**：
+  `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.1`
+  （安装器 84.50 MiB）。旧的 v0.1.0 Release（有闪退/默认图标）已从
+  Releases 删除，tag 保留作源码历史。实机复验：启动页出现 → 本机启动后
+  无白容器/机器人栏正常；二次启动 exit 0 且不闪退；exe/安装器/窗口图标
+  均为 Mirach。
 
 **✅ 2026-11-26（二十）：群聊显示对齐主对话 + 群聊回复恢复 + 右键菜单 / 启动页 / 技能包**
 
