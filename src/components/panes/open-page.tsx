@@ -27,7 +27,6 @@
  * 对文件预览是假话）。标题保留 2026-10-31 用户定稿的说明文字。
  */
 import {
-  EyeIcon,
   FileDiffIcon,
   FolderOpenIcon,
   RadioIcon,
@@ -48,7 +47,6 @@ const ACTIONS: readonly {
   description?: string
 }[] = [
   { kind: 'files', icon: FolderOpenIcon, label: '文件' },
-  { kind: 'preview', icon: EyeIcon, label: '预览', description: '预览打开的文件。' },
   { kind: 'terminal', icon: SquareTerminalIcon, label: '终端', description: '运行命令和查看输出。' },
   { kind: 'review', icon: FileDiffIcon, label: '审查', description: '查看代码变更与差异。' },
   // 电台（2026-11-15）：hermes radio 插件的宿主形态——上游是桌面端状态栏

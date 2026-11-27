@@ -51,6 +51,12 @@ export const panelsDropPosition = (
  *  面板栏处于「末签关闭已关栏」态（panelsHidden）时开出实签 = 栏重新
  *  在场——旗标随实签清掉（ZCode 语义：栏的生命周期跟实签走）。 */
 export function openPagePanel(a: DockviewApi, kind: OpenPageKind): void {
+  // 预览面板必须带 filePath（文件树/审查双击走 preview-opener 专用通道）；
+  // 空预览会留下一个永远空白的页签（2026-11-27 用户："预览页删除，现在是空的"）。
+  if (kind === 'preview') {
+    console.error('[dv-shell] 预览面板需要文件路径——不再打开空预览（请从文件树单击文件）')
+    return
+  }
   // 终端 = 多实例（ZCode side pane terminal tabs：每次点终端都新建一个
   // 标签，不复用单例）——单独一条路径，其余面板保持单例置前。
   if (kind === 'terminal') {

@@ -288,6 +288,9 @@ fn apply_window_chrome(window: &tauri::WebviewWindow) {
     // ② 去掉 1px 描边（画成壳色，避免 COLOR_NONE 在部分机器上仍留灰线）
     let border = BORDER_SHELL;
     let border_ok = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, 4) } == 0;
+    // Win10 没有 DWM border color / 投影可保，WM_NCPAINT 用壳色填平经典框架；
+    // Win11 保持 false，绝不覆盖系统投影。
+    top_line::set_fill_frame_with_shell(!border_ok);
     if !border_ok {
         static WARNED_BORDER: std::sync::Once = std::sync::Once::new();
         WARNED_BORDER.call_once(|| {
@@ -322,9 +325,19 @@ fn apply_window_chrome(_window: &tauri::WebviewWindow) {}
 #[cfg(windows)]
 mod top_line {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     type WndProc = unsafe extern "system" fn(isize, u32, usize, isize) -> isize;
+
+    /// Win10（`DWMWA_BORDER_COLOR` 不支持）没有 DWM 投影可保，undecorated
+    /// shadow inset 只会露出经典灰框架；此时在 WM_NCPAINT 里用外壳色填平。
+    /// Win11 保持 false（DWM 投影照画，不能覆盖）。
+    static FILL_FRAME_WITH_SHELL: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_fill_frame_with_shell(value: bool) {
+        FILL_FRAME_WITH_SHELL.store(value, Ordering::Relaxed);
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -348,10 +361,23 @@ mod top_line {
         fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize)
             -> isize;
         fn IsZoomed(hwnd: isize) -> i32;
+        fn GetWindowDC(hwnd: isize) -> isize;
+        fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+        fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+        fn FillRect(hdc: isize, rect: *const Rect, brush: isize) -> i32;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateSolidBrush(color: u32) -> isize;
+        fn DeleteObject(object: isize) -> i32;
     }
 
     const GWLP_WNDPROC: i32 = -4;
     const WM_NCCALCSIZE: u32 = 0x0083;
+    const WM_NCPAINT: u32 = 0x0085;
+    /// 宿主 light 外壳色 #E9EEEF 的 COLORREF（Win10 无投影时填框用）。
+    const SHELL_COLORREF: u32 = 0x00EF_EEE9;
 
     /// 每个窗口的原始 wndproc（**按 hwnd 存**，多窗口共用一个槽会互相踩）。
     static ORIGINALS: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
@@ -385,6 +411,24 @@ mod top_line {
                 params.rgrc[0].top -= 1;
             }
             return result;
+        }
+        if msg == WM_NCPAINT && FILL_FRAME_WITH_SHELL.load(Ordering::Relaxed) {
+            // Win10：没有 DWM 投影要保，用外壳色把整圈经典框架填平。
+            unsafe {
+                let hdc = GetWindowDC(hwnd);
+                if hdc != 0 {
+                    let mut rect = Rect::default();
+                    if GetWindowRect(hwnd, &mut rect) != 0 {
+                        let brush = CreateSolidBrush(SHELL_COLORREF);
+                        if brush != 0 {
+                            FillRect(hdc, &rect, brush);
+                            DeleteObject(brush);
+                        }
+                    }
+                    ReleaseDC(hwnd, hdc);
+                }
+            }
+            return 0;
         }
         let prev = original_of(hwnd);
         if prev == 0 {

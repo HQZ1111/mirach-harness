@@ -1027,6 +1027,17 @@ export function DockviewShell() {
             p.api.setRenderer('always')
           }
         }
+        // 空预览页签（存档里 filePath 丢失/从未设置）没有内容，直接剪掉；
+        // 文件预览仍由文件树单击的 preview-opener 按 path 新建。
+        for (const p of [...a.panels]) {
+          const filePath = (p.params as { filePath?: unknown } | undefined)?.filePath
+          if (
+            (p.id === 'preview' || p.id.startsWith('preview:')) &&
+            !(typeof filePath === 'string' && filePath.trim())
+          ) {
+            a.removePanel(p)
+          }
+        }
         // **打开页标签名以代码为准，不认存档**（2026-10-31）。
         //
         // 用户："打开页的标题把打开换个说明文字"。改 `addPanel` 的 title 只

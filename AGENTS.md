@@ -5378,7 +5378,16 @@ ellipsis），已被本节的逐段移植替换。
   （Windows `CREATE_NO_WINDOW`）。新增 `Command::new` 时同一规则，否则
   软件打开/审查刷新会闪控制台黑框。
 - **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
-  `Cargo.toml` 全部 **0.1.3**。
+  `Cargo.toml` 全部 **0.1.4**。
+- **Win10 灰框补充（0.1.4）**：Win10 的 `DWMWA_BORDER_COLOR` 直接失败
+  （无 DWM 投影可保），tao shadow inset 会露出经典 3-7px 灰框架。此时
+  `top_line::set_fill_frame_with_shell(true)`，WM_NCPAINT 用外壳色
+  `#E9EEEF`（COLORREF `0x00EFEEE9`）填平；Win11 该 flag 保持 false，
+  DWM 投影照常。**不要在 Win11 上开这个 flag**（会覆盖投影）。
+- **空预览页签**：启动时剪掉 `preview` / `preview:*` 且 `params.filePath`
+  为空的存档面板；打开页和标签条 `+` 菜单移除「预览」入口（文件树单击
+  文件仍走 preview-opener 按路径新建）。`openPagePanel('preview')` 直接
+  console.error 拒绝，不再生成永远空白的页签。
 - **窗口四周灰边 / 投影（2026-11-27 实报，最终口径）**：`decorations:false +
   shadow:true` 时 tao 预留 undecorated-shadow 非客户 inset（150% DPI 约
   6-7px），DWM 投影就画在这圈里——用户看到的"左右下灰边"是**投影在窗口

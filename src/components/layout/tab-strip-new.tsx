@@ -14,7 +14,7 @@
  * （MENU_CONTENT_CLASS 同款观感：圆角/阴影/无描边）。
  */
 import type { FC } from 'react'
-import { EyeIcon, FolderTreeIcon, PlusIcon, RadioIcon, SquareTerminalIcon } from 'lucide-react'
+import { FolderTreeIcon, PlusIcon, RadioIcon, SquareTerminalIcon } from 'lucide-react'
 import type { IDockviewHeaderActionsProps } from 'dockview-react'
 
 import { regionOfGroup } from './dockview-column-ops'
@@ -32,7 +32,6 @@ import type { OpenPageKind } from '@/components/panes/open-page'
 const NEW_TAB_OPTIONS: readonly { kind: OpenPageKind; label: string; icon: typeof FolderTreeIcon }[] = [
   { kind: 'files', label: '文件树', icon: FolderTreeIcon },
   { kind: 'terminal', label: '终端', icon: SquareTerminalIcon },
-  { kind: 'preview', label: '预览', icon: EyeIcon },
   // 电台（2026-11-15）：hermes radio 插件改落窗格（宿主无底栏）。
   { kind: 'radio', label: '电台', icon: RadioIcon },
 ]
