@@ -6,6 +6,44 @@
 
 ## 当前状态
 
+**✅ 2026-11-27（二十二）：v0.1.5 随包技能/插件 + 数据目录 + 软件内更新 + 错误 toast 浮层**
+
+- **打包版技能/插件不再为空**：安装包携带 27 个技能（`src-tauri/bundled/skills`）
+  + 27 个原生扩展 DLL（`src-tauri/bundled/rpi-extensions.zip`，zip 31.9MB）。
+  `pi_bundled.rs` 在本体/具名环境的 `ensure_profile_dirs` 与 setup 后台线程
+  copy-if-missing 种下。实机（干净 `RPI_CODING_AGENT_DIR`）：skills=27 /
+  dlls=27，技能页与插件页均显示对应路径与条目。
+- **数据目录可配置**：设置 →「版本与更新 → 数据目录」；配置存
+  `%APPDATA%\com.mirach.harness\data-dir.json`，`main()` 启动前设
+  `RPI_CODING_AGENT_DIR`（环境变量优先）。重启生效、不移动现有数据；坏配置
+  MessageBox 报错退出。实机：写配置 → 启动 → 新目录自动种资产、运行信息三个
+  路径全部指向新目录；测试后已删除配置与 `G:\MirachHarnessTest\data-test*`。
+- **软件内更新**：`tauri-plugin-updater` / `tauri-plugin-process` 3.0.0-alpha.3；
+  endpoint = GitHub `releases/latest/download/latest.json`；minisign 私钥
+  `%USERPROFILE%\.tauri\mirach-updater.key`（无密码，不进仓库）。构建带
+  `TAURI_SIGNING_PRIVATE_KEY=<key路径>` 产出 `.exe.sig`；发布三件套 =
+  setup.exe + .sig + latest.json。**0.1.4 及更早没有更新器，需手动安装
+  0.1.5 一次**。
+- **错误 toast 是浮层**：`ToastHost` 的 `AnimatedToastStack` 改 `fixed`
+  （portal、右下角）——不再把整页内容往下挤；有标题时也显示原始错误 detail，
+  错误 toast 4 行。插件侧「无法打开 X 的聊天」现在能看到真实原因。
+- **关闭主窗口 → 设置窗一起隐藏**；顶带拖拽改 3px 移动阈值 + 自记双击
+  （450ms/6px，不依赖 `PointerEvent.detail`），实机拖动与快速双击最大化均通过。
+- **内置背景画廊折叠**：外观 → 聊天背景 →「内置图片」默认收起，展开为换行
+  网格（11 张全可见）。
+- 版本与更新页去掉 hermes 文案，换 `updates-settings.tsx`（真更新 + 运行信息 +
+  数据目录）。
+- **「机器人页点击 Mirach 无法打开」的解释**：当时运行的是本机测试用的
+  空数据目录（`data-test2`，无 models/auth）——建 bot 会话必然失败；toast 修复
+  后会显示真实原因。换回默认 home 复验：点击 Mirach 正常进入 Mirach bot 草稿
+  （"说点什么开始吧"）。
+- 门禁：`cargo check` 通过、`cargo test` 744 过 / 1 ignored、`npm test`
+  1135 过、本次改动文件无新增 tsc 错误。
+- **v0.1.5 已发布**：
+  `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.5`
+  （安装器 120,334,983 B ≈ 114.8 MiB；资产 = setup.exe + .exe.sig +
+  latest.json）。
+
 **✅ 2026-11-27（二十一）：启动连接页 + 单实例守卫 + 打包版白容器/图标/会话恢复修复（v0.1.1）**
 
 - **启动连接页**：首次启动 / `?setup=1` / 设置「网关连接 → 启动与连接」
