@@ -5379,11 +5379,14 @@ ellipsis），已被本节的逐段移植替换。
   软件打开/审查刷新会闪控制台黑框。
 - **版本**：`package.json` / `package-lock.json` / `tauri.conf.json` /
   `Cargo.toml` 全部 **0.1.4**。
-- **Win10 灰框补充（0.1.4）**：Win10 的 `DWMWA_BORDER_COLOR` 直接失败
-  （无 DWM 投影可保），tao shadow inset 会露出经典 3-7px 灰框架。此时
-  `top_line::set_fill_frame_with_shell(true)`，WM_NCPAINT 用外壳色
-  `#E9EEEF`（COLORREF `0x00EFEEE9`）填平；Win11 该 flag 保持 false，
-  DWM 投影照常。**不要在 Win11 上开这个 flag**（会覆盖投影）。
+- **Win10 灰框 → 运行期撤投影（0.1.4 最终）**：Win10 系没有
+  `DWMWA_BORDER_COLOR` / 圆角属性，tao 的 undecorated-shadow inset 只露出
+  经典 6-7px 灰框架。`main.rs::apply_shadow_policy` 用 `RtlGetVersion`
+  （`dwBuildNumber < 22000`，不受 manifest 兼容层谎报影响）判定 Win10 系，
+  在**任何 set_size 之前** `set_shadow(false)` 整个撤掉系统投影（主窗 setup、
+  设置窗 builder、`wire_window` 三处调用，幂等）；Win11 无操作，conf 的
+  `shadow:true` 与 DWM 投影照常。此前试过的 `FILL_FRAME_WITH_SHELL` /
+  `WM_NCPAINT` 填壳色**已撤除**（覆盖投影 + 顶线黑线，用户否决）。
 - **空预览页签**：启动时剪掉 `preview` / `preview:*` 且 `params.filePath`
   为空的存档面板；打开页和标签条 `+` 菜单移除「预览」入口（文件树单击
   文件仍走 preview-opener 按路径新建）。`openPagePanel('preview')` 直接
@@ -5395,8 +5398,9 @@ ellipsis），已被本节的逐段移植替换。
   长，底部黑带），也**不要**在 WM_NCPAINT 里 FillRect（投影被覆盖 + 黑线）。
   最终做法：保留 tao inset/投影，只把 `DWMWA_BORDER_COLOR` 从
   `COLOR_NONE` 改为外壳色 `0x00EFEEE9`（`BORDER_SHELL`，1px 描边融进
-  壳色）；`top_line` 仍只吃顶部 1px。要完全无灰边只能 `shadow:false`
-  （同时失去投影），默认不做。
+  壳色）；`top_line` 仍只吃顶部 1px。**Win10 系例外**：`apply_shadow_policy`
+  运行期 `set_shadow(false)` 撤整圈投影（用户 2026-11-27 定稿："检测系统
+  版本，不支持的比如 win10 就禁用掉阴影"）；Win11 保留投影。
 - **设置页第二次关闭失灵（2026-11-27）**：设置窗 `hide()` 不卸载 React 树，
   `useOverlayExit` 的 `closedRef` 第一次关闭后永久 true → 再开点 ✕ 直接
   返回。`useOverlayExit` 暴露 `reset()`；`SettingsOverlay` 在

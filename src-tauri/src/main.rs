@@ -288,9 +288,6 @@ fn apply_window_chrome(window: &tauri::WebviewWindow) {
     // ② 去掉 1px 描边（画成壳色，避免 COLOR_NONE 在部分机器上仍留灰线）
     let border = BORDER_SHELL;
     let border_ok = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border, 4) } == 0;
-    // Win10 没有 DWM border color / 投影可保，WM_NCPAINT 用壳色填平经典框架；
-    // Win11 保持 false，绝不覆盖系统投影。
-    top_line::set_fill_frame_with_shell(!border_ok);
     if !border_ok {
         static WARNED_BORDER: std::sync::Once = std::sync::Once::new();
         WARNED_BORDER.call_once(|| {
@@ -301,6 +298,65 @@ fn apply_window_chrome(window: &tauri::WebviewWindow) {
 
 #[cfg(not(windows))]
 fn apply_window_chrome(_window: &tauri::WebviewWindow) {}
+
+/// 系统是不是 Win10 系（build < 22000，含 Server 2019/2022 早期 build）。
+///
+/// **为什么不能用 `GetVersionExW`**：没有 `windows10` 兼容性清单时它按
+/// manifest 谎报 6.2；`RtlGetVersion` 不受兼容层影响，直接读内核版本。
+///
+/// **用途**：Win10 不支持 `DWMWA_BORDER_COLOR` / `DWMWA_WINDOW_CORNER_PREFERENCE`
+/// （apply_window_chrome 里那两个属性设置必然失败），系统给无边框窗口画的
+/// 投影/非客户区会在窗口矩形**内**留一圈 6-7px 的灰边（用户实报"公司电脑
+/// 上左右下一条灰框"）。Win11 上这圈是投影的一部分（内侧贴合壳色，观感是
+/// 正常投影），Win10 上则是显眼的灰描边。故：Win10 系运行期
+/// `set_shadow(false)` 整个撤掉系统投影（用户 2026-11-27 定稿："检测系统
+/// 版本，不支持的比如 win10 就禁用掉阴影"），Win11 保留。
+#[cfg(windows)]
+fn is_legacy_windows() -> bool {
+    #[repr(C)]
+    struct RtlOsVersionInfoW {
+        os_version_info_size: u32,
+        major_version: u32,
+        minor_version: u32,
+        build_number: u32,
+        platform_id: u32,
+        csd_version: [u16; 128],
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn RtlGetVersion(info: *mut RtlOsVersionInfoW) -> i32;
+    }
+    let mut info: RtlOsVersionInfoW = unsafe { std::mem::zeroed() };
+    info.os_version_info_size = std::mem::size_of::<RtlOsVersionInfoW>() as u32;
+    let status = unsafe { RtlGetVersion(&mut info) };
+    if status != 0 {
+        // 失败不做猜测：如实打日志，按 "非 legacy" 处理（保留 conf 里的
+        // 默认投影），不静默改窗口外观。
+        eprintln!("[win_chrome] RtlGetVersion 失败 status=0x{status:08X}，按 Win11 处理（保留投影）");
+        return false;
+    }
+    info.build_number < 22000
+}
+
+/// 按系统版本决定窗口投影（Win10 系 = 关，Win11 = 保留 conf 的 shadow:true）。
+///
+/// 幂等：可在窗口生命周期里重复调用（wire_window 与 setup 各调一次）。
+/// 失败只打日志不吞（禁止静默降级），窗口仍以 conf 默认投影呈现。
+#[cfg(windows)]
+fn apply_shadow_policy(window: &tauri::WebviewWindow) {
+    if !is_legacy_windows() {
+        return;
+    }
+    if let Err(e) = window.set_shadow(false) {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!("[win_chrome] Win10 禁用窗口阴影失败（灰边可能仍在）: {e}");
+        });
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_shadow_policy(_window: &tauri::WebviewWindow) {}
 
 /// 抹掉窗口顶部那条 1px 深灰线（2026-10-25 用户报"顶部怎么有一条黑线"）。
 ///
@@ -325,19 +381,9 @@ fn apply_window_chrome(_window: &tauri::WebviewWindow) {}
 #[cfg(windows)]
 mod top_line {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     type WndProc = unsafe extern "system" fn(isize, u32, usize, isize) -> isize;
-
-    /// Win10（`DWMWA_BORDER_COLOR` 不支持）没有 DWM 投影可保，undecorated
-    /// shadow inset 只会露出经典灰框架；此时在 WM_NCPAINT 里用外壳色填平。
-    /// Win11 保持 false（DWM 投影照画，不能覆盖）。
-    static FILL_FRAME_WITH_SHELL: AtomicBool = AtomicBool::new(false);
-
-    pub fn set_fill_frame_with_shell(value: bool) {
-        FILL_FRAME_WITH_SHELL.store(value, Ordering::Relaxed);
-    }
 
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
@@ -361,23 +407,10 @@ mod top_line {
         fn CallWindowProcW(prev: isize, hwnd: isize, msg: u32, wparam: usize, lparam: isize)
             -> isize;
         fn IsZoomed(hwnd: isize) -> i32;
-        fn GetWindowDC(hwnd: isize) -> isize;
-        fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
-        fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
-        fn FillRect(hdc: isize, rect: *const Rect, brush: isize) -> i32;
-    }
-
-    #[link(name = "gdi32")]
-    extern "system" {
-        fn CreateSolidBrush(color: u32) -> isize;
-        fn DeleteObject(object: isize) -> i32;
     }
 
     const GWLP_WNDPROC: i32 = -4;
     const WM_NCCALCSIZE: u32 = 0x0083;
-    const WM_NCPAINT: u32 = 0x0085;
-    /// 宿主 light 外壳色 #E9EEEF 的 COLORREF（Win10 无投影时填框用）。
-    const SHELL_COLORREF: u32 = 0x00EF_EEE9;
 
     /// 每个窗口的原始 wndproc（**按 hwnd 存**，多窗口共用一个槽会互相踩）。
     static ORIGINALS: OnceLock<Mutex<HashMap<isize, isize>>> = OnceLock::new();
@@ -411,24 +444,6 @@ mod top_line {
                 params.rgrc[0].top -= 1;
             }
             return result;
-        }
-        if msg == WM_NCPAINT && FILL_FRAME_WITH_SHELL.load(Ordering::Relaxed) {
-            // Win10：没有 DWM 投影要保，用外壳色把整圈经典框架填平。
-            unsafe {
-                let hdc = GetWindowDC(hwnd);
-                if hdc != 0 {
-                    let mut rect = Rect::default();
-                    if GetWindowRect(hwnd, &mut rect) != 0 {
-                        let brush = CreateSolidBrush(SHELL_COLORREF);
-                        if brush != 0 {
-                            FillRect(hdc, &rect, brush);
-                            DeleteObject(brush);
-                        }
-                    }
-                    ReleaseDC(hwnd, hdc);
-                }
-            }
-            return 0;
         }
         let prev = original_of(hwnd);
         if prev == 0 {
@@ -528,10 +543,13 @@ enum CloseAction {
 ///      ScaleFactorChanged → DPI 重算；CloseRequested → 按 `close_action`
 ///   ② 首屏几何主动落盘（set_size 发生在订阅之前，不会触发回调）
 ///
-/// 窗口外观（无边框 + 系统圆角 + 系统投影）全部由 `tauri.conf.json` 的
-/// `decorations: false` / `shadow: true` 决定，Rust 侧不再做任何 DWM 调整
-/// （2026-10-25 用户定稿：回到 Tauri 原生壳）。
+/// 窗口外观（无边框 + 系统圆角 + 系统投影）由 `tauri.conf.json` 的
+/// `decorations: false` / `shadow: true` 决定；Rust 侧只做两件事：
+/// Win10 系撤投影（`apply_shadow_policy`，灰边来源）与 Win11 的 DWM
+/// 直角/描边修正（`apply_window_chrome`）。
 fn wire_window(app: &tauri::AppHandle, window: &tauri::WebviewWindow, close_action: CloseAction) {
+    // Win10 系：运行期撤掉系统投影（conf 的 shadow:true 只服务 Win11）。
+    apply_shadow_policy(window);
     // 直角 + 无描边，系统投影保留。每个顶层窗口都要调。
     apply_window_chrome(window);
     // 顶部 1px 框架线：客户区上沿多吃 1px 盖掉（见 top_line 模块）。
@@ -824,6 +842,10 @@ fn build_settings_window(
     }
 
     let window = builder.build().map_err(|e| format!("设置窗创建失败：{e}"))?;
+
+    // Win10 系先撤系统投影（灰边来源）——必须先于任何 set_size：投影 inset
+    // 参与 tao 的内外尺寸换算。Win11 无操作（conf 的 shadow:true 生效）。
+    apply_shadow_policy(&window);
 
     // ⓪ **DWM + 子类化必须先于任何 set_size**（2026-10-23 实锤：顺序错了
     //    窗口会大一圈）。tao 的 `set_inner_size` 对 undecorated-with-shadow
@@ -1975,6 +1997,10 @@ fn main() {
             // 存档每轮 +16×9（实测 1760 → 1824 → 1872）。
             // 装完子类化后 client == window_rect，偏移恒为 0，`set_size`
             // 才是"设多少就是多少"。所以这里必须早于下面的 set_size。
+            //
+            // Win10 系先撤系统投影（灰边来源）：`set_shadow(false)` 同样
+            // 改变 tao 的 undecorated-shadow inset，必须早于 set_size。
+            apply_shadow_policy(&window);
             apply_window_chrome(&window);
             // 最小尺寸同时钉到运行期（tauri.conf 的 minWidth 只在创建时生效；
             // 存档恢复/后续 set_size 不能把三栏窗口压到裁切宽度）。

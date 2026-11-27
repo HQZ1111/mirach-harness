@@ -61,11 +61,13 @@
   顶部 1px。**投影与灰边是同一条 inset 的两面：要完全无灰边只能
   `shadow:false`（同时失去投影），默认不做。**
 - **v0.1.4 补丁**：公司电脑（Win10）左右下灰边仍在 = Win10 无
-  `DWMWA_BORDER_COLOR` / DWM 投影，undecorated shadow inset 只露出经典
-  框架。`top_line` 增加 `FILL_FRAME_WITH_SHELL`：仅在 border_color 失败
-  时（Win10）于 `WM_NCPAINT` 用外壳色填平整圈框架；Win11 不上这条路径，
-  系统投影照常。另：面板栏空 `preview` 页签在启动时剪除，打开页/标签条
-  菜单移除「预览」入口（文件树单击仍按 filePath 开预览）。
+  `DWMWA_BORDER_COLOR` / DWM 投影。改用**系统版本检测 + 关阴影**：
+  `main.rs::apply_shadow_policy` 以 `RtlGetVersion` 判定（build < 22000 =
+  Win10 系），在任何 `set_size` 之前 `set_shadow(false)` 撤掉整圈系统投影
+  （主窗 setup / 设置窗 builder / `wire_window` 三处，幂等）；Win11 保留
+  DWM 投影。WM_NCPAINT 填壳色的试做已撤除（覆盖投影 + 顶线黑线）。
+  另：面板栏空 `preview` 页签在启动时剪除，打开页/标签条菜单移除「预览」
+  入口（文件树单击仍按 filePath 开预览）。
 - **v0.1.3 已发布**：
   `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.3`
   （安装器 84.49 MiB）。实机复验：设置页连开连关（第二次 ✕ 可关）；
