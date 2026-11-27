@@ -700,6 +700,16 @@ pub struct PiEngine {
     asks: Arc<AskRegistry>,
     /// 目标完成校验器（ZCode goal verifier 的宿主对偶；在途态 + 单槽门）。
     verifier: Arc<crate::pi_goal_verify::GoalVerifier>,
+    /// 压缩进度出口（AG-UI 的 CUSTOM name=compaction）。
+    ///
+    /// 为什么需要：引擎在每次压缩前后通过 `HarnessEventBus` 发
+    /// `HarnessEvent::CompactionProgress`（rpi-harness/src/events.rs 的
+    /// `CompactionProgressGuard`），但**宿主从未订阅这个总线**，于是前端
+    /// turn-actor 里的 compaction 归约分支永远等不到事件——用户只看到
+    /// “上下文消失了”而没有任何「正在压缩」提示（2026-11-27 实报）。
+    /// 这里由装配方（main.rs）注入一个推送函数，换会话时由 install_live
+    /// 把该会话的 bus 接上。
+    compaction_sink: Mutex<Option<Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>>>,
 }
 
 // ── harness 装配（PiEngine 与后台 bot 泳道共用）───────────────────────────
@@ -1008,7 +1018,23 @@ impl PiEngine {
             approvals,
             asks,
             verifier: crate::pi_goal_verify::GoalVerifier::new(),
+            compaction_sink: Mutex::new(None),
         }
+    }
+
+    /// 注入压缩进度出口（装配方调用一次，把事件推到 AG-UI 常驻流）。
+    /// 参数 = (thread 键, 事件)——压缩属于**具体会话**，桥按会话键入桶
+    /// （多会话并存：切走后压缩进度落自己的桶，不串台）。
+    pub fn set_compaction_sink(
+        &self,
+        sink: Arc<dyn Fn(&str, serde_json::Value) + Send + Sync>,
+    ) -> Result<(), String> {
+        let mut slot = self
+            .compaction_sink
+            .lock()
+            .map_err(|_| "compaction sink 锁中毒".to_string())?;
+        *slot = Some(sink);
+        Ok(())
     }
 
     pub fn approvals(&self) -> Arc<ApprovalRegistry> {
@@ -1184,6 +1210,25 @@ impl PiEngine {
 
     fn live(&self) -> Result<Arc<HarnessLive>, String> {
         self.live_opt()?.ok_or_else(|| NO_ACTIVE_SESSION.to_string())
+    }
+
+    /// 活动主会话的 pi session id（多会话事件路由用：`main:<id>` 线程键）。
+    /// 无活动会话 = Err（调用方在 ensure/open 之后调，不该发生）。
+    pub fn live_session_id(&self) -> Result<String, String> {
+        let live = self.live()?;
+        self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .get_metadata()
+                .await
+                .map(|m| m.id)
+                .map_err(|e| format!("会话元数据读取失败: {e}"))
+        })
+    }
+
+    /// 活动主会话的文件路径（None = 尚未落盘 / 无会话）。
+    pub fn live_session_path(&self) -> Option<std::path::PathBuf> {
+        self.live_opt().ok()?.and_then(|live| live.session_path.clone())
     }
 
     /// 活动会话句柄（None = 首启/New Chat 的预期态，不是错误；锁中毒才 Err）。
@@ -1364,6 +1409,11 @@ impl PiEngine {
         // prompt_inner 挂钩会漏掉这类 run（2026-11-18 实机踩中：goal 首轮
         // 结束后无任何校验发生）。常驻订阅本会话事件流，每个会话一个。
         self.watch_runs(Arc::clone(&installed));
+        // 压缩进度桥：把本会话的 HarnessEvent::CompactionProgress 映射成
+        // AG-UI 的 CUSTOM name=compaction（前端 LiveCompactionRow 消费）。
+        // 订阅挂在 bus 上、生命周期跟随 bus（会话被 retire 时 bus 也随之
+        // 消亡，不会泄漏到下一个会话）。
+        self.bridge_compaction(Arc::clone(&installed));
         let previous = self
             .shared
             .live
@@ -1379,6 +1429,74 @@ impl PiEngine {
         self.approvals.cleanup();
         self.asks.cleanup();
         Ok(())
+    }
+
+    /// 压缩进度桥：把 `HarnessEvent::CompactionProgress`（引擎在压缩前后各发
+    /// 一次，`active=true/false`）映射成前端约定的 `CUSTOM name=compaction`
+    /// 形状（`phase: start|end`）。
+    ///
+    /// 引擎事件不带 token 计数（`CompactionProgressEvent` 只有 lane/manual/
+    /// active），所以不伪造 tokensBefore/After——前端 `compactionRowView`
+    /// 对缺字段本来就会退成不带计数的文案。
+    fn bridge_compaction(&self, live: Arc<HarnessLive>) {
+        let sink = match self.compaction_sink.lock() {
+            Ok(slot) => slot.clone(),
+            Err(_) => {
+                eprintln!("[pi] compaction sink 锁中毒——压缩进度不上报");
+                return;
+            }
+        };
+        let Some(sink) = sink else {
+            // 装配方未注入（如 cargo test/后台 bot 泳道）——不是错误，静默跳过。
+            return;
+        };
+        // 会话键：压缩发生在**本会话**，事件落 `main:<id>` 自己的桶
+        // （多会话并存：切走后压缩进度也能在切回时从缓冲续放）。
+        let Ok(session_id) = self.shared.rt.block_on(async {
+            live.harness
+                .session()
+                .get_metadata()
+                .await
+                .map(|m| m.id)
+                .map_err(|e| format!("会话元数据读取失败: {e}"))
+        }) else {
+            eprintln!("[pi] 压缩桥会话 id 读取失败——压缩进度不上报");
+            return;
+        };
+        let thread_key = format!("main:{session_id}");
+        use std::sync::Arc as StdArc;
+        use rpi_harness::events::{CompactionProgressEvent, HarnessEvent};
+        use rpi_harness::events::WatchListener;
+        // `watch` 是接收**所有** HarnessEvent 的通用入口（引擎没给
+        // CompactionProgressEvent 实现 HarnessEventOf，无法用 on_lifetime<T>）。
+        // start() 后 watch 进入有效期，且句柄本身会被 bus 强引用保留。
+        let mut handle = live.harness.events().watch(|| ());
+        let listener: WatchListener = Arc::new(move |event: &HarnessEvent| {
+            let HarnessEvent::CompactionProgress(CompactionProgressEvent {
+                active, manual, ..
+            }) = event
+            else {
+                return;
+            };
+            let mut value = serde_json::json!({
+                "phase": if *active { "start" } else { "end" },
+            });
+            // reason 用 manual 区分手动/自动，前端文案会带上。
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "reason".into(),
+                    serde_json::Value::String(
+                        if *manual { "手动压缩" } else { "上下文接近上限" }.into(),
+                    ),
+                );
+            }
+            sink(&thread_key, serde_json::json!({
+                "type": "CUSTOM",
+                "name": "compaction",
+                "value": value,
+            }));
+        });
+        handle.start(listener);
     }
 
     /// 常驻 run 事件观察者：收到 `AgentEnd`（一次 run 收尾）就触发目标校验

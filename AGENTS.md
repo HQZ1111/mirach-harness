@@ -819,6 +819,79 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
   左右 16 内距（与下方卡片正文同左基线）和关闭钮。
 - 版本：0.1.6。
 
+## 2026-11-28（二十四）v0.1.7：多会话并存（后台继续跑）+ 草稿/队列持久化（当前有效）
+
+用户："切换会话时要不中断对话（像 hermes 那样多标签并存、后台继续跑）……
+输入框里的消息和排队消息，切换会话后都没了，关闭重启应用也没了"。
+
+### 根因（旧架构三宗罪）
+
+1. **事件全进公共 "main" 桶**：引擎 POST 把 run 事件路由到固定 thread
+   "main"，切走会话后 run 虽在 retired 句柄上继续跑，事件却落公共桶——新
+   焦点会话的投影被旧 run 的增量污染（串台/中断/内容丢失的根因）。
+2. **切换 = 强制中断**：`switchToThreadPath` 在切换前 `pi_interrupt`
+   （"引擎单 handle 决定了切换 = 只能中断"的旧结论）——后台继续跑无从谈起。
+3. **单 actor**：全部会话共用一份轮次机投影，切换 = 重水合（把文件里的旧
+   状态盖回去，在跑增量反而丢）；排队队列全局单份 + **切换即 clear**；
+   composer 草稿纯内存。
+
+### 新架构（三端同键：`main:<piSessionId>`）
+
+- **引擎路由**（agui.rs POST）：解析会话（同步等 pi-create 线程）拿到
+  session id → 本 run 全部事件路由 `main:<id>` 专属缓冲（每 thread 独立
+  counter/deque，互不串台）；响应带 `{runId, threadId}`。解析失败 =
+  HTTP 500 + `{error: 原文}`（前端可见，不再往公共桶推孤儿 RUN_ERROR）。
+  压缩 sink 同改 `(thread, event)` 签名（bridge_compaction 捕获会话键）。
+- **切会话不打断**：`switchToThreadPath` 撤销 `pi_interrupt`——引擎
+  open_session 换 live 槽，旧柄退 retired（run 继续跑，写盘不受影响）。
+  用户要停 = 点停止钮（显式手势，hermes/ZCode 同语义）。
+- **前端 actor 注册表**（runtime.tsx）：`Map<threadKey, TurnActor>`（上限
+  12，驱逐最久未用的非焦点非 streaming——hermes `evictable()` 同语义）。
+  焦点切换 = 换焦点 actor：**投影原样保留**（不重水合/不重置），SSE 换订
+  焦点流、从焦点 actor 的 lastEventId 续放（切走期间缓冲累积的增量整段
+  接上）。冷会话（首次打开）走原 peek/open/水合链 + `SEEK`（新轮次机事
+  件：只拨 lastEventId 不改投影——文件水合后跳过缓冲里已落盘的历史）。
+  fork / 回到父会话同样落到**目标会话自己的 actor**。
+- **启动链顺序修正**：水合 + SEEK 先于 setCurrentThreadId（焦点效果据此
+  从正确游标开流，避免先从 0 开流与文件水合竞态）。启动链不再建 ES。
+- **切换/丢弃/New Chat 不再 RESET 旧 actor**：旧投影留在注册表，切回即
+  恢复。会话删除才 drop actor + 清队列/草稿。
+
+### 草稿 + 排队（per-session + localStorage）
+
+- `composer-draft-store.ts`（新）：`mirach:composer-drafts.v1`，键 =
+  sessionThreadKey，上限 50 条按 updatedAt 淘汰，空文本 = 删条目，附件不
+  持久化（hermes/ZCode 同款）。composer-wired 接线：**切键首帧跳过 stash**
+  （此刻 value 还是旧会话文本，直接写会把 A 的草稿落进 B 的键——只做恢复
+  setText 新键草稿），之后 value 变化 400ms 防抖 stash。
+- `session-queue-store.ts` 重写：`bySession: Record<key, QueuedMessage[]>`
+  + `activeKey`（runtime 随焦点同步）+ localStorage
+  `mirach:session-queue.v1`（上限 30 会话 / 每会话 20 条）。**切换不再
+  clear**（resetSessionScopedBridges 移除队列清除）；drain 按**焦点会话**
+  出队；**边沿无关自动 drain**（hermes shouldAutoDrain：切到某会话时若
+  空闲且有排队消息立即续发——否则切走的会话收尾时队列等不到下一个边沿）；
+  会话删除 = clearSession + clearComposerDraft。
+- 队列面板（thread.aui MessageQueueWired）按焦点键读（useSessionQueueItems）。
+
+### 已知边界（如实标注）
+
+- **后台审批仍被取消**：引擎 `retire_previous`/`install_live` 会 cancel
+  ui_dialog + `approvals.cleanup()`——后台 run 走到审批点依然会失败
+  （审批注册表按进程单份，per-session 化是下一轮）。流式 run（最常见的
+  "后台继续跑"）不受影响。
+- **retired 句柄上限 4 + live 1**：第 6 个并发后台 run 的句柄被逐（lease
+  释放）——引擎侧既有约束，未动。
+- **后台会话无 busy 投影**：$hostBusy 只绑焦点 actor——侧栏"谁在跑"的
+  per-session 化（hermes $workingSessionIds 对偶）是下一轮。
+- **重载（F5/HMR）时在途消息**：与旧行为同——文件水合 + SEEK(缓冲头)，
+  在途增量等落盘后出现（引擎进程存活，run 本身不丢）。
+
+### 门禁
+
+cargo check 通过 / cargo test 747 过 1 ignored / npm test 1152 过（98 文
+件，含重写的 session-queue-store.test）/ 改动文件无新增 tsc 错误。
+版本 0.1.7。
+
 ## 工具链钉版（升级前必读）
 
 | 包 | 版本 | 为什么 |
@@ -837,7 +910,7 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
 
 ```
 npx tsc --noEmit                 # 注意：本分支 hermes-mirror 仍有历史缺模块错误（见 2026-11-22 节）
-npm test                         # 当前 1134 用例 / 97 文件
+npm test                         # 当前 1135 用例 / 97 文件
 cd src-tauri && cargo test       # 当前 742 用例（741 过 / 1 ignored）
 cd src-tauri && cargo check      # 0 错误（既有 warning 是上游/未用代码 lint）
 ```

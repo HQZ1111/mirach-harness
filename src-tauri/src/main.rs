@@ -1544,6 +1544,23 @@ fn pi_open_session(
         .open_session(&path, Some(state.ui_bridge("main")))
 }
 
+/// New Chat 发送前的**显式建会话**（多会话并存 2026-11-28）：首条消息不再
+/// 走懒创建——先 ensure（引擎上台 + pi 分配 session id），前端拿到 id 后
+/// 才发 POST，事件路由键 `main:<id>` 从第一条就对。返回 {id, path}（pi
+/// 建会话即落盘 header，path 供 catalog/POST sessionPath 用）。
+#[tauri::command(async)]
+fn pi_ensure_main_session(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+) -> Result<serde_json::Value, String> {
+    state.engine.ensure_session(Some(state.ui_bridge("main")))?;
+    let id = state.engine.live_session_id()?;
+    let path = state
+        .engine
+        .live_session_path()
+        .map(|p| p.to_string_lossy().to_string());
+    Ok(serde_json::json!({ "id": id, "path": path }))
+}
+
 /// 当前会话的 fork 谱系（branchedFrom = 父会话文件路径；线性会话 = null）。
 #[tauri::command(async)]
 fn pi_get_session_lineage(
@@ -2350,6 +2367,7 @@ fn main() {
             pi_export_session_html,
             pi_stream_cursor,
             pi_open_session,
+            pi_ensure_main_session,
             pi_get_session_lineage,
             pi_rename_session,
             pi_delete_session,

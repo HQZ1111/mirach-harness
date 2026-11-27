@@ -46,7 +46,10 @@ import {
   checkpointBridge,
   formatCheckpointTime,
 } from "@/components/assistant-ui/checkpoint-store";
-import { sessionQueue } from "@/components/assistant-ui/session-queue-store";
+import {
+  sessionQueue,
+  useSessionQueueItems,
+} from "@/components/assistant-ui/session-queue-store";
 import {
   modelCatalogStore,
   toModelOptions,
@@ -100,6 +103,7 @@ import {
 import {
   FIRST_PAINT_BUDGET,
   FULL_TRANSCRIPT_BUDGET,
+  MIN_VISIBLE_TURNS,
   TOP_EDGE_PX,
   expandBudget,
   nextBackfillBudget,
@@ -143,6 +147,7 @@ import {
   MinimizeIcon,
   PencilIcon,
   PhoneIcon,
+  RefreshCwIcon,
   Volume2Icon,
 } from "lucide-react";
 import {
@@ -285,12 +290,67 @@ type TurnStateProjection = {
     errorMessage?: unknown;
   } | null;
   interrupted?: unknown;
+  providerRetry?: {
+    attempt?: unknown;
+    maxRetries?: unknown;
+    delayMs?: unknown;
+    error?: unknown;
+    scheduledAt?: unknown;
+  } | null;
 };
 
 const parseTurnState = (raw: unknown): TurnStateProjection | null => {
   if (raw === null || raw === undefined) return null;
   if (typeof raw !== "object" || Array.isArray(raw)) return null;
   return raw as TurnStateProjection;
+};
+
+// ── 提供方自动重试行（CUSTOM name=provider_retry，hermes
+// assistant-message 的「Retrying at … — in Ns」同语义）─────────────────────
+//
+// 为什么必须有：引擎在上游 provider 瞬时失败（429/5xx）后会退避重试若干次，
+// 此前这个事件被完全忽略，用户只看到“卡住很久 → 突然报错停下”
+// （2026-11-27 用户：“模型出问题了，不显示自动重连”）。
+//
+// 显示位置 = 对话流内（与压缩行同壳体）：它是“本轮正在发生的事”，不是全局
+// 错误；放到输入框上方会被误认为输入区状态。重试成功后该行自然消失。
+const LiveRetryRow: FC = () => {
+  const raw = useAuiState((s) => s.thread.state);
+  const st = parseTurnState(raw);
+  const r = st?.providerRetry;
+  const attempt = typeof r?.attempt === "number" ? r.attempt : null;
+  const maxRetries = typeof r?.maxRetries === "number" ? r.maxRetries : null;
+  const delayMs = typeof r?.delayMs === "number" ? r.delayMs : null;
+  const scheduledAt = typeof r?.scheduledAt === "number" ? r.scheduledAt : null;
+  const [now, setNow] = useState(() => Date.now());
+
+  // 倒计时每秒刷新（只在有重试时挂 timer）。
+  useEffect(() => {
+    if (attempt === null || scheduledAt === null) return;
+    const id = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, [attempt, scheduledAt]);
+
+  if (attempt === null || maxRetries === null || delayMs === null) {
+    if (r) console.error("[aui] providerRetry 投影形状非法——重试行不渲染", r);
+    return null;
+  }
+
+  const remaining = scheduledAt === null ? delayMs : Math.max(0, scheduledAt + delayMs - now);
+  const seconds = Math.ceil(remaining / 1000);
+  const detail = typeof r?.error === "string" && r.error.length > 0 ? r.error : undefined;
+
+  return (
+    <div data-slot="aui_retry-row">
+      <MarkerDivider
+        kind="retry"
+        label={`模型请求失败，${seconds}s 后自动重试（第 ${attempt}/${maxRetries} 次）`}
+        icon={<RefreshCwIcon aria-hidden className="size-[var(--size-icon-sm)] shrink-0" />}
+        running
+        {...(detail === undefined ? {} : { detail })}
+      />
+    </div>
+  );
 };
 
 // 上下文压缩行（ZCode `ConversationTimelineMarkerDivider` 的 compact 形态）：
@@ -396,7 +456,7 @@ const SessionLineBar: FC = () => {
 // 错误时展示（RUN_ERROR 路径由错误条负责，二者不叠显）。words = 最后一条
 // assistant 段已收到的文本。挂载点在 ViewportFooter（thread 级，无 message
 // scope）——只允许读 s.thread.*。
-const StoppedRunBanner: FC = () => {
+const StoppedRunRow: FC = () => {
   const aui = useAui();
   const interrupted =
     useAuiState((s) => parseTurnState(s.thread.state)?.interrupted) === true;
@@ -455,11 +515,24 @@ const StoppedRunBanner: FC = () => {
 // 手写条。轮次机 error 经 error-bridge 到达；下一个 run 的 RUN_STARTED
 // 归约清 error 后自动消失。onRetry = 重刷最后一条 assistant（与 Reload
 // 同一机制：message.reload → startRun → onReload）。
-const RunErrorBar: FC = () => {
+//
+// **挂点**（2026-11-27 用户：「错误信息是否应该显示在那轮对话的地方，参考
+// hermes」）：不再挂 footer，而是挂在对话流末尾。只在「本轮最后一条是
+// assistant」时渲染——否则错误已经属于更早的轮，不该再占着最新位置。
+const RunErrorRow: FC = () => {
   const { error, retryable } = useErrorBridge();
   const aui = useAui();
-  if (!error) return null;
-  const onRetry = () => {
+  const lastRole = useAuiState((s) => s.thread.messages.at(-1)?.role);
+  const isRunning = useAuiState((s) => s.thread.isRunning);
+  // 自动重试倒计时（对照 hermes assistant-message 的 scheduled-retry）：
+  // 用户 2026-11-27：「任务执行过程中卡住或者出现问题没法感知自己重试或者
+  // 停掉正在进行的任务」。可重试错误自动排一次退避重试，且**倒计时可见、
+  // 可取消**（不做静默重试）。fireAt=null 表示没排。
+  const [fireAt, setFireAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const stale = isRunning || lastRole !== "assistant";
+
+  const reload = useCallback(() => {
     const msgs = aui.thread.getState().messages;
     const last = msgs[msgs.length - 1];
     if (!last || last.role !== "assistant") {
@@ -467,16 +540,64 @@ const RunErrorBar: FC = () => {
       return;
     }
     aui.thread.message({ index: last.index }).reload();
-  };
+  }, [aui]);
+
+  // 可重试错误到达时排一次 5s 后的自动重试（用户可随时取消）。
+  useEffect(() => {
+    if (!error || !retryable || stale) {
+      setFireAt(null);
+      return;
+    }
+    setFireAt(Date.now() + 5000);
+    // 只在错误本身变化时重排；stale/上下文变化由下面的守卫收起。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [error, retryable]);
+
+  useEffect(() => {
+    if (fireAt === null || stale) return;
+    const timer = window.setTimeout(() => {
+      setFireAt(null);
+      reload();
+    }, Math.max(0, fireAt - Date.now()));
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(tick);
+    };
+  }, [fireAt, stale, reload]);
+
+  if (!error) return null;
+  if (lastRole !== "assistant") return null;
+
+  const secondsLeft =
+    fireAt === null ? null : Math.max(0, Math.ceil((fireAt - now) / 1000));
+
   return (
-    <ErrorState
-      data-slot="aui_run-error-bar"
-      title={retryable ? "运行出错" : "会话打开失败"}
-      detail={error}
-      retrying={false}
-      onRetry={retryable ? onRetry : undefined}
-      className="mt-1 w-full max-w-none"
-    />
+    <div data-slot="aui_run-error-row" className="flex flex-col gap-1">
+      <ErrorState
+        data-slot="aui_run-error-bar"
+        title={retryable ? "运行出错" : "会话打开失败"}
+        detail={error}
+        retrying={false}
+        onRetry={retryable ? reload : undefined}
+        className="mt-1 w-full max-w-none"
+      />
+      {secondsLeft !== null && (
+        <div
+          data-slot="aui_run-error-autoretry"
+          className="text-muted-foreground flex items-center gap-2 px-1 text-xs"
+        >
+          <span>{secondsLeft}s 后自动重试</span>
+          <button
+            type="button"
+            className="underline underline-offset-2 hover:text-foreground"
+            onClick={() => setFireAt(null)}
+          >
+            取消
+          </button>
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -490,7 +611,9 @@ const RunErrorBar: FC = () => {
 // 不做双入口（删除钮保留，模板 onCancel）。
 const MessageQueueWired: FC = () => {
   const isRunning = useAuiState((s) => s.thread.isRunning);
-  const queued = useStore(sessionQueue, (s) => s.items);
+  // 排队队列 = 焦点会话自己的桶（多会话并存：切换会话后 A 的排队消息留在
+  // A 的键下，切回后仍在；runtime 随焦点同步 activeKey）
+  const queued = useSessionQueueItems();
   const runningText = useAuiState((s) => {
     const msgs = s.thread.messages;
     for (let i = msgs.length - 1; i >= 0; i--) {
@@ -512,7 +635,10 @@ const MessageQueueWired: FC = () => {
       data-slot="aui_message-queue"
       running={runningText?.trim() || "正在处理当前消息"}
       queued={queued}
-      onCancel={(id) => sessionQueue.getState().remove(id)}
+      onCancel={(id) => {
+        const key = sessionQueue.getState().activeKey;
+        sessionQueue.getState().remove(key, id);
+      }}
       className="w-full max-w-none"
     />
   );
@@ -864,9 +990,15 @@ const MessageTurnList: FC = () => {
     [ids, roleSig],
   );
   // ── 转录渲染窗口（hermes transcript-window 移植，2026-11-19）───────────
-  // 切会话先挂尾部小预算，rAF 分步补齐到整页预算；窗口边界落在轮上。
+  // 切会话先挂尾部小预算，随后自动补齐到已加载全部（见下方 effect）。
   // 只裁剪**渲染**，不动 store 与 scrollTop（滚动记忆单一所有者不受扰）。
-    const threadKey = ids[0] ?? "empty";
+  //
+  // 会话身份用 transcriptTailStore.sessionId（真正的会话归属），**不用
+  // 首条消息 id**：后者在空会话/单消息会话里会与别的会话撞值，也会因
+  // 上滚补页前插而变——那时会把“消息变多”误判成“换了会话”，把用户刚
+  // 滚到的位置重置回尾部（2026-11-27 查会话内容“丢失”时发现的次生缺陷）。
+  const sessionIdForWindow = useStore(transcriptTailStore, (s) => s.sessionId);
+  const threadKey = sessionIdForWindow ?? "empty";
   const [renderBudget, setRenderBudget] = useState(FIRST_PAINT_BUDGET);
   const renderBudgetRef = useRef(renderBudget);
   renderBudgetRef.current = renderBudget;
@@ -879,19 +1011,39 @@ const MessageTurnList: FC = () => {
     setRenderBudget(FIRST_PAINT_BUDGET);
     setExpandTarget(null);
   }
-  // **不再自动补齐到整页**（2026-11-21 用户实测："等全部显示并不流畅"）：
-  // 自动 rAF 补齐会在切换后持续挂载数十轮（数秒的连续提交）。首屏只挂
-  // 尾部，向上滚动（滚到顶继续上滚 / 显示更早按钮）按需渐进展开——
-  // 与微信「打开显示最近、上翻加载更早」同语义。
+  // **补齐策略**（2026-11-27 修正）：
+  //
+  // 旧实现“不再自动补齐到整页”（2026-11-21 为了流畅）——但代价是切会话
+  // 后只挂 尾部 20 权重（约 1-2 轮），其余全部**不渲染**。用户看到的就是
+  // “对话突然中断 / 内容丢失，切换一次出来一点”（实报）。渲染裁剪在用户
+  // 眼里和丢数据一样。
+  //
+  // 现在：首帧仍然只挂小预算（保留切换即时手感的初衷），但**紧接着自动
+  // 补齐到已加载全部**，每帧 +48（1-2 轮），单帧开销与原来的上滚展开完全
+  // 一致。这不会回到“等全部显示并不流畅”：
+  //   · 首帧照旧先出尾部，用户立刻能看到内容；
+  //   · 补齐是逐帧进行的，不阻塞交互；
+  //   · 补齐把**所有已加载消息**都画出来，不再留下看不见的尾部窗口。
   useEffect(() => {
-    if (expandTarget === null || renderBudget >= expandTarget) return;
+    // expandTarget 为 null 时也补齐（目标 = 已加载全部）——只要还有消息
+    // 没进窗口，就继续加。
+    const total = turns.length;
+    if (renderBudget >= FULL_TRANSCRIPT_BUDGET) return;
+    // 已加载的轮很少时直接一次到位（避免无意义的逐帧调度）。
+    if (total <= MIN_VISIBLE_TURNS) {
+      setRenderBudget(FULL_TRANSCRIPT_BUDGET);
+      return;
+    }
     const frame = requestAnimationFrame(() => {
       setRenderBudget((current) =>
-        Math.min(expandTarget, nextBackfillBudget(current)),
+        Math.min(
+          expandTarget ?? FULL_TRANSCRIPT_BUDGET,
+          nextBackfillBudget(current),
+        ),
       );
     });
     return () => cancelAnimationFrame(frame);
-  }, [renderBudget, expandTarget]);
+  }, [renderBudget, expandTarget, turns.length]);
   const window_ = useMemo(() => {
     const byId = new Map<string, WindowMessageLike>(
       (aui.thread.getState().messages as readonly (WindowMessageLike & { id: string })[]).map(
@@ -1025,6 +1177,9 @@ const MessageTurnList: FC = () => {
           落在列表末尾（= 最新事件的位置），与历史 compact marker 同一壳体。
           end 相在有 tail marker 时由组件自己让位（避免末尾重复）。 */}
       <LiveCompactionRow hasTailCompactMarker={hasTailCompactMarker} />
+      {/* 提供方自动重试（CUSTOM name=provider_retry）：同样轮外、落在末尾。
+          run 结束后由归约器清空，不会残留。 */}
+      <LiveRetryRow />
     </div>
   );
 };
@@ -1366,6 +1521,13 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             className="mb-14 flex flex-col gap-y-[76px] empty:hidden"
           >
             <MessageTurnList />
+            {/* 错误与中断挂在**对话流末尾**（= 出问题那一轮的位置），
+                与 hermes assistant-message 的错误卡片同位。此前它们挂在
+                footer（输入框上方），用户 2026-11-27：「错误信息是否应该
+                显示在那轮对话的地方，参考 hermes」。
+                只在本轮最后一条是 assistant 时出现（组件内部自己门控）。 */}
+            <RunErrorRow />
+            <StoppedRunRow />
           </div>
         </div>
 
@@ -1392,8 +1554,10 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             <EngineAttachHint />
             {!scoped && (
               <>
-                <RunErrorBar />
-                <StoppedRunBanner />
+                {/* 错误/中断不再挂输入框上方：用户 2026-11-27「错误信息
+                    是否应该显示在那轮对话的地方，参考 hermes」——hermes 把
+                    错误卡片放在 assistant 消息里。两者已改挂消息流末尾
+                    （见 MessageTurnList 后的 RunErrorRow / StoppedRunRow）。 */}
                 <ApprovalCards />
                 <AskCards />
                 {/* 新建任务行（2026-11-01 用户："选择文件夹和压缩会话应该在
@@ -1797,7 +1961,7 @@ const AssistantMessage: FC = () => {
       data-slot="aui_assistant-message-root"
       data-role="assistant"
       className={cn(
-        "fade-in slide-in-from-bottom-1 animate-in relative duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto]",
+        "fade-in slide-in-from-bottom-1 animate-in relative duration-150",
         // 只有挂操作条的（轮尾）消息才为 footer 预留 30px——不预留会让
         // 中途段与下一段之间多出一段空气。
         isTurnTail && hasParts && "-mb-7.5 pb-7.5",
@@ -2032,7 +2196,7 @@ const AssistantActionBar: FC<{
       // autohide="always" 在 assistant-ui 里是**卸载**（Root 直接 return null），
       // 悬停时整行高度会跳一下，没有淡入——故用 never + CSS 透明度。
       autohide="never"
-      className="aui-assistant-action-bar-root text-muted-foreground col-start-3 row-start-2 flex gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/turn:opacity-100"
+      className="aui-assistant-action-bar-root text-muted-foreground col-start-3 row-start-2 flex items-center gap-1 opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/turn:opacity-100"
     >
       <MessageActions
         copied={isCopied}
@@ -2170,7 +2334,7 @@ const UserMessage: FC = memo(function UserMessage() {
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
-      className="group/user-row fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_minmax(0,auto)_auto] content-start gap-x-2 gap-y-2 duration-150 [contain-intrinsic-size:auto_200px] [content-visibility:auto] [&:where(>*)]:col-start-2"
+      className="group/user-row fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_minmax(0,auto)_auto] content-start gap-x-2 gap-y-2 duration-150 [&:where(>*)]:col-start-2"
       data-role="user"
     >
       {/* 身份行：名字与内容同边（右对齐到气泡右缘），头像在**外面**（更右），

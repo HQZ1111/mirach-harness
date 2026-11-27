@@ -311,11 +311,23 @@ impl AguiState {
         let engine = crate::pi_session::PiEngine::new();
         let approvals = engine.approvals();
         let asks = engine.asks();
+        let buffers = Arc::new(Mutex::new(ThreadBuffers::default()));
+        // 压缩进度 → 常驻 AG-UI 流（CUSTOM name=compaction）：引擎只往
+        // HarnessEventBus 发 `CompactionProgress`，宿主必须自己桥进
+        // thread 事件缓冲，否则前端永远没有「正在压缩上下文」提示。
+        // 桥给的是**会话专属线程键**（`main:<id>`，bridge_compaction 捕获）
+        // ——压缩进度落会话自己的桶，不串台。
+        let buffers_for_sink = Arc::clone(&buffers);
+        let _ = engine.set_compaction_sink(Arc::new(
+            move |thread: &str, event: serde_json::Value| {
+                push_shared(&buffers_for_sink, thread, event);
+            },
+        ));
         Self {
             engine,
             token,
             port: Mutex::new(None),
-            buffers: Arc::new(Mutex::new(ThreadBuffers::default())),
+            buffers,
             approvals,
             asks,
         }
@@ -508,6 +520,54 @@ pub(crate) fn validate_images(images: &[AguiImage]) -> Result<(), String> {
     Ok(())
 }
 
+/// 把 provider 错误压成人可读的一行（去掉上游返回的 HTML 错误页）。
+///
+/// 为什么需要：模型服务前面常常有一层反向代理（nginx / Cloudflare）。代理
+/// 返回 502/503/504 时 body 是一整页 HTML（`<html><head><title>502 Bad
+/// Gateway</title>…`），而 pi-ai 把 `response.text()` **原样**放进 `AiError::Http`
+/// 的 message（`rpi-ai/src/providers/*`）。前端直接把这条 message 显示给用户，
+/// 于是会话里出现一大块 HTML（2026-11-27 用户实报）。
+///
+/// 这里只做**展示层清洗**，不改错误语义：
+///   · HTML 文档 → 抽出 `<title>` 文本（`502 Bad Gateway` 本身就是最好的摘要），
+///     没有 title 就退成 `HTTP 502（上游返回 HTML 错误页）`；
+///   · 非 HTML 保持原样（JSON 错误体是有效信息，不能丢）。
+pub fn humanize_provider_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let looks_html = {
+        let head = trimmed.get(..512).unwrap_or(trimmed).to_ascii_lowercase();
+        head.contains("<!doctype html") || head.contains("<html") || head.contains("<head")
+    };
+    if !looks_html {
+        return trimmed.to_string();
+    }
+
+    // 取 <title>…</title>（大小写不敏感）：nginx 的默认错误页正是这个形状。
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(start) = lower.find("<title") {
+        if let Some(open_end) = lower[start..].find('>') {
+            let body_start = start + open_end + 1;
+            if let Some(close) = lower[body_start..].find("</title") {
+                let title = trimmed[body_start..body_start + close].trim();
+                if !title.is_empty() {
+                    return format!("{title}（上游返回 HTML 错误页，非 JSON 响应）");
+                }
+            }
+        }
+    }
+
+    // 从首行/首段里再试一次状态码，尽量给具体信息。
+    let status_hint = lower
+        .find("bad gateway")
+        .map(|_| "502 Bad Gateway")
+        .or_else(|| lower.find("service unavailable").map(|_| "503 Service Unavailable"))
+        .or_else(|| lower.find("gateway timeout").map(|_| "504 Gateway Timeout"));
+    match status_hint {
+        Some(hint) => format!("{hint}（上游返回 HTML 错误页，非 JSON 响应）"),
+        None => "上游返回 HTML 错误页（非 JSON 响应）".to_string(),
+    }
+}
+
 fn parse_images(body: &serde_json::Value) -> Result<Vec<AguiImage>, String> {
     match body.get("images") {
         None | Some(serde_json::Value::Null) => Ok(vec![]),
@@ -582,6 +642,14 @@ async fn agui_run(
     // 无才创建——【关键】不能每次 POST 都 create（否则每条消息换新会话，
     // 上下文全丢）。flush/create 的深递归 future 不能在 tokio worker 栈上
     // block_on——16MiB 大栈线程承载（engine 经 Arc 共享，单会话不变量不破）。
+    //
+    // **多会话并存（2026-11-28 用户："切换会话时要不中断对话，像 hermes
+    // 那样多标签并存、后台继续跑"）**：POST 同步等会话解析完成后，本 run
+    // 的**全部事件**路由到 `main:<piSessionId>` 专属缓冲（不再共用 "main"）
+    // ——切走后该 run 在 retired 句柄上继续跑，事件落自己的桶；切回时前端
+    // 从自己的游标续放，投影无缝接上。响应带 `threadId` 供前端核对订阅键。
+    // 解析失败 = HTTP 500 + JSON error（前端可见；不再往公共桶推 RUN_ERROR
+    // ——旧路径的订阅方已不存在）。
     let st_create = st.clone();
     let thread_bridge = thread.clone();
     let create = tokio::task::spawn_blocking(move || {
@@ -595,24 +663,25 @@ async fn agui_run(
                         // 重新 open 会撞 "writer lease is already held"——
                         // 前端每次 POST 都带 sessionPath，这是主路径）。
                         match st_create.engine.is_live_session(path) {
-                            Ok(true) => Ok(()),
+                            Ok(true) => st_create.engine.live_session_id(),
                             Ok(false) => st_create
                                 .engine
-                                .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
-                                .map(|_| ()),
+                                .open_session(path, Some(st_create.ui_bridge(&thread_bridge))),
                             Err(e) => Err(e),
                         }
                     } else {
                         st_create
                             .engine
                             .ensure_session(Some(st_create.ui_bridge(&thread_bridge)))
+                            .and_then(|()| st_create.engine.live_session_id())
                     }
                 } else {
                     st_create.engine.side_open(
                         &thread_bridge,
                         session_path.as_deref().expect("sessionPath checked"),
                         st_create.ui_bridge(&thread_bridge),
-                    )
+                    )?;
+                    Ok(thread_bridge.clone())
                 }
             })
             .expect("spawn pi-create thread")
@@ -622,20 +691,30 @@ async fn agui_run(
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
-    let created = match create {
-        Ok(res) => res,
+    let resolved = match create {
+        Ok(Ok(id_or_key)) => id_or_key,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": humanize_provider_error(&e) })),
+            )
+                .into_response()
+        }
         Err(e) => {
-            // P2-1：失败路径只推 RUN_ERROR（payload 带错误信息）——不推无
-            // runId 的 RUN_STARTED（前端会残留空消息段；§0.3-1：STARTED
-            // 必须挂在真实 run 上）。
-            st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
-            return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
         }
     };
-    if let Err(e) = created {
-        st.push(&thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
-        return Json(serde_json::json!({ "runId": null, "error": e })).into_response();
-    }
+    // 路由键：主会话 = `main:<piSessionId>`（每会话独立缓冲）；分栏 = 原
+    // 窗格键（本就 per-thread）。
+    let route_thread = if is_main_thread {
+        format!("main:{resolved}")
+    } else {
+        thread.clone()
+    };
 
     let run_id = format!(
         "run-{}",
@@ -651,7 +730,7 @@ async fn agui_run(
     let run_id_for_start = run_id.clone();
 
     let st2 = st.clone();
-    let thread2 = thread.clone();
+    let thread2 = route_thread.clone();
     // pi 的 block_on 阻塞自己的线程（asupersync），专用大栈线程承载——
     // pi debug 构建的 session future 深递归 >2MiB 默认栈（pi .cargo/config.toml
     // 的 RUST_MIN_STACK=16MiB 同源教训：MutexGuard 跨 await 非 Send，
@@ -700,11 +779,12 @@ async fn agui_run(
                 }
             };
             if let Err(e) = result {
-                err_sink.push(&err_thread, serde_json::json!({ "type": "RUN_ERROR", "message": e }));
+                err_sink.push(&err_thread, serde_json::json!({ "type": "RUN_ERROR", "message": humanize_provider_error(&e) }));
             }
         })
         .expect("spawn pi-prompt thread");
-    Json(serde_json::json!({ "runId": run_id })).into_response()
+    // 响应带路由键：前端核对/换订 SSE 用（`main:<id>` ≠ 请求里的 "main"）。
+    Json(serde_json::json!({ "runId": run_id, "threadId": route_thread })).into_response()
 }
 
 
@@ -863,6 +943,37 @@ mod tests {
     use super::*;
     use rpi_ai::types::{Api, AssistantMessage, AssistantMessageEvent};
     use rpi_agent::message::AgentMessage;
+
+    // ---------- provider 错误友好化 ----------
+
+    #[test]
+    fn humanize_extracts_title_from_nginx_error_page() {
+        // 用户 2026-11-27 实报的原文（nginx 502 默认页）。
+        let raw = "http error 502: <html> <head><title>502 Bad Gateway</title></head> \
+                   <body> <center><h1>502 Bad Gateway</h1></center> <hr><center>nginx</center> \
+                   </body> </html>";
+        let out = humanize_provider_error(raw);
+        assert!(out.starts_with("502 Bad Gateway"), "got: {out}");
+        assert!(!out.contains('<'), "不应再出现 HTML 标签: {out}");
+        assert!(!out.contains("<body>"), "不应再携带 body: {out}");
+    }
+
+    #[test]
+    fn humanize_keeps_plain_and_json_errors_verbatim() {
+        // 非 HTML（JSON 错误体 / 纯文本）是有效信息，一字不改。
+        let json = r#"{"error":{"message":"rate limited"}}"#;
+        assert_eq!(humanize_provider_error(json), json);
+        let plain = "connection refused";
+        assert_eq!(humanize_provider_error(plain), plain);
+    }
+
+    #[test]
+    fn humanize_falls_back_to_status_hint_without_title() {
+        let raw = "<html><body><h1>502 Bad Gateway</h1></body></html>";
+        let out = humanize_provider_error(raw);
+        assert!(out.contains("502 Bad Gateway"), "got: {out}");
+        assert!(!out.contains('<'), "不应再出现 HTML 标签: {out}");
+    }
 
     // ---------- 样本助手 ----------
 

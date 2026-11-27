@@ -17,7 +17,8 @@ import {
   type SpeechSynthesisAdapter,
 } from '@assistant-ui/react'
 import { invoke } from '@tauri-apps/api/core'
-import { useActorRef, useSelector } from '@xstate/react'
+import { useSelector } from '@xstate/react'
+import { createActor, type Actor } from 'xstate'
 import { useStore } from 'zustand'
 
 import { turnMachine, type TurnContext, type TurnMessage, type TurnUsage } from './turn-actor'
@@ -62,6 +63,7 @@ import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
+import { clearComposerDraft } from './composer-draft-store'
 import { conversationDisplayStore } from './conversation-display-store'
 import { timelineMarkerBridge } from './timeline-marker-store'
 import { dispatchToolDetails } from './tool-sidecar'
@@ -123,8 +125,76 @@ import {
   BoundarySpeechSynthesisAdapter,
   ensureSpeechSupportLogged,
 } from './speech-adapter'
+import { sessionThreadKey, NEW_CHAT_THREAD_KEY } from './session-thread-key'
 
-const THREAD = 'main'
+/**
+ * 多会话并存（2026-11-28 用户："切换会话时要不中断对话，像 hermes 那样
+ * 多标签并存、后台继续跑"）——**actor 注册表**：每个会话一份轮次机投影
+ * （键 = `main:<piSessionId>`，与引擎 POST 的事件路由键同源），切换会话 =
+ * 换焦点 actor（投影原样保留），**不重水合、不重置、不打断在跑 run**。
+ *
+ * 事件流模型：POST 解析会话后把 run 事件全部路由到 `main:<id>` 专属缓冲
+ * （agui.rs），切走后 run 在 retired 句柄上继续跑、事件继续落自己的桶；
+ * 焦点回到该会话时 SSE 从 actor 的 lastEventId 续放，增量无缝接上。
+ * hermes `useSessionStateCache`（per-session ClientSessionState，busy 条目
+ * 永不驱逐）+ "only the viewed session may stage into the shared view" 的
+ * 宿主对偶。
+ */
+const ACTOR_CAP = 12
+
+const freshTurnContext = (): TurnContext => ({
+  messages: [],
+  currentRunId: null,
+  lastEventId: 0,
+  error: null,
+  usage: null,
+  compaction: null,
+  providerRetry: null,
+  interrupted: false,
+})
+
+type TurnActor = Actor<typeof turnMachine>
+
+const actorRegistry = new Map<string, TurnActor>()
+/** 已经做过"文件水合"的会话键（切换路径据此区分冷/热：热 = 投影消费过
+ *  全部流事件，只需引擎切 live + SSE 续放；冷 = 走 peek/open/水合全链）。 */
+const hydratedKeys = new Set<string>()
+
+/** 取/建焦点 actor。`focusKey` = 当前焦点键（驱逐时永不选中它）。
+ *
+ * 驱逐（> ACTOR_CAP）：最久未用的**非焦点、非 streaming** actor——hermes
+ * `evictable()` 同语义（busy/awaiting 的条目永不驱逐，后台 run 不因容量
+ * 被杀投影）。被驱逐的会话再打开 = 走冷路径重水合（文件里有已落盘部分）。 */
+function getOrCreateActor(key: string, focusKey: string): TurnActor {
+  let actor = actorRegistry.get(key)
+  if (!actor) {
+    actor = createActor(turnMachine, { input: freshTurnContext() })
+    actorRegistry.set(key, actor)
+  }
+  if (actor.getSnapshot().status !== 'active') actor.start()
+  if (actorRegistry.size > ACTOR_CAP) {
+    const candidates = [...actorRegistry.entries()]
+      .filter(([k, a]) => k !== focusKey && !a.getSnapshot().matches('streaming'))
+      .sort((a, b) => a[1].getSnapshot().context.lastEventId - b[1].getSnapshot().context.lastEventId)
+    for (const [k, a] of candidates) {
+      if (actorRegistry.size <= ACTOR_CAP) break
+      a.stop()
+      actorRegistry.delete(k)
+      hydratedKeys.delete(k)
+    }
+  }
+  return actor
+}
+
+/** 丢弃一个会话的 actor（会话删除/New Chat 重建哨兵时用）。 */
+function dropActor(key: string): void {
+  const actor = actorRegistry.get(key)
+  if (actor) {
+    actor.stop()
+    actorRegistry.delete(key)
+  }
+  hydratedKeys.delete(key)
+}
 
 /**
  * 焦点会话的 bot owner（插件 `host.state.focusedSessionOwner` 的对偶）。
@@ -275,17 +345,17 @@ class RuntimeBoundary extends Component<{ children: ReactNode }, { error: Error 
 }
 
 export function AssistantRuntime({ children }: { children: ReactNode }) {
-  const actorRef = useActorRef(turnMachine, {
-    input: {
-      messages: [],
-      currentRunId: null,
-      lastEventId: 0,
-      error: null,
-      usage: null,
-      compaction: null,
-      interrupted: false,
-    } as TurnContext,
-  })
+  // ── 焦点会话（多会话并存，2026-11-28 用户："切换会话时要不中断对话，
+  // 像 hermes 那样多标签并存、后台继续跑"）——**每个会话一份轮次机投影**
+  //（actorRegistry，键 = sessionThreadKey），切换 = 换焦点 actor：投影
+  // 原样保留（在跑 run 的增量继续累积），不重水合、不重置、不打断。
+  // hermes `useSessionStateCache` + "only the viewed session may stage into
+  // the shared view" 的宿主对偶。
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
+  const currentThreadIdRef = useRef<string | null>(null)
+  currentThreadIdRef.current = currentThreadId
+  const focusedThreadKey = sessionThreadKey(currentThreadId)
+  const actorRef = getOrCreateActor(focusedThreadKey, focusedThreadKey)
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
   const usage = useSelector(actorRef, (s) => s.context.usage)
@@ -339,6 +409,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // adapter 的 state 通道，不再加桥（真相仍在轮次机 context）
   const compaction = useSelector(actorRef, (s) => s.context.compaction)
   const interrupted = useSelector(actorRef, (s) => s.context.interrupted)
+  // 提供方自动重试投影（同上：真相在轮次机 context，UI 直接读 state 通道）
+  const providerRetry = useSelector(actorRef, (s) => s.context.providerRetry)
 
   // ── 审查面板的自动刷新触发（hermes store/review.ts 的模块级订阅对偶）──
   //
@@ -371,16 +443,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // 消费方——侧栏/双行块/workspace 页签名——只读 catalog）；本组件是
   // 唯一写入者（pi_list_sessions 灌入 + 消息流派生标题）。assistant-ui
   // 的 threads 数组从 catalog 派生（title = 统一显示名）。
-  // 必须声明在挂载 effect 之前（effect 依赖数组 render 期求值，TDZ）。──
-  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null)
+  // 必须声明在挂载 effect 之前（effect 依赖数组 render 期求值，TDZ）。
+  // （currentThreadId/currentThreadIdRef 上移到组件头——焦点 actor 依赖它，
+  // 多会话并存 2026-11-28。）
   // 【bisect】threads 暂回本地 state（title=统一显示名）；catalog 并行灌入。
   const [threads, setThreads] = useState<ThreadListRow[]>([])
   const threadsRef = useRef<ThreadListRow[]>([])
   threadsRef.current = threads
-  // 会话列表刷新是异步回调——ingestRows 需要"当前选中的会话"（选中恒
-  // 确认已读），ref 保证回调里拿到最新值（closure 陈旧是已踩过的坑）。
-  const currentThreadIdRef = useRef<string | null>(null)
-  currentThreadIdRef.current = currentThreadId
 
   // 活动会话切换 → catalog（消费方经 activeId 取显示名/项目名）。
   useEffect(() => {
@@ -625,52 +694,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   }, [])
 
 
-  // 端点发现（IPC 主动拉取，避免启动竞态）+ 常驻 SSE 连接。
+  // ── 启动链（端点发现 + 环境/目录/上次会话恢复）──
+  // 多会话并存（2026-11-28）：SSE 订阅移到**焦点效果**（下方）——每个会话
+  // 一条流，thread = `main:<id>`（与 POST 事件路由键同源）；切换会话 =
+  // 换订焦点流，从焦点 actor 的 lastEventId 续放（在跑 run 的增量不丢，
+  // 切换永不打断）。
   // EventSource 断线时浏览器自动带 Last-Event-ID 重连 = 免费续放。
   // dropped 相（浏览器放弃自动重连）的手动 Reconnect：connectionBridge
-  // requestReconnect 递增 reconnectSeq → 本 effect 重跑（cleanup close 旧
-  // 连接 → 端点重发现 + 历史水合 + 会话列表重拉，幂等）。
+  // requestReconnect 递增 reconnectSeq → 两个 effect 都重跑（幂等）。
   const reconnectSeq = useStore(connectionBridge, (s) => s.reconnectSeq)
   // 启动页「重试」序号：启动失败后用户点重试 → 本 effect 重跑端点发现链。
   const bootRetrySeq = useStore(bootBridge, (s) => s.retrySeq)
   useEffect(() => {
-    let es: EventSource | null = null
     let cancelled = false
-    const onMessage = (e: MessageEvent) => {
-      try {
-        const parsed = JSON.parse(e.data)
-        // 审批请求进流（§4.4 prescribed：ExtensionUiRequest → CUSTOM
-        // 常驻流——不是被删的 Tauri Event 门铃，零新增通道）：卡片详情
-        // 以 Rust 端 ApprovalRegistry 为真相，经 IPC 拉取全量挂起列表
-        // （重放流不会造成卡片重复）。事件本体照常喂机器。
-        if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
-          approvalBridge
-            .getState()
-            .refresh()
-            .catch((err) => console.error('[pi] 审批列表拉取失败', err))
-        }
-        // ask 工具问题卡（同款信号语义：流上只有 id，详情走注册表拉取）
-        if (parsed?.type === 'CUSTOM' && parsed?.name === 'ask_request') {
-          askBridge
-            .getState()
-            .refresh()
-            .catch((err) => console.error('[pi] 问题列表拉取失败', err))
-        }
-        // 活动面板 sidecar（todo / agent roster / jobs）：tool_execution
-        // 的 details.schema 分派到对应 store。纯桥读取，不改消息段——真相
-        // 在 pi（todo 会话树条目 / agent_hub registry / jobs registry）。
-        if (parsed?.type === 'CUSTOM' && parsed?.name === 'tool_execution') {
-          dispatchToolDetails(parsed.name, parsed.value)
-        }
-        actorRef.send({
-          type: 'AGUI_EVENT',
-          event: parsed as { type: string } & Record<string, unknown>,
-          id: Number(e.lastEventId || 0),
-        })
-      } catch (err) {
-        console.error('[agui] 事件解析失败', err)
-      }
-    }
     void (async () => {
       bootBridge.getState().setBooting()
       // 端点发现带自动重试（2026-11-25 启动页全链路）：Rust setup 里引擎是
@@ -701,35 +737,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       try {
         setEndpoint(ep)
-        // 挂载水合（§7-4 多会话）：历史真相在 pi（pi_get_messages 水合），
-        // 流游标从缓冲最新 seq 起——跳过重放，避免混入其它会话的旧事件。
-        // 之后断线重连由浏览器带最后收到的 Last-Event-ID 正常续放。
-        let url = `http://127.0.0.1:${ep.port}/ag-ui/stream?thread=${THREAD}&token=${encodeURIComponent(ep.token)}`
-        try {
-          const cursor = await invoke<number>('pi_stream_cursor')
-          if (cancelled) return
-          url += `&lastEventId=${cursor}`
-        } catch (e) {
-          console.error('[pi] 流游标获取失败（保留全量重放连接）', e)
-        }
-        if (cancelled) return
-        es = new EventSource(url)
-        es.onmessage = onMessage
-        // 连接态投影（L1 可见性，四相见 connection-store）：onopen 置
-        // online；onerror 按 readyState 区分重试中（CONNECTING，自动重连
-        // 进行中）与 dropped（CLOSED，浏览器放弃）——真相在 EventSource。
-        es.onopen = () => {
-          connectionBridge.getState().setConnected(true)
-          // 启动页就绪信号：事件流首连成功 = 引擎真的可用了（端点成功只
-          // 说明 HTTP 面在，SSE 打开才代表 run 事件链就绪）。
-          bootBridge.getState().setReady()
-        }
-        es.onerror = (e) => {
-          console.error('[agui] SSE 连接错误', e)
-          // readyState：CONNECTING = 自动重试中；CLOSED = 浏览器放弃（dropped）
-          const source = e.target as EventSource
-          connectionBridge.getState().setDisconnected(source.readyState === EventSource.CLOSED)
-        }
+        // 挂载水合（§7-4 多会话）：历史真相在 pi；**事件流的订阅在焦点效果**
+        // （下方）——thread = 焦点会话键 `main:<id>`，游标 = 焦点 actor 的
+        // lastEventId。多会话并存：每会话独立缓冲（引擎按会话路由），SSE
+        // 按 Key 续放；会话内的 Last-Event-ID 断线重连照常免费续放。
         // 会话列表 + 当前线程 id（threadId 与 pi sessionId 同源）。
         // 环境隔离（hermes profile 对偶）：先把上次活动环境应用到引擎，再
         // 首刷目录——否则具名环境的会话（独立 home/sessions）一条都列不到。
@@ -783,10 +794,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
                 } else {
                   // 大会话秒开：先读文件尾把尾部画出来（不依赖引擎），
                   // 引擎 open 在后台继续；下方统一的水合会在引擎就绪后对齐。
+                  // 画到**该会话自己的 actor**（多会话并存：注册表按键持有）。
                   const peek = await peekTranscriptTail(lastPath)
                   if (cancelled) return
                   if (peek) {
-                    applyTranscriptPeek(actorRef, peek, peek.sessionId)
+                    const peekKey = sessionThreadKey(peek.sessionId)
+                    applyTranscriptPeek(getOrCreateActor(peekKey, peekKey), peek, peek.sessionId)
                     setCurrentThreadId(peek.sessionId)
                     mainViewStore.getState().showChat()
                   }
@@ -824,17 +837,36 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
               }
             }
           }
-          if (cancelled) return
-          setCurrentThreadId(st?.sessionId ?? null)
           if (st?.sessionId) {
+            const restoreKey = sessionThreadKey(st.sessionId)
+            const restoreActor = getOrCreateActor(restoreKey, restoreKey)
             // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
-            await hydrateTranscriptTail(actorRef, st.sessionId)
+            // **水合 + SEEK 先于 setCurrentThreadId**：焦点效果据此从正确的
+            // 游标开流（顺序反了会先从 0 开流，与文件水合竞态）。
+            await hydrateTranscriptTail(restoreActor, st.sessionId)
+            // 多会话并存：文件水合后把游标拨到该会话缓冲的当前头（缓冲里的
+            // 历史已由文件覆盖，只收之后的增量）——焦点效果的 SSE 从这里续放。
+            try {
+              const cursor = await invoke<number>('pi_stream_cursor', {
+                thread: restoreKey,
+              })
+              restoreActor.send({ type: 'SEEK', id: cursor })
+              hydratedKeys.add(restoreKey)
+            } catch (e) {
+              console.error('[pi] 流游标获取失败（不 seek，直接续放）', e)
+            }
+            setCurrentThreadId(st.sessionId)
             // 滚动位置恢复请求（挂载水合成功路径）：视口（thread.aui 侧）
             // 消费后按持久化位置恢复阅读位
             threadScrollBridge.getState().requestRestore(st.sessionId)
             // 时间线标记（模型切换/压缩分隔线）：与消息同源、同索引，水合
             // 后必须一起重拉——否则刷新页面后分隔线整批消失。
             void timelineMarkerBridge.getState().refresh(st.sessionId)
+          } else {
+            // 无恢复会话（New Chat 启动）没有 ES onopen 信号：启动页在这里
+            // 退场（端点 + 目录都就绪 = 引擎可用；恢复会话的 ready 由焦点流
+            // onopen 补）。
+            bootBridge.getState().setReady()
           }
         } catch (e) {
           // 真错误（pi_get_state 非"无会话"失败 / 水合失败）：保持当前状态并
@@ -854,16 +886,94 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     })()
     return () => {
       cancelled = true
-      es?.close()
     }
   }, [
-    actorRef,
     refreshThreads,
     hydrateTranscriptTail,
     reconnectSeq,
     bootRetrySeq,
     sweepEmptyBotChats,
   ])
+
+  // ── 焦点流（per-session SSE，多会话并存）──────────────────────────────
+  // thread = 焦点会话键 `main:<id>`（与 POST 事件路由键同源）；游标 = 焦点
+  // actor 的 lastEventId——切走期间该会话缓冲里累积的增量在重订时整段续放
+  // （在跑 run 不因切换中断，切回来接着看）。New Chat 哨兵键上没有引擎事
+  // 件（首条消息前 runtime 先 pi_ensure_main_session 拿真 id），不订阅。
+  const focusedThreadKeyForStream = sessionThreadKey(currentThreadId)
+  useEffect(() => {
+    if (!endpoint) return
+    if (focusedThreadKeyForStream === NEW_CHAT_THREAD_KEY) {
+      // New Chat 草稿态：没有会话流可订（引擎事件都落真会话键）；引擎可用
+      // 性由启动链保证，连接态置 online（无流可断）。
+      connectionBridge.getState().setConnected(true)
+      bootBridge.getState().setReady()
+      return
+    }
+    let es: EventSource | null = null
+    let cancelled = false
+    const streamActor = getOrCreateActor(focusedThreadKeyForStream, focusedThreadKeyForStream)
+    void (async () => {
+      try {
+        const cursor = streamActor.getSnapshot().context.lastEventId
+        let url = `http://127.0.0.1:${endpoint.port}/ag-ui/stream?thread=${encodeURIComponent(focusedThreadKeyForStream)}&token=${encodeURIComponent(endpoint.token)}`
+        if (cursor > 0) url += `&lastEventId=${cursor}`
+        if (cancelled) return
+        es = new EventSource(url)
+        es.onmessage = (e: MessageEvent) => {
+          try {
+            const parsed = JSON.parse(e.data)
+            // 审批/ask 请求进流（§4.4）：卡片详情以 Rust 注册表为真相，经
+            // IPC 拉取挂起列表（重放流不会造成卡片重复）。
+            if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
+              approvalBridge
+                .getState()
+                .refresh()
+                .catch((err) => console.error('[pi] 审批列表拉取失败', err))
+            }
+            if (parsed?.type === 'CUSTOM' && parsed?.name === 'ask_request') {
+              askBridge
+                .getState()
+                .refresh()
+                .catch((err) => console.error('[pi] 问题列表拉取失败', err))
+            }
+            // 活动面板 sidecar（todo / agent roster / jobs）：tool_execution
+            // 的 details.schema 分派到对应 store。纯桥读取，不改消息段。
+            if (parsed?.type === 'CUSTOM' && parsed?.name === 'tool_execution') {
+              dispatchToolDetails(parsed.name, parsed.value)
+            }
+            // 事件喂**本流所属会话**的 actor（键在闭包里——切走后旧流的尾
+            // 事件也落旧会话的投影，不串台）。
+            streamActor.send({
+              type: 'AGUI_EVENT',
+              event: parsed as { type: string } & Record<string, unknown>,
+              id: Number(e.lastEventId || 0),
+            })
+          } catch (err) {
+            console.error('[agui] 事件解析失败', err)
+          }
+        }
+        es.onopen = () => {
+          connectionBridge.getState().setConnected(true)
+          // 启动页就绪信号：事件流首连成功 = 引擎真的可用了（端点成功只
+          // 说明 HTTP 面在，SSE 打开才代表 run 事件链就绪）。
+          bootBridge.getState().setReady()
+        }
+        es.onerror = (e) => {
+          console.error('[agui] SSE 连接错误', e)
+          // readyState：CONNECTING = 自动重试中；CLOSED = 浏览器放弃（dropped）
+          const source = e.target as EventSource
+          connectionBridge.getState().setDisconnected(source.readyState === EventSource.CLOSED)
+        }
+      } catch (e) {
+        console.error('[agui] 焦点流连接失败', e)
+      }
+    })()
+    return () => {
+      cancelled = true
+      es?.close()
+    }
+  }, [focusedThreadKeyForStream, endpoint, reconnectSeq])
 
   /** 自动会话命名（规则段，hermes title_generator 两段式的即时段）：
    * POST 成功后对「默认态名」（pi SessionIndex 的 name 为 null/空 = 用户
@@ -954,9 +1064,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           // 契约：{threadId, message, images?: [{data: 纯base64, mimeType}]}；
-          // 无图片不带 images 键
+          // 无图片不带 images 键。**threadId = 本会话的路由键**
+          // `main:<id>`（多会话并存：引擎把本 run 的事件路由到该会话专属
+          // 缓冲——与 SSE 订阅键同源，切换会话互不串台）。
           body: JSON.stringify({
-            threadId: THREAD,
+            threadId: sessionThreadKey(currentThreadIdRef.current),
             message,
             // v7.4 双对话分栏：会话分栏发送会把引擎切到它自己的会话——工作区
             // 的每次发送都带上自己会话的 path，引擎切回工作区会话再跑（缺
@@ -968,13 +1080,22 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           }),
         },
       )
-      // 错误即错误：非 2xx 不装作已发送——状态码可见并抛出。
-      // 413 是图片链路的典型失败（请求体超过 axum 上限），文案写明。
+      // 错误即错误：非 2xx 不装作已发送——状态码 + 服务端错误原文可见
+      // （引擎 500 带 {error: 原文}；413 是图片链路的典型失败）。
       if (!res.ok) {
+        let detail = `POST /ag-ui 返回 ${res.status}`
+        try {
+          const body = (await res.json()) as { error?: unknown }
+          if (typeof body?.error === 'string' && body.error.trim()) {
+            detail = `${detail}：${body.error.trim()}`
+          }
+        } catch {
+          /* 响应体非 JSON——保留状态码文案 */
+        }
         const msg =
           res.status === 413
             ? '消息发送失败：请求体过大（HTTP 413）——图片/附件总大小超过服务端上限'
-            : `消息发送失败：POST /ag-ui 返回 ${res.status}`
+            : `消息发送失败：${detail}`
         errorBridge.getState().setError(msg, false)
         throw new Error(msg)
       }
@@ -1033,10 +1154,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       sessionCatalog.getState().setActive(sessionId)
       setCurrentThreadId(sessionId)
       mainViewStore.getState().showChat()
-      applyTranscriptPeek(actorRef, peek, sessionId)
+      // 预览画到**目标会话自己的 actor**（多会话并存：键按会话隔离）
+      applyTranscriptPeek(getOrCreateActor(sessionThreadKey(sessionId), sessionThreadKey(sessionId)), peek, sessionId)
       threadScrollBridge.getState().requestRestore(sessionId)
     })()
-  }, [sessionPreviewRequest, actorRef])
+  }, [sessionPreviewRequest])
 
   /** run 进行中先中断（照抄 switchToThread 守卫）：prompt 持锁跨整个 run，
    * 不先 pi_interrupt 重发会撞锁失败；中断失败返回 false，调用方不动状态 */
@@ -1065,7 +1187,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
    * 清；累计按 sessionId 键隔离保留）。时间线标记（模型切换/压缩分隔线）
    * 同属会话域——重拉该会话的条目投影。 */
   const resetSessionScopedBridges = useCallback((sessionId: string | null) => {
-    sessionQueue.getState().clear()
+    // 排队消息**不再 clear**（多会话并存：排队意图按会话分桶持久化，切换
+    // 会话 = 各归各键，切回继续按序发出——2026-11-28 用户："排队消息切换
+    // 会话后都没了"）。会话删除时经 clearSession 单点清理。
     checkpointBridge.getState().resetProjection()
     costBridge.getState().resetSession(sessionId)
     void timelineMarkerBridge.getState().refresh(sessionId)
@@ -1146,7 +1270,36 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     if (currentThreadIdRef.current) return currentThreadIdRef.current
     const pendingCwd = sessionCatalog.getState().pendingCwd
     const pendingBot = pendingBotChatStore.getState().pending
-    if (!pendingCwd && !pendingBot) return null
+    if (!pendingCwd && !pendingBot) {
+      // 普通 New Chat 首发（多会话并存 2026-11-28）：**显式建会话**——
+      // pi_ensure_main_session 引擎上台 + pi 分配 session id；拿到 id 后
+      // 事件路由键 `main:<id>` 从第一条消息就正确（不再依赖懒创建后的
+      // 收养补偿）。
+      try {
+        const ensured = await invoke<{ id: string; path: string | null }>(
+          'pi_ensure_main_session',
+        )
+        if (!ensured?.id) throw new Error('pi 没有返回新会话 id')
+        const now = Date.now()
+        workspaceSessionIndex.getState().register({
+          id: ensured.id,
+          cwd: '',
+          ...(ensured.path ? { path: ensured.path } : {}),
+          profile: profileStore.getState().profile,
+          messageCount: 0,
+          createdAtMs: now,
+          lastModifiedMs: now,
+        })
+        setCurrentThreadId(ensured.id)
+        sessionCatalog.getState().setActive(ensured.id)
+        await refreshThreads()
+        return ensured.id
+      } catch (e) {
+        throw new MessageNotSentError(
+          `新会话创建失败：${e instanceof Error ? e.message : String(e)}`,
+        )
+      }
+    }
     try {
       let sessionId: string
       let createdPath: string | null = null
@@ -1215,7 +1368,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const teardownToNewChat = useCallback(async (): Promise<void> => {
     const leavingEmpty = currentThreadIdRef.current
     try {
-      if (actorRef.getSnapshot().matches('streaming')) await invoke('pi_interrupt')
+      // **不打断在跑 run**（多会话并存 2026-11-28）：pi_discard_session 把
+      // 活动柄退入 retired（run 在后台继续，事件落自己的桶）；New Chat =
+      // 焦点换到哨兵 actor，旧会话原样保留。
       // 空会话（bot 行刚铸出来还没说话）不留在磁盘上
       await pruneEmptyCurrentSession(leavingEmpty)
       await invoke('pi_discard_session')
@@ -1223,7 +1378,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 会话拆除失败不阻断落点切换（环境/草稿真相已定），但必须可见。
       console.error('[profile] 离开当前会话失败（侧栏仍会按新落点重扫）', e)
     }
-    actorRef.send({ type: 'RESET' })
+    // New Chat 草稿 = 全新哨兵 actor（旧会话投影留在注册表里，切回即恢复）
+    dropActor(NEW_CHAT_THREAD_KEY)
     resetTranscriptTail()
     setCurrentThreadId(null)
     sessionCatalog.getState().setActive(null)
@@ -1235,7 +1391,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       console.error('[profile] 落点切换后会话目录刷新失败（侧栏保持旧列表）', e)
     }
     branchBridge.getState().requestRefresh()
-  }, [actorRef, pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges])
+  }, [pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges])
 
   /** 切换活动环境（hermes Desktop「配置档案」选择的对偶；2026-11-22）。
    *
@@ -1398,9 +1554,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error('[pi] fork 返回形状非法——不采纳新会话', forked)
         return
       }
-      // 采纳新会话：重水合 + currentThreadId 切换 + 线程列表刷新
+      // 采纳新会话：新会话自己的 actor 水合（多会话并存：fork 是新键，旧
+      // 会话的 actor 原样保留）+ currentThreadId 切换 + 线程列表刷新
       try {
-        await hydrateTranscriptTail(actorRef, forked.sessionId)
+        const forkedKey = sessionThreadKey(forked.sessionId)
+        const forkedActor = getOrCreateActor(forkedKey, forkedKey)
+        await hydrateTranscriptTail(forkedActor, forked.sessionId)
+        try {
+          const cursor = await invoke<number>('pi_stream_cursor', { thread: forkedKey })
+          forkedActor.send({ type: 'SEEK', id: cursor })
+          hydratedKeys.add(forkedKey)
+        } catch (e) {
+          console.error('[pi] 流游标获取失败（不 seek，直接续放）', e)
+        }
         setCurrentThreadId(forked.sessionId)
         await refreshThreads()
         resetSessionScopedBridges(forked.sessionId)
@@ -1415,7 +1581,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 分支条刷新（新会话的分支态）
       branchBridge.getState().requestRefresh()
     },
-      [actorRef, hydrateTranscriptTail, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
+      [hydrateTranscriptTail, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
   )
 
   /** 分支切换执行：守卫 → pi_switch_branch（服务端切叶）→ 重拉
@@ -1467,7 +1633,18 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         return
       }
       try {
-        await hydrateTranscriptTail(actorRef, sessionId)
+        // 回到父会话 = 打开另一个既有会话：水合到**父会话自己的 actor**
+        // （多会话并存：键按会话隔离，旧 actor 原样保留）
+        const parentKey = sessionThreadKey(sessionId)
+        const parentActor = getOrCreateActor(parentKey, parentKey)
+        await hydrateTranscriptTail(parentActor, sessionId)
+        try {
+          const cursor = await invoke<number>('pi_stream_cursor', { thread: parentKey })
+          parentActor.send({ type: 'SEEK', id: cursor })
+          hydratedKeys.add(parentKey)
+        } catch (e) {
+          console.error('[pi] 流游标获取失败（不 seek，直接续放）', e)
+        }
         setCurrentThreadId(sessionId)
         await refreshThreads()
         resetSessionScopedBridges(sessionId)
@@ -1481,7 +1658,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       branchBridge.getState().requestRefresh()
     },
-    [actorRef, interruptIfRunning, refreshThreads, resetSessionScopedBridges],
+    [interruptIfRunning, refreshThreads, resetSessionScopedBridges],
   )
 
   const forkRequest = useStore(branchBridge, (s) => s.forkRequest)
@@ -1629,22 +1806,21 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           fail(message)
           return
         }
-        if (!(await interruptIfRunning())) {
-          fail('当前会话无法中断——未新建工作区会话')
-          return
-        }
+        // （多会话并存：在跑 run 后台继续，不再 gate 在"能中断"上）
         // ZCode 选文件夹 = 新建项目：先落项目注册表（同根复用/回收站恢复），
         // 再进入草稿；失败则整个请求失败（不留下「有会话无项目」）。
         await ensureProjectForWorkspace(cwd)
         await sessionCatalog.getState().loadProjects(true)
         // 草稿态：旧会话（若为 0 消息空壳）删掉，其余只 flush 不删文件。
+        // **不打断在跑 run**（多会话并存）：discard 把柄退入 retired，run
+        // 后台继续；焦点换到全新哨兵 actor。
         await pruneEmptyCurrentSession(currentThreadIdRef.current)
         try {
           await invoke('pi_discard_session')
         } catch (e) {
           console.error('[pi] 丢弃旧会话失败（仍进入工作区草稿）', e)
         }
-        actorRef.send({ type: 'RESET' })
+        dropActor(NEW_CHAT_THREAD_KEY)
         resetTranscriptTail()
         setCurrentThreadId(null)
         sessionCatalog.getState().setActive(null)
@@ -1710,7 +1886,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         console.error('[queue] endpoint 未就绪——排队消息保留，待下次 run 收尾再发')
         return
       }
-      if (sessionQueue.getState().items.length === 0) return
+      // 排队消息按**焦点会话**分桶（多会话并存）：drain 只发焦点会话的
+      // 队列（后台会话的队列在切回焦点且空闲时续发）。
+      const drainKey = sessionThreadKey(currentThreadIdRef.current)
+      if ((sessionQueue.getState().bySession[drainKey] ?? []).length === 0) return
       let busy = true
       for (let attempt = 0; attempt < 60; attempt += 1) {
         busy = false
@@ -1735,7 +1914,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         }
         return
       }
-      const next = sessionQueue.getState().takeFirst()
+      const next = sessionQueue.getState().takeFirst(drainKey)
       if (!next) return
       actorRef.send({
         type: 'USER_SUBMIT',
@@ -1790,6 +1969,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     void drainQueue()
     recordRunCost()
   }, [isRunning, drainQueue, recordRunCost])
+
+  // 排队消息的**边沿无关自动 drain**（hermes shouldAutoDrain 同语义：
+  // "the queue must advance whenever the session is idle and has pending
+  // entries, NOT only on an observed busy→false edge"）——切到某会话时若
+  // 它有排队消息且空闲，立即续发（否则切走的会话收尾时队列永远等不到
+  // 下一个收尾边沿）。
+  useEffect(() => {
+    if (isRunning || !endpoint) return
+    const key = sessionThreadKey(currentThreadId)
+    if ((sessionQueue.getState().bySession[key] ?? []).length === 0) return
+    const timer = window.setTimeout(() => void drainQueue(), 300)
+    return () => window.clearTimeout(timer)
+  }, [currentThreadId, isRunning, endpoint, drainQueue])
 
   // onEdit（§数据面契约 pi_retry_edit）：准备最后一个可重试 user turn 的
   // 兄弟分支，重发 = 之后一次普通 POST。成功后把编辑文本经 USER_SUBMIT
@@ -1899,9 +2091,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 流式中切换（§4.5）：prompt 持锁跨整个 run（RUN_FINISHED/ERROR 才
       // 释放），不先中断 open_session 会撞锁失败——先 pi_interrupt 再切；
       // 中断失败保持当前会话（不更新本地态，禁止假装切换成功）。
+      //
+      // **中断必须可见**（2026-11-27 用户：「去掉工作中」）：引擎单 handle
+      // 决定了「切换 = 只能中断」。标记要在下面 hydrate **之后**发（hydrate
+      // 的 assign 会把 interrupted 重置为 false，先发会被清掉），否则切回来
+      // 时 run 已经没了、界面上却没有任何痕迹。
+      let interruptedBySwitch = false
       if (actorRef.getSnapshot().matches('streaming')) {
         try {
           await invoke('pi_interrupt')
+          interruptedBySwitch = true
           console.info('[pi] run 进行中：已中断当前 run 后切换会话（prompt 持锁跨整个 run）')
         } catch (e) {
           console.error('[pi] 中断当前 run 失败，取消切换会话', e)
@@ -1922,6 +2121,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       }
       // 离开的空会话不落盘（2026-11-26）：先清理当前 0 消息会话，再切目标。
       await pruneEmptyCurrentSession(currentThreadIdRef.current)
+      // **切换绝不打断在跑 run**（2026-11-28 用户："切换会话时要不中断对
+      // 话，像 hermes 那样多标签并存、后台继续跑"）：引擎按会话路由事件
+      // （POST 键 `main:<id>`），切走后 run 在 retired 句柄上继续跑、事件
+      // 落自己的桶；旧实现「先 pi_interrupt 再切」已随单会话路由一并撤销。
+      // 用户要停止 = 点停止钮（显式手势，hermes/ZCode 同语义）。
       // 乐观高亮（hermes focusOpenSession 先前端面后等 RPC 的对偶）：点行
       // 立即把选中态切过去，侧栏/页签不用干等 open_session + 全量水合。
       // 打开失败时下面 catch 会拉一次真值把选中态纠正回来。
@@ -1929,16 +2133,44 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       sessionCatalog.getState().setActive(id)
       setCurrentThreadId(id)
       mainViewStore.getState().showChat()
+      const targetKey = sessionThreadKey(id)
+      const warm = hydratedKeys.has(targetKey)
       // **内容加载防抖**（2026-11-21 用户实测：快速连点会话卡顿）：
       // 乐观 UI 零成本即时；peek+open+hydrate 的 React 提交 ~300-500ms/次，
       // 连点会堆叠。取消上一次的 pending 加载，只执行最后一次点击的加载。
       if (switchDebounceRef.current) clearTimeout(switchDebounceRef.current)
       switchDebounceRef.current = setTimeout(async () => {
         try {
-          // **大会话秒开**：引擎 pi_open_session 对巨文件要整树 replay（实测
-          // 11MB ≈ 5s）。尾部预览（文件尾读，不依赖引擎）与打开并行：预览
-          // 先回来且引擎还没就绪 → 先把尾部画出来；打开就绪后统一走引擎页
-          // 对齐（同条目 id 重水合，无 key 变化、无闪烁）。
+          if (warm) {
+            // **热会话**：投影已消费该会话全部流事件（比文件新，在跑 run 的
+            // 增量也在）——只切引擎 live（get_state/模式/审批都跟 live），
+            // **不重水合**：重水合会把文件里的旧状态盖回投影，在跑 run 的
+            // 增量反而丢。SSE 由焦点效果按 focusedKey 变化换订续放。
+            let openErrorW: unknown = null
+            const openW = invoke('pi_open_session', { path })
+              .then(() => undefined)
+              .catch((e) => {
+                openErrorW = e
+              })
+            pendingOpenRef.current = openW
+            await openW
+            if (openErrorW) throw openErrorW
+            errorBridge.getState().setError(null)
+            if (sessionCatalog.getState().activeId !== id) return
+            $hostActiveSessionId.set(id)
+            $hostFocusedStoredSessionId.set(id)
+            void refreshThreads().catch((e) =>
+              console.error('[pi] 切换后会话目录刷新失败（侧栏行统计可能偏高）', e),
+            )
+            resetSessionScopedBridges(id)
+            threadScrollBridge.getState().requestRestore(id)
+            branchBridge.getState().requestRefresh()
+            return
+          }
+          // **冷会话（首次打开）**：引擎 pi_open_session 对巨文件要整树
+          // replay（实测 11MB ≈ 5s）。尾部预览（文件尾读，不依赖引擎）与
+          // 打开并行：预览先回来且引擎还没就绪 → 先把尾部画出来；打开就绪
+          // 后统一走引擎页对齐（同条目 id 重水合，无 key 变化、无闪烁）。
           let openError: unknown = null
           let openSettled = false
           const openPromise = invoke('pi_open_session', { path })
@@ -1949,11 +2181,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
               openSettled = true
             })
           pendingOpenRef.current = openPromise.then(() => undefined)
+          const targetActor = getOrCreateActor(targetKey, targetKey)
           const peek = await peekTranscriptTail(path)
           // 预览等待期间用户可能已切走：只在仍是当前选中时才挂（以
           // catalog.activeId 为准——setActive 是同步 Zustand 写）
           if (peek && !openSettled && sessionCatalog.getState().activeId === id) {
-            applyTranscriptPeek(actorRef, peek, id)
+            applyTranscriptPeek(targetActor, peek, id)
             threadScrollBridge.getState().requestRestore(id)
           }
           if (!openSettled) setEngineAttaching(true)
@@ -1967,8 +2200,20 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           // 下一次 RUN_STARTED 的归约自然覆盖）。
           errorBridge.getState().setError(null)
           // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
-          await hydrateTranscriptTail(actorRef, id)
+          // 返回值 = 是否真的写入（false = 已被更新的切换取代，本会话不再
+          // 是该请求的归属者——后续副作用一律跳过，避免搞乱别人的会话）。
+          const hydrated = await hydrateTranscriptTail(targetActor, id)
+          if (!hydrated) return
           if (sessionCatalog.getState().activeId !== id) return // 已切走
+          // 多会话并存：文件水合后把游标拨到该会话缓冲的当前头（缓冲历史
+          // 已由文件覆盖，只收之后的增量），并标记为热会话（下次切换走热路）。
+          try {
+            const cursor = await invoke<number>('pi_stream_cursor', { thread: targetKey })
+            targetActor.send({ type: 'SEEK', id: cursor })
+            hydratedKeys.add(targetKey)
+          } catch (e) {
+            console.error('[pi] 流游标获取失败（不 seek，直接续放）', e)
+          }
           // 宿主状态面（插件 host.state）：活动/聚焦会话 = 当前线程；机器人
           // 花名册的"这行是否正在看"与"是否在跑"读这两个 atom。owner/profile
           // 由 [currentThreadId] 的效果统一算（bot 双锚命中才是 owner）。
@@ -1997,7 +2242,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         }
         })
     },
-    [actorRef, hydrateTranscriptTail, pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges],
+    [hydrateTranscriptTail, pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges],
   )
 
   const switchToThread = useCallback(
@@ -2089,12 +2334,14 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     threads,
     onSwitchToNewThread: async () => {
       // New Chat：flush 旧会话落盘 + 清 handle（不立即建空会话文件），
-      // 下一次发送按需创建全新会话；失败保持当前会话（不更新本地态）
+      // 下一次发送按需创建全新会话；失败保持当前会话（不更新本地态）。
+      // **不打断在跑 run**（多会话并存 2026-11-28）：discard 把柄退入
+      // retired，run 后台继续；焦点换到全新哨兵 actor。
       try {
         // 旧会话如果是 0 消息空壳（bot 行刚铸出来的），直接删掉不留盘
         await pruneEmptyCurrentSession(currentThreadIdRef.current)
         await invoke('pi_discard_session')
-        actorRef.send({ type: 'RESET' })
+        dropActor(NEW_CHAT_THREAD_KEY)
         resetTranscriptTail()
         setCurrentThreadId(null)
         // 新会话不继承上一个文件夹（"新建会话"按钮语义不变）；否则
@@ -2168,10 +2415,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         if (id === currentThreadId) {
           // 当前活跃会话：pi 持有该会话 handle（jsonl 打开中），直接
           // delete 会撞打开中的文件——先 discard（flush 落盘 + 清 handle
-          // + 清挂起审批）+ 清轮次态（消息清空、threadId 置 null = 高亮
+          // + 清挂起审批）+ 焦点换全新哨兵 actor（threadId 置 null = 高亮
           // New Chat），再删文件。非当前会话行为不变。
           await invoke('pi_discard_session')
-          actorRef.send({ type: 'RESET' })
+          dropActor(NEW_CHAT_THREAD_KEY)
           resetTranscriptTail()
           setCurrentThreadId(null)
           sessionCatalog.getState().setPendingCwd(null)
@@ -2182,6 +2429,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         await invoke('pi_delete_session', { path })
         // 删除成功：登记表同步移除，否则 refreshThreads 会把这行补回来。
         workspaceSessionIndex.getState().remove(id)
+        // 该会话的队列/草稿一并清掉（用户删除 = 意图明确，不是切换）。
+        sessionQueue.getState().clearSession(sessionThreadKey(id))
+        clearComposerDraft(id)
         // 删除成功清该会话的滚动位置记忆（内存 + 持久化）
         clearThreadScroll(id)
         await refreshThreads()
@@ -2216,8 +2466,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 无语音引擎环境为 undefined（capabilities.speech=false，UI 钮隐藏）
       ...(speechAdapter ? { speech: speechAdapter } : {}),
     },
-    // 压缩横幅 / 中断态投影（机器 context 的 JSON 快照）
-    state: { compaction, interrupted },
+    // 压缩横幅 / 中断态 / 重试中投影（机器 context 的 JSON 快照）
+    state: { compaction, interrupted, providerRetry },
     // TurnPart 与 ThreadMessageLike 的 tool-call 形状对齐；args 的
     // Record<string, unknown> 运行时即 JSON 对象（pi arguments Value），断言
     convertMessage: convertTurnMessage,
@@ -2313,15 +2563,17 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           void refreshThreads()
           return
         }
-        sessionQueue.getState().enqueue({
-          id: `queued-${++queuedSeq}`,
-          text,
-          ...(submission !== text ? { submission } : {}),
-          ...(plan.images.length > 0
-            ? { images: plan.images, imageDataUrls: plan.imageDataUrls }
-            : {}),
-          ...(plan.files.length > 0 ? { files: plan.files } : {}),
-        })
+        sessionQueue
+          .getState()
+          .enqueue(sessionThreadKey(currentThreadIdRef.current), {
+            id: `queued-${++queuedSeq}`,
+            text,
+            ...(submission !== text ? { submission } : {}),
+            ...(plan.images.length > 0
+              ? { images: plan.images, imageDataUrls: plan.imageDataUrls }
+              : {}),
+            ...(plan.files.length > 0 ? { files: plan.files } : {}),
+          })
         // lane 忙但 **UI 已 idle**（收尾窗口/断流残留）：没有 run 收尾事件
         // 会来触发 drain，必须自己排一次重试——否则排队消息永远不发出。
         if (laneBusy && !streaming) {
@@ -2338,7 +2590,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 建会话（cwd 随 pi_new_session 传入）；普通 New Chat 的 ensure 仍由
       // agui POST 懒创建。
       await ensureDraftSession()
-      actorRef.send({
+      // 乐观 USER_SUBMIT 落**本会话自己的 actor**（多会话并存：ensure 之后
+      // currentThreadId 已定，闭包里的 actorRef 可能还是旧焦点——按键取）。
+      const sendSessionId = currentThreadIdRef.current
+      if (!sendSessionId) throw new MessageNotSentError('[pi] 会话创建失败——消息未发送')
+      const sendKey = sessionThreadKey(sendSessionId)
+      getOrCreateActor(sendKey, sendKey).send({
         type: 'USER_SUBMIT',
         text,
         messageId: `user-${Date.now()}`,

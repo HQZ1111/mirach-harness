@@ -85,6 +85,32 @@ export type CompactionSnapshot = {
   errorMessage?: string
 }
 
+/**
+ * 提供方重试快照（AG-UI CUSTOM name=provider_retry）。
+ *
+ * 引擎在上游 provider 瞬时失败（429/配额/过载/5xx）后、退避等待前发一次
+ * （`agui.rs` 的 RetryScheduled → CUSTOM provider_retry）。
+ *
+ * 为什么必须有：此前这个事件被**完全忽略**，用户只看到会话“卡住很久 → 突然
+ * 报错停下”，中间 10 次重试全无感知（2026-11-27 用户：“模型出问题了，不显示
+ * 自动重连”）。hermes 在 assistant-message 里显示「Retrying at … — in Ns」+ 取消，
+ * 这里用同一语义。
+ *
+ * run 结束（FINISHED/ERROR）、新 run 开始、RESET 清空。
+ */
+export type ProviderRetrySnapshot = {
+  /** 第几次重试（1 起，首发不计）。 */
+  attempt: number
+  /** 本次请求允许的最大重试次数。 */
+  maxRetries: number
+  /** 本次退避时长 ms。 */
+  delayMs: number
+  /** 失败原因（引擎原文，展示层已由 agui 清洗过 HTML）。 */
+  error: string
+  /** 收到该事件的本机时刻（ms）——UI 据此倒计时。 */
+  scheduledAt: number
+}
+
 /** 当前答案段边界：最后一个 tool-call 之后是否已有 text。 */
 function segmentBounds(parts: TurnPart[]): { lastTool: number; lastText: number } {
   let lastTool = -1
@@ -174,6 +200,8 @@ export interface TurnContext {
   usage: TurnUsage | null
   /** 上下文压缩横幅数据（CUSTOM name=compaction；新 run 开始清） */
   compaction: CompactionSnapshot | null
+  /** 提供方自动重试中（CUSTOM name=provider_retry；run 收尾/新 run 清） */
+  providerRetry: ProviderRetrySnapshot | null
   /** 用户中断标记：pi_interrupt 成功后置位，run 结束后 thread.aui 据此
    * 展示 StoppedRun（继续/丢弃）；新 run 开始、RESET、HYDRATE 清。 */
   interrupted: boolean
@@ -199,6 +227,10 @@ export type TurnEvent =
   | { type: 'CANCEL_MARK' }
   /** StoppedRun 的继续/丢弃被处理——清中断标记 */
   | { type: 'INTERRUPT_CLEAR' }
+  /** 多会话并存（2026-11-28）：把游标拨到事件缓冲的指定 seq——新 actor
+   *  从文件水合后跳过缓冲里已落盘的历史（文件 ≥ 缓冲），只收之后的
+   *  增量。不改投影，只动 lastEventId。 */
+  | { type: 'SEEK'; id: number }
 
 /** 会往消息里写内容的事件类（run 归属事件）。currentRunId === null 时送达
  * = run 外残留/重放（RUN_ERROR 后的服务器尾流、断线重放窗口）——drop 并
@@ -250,6 +282,8 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
         error: null,
         // 新 run 开始清压缩横幅与中断标记（二者都只描述上一个 run）
         compaction: null,
+        // 新 run 开始清上一 run 的重试提示（只描述上一个 run）
+        providerRetry: null,
         interrupted: false,
         messages: [
           ...ctx.messages,
@@ -378,6 +412,31 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
         }
         return { ...next, messages }
       }
+      // 提供方自动重试（CUSTOM name=provider_retry）：引擎在退避等待前发一次。
+      // 形状不符 console.error 可见并丢弃（渲染选择非吞错）。
+      if (ev.name === 'provider_retry' && value && typeof value === 'object') {
+        const v = value as {
+          attempt?: unknown
+          maxRetries?: unknown
+          delayMs?: unknown
+          error?: unknown
+        }
+        const attempt = typeof v.attempt === 'number' ? v.attempt : null
+        const maxRetries = typeof v.maxRetries === 'number' ? v.maxRetries : null
+        const delayMs = typeof v.delayMs === 'number' ? v.delayMs : null
+        if (attempt === null || maxRetries === null || delayMs === null) {
+          console.error('[turn] provider_retry 事件字段缺失——丢弃', v)
+          return next
+        }
+        const snap: ProviderRetrySnapshot = {
+          attempt,
+          maxRetries,
+          delayMs,
+          error: typeof v.error === 'string' ? v.error : '',
+          scheduledAt: Date.now(),
+        }
+        return { ...next, providerRetry: snap }
+      }
       // 上下文压缩（§数据面契约）：phase 严格二值，其余字段按类型收窄——
       // 形状不符 console.error 可见并丢弃（渲染选择非吞错）
       if (ev.name === 'compaction' && value && typeof value === 'object') {
@@ -422,10 +481,17 @@ export function reduceAguiEvent(ctx: TurnContext, ev: AguiEvent, id: number): Tu
               costUsd: num(usage.costUsd),
             }
           : next.usage,
+        // run 结束（无论成败）都不再有“重试中”——清掉，避免下一 run 残留。
+        providerRetry: null,
       }
     }
     case 'RUN_ERROR':
-      return { ...next, currentRunId: null, error: String(ev.message ?? 'run error') }
+      return {
+        ...next,
+        currentRunId: null,
+        error: String(ev.message ?? 'run error'),
+        providerRetry: null,
+      }
     default:
       return next // run 外/未映射事件透传（§0.3-5）
   }
@@ -505,6 +571,7 @@ export const turnMachine = setup({
       error: null,
       usage: null,
       compaction: null,
+      providerRetry: null,
       interrupted: false,
     })),
     hydrate: assign(({ event }) => {
@@ -517,6 +584,7 @@ export const turnMachine = setup({
         error: null,
         usage: event.usage ?? null,
         compaction: null,
+        providerRetry: null,
         interrupted: false,
       }
     }),
@@ -530,6 +598,13 @@ export const turnMachine = setup({
       const keep = Math.max(0, Math.trunc(event.keep))
       if (keep === 0 || context.messages.length <= keep) return {}
       return { messages: context.messages.slice(context.messages.length - keep) }
+    }),
+    seek: assign(({ context, event }) => {
+      if (event.type !== 'SEEK') return {}
+      const id = Math.max(0, Math.trunc(event.id))
+      // 只前移不后退：游标是"本会话已消费到的缓冲位置"，倒退会造成重放
+      // （dedupe 门会挡掉，但游标语义就该单调）。
+      return id > context.lastEventId ? { lastEventId: id } : {}
     }),
   },
   guards: {
@@ -558,6 +633,7 @@ export const turnMachine = setup({
         TRIM_HISTORY: { actions: 'trimHistory' },
         CANCEL_MARK: { actions: 'markCancelled' },
         INTERRUPT_CLEAR: { actions: 'clearInterrupt' },
+        SEEK: { actions: 'seek' },
         AGUI_EVENT: [
           { guard: 'isRunStart', target: 'streaming', actions: 'reduce' },
           { actions: 'reduce' }, // idle 态 run 外事件透传（§0.3-5）
@@ -573,6 +649,7 @@ export const turnMachine = setup({
         TRIM_HISTORY: { actions: 'trimHistory' },
         CANCEL_MARK: { actions: 'markCancelled' },
         INTERRUPT_CLEAR: { actions: 'clearInterrupt' },
+        SEEK: { actions: 'seek' },
         AGUI_EVENT: [
           // streaming 中另一 runId 的 RUN_STARTED：协议违例（§0.3-1——
           // run 内交错在物理上不可能，AgentSessionHandle Mutex 互斥），

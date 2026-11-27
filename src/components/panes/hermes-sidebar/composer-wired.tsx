@@ -10,7 +10,7 @@
  * + 上传态遮罩）。斜杠/@=kit 匹配器；模型选择=pi 控制面（§4.5 IPC：
  * pi_list_models/pi_get_state/pi_set_model）。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FC, type KeyboardEvent } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ComposerPrimitive,
@@ -19,7 +19,7 @@ import {
   unstable_useComposerInput,
 } from '@assistant-ui/react'
 import { useStore } from 'zustand'
-import { FileText, ImageIcon, Languages } from 'lucide-react'
+import { CheckIcon, FileText, ImageIcon, Languages, LightbulbIcon, SquareIcon } from 'lucide-react'
 
 import {
   Composer,
@@ -38,10 +38,17 @@ import {
 } from '@/components/assistant-ui/elements/composer'
 import { useContributions } from '@/hermes-shim/contrib/react/use-contributions'
 import { COMPOSER_AT_COMPLETIONS_AREA } from '@/hermes-shim/contrib/composer-middleware'
+import { getComposerDraft, setComposerDraft } from '@/components/assistant-ui/composer-draft-store'
 import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assistant-ui/elements/attachment.aui'
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { PermissionModeChip } from '@/components/assistant-ui/permission-mode-chip'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/motion/context-menu'
 import { ComposerStatusBadge } from '@/components/assistant-ui/composer-status-badge'
 import { ComposerTopSlot } from '@/components/assistant-ui/composer-top-slot'
 import { useThreadSessionId } from '@/components/assistant-ui/thread-session-id'
@@ -51,6 +58,7 @@ import {
   toModelOptions,
 } from '@/components/assistant-ui/model-catalog-store'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
+import { ComposerStatsLine } from '@/components/assistant-ui/composer-stats-line'
 import { pickAttachmentFiles } from '@/components/assistant-ui/attachments'
 
 const COMMANDS = [
@@ -58,6 +66,58 @@ const COMMANDS = [
   { name: 'summary', description: '总结当前对话', icon: FileText },
   { name: 'translate', description: '翻译成英文', icon: Languages },
 ] as const
+
+/** pi ThinkingLevel（引擎真实档位，pi_set_thinking_level 直接消费）。
+ *  中文名 = 展示用，与引擎值一一对应；`null`（未设）按引擎默认（不选）展示。 */
+const THINKING_LEVELS = [
+  { level: 'off', label: '关闭', hint: '不输出思考' },
+  { level: 'minimal', label: '最少', hint: '最少思考' },
+  { level: 'low', label: '低', hint: '轻量思考' },
+  { level: 'medium', label: '中', hint: '平衡（常用）' },
+  { level: 'high', label: '高', hint: '深度思考' },
+  { level: 'xhigh', label: '极高', hint: '大量思考' },
+  { level: 'max', label: '最大', hint: '完整推理预算' },
+] as const
+
+/**
+ * 思考强度按钮（工具栏常驻入口）。
+ *
+ * 与模型选择器内的档位**同一份数据面**（pi_set_thinking_level +
+ * pi_get_state 回读），不另建状态；这里只是把能力提到可见处。
+ */
+const ThinkingEffortButton: FC<{
+  effort: string | null
+  onChange: (level: string) => void
+}> = ({ effort, onChange }) => {
+  const current = THINKING_LEVELS.find((l) => l.level === effort)
+  const label = current?.label ?? '思考'
+  return (
+    <ContextMenu anchor="trigger">
+      <ContextMenuTrigger>
+        <button
+          type="button"
+          aria-label={`思考强度：${label}`}
+          title={`思考强度：${label}`}
+          data-slot="thinking-effort-button"
+          className="text-(--text-3) hover:text-(--text-1) flex h-7 shrink-0 items-center gap-1 rounded-[8px] px-2 text-[13px] transition-colors"
+        >
+          {/* 灯泡 = 思考强度（不依赖模型声明的推理图标） */}
+          <LightbulbIcon className="size-[14px]" />
+          <span>{label}</span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        {THINKING_LEVELS.map((l) => (
+          <ContextMenuItem key={l.level} onSelect={() => onChange(l.level)}>
+            <span className="flex-1">{l.label}</span>
+            <span className="text-(--text-4) text-[11px]">{l.hint}</span>
+            {effort === l.level && <CheckIcon className="ml-1 size-[14px] shrink-0" />}
+          </ContextMenuItem>
+        ))}
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
 
 const PEOPLE = [
   { name: 'mirach', role: 'agent' },
@@ -214,6 +274,24 @@ export function ComposerWired() {
       ? null
       : threadIdFromAui)
   const setText = input.setText
+
+  // ── composer 草稿（按会话持久化，2026-11-28 用户："输入框里的消息，
+  //    切换会话后都没了，关闭重启应用也没了"）——hermes
+  //    composer-draft-stash 对偶：键 = sessionThreadKey(threadId)（New
+  //    Chat = 哨兵键），localStorage 恢复/防抖 stash。
+  //    **切键首帧必须跳过 stash**：此刻 value 还是旧会话文本，直接写会把
+  //    A 的草稿落进 B 的键——只做恢复（setText 新键草稿）。
+  const lastDraftKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (lastDraftKeyRef.current !== threadId) {
+      lastDraftKeyRef.current = threadId
+      setText(getComposerDraft(threadId))
+      return
+    }
+    const timer = window.setTimeout(() => setComposerDraft(threadId, value), 400)
+    return () => window.clearTimeout(timer)
+  }, [threadId, value, setText])
+
   const slash = useSlashMatches(value, COMMANDS)
   // @ 补全：静态行（宿主自带占位人员）+ `composer.atCompletions` 贡献行
   // （hermes-bots 的机器人 handle）。上游语义：贡献行排在宿主行**之前**，
@@ -509,10 +587,20 @@ export function ComposerWired() {
         setDismissed(value)
       }
     }
-    // ZCode：运行中 Enter = 排队后续修改（placeholder 同款）。核心的默认
-    // Enter 提交在 running && !capabilities.queue 时直接 return——这里绕过
-    // 原语禁用，直接 composer.send() → runtime.onNew 走本地队列。
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && isRunning) {
+    // ZCode：运行中 Enter = 提交后续修改。核心的默认 Enter 提交在
+    // running && !capabilities.queue 时直接 return——这里绕过原语禁用，
+    // 直接 composer.send() → runtime.onNew 按「交互行为」分流
+    // （guide → pi_steer 注入当前 run；queue → 本地队列）。
+    // 带 Ctrl/Cmd 的组合键留给 assistant-ui 原生 steer 热键（ComposerInput
+    // 的 Cmd/Ctrl+Shift+Enter），这里不拦，否则会提前吃掉那次提交。
+    if (
+      e.key === 'Enter' &&
+      !e.shiftKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.nativeEvent.isComposing &&
+      isRunning
+    ) {
       e.preventDefault()
       aui.composer.send()
     }
@@ -596,6 +684,22 @@ export function ComposerWired() {
                     切换面——芯片只读展示当前真实模式，菜单里其余态置灰并
                     标注原因（不造假开关）。 */}
                 <PermissionModeChip threadId={threadId ?? undefined} running={isRunning} />
+                {/* 思考强度按钮（2026-11-27 用户：「输入框中还少个思考强调的
+                    按钮，可以用 ass 组件自带的」）。
+
+                    为什么需要独立入口：此前思考档位**只**藏在模型选择器的
+                    下拉里，而且只在模型声明 `reasoning` 时才出现
+                    （model-catalog-store 的 `...e.reasoning ? {efforts:true}`）
+                    ——非推理模型、或用户没展开模型菜单时，根本看不到/找不到
+                    这个能力。
+
+                    数据面与模型选择器**完全同一份**（pi_set_thinking_level +
+                    pi_get_state 回读），不是第二个真相；只是把它提到工具栏上
+                    常驻可见。档位/中文名取 pi 真实 ThinkingLevel。 */}
+                <ThinkingEffortButton
+                  effort={currentEffort}
+                  onChange={onEffortChange}
+                />
                 {/* 实时活动徽标（ZCode ConversationBackgroundWorkTrigger 同位）：
                     有运行中的终端/工作流/智能体时出现，点击直达详情或展开
                     状态面板；计数与面板分区同一份真值。 */}
@@ -633,7 +737,7 @@ export function ComposerWired() {
                   // 仍完整显示），卡片 < 36rem 收到 160px + 隐藏思考档位，
                   // < 24rem 只留 96px 短名。宽态不要用 200px：正常桌面宽度
                   // 也会把模型名截成 "deepseek-v4.1-flash-1…"（用户实报）。
-                  // `[&>button]:min-w-0`：goo PopoverTrigger 里还有一层裸
+                  // `[&>button]:min-w-0`：motion PopoverTrigger 里还有一层裸
                   // button，默认 min-width:auto 会让内部长名拒绝收缩。
                   className="h-[28px] max-w-[320px] min-w-0 shrink rounded-[8px] px-2 text-[14px] @max-xl/composer:max-w-[160px] @max-sm/composer:max-w-[96px] @max-sm/composer:[&>button>svg]:hidden [&>button]:min-w-0 [&>button]:max-w-full"
                   effort={currentEffort ?? ''}
@@ -659,17 +763,30 @@ export function ComposerWired() {
                     左侧的明细按钮（同一信息的第二个入口是噪声）。 */}
                 {isRunning ? (
                   canQueueWhileRunning ? (
-                    /* ZCode（9444 源码 showStopControl = canStop && !hasDraftToSubmit）：
-                       运行中**有草稿时只显示发送/排队**，停止交给 Esc（或清空草稿
-                       后的停止钮）。不能同时放两个黑按钮（用户实报"两个发送按钮"）。
-                       这里用普通 onClick 直接调 composer.send：核心的 Send 原语在
-                       running && !capabilities.queue 时是 disabled 的。 */
-                    <ComposerSend
-                      aria-label="排队消息"
-                      idle={false}
-                      streaming={false}
-                      onClick={() => aui.composer.send()}
-                    />
+                    /* 运行中且有草稿：主钮 = 排队发送，**旁边多一个次要停止钮**。
+                       ZCode 的口径是“有草稿时只显示排队，停止交给 Esc”——但用户
+                       2026-11-27 实报「任务执行过程中…没法…停掉正在进行的任务」：
+                       需要输入时囗口有字，停止钮就消失，而 Esc 这个隐性快捷键
+                       无从得知。所以这里把停止做成可见的次要图标钮（不再是两个
+                       主按钮，不违反“不能两个黑按钮”的原约束）。 */
+                    <div className="flex items-center gap-1">
+                      <ComposerPrimitive.Cancel asChild>
+                        <button
+                          type="button"
+                          aria-label="停止生成"
+                          title="停止生成"
+                          className="text-(--text-3) hover:text-(--text-1) flex size-[28px] shrink-0 items-center justify-center rounded-[8px] transition-colors"
+                        >
+                          <SquareIcon className="size-[12px]" />
+                        </button>
+                      </ComposerPrimitive.Cancel>
+                      <ComposerSend
+                        aria-label="排队消息"
+                        idle={false}
+                        streaming={false}
+                        onClick={() => aui.composer.send()}
+                      />
+                    </div>
                   ) : (
                     <ComposerPrimitive.Cancel asChild>
                       <ComposerSend aria-label="停止生成" idle={false} streaming />
@@ -705,6 +822,10 @@ export function ComposerWired() {
               </p>
             )}
           </ComposerBar>
+          {/* 会话统计条（DSH StatsPills 的宿主形态，2026-11-27）：挂在输入卡
+              下方（用户：「dsh 的输入框下面的第几轮对话、首吐多久、缓存命中
+              的那个组件能完整移植过来使用吗」）。无数据时组件自己返回 null。 */}
+          <ComposerStatsLine className="mt-1.5" />
         </ComposerPrimitive.AttachmentDropzone>
       </Composer>
     </ComposerPrimitive.Root>

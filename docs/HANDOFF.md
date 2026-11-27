@@ -6,6 +6,22 @@
 
 ## 当前状态
 
+**✅ 2026-11-28（二十四）：v0.1.7 多会话并存（后台继续跑）+ 草稿/队列持久化**
+
+- **根因三宗罪**（用户："切换会话时要不中断对话……切换会话后内容就没了……
+  排队消息重启也没了"）：①引擎 POST 事件全进公共 "main" 桶（切走后 run
+  继续跑但事件串台）；②`switchToThreadPath` 切换前强制 `pi_interrupt`；
+  ③单 actor 重水合 + 排队/草稿内存态且切换即 clear。
+- **修法（三端同键 `main:<piSessionId>`，详注见 AGENTS.md 二十四节）**：
+  引擎 POST 按会话路由事件 + 响应带 threadId；切换撤销强制中断；前端
+  actor 注册表（每会话一份投影，切换 = 换焦点不重水合，SSE 按焦点键从
+  actor 游标续放）；队列/草稿按会话分桶 localStorage 持久化（切换不清、
+  重启恢复、删除才清）；排队**边沿无关自动 drain**（hermes shouldAutoDrain）。
+- 已知边界：后台审批仍被取消（引擎 registry 单份）；retired 句柄上限 4；
+  后台 busy 无投影（$hostBusy 只绑焦点）；重载时在途增量等落盘（旧行为）。
+- 门禁：cargo check / cargo test 747 过 1 ignored / npm test 1152 过 /
+  改动文件无新增 tsc 错误。版本 0.1.7。
+
 **✅ 2026-11-27（二十三）：v0.1.6 群聊成员不可用改 deferred（可重试）+ 设置标题去卡**
 
 - **群聊里被删除的机器人 = `turn.deferred`（对齐 hermes）**：`canonical-group-driver`
@@ -1993,10 +2009,13 @@ pi 真引擎（AG-UI HTTP+SSE）全链通。**
     `by [作者](url) - 描述`），`## 标题` 成分类，元信息节整节跳过（有单测）。
     **清单条目不可安装**（pi 无 hermes hub 协议）→ 卡片给"打开仓库"。
   - 配套新增：`components/ui/` 的 `switch` / `alert` / `row-button` /
-    `search-field` / `masonry` + `Button` 的 `text|chip` variant 与
-    `text|inline` size；`styles/catalog.css` / `catalog-discovery.css` /
-    `page.css` / `masonry.css`；`src/assets/catalog-wing-retro.svg`；
+    `search-field` + `Button` 的 `text|chip` variant 与
+    `text|inline` size；`src/assets/catalog-wing-retro.svg`；
     `--ui-chat-bubble-background` / `--ui-text-primary` 等令牌别名。
+    （`styles/catalog.css` / `catalog-discovery.css` / `page.css` /
+    `masonry.css` 与 `components/ui/masonry.tsx` 是当时为宿主 capabilities
+    页建的副本；2026-11-27 该页换成 `LocalCapabilitiesPane` 后已无消费方，
+    且与 `hermes-mirror/**` 的可达副本重复，已删除。镜像内的同名文件保留。）
   - **`lib/query-cache.ts`**：宿主没有挂 TanStack Query 的 Provider，为一个
     页面加全局 Provider 不划算 → 实现同语义的最小查询缓存（并发去重 /
     staleTime / 失败停在错误态 / 空闲预热）。将来真接 RQ 时换薄适配即可。
