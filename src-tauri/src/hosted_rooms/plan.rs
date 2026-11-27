@@ -415,10 +415,17 @@ pub fn plan_next_task(
         &to_log_events_refs(&member_msgs),
     );
 
-    // 已结算的 (round, member) 组合（排除 lead routing turn）
+    // 已结算的 (round, member) 组合（排除 lead routing turn）。
+    //
+    // **`turn.deferred` 不算结清**（hermes `hosted_room_lead`："turn.deferred
+    // is not terminal: it awaits Retry or Discard"）：成员不可用被 defer 后，
+    // plan 继续给出同一 (round, member) 的同一个 task_id，由前端驱动按日志
+    // 暂停（不重跑）并展示 Retry 卡；重试成功写 settled、丢弃写 cancelled
+    // 后才推进。若把它当终态，房间会越过一个没说话的成员继续下一轮。
     let terminals: std::collections::BTreeSet<(i64, String)> = validated
         .iter()
         .filter(|e| super::decision_engine::TERMINAL_KINDS.contains(&e.kind.as_str()))
+        .filter(|e| e.kind != "turn.deferred")
         .filter(|e| {
             e.payload.get("discussion_event_id").and_then(Value::as_str)
                 == Some(discussion.event_id.as_str())

@@ -134,6 +134,52 @@ const failedTasks = new Map<string, { task: PlannedTask; member: RoomMember; dis
 /** Retry 请求：房间 → 待强制重跑的任务（驱动循环优先消费）。 */
 const retryQueue = new Map<string, { task: PlannedTask; member: RoomMember; discussionId: string }>()
 
+/** 已 defer 的任务（hermes `turn.deferred` 非终态，等 Retry/Discard）：
+ *  task_id → 坐标 + 原因 + 代际。`pending_actions` 用它给 workspace 出 Retry 卡。 */
+const deferredTasks = new Map<
+  string,
+  { roomId: string; task: PlannedTask; member: RoomMember; discussionId: string; error: string; generation: number }
+>()
+
+/**
+ * 事件日志里该 task 的最新终态若是 `turn.deferred`，返回其代际；否则 null。
+ *
+ * 两个用途：
+ *  · 重启后内存表为空——靠日志知道"这条轮次还在等重试"，不重新开跑；
+ *  · 连续 defer 必须**代际递增**（Rust decision_engine 硬校验），generation
+ *    从日志里的上一条 deferred 取最大值 +1。
+ */
+async function pendingDeferredGeneration(
+  roomId: string,
+  taskId: string,
+  sinceSeq = 0,
+): Promise<null | number> {
+  const res = await invoke<{
+    events?: { kind?: string; payload?: Record<string, unknown> }[]
+  }>('groups_dispatch', {
+    method: 'groups.log',
+    // since_seq 用任务的 seen_through_seq：deferred 一定在该用户消息之后，
+    // 不会因为长房间的 500 条窗口截断而漏看（limit 上限 = 500）。
+    params: { room_id: roomId, since_seq: sinceSeq, limit: 500 },
+  })
+  let generation: null | number = null
+  for (const event of res.events ?? []) {
+    const payload = event.payload
+    if (!payload || payload.task_id !== taskId) continue
+    if (event.kind === 'turn.deferred') {
+      const value = Number(payload.execution_generation)
+      if (Number.isSafeInteger(value) && value > 0) generation = value
+    } else if (
+      event.kind === 'turn.settled' ||
+      event.kind === 'turn.failed' ||
+      event.kind === 'turn.cancelled'
+    ) {
+      generation = null
+    }
+  }
+  return generation
+}
+
 function notify(): void {
   for (const listener of listeners) listener()
 }
@@ -170,11 +216,21 @@ export function canonicalDriverStatus(roomId: string): CanonicalDriverStatus {
         },
       }]
     : []
+  const deferredActions = [...deferredTasks.values()]
+    .filter((entry) => entry.roomId === roomId)
+    .map((entry) => ({
+      // workspace 的 CanonicalPendingCard 对 kind='retry' 渲染「重试」按钮；
+      // execution_generation 必须带上（actions 的 key 与 groups.retry 参数）。
+      kind: 'retry',
+      member_id: entry.member.member_id,
+      task_id: entry.task.task_id,
+      execution_generation: entry.generation,
+    }))
   return {
     working: Boolean(run),
     // 全 0/空 = workspace 的 stopConfirmed 判定成立（无 stopping/deferred 残留）。
-    counts: {},
-    pending_actions: pendingActions,
+    counts: deferredActions.length > 0 ? { deferred: deferredActions.length } : {},
+    pending_actions: [...pendingActions, ...deferredActions],
     member_activity: activity,
     max_rounds: null,
   }
@@ -353,6 +409,9 @@ const PASS_RE = /^\(?\s*pass\s*\)?\.?$/i
 type TurnOutcome =
   | { kind: 'replied'; text: string }
   | { kind: 'passed' }
+  /** 成员不可用（profile 已删）等**可重试**情形：hermes 语义 = `turn.deferred`
+   *  （reason `member_unavailable`），不是 failed——房间等 Retry/Discard。 */
+  | { kind: 'deferred'; error: string; reasonCode: string }
   | { kind: 'failed'; error: string; reasonCode?: string }
 
 async function runMemberTurn(
@@ -361,7 +420,7 @@ async function runMemberTurn(
   member: RoomMember,
 ): Promise<TurnOutcome> {
   const unavailable = await memberUnavailableReason(member)
-  if (unavailable) return { kind: 'failed', error: unavailable, reasonCode: 'member_unavailable' }
+  if (unavailable) return { kind: 'deferred', error: unavailable, reasonCode: 'member_unavailable' }
 
   const sessionId = await ensureMemberSession(run.roomId, member.profile)
   run.sessionId = sessionId
@@ -569,7 +628,7 @@ async function executeMemberTask(
   task: PlannedTask,
   discussionId: string,
   member: RoomMember,
-): Promise<'done' | 'cancelled'> {
+): Promise<'done' | 'cancelled' | 'deferred'> {
   const gatewayActor: Record<string, unknown> = { kind: 'gateway', id: room.authority_gateway_id ?? '' }
   const memberActor: Record<string, unknown> = {
     kind: 'member',
@@ -606,6 +665,7 @@ async function executeMemberTask(
   }
 
   if (outcome.kind === 'replied') {
+    deferredTasks.delete(task.task_id)
     const messageEventId = eventId()
     await invoke('groups_dispatch', {
       method: 'groups.driver_append',
@@ -624,14 +684,37 @@ async function executeMemberTask(
       passed: false,
     })
   } else if (outcome.kind === 'passed') {
+    deferredTasks.delete(task.task_id)
     await appendEvent(run.roomId, 'turn.settled', gatewayActor, {
       ...coordinates(task, discussionId),
       seen_through_seq: task.seen_through_seq,
       message_event_id: null,
       passed: true,
     })
+  } else if (outcome.kind === 'deferred') {
+    // hermes 语义：成员不可用 = `turn.deferred`（**非终态**），房间停在
+    // 这里等 Retry / Discard；同 task 的重复 defer 代际必须递增。
+    const prior = await pendingDeferredGeneration(run.roomId, task.task_id, task.seen_through_seq)
+    const generation = Math.max(prior ?? 0, deferredTasks.get(task.task_id)?.generation ?? 0) + 1
+    deferredTasks.set(task.task_id, {
+      roomId: run.roomId,
+      task,
+      member,
+      discussionId,
+      error: outcome.error,
+      generation,
+    })
+    await appendEvent(run.roomId, 'turn.deferred', gatewayActor, {
+      ...coordinates(task, discussionId),
+      seen_through_seq: task.seen_through_seq,
+      execution_generation: generation,
+      reason: outcome.reasonCode,
+    })
+    notify()
+    return 'deferred'
   } else {
     // 保留失败任务的 prompt/成员，供 canonical 的 Retry 重跑。
+    deferredTasks.delete(task.task_id)
     failedTasks.set(task.task_id, { task, member, discussionId })
     await appendEvent(run.roomId, 'turn.failed', gatewayActor, {
       ...coordinates(task, discussionId),
@@ -662,7 +745,7 @@ async function driveRoom(roomId: string): Promise<void> {
       if (forced) {
         retryQueue.delete(roomId)
         const result = await executeMemberTask(run, room, forced.task, forced.discussionId, forced.member)
-        if (result === 'cancelled') break
+        if (result === 'cancelled' || result === 'deferred') break
         continue
       }
 
@@ -724,8 +807,14 @@ async function driveRoom(roomId: string): Promise<void> {
         break
       }
 
+      // 同一 task 已有待处理的 turn.deferred（内存表或重启后的日志）→ 房间
+      // 暂停等 Retry/Discard，不重复跑成员、不重复写 defer（hermes deferred
+      // 不是终态；代际只能在新 retry 后递增）。
+      const pendingDeferral = await pendingDeferredGeneration(roomId, task.task_id, task.seen_through_seq)
+      if (pendingDeferral !== null) break
+
       const result = await executeMemberTask(run, room, task, discussionId, member)
-      if (result === 'cancelled') break
+      if (result === 'cancelled' || result === 'deferred') break
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e)
@@ -803,27 +892,32 @@ export async function approveCanonicalAction(
 }
 
 /**
- * Retry：重跑本次应用内失败的任务（坐标不变，重跑结果写回同一 (round, member)）。
- * 应用重启后失败任务的 prompt 已不在内存——明确报错，不假装能重试。
+ * Retry：重跑失败/推迟（deferred）的成员任务（坐标不变，结果写回原坐标）。
+ * 应用重启后失败任务的 prompt 已不在内存——deferred 由启动扫描从日志重建
+ * （member_unavailable 可跨重启重试）；两者都没有时明确报错，不假装能重试。
  */
 export function retryCanonicalTask(roomId: string, memberId: string, taskId: string): void {
-  const entry = failedTasks.get(taskId)
+  const failed = failedTasks.get(taskId)
+  const deferred = deferredTasks.get(taskId)
+  const entry = failed ?? deferred
   if (!entry || entry.member.member_id !== memberId) {
-    throw new Error('这张失败卡已不可重试（应用重启后仅保留日志；再发一条消息让房间继续）')
+    throw new Error('这张卡已不可重试（应用重启后仅保留日志；再发一条消息让房间继续）')
   }
-  retryQueue.set(roomId, entry)
+  retryQueue.set(roomId, { task: entry.task, member: entry.member, discussionId: entry.discussionId })
   kickCanonicalRoom(roomId)
 }
 
-/** Discard：把失败任务标成 cancelled，从当前轮次里收起。 */
+/** Discard：把失败/推迟的任务标成 cancelled，从当前轮次里收起。 */
 export async function discardCanonicalTask(
   roomId: string,
   memberId: string,
   taskId: string,
 ): Promise<void> {
-  const entry = failedTasks.get(taskId)
+  const failed = failedTasks.get(taskId)
+  const deferred = deferredTasks.get(taskId)
+  const entry = failed ?? deferred
   if (!entry || entry.member.member_id !== memberId) {
-    throw new Error('这张失败卡已不可丢弃（应用重启后仅保留日志）')
+    throw new Error('这张卡已不可丢弃（应用重启后仅保留日志）')
   }
   const state = await readRoomState(roomId)
   const gateway = state.room?.authority_gateway_id ?? ''
@@ -833,6 +927,9 @@ export async function discardCanonicalTask(
     reason: 'discarded',
   })
   failedTasks.delete(taskId)
+  deferredTasks.delete(taskId)
+  // 收起后让房间继续（plan 看到 cancelled 终态就会推进）。
+  kickCanonicalRoom(roomId)
 }
 
 /**
@@ -854,7 +951,27 @@ export async function discardCanonicalTask(
       // 一个坏房间不能拖垮整次恢复扫描。
       try {
         const plan = await planRoom(roomId)
-        if (plan.status === 'task') kickCanonicalRoom(roomId)
+        if (plan.status !== 'task' || !plan.task) continue
+        // deferred 轮次（成员已删）不是终态：重启后从日志重建「等重试」表，
+        // 让 workspace 继续显示 Retry 卡；不要重新开跑。
+        const generation = await pendingDeferredGeneration(roomId, plan.task.task_id, plan.task.seen_through_seq)
+        if (generation !== null) {
+          const state = await readRoomState(roomId)
+          const member = (state.room?.members ?? []).find((m) => m.member_id === plan.task?.member_id)
+          const discussionId = plan.discussion_event_id
+          if (member && discussionId) {
+            deferredTasks.set(plan.task.task_id, {
+              roomId,
+              task: plan.task,
+              member,
+              discussionId,
+              error: `机器人「${member.profile}」已不在机器人名册（profile 已删除）`,
+              generation,
+            })
+            continue
+          }
+        }
+        kickCanonicalRoom(roomId)
       } catch (e) {
         console.warn(`[canonical-driver] 房间 ${roomId} 恢复扫描跳过`, e)
       }

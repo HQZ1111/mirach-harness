@@ -794,6 +794,31 @@ hermes 侧事实：`$showAllProfiles`（默认显示全部配置档案的会话�
 - 版本：0.1.5（package.json / package-lock / tauri.conf / Cargo.toml /
   Cargo.lock）。
 
+## 2026-11-27（二十三）v0.1.6：群聊成员不可用 = deferred + 设置标题去卡
+
+- **群聊成员被删除 = `turn.deferred`（对齐 hermes）**：`canonical-group-driver`
+  的 `memberUnavailableReason` 命中（profile 已删除）时不再写 `turn.failed`，
+  改写 **`turn.deferred` + reason `member_unavailable` + `execution_generation`**
+  （同 task 重复 defer 代际递增；从 `groups.log` 取上一条值）。
+  - `plan.rs` 的 terminals **排除 `turn.deferred`**（hermes："turn.deferred is
+    not terminal: it awaits Retry or Discard"）——plan 会继续给出同一
+    (round, member) 的同一 task_id；前端驱动按日志 `pendingDeferredGeneration`
+    发现待处理 defer 时**暂停房间**（不重跑、不重复写事件）。
+  - `canonicalDriverStatus.pending_actions` 增加 `{kind:'retry', member_id,
+    task_id, execution_generation}`，workspace 的 `CanonicalPendingCard` 直接
+    渲染「重试」卡（`groups.retry` → `retryCanonicalTask` 优先消费 retryQueue）。
+  - Discard（`groups.discard`）把 deferred 写成 `turn.cancelled reason=discarded`
+    并踢一次驱动，让 plan 推进。
+  - 重启恢复：`startCanonicalGroupDriver` 对 plan 出的 task 查日志里的待处理
+    defer，重建内存表（Retry 卡仍可见、不重新开跑）。
+  - 宿主仍保留的差异：hermes 的 retry/discard 是 gateway 持久任务；宿主
+    retry 仍要求进程内还有任务坐标（重启后由上面的日志重建覆盖
+    member_unavailable）。
+- **设置页标题去卡片**（用户："把设置页标题的卡片去掉"）：`.set-inset-head`
+  撤销 2026-11-24 的卡片化——背景/描边/圆角清掉，保留 48px 高度（拖窗带）、
+  左右 16 内距（与下方卡片正文同左基线）和关闭钮。
+- 版本：0.1.6。
+
 ## 工具链钉版（升级前必读）
 
 | 包 | 版本 | 为什么 |

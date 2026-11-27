@@ -229,13 +229,12 @@
    横跨右栏的"顶栏"边。层次由标题字重承担。 */
 .set-inset-head {
   align-items: center;
-  /* 2026-11-24 用户："右边的标题栏也给个卡片"。原先标题裸在内容区底色上，
-     与下方岛卡不是同一结构；现在它自己就是一张卡（同 --surface / 描边 /
-     --radius-panel-lg），左右内距 16 = 下方卡的内距，标题与卡内正文同一条
-     左基线（182 + 1 描边 + 16 = 199）。 */
-  background: var(--surface);
-  border: 1px solid var(--stroke-soft);
-  border-radius: var(--radius-panel-lg);
+  /* 2026-11-27 用户："把设置页标题的卡片去掉" —— 撤销 2026-11-24 的卡片化：
+     标题回到**裸文字**（内容区底色上，无底/无边/无圆角），只保留 48px 固定
+     高度（拖窗带）、左右 16 内距（与下方卡内正文同左基线）与右侧关闭钮。 */
+  background: transparent;
+  border: none;
+  border-radius: 0;
   display: flex;
   flex-shrink: 0;
   gap: var(--space-inline);
