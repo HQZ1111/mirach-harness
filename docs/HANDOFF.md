@@ -60,6 +60,11 @@
   `0x00EFEEE9`**（`BORDER_SHELL`），1px 描边融进壳色；`top_line` 仍只吃
   顶部 1px。**投影与灰边是同一条 inset 的两面：要完全无灰边只能
   `shadow:false`（同时失去投影），默认不做。**
+- **v0.1.3 已发布**：
+  `https://github.com/HQZ1111/mirach-harness/releases/tag/v0.1.3`
+  （安装器 84.49 MiB）。实机复验：设置页连开连关（第二次 ✕ 可关）；
+  边缘无黑线、系统投影保留、1px 边框融进壳色；启动/单实例/桌面快捷方式
+  延续 0.1.2。
 - **设置页第二次关闭失灵（v0.1.3 修）**：设置窗 `hide()` 不卸载 React 树，
   `useOverlayExit` 的 `closedRef` 第一次关闭后永久 true → 再开点 ✕ 直接
   return。`useOverlayExit` 增加 `reset()`；`SettingsOverlay` 在
