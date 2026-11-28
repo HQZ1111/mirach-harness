@@ -216,6 +216,18 @@ if (isSettingsWindow) {
     )
     clearBootRetry()
 
+    // **首帧就绪 → 让 Rust 显示主窗**（2026-11-28 修"灰屏没起来"）：
+    // 主窗 visible:false 创建 + 透明窗；webview 首帧前 show = 空灰玻璃
+    // （冷启动 1~3s，实机截图实锤）。rAF×2 = 第一帧已提交，再发 ui_ready；
+    // Rust 侧幂等显示，且 5s 兜底也会显示（前端崩了不会永远隐形）。
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        void import('@tauri-apps/api/core')
+          .then(({ invoke }) => invoke('ui_ready'))
+          .catch((e) => console.error('[boot] ui_ready 发送失败（主窗将由 5s 兜底显示）', e))
+      })
+    })
+
     // 内置插件（hermes bots 等）——与运行时磁盘门并列的第二条插件源：
     // vite 打包的整棵工程 + createContext 注册。失败只进设置页插件记录，
     // 不打白壳。

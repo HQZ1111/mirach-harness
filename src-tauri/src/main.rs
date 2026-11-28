@@ -205,6 +205,27 @@ fn hermes_window_size(work_w: f64, work_h: f64) -> (f64, f64) {
     (w, h)
 }
 
+/// 主窗是否已显示过（首帧渲染信号 / 兜底定时器只显示一次）。
+static MAIN_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 首帧就绪显示主窗（**前端 ui_ready 信号**；兜底定时器 5s 也调它）。
+///
+/// 为什么不让 setup 直接 show：透明窗在 webview 首次绘制前是**空灰玻璃**
+/// ——用户看到的是 1~3s 的灰屏"没起来"（2026-11-28 实机截图实锤）。等到
+/// 前端第一帧（rAF×2）再显示，用户看到的第一眼就是启动页。
+#[tauri::command(async)]
+fn ui_ready(app: tauri::AppHandle) -> Result<(), String> {
+    show_main_once(&app);
+    Ok(())
+}
+
+fn show_main_once(app: &tauri::AppHandle) {
+    if MAIN_SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    show_main(app);
+}
+
 /// 显示主窗并聚焦（托盘左键与菜单「显示主窗口」共用）
 fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -2196,12 +2217,20 @@ fn main() {
             // 会在新窗口上原样复现，见该函数注释）。
             wire_window(app.handle(), &window, CloseAction::HideToTray);
 
-            // **最后才显示窗口**（2026-10-26 修"启动先小后大跳一下"）：
+            // **显示时机 = 前端第一帧就绪**（2026-10-26 修"启动先小后大跳
+            // 一下"的几何基础保留；2026-11-28 再修"灰屏没起来"）：
             // `tauri.conf.json` 里 `visible: false` —— 窗口以 1280×820 创建
-            // 但不显示；上面按存档/公式定好尺寸与位置后才 show，用户看到
-            // 的第一帧就是最终几何。不设 visible:false 时会先闪一个 1280×820
-            // 的小窗再跳到目标尺寸（用户报的"跳跃"）。
-            window.show().map_err(|e| format!("主窗显示失败：{e}"))?;
+            // 但不显示；上面按存档/公式定好尺寸与位置，**前端 ui_ready
+            // （rAF×2）才 show**——webview 首帧前显示 = 空灰玻璃（实锤：
+            // 透明窗 + 冷启动 1~3s，用户看到的是"卡没起来"）。
+            // 兜底 5s：前端崩了也要出窗口（否则托盘/关闭路径都在黑箱里）。
+            {
+                let fallback = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    show_main_once(&fallback);
+                });
+            }
 
             // 设置窗**不预热**（2026-11-21 撤销 2026-11-20 的预热）：预热换
             // 首次点开 ~1s，代价是常驻一个完整渲染进程（实测 100~150MB 私有
@@ -2444,6 +2473,7 @@ fn main() {
             pi_keys::pi_set_provider_key,
             pi_keys::pi_delete_provider_key,
             pi_keys::pi_engine_version,
+            ui_ready,
             pi_keys::pi_notify_test,
             pi_keys::pi_notify,
             pi_vault::pi_vault_list,
