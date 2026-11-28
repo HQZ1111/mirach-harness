@@ -7,7 +7,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { sessionQueue } from './session-queue-store'
+import { EMPTY_QUEUE, selectQueueItems, sessionQueue } from './session-queue-store'
 import { sessionThreadKey } from './session-thread-key'
 
 const item = (id: string, text: string) => ({ id, text })
@@ -84,5 +84,22 @@ describe('sessionQueue（按会话分桶）', () => {
     expect(raw).toBeTruthy()
     const parsed = JSON.parse(raw!) as { bySession: Record<string, { id: string }[]> }
     expect(parsed.bySession[A]?.map((m) => m.id)).toContain('p1')
+  })
+})
+
+describe('selector 引用稳定性（2026-11-28 启动崩溃回归锁）', () => {
+  it('空队列两次取样返回同一个引用（useSyncExternalStore 合同）', () => {
+    sessionQueue.getState().setActiveKey(A)
+    const first = selectQueueItems(sessionQueue.getState())
+    const second = selectQueueItems(sessionQueue.getState())
+    expect(first).toBe(second)
+    expect(first).toBe(EMPTY_QUEUE)
+  })
+
+  it('有队列时返回存储里的数组（不是拷贝）', () => {
+    sessionQueue.getState().enqueue(A, item('q1', '排队'))
+    const sel = selectQueueItems(sessionQueue.getState())
+    expect(sel).toBe(sessionQueue.getState().bySession[A])
+    expect(sel.map((m) => m.id)).toEqual(['q1'])
   })
 })

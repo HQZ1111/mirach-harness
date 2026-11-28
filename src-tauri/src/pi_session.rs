@@ -4222,7 +4222,9 @@ fn prompt_inner(
         if thread.is_empty() {
             return Err("窗格键为空".into());
         }
-        if thread == "main" {
+        if thread == "main" || thread.starts_with("main:") {
+            // `main:` 前缀是主窗会话专属键（agui.rs 归主柄路径）——误到此
+            // 说明上游路由把主窗 POST 当成了分栏，直接拒绝防双写。
             return Err("窗格键不能是 main（前台走主柄）".into());
         }
         let target = session_cache_key(Path::new(path));

@@ -719,8 +719,8 @@ export function ComposerWired() {
           与 thread 的 44rem 消息区叠层——输入框比消息区窄一截（实测 480 vs
           660）。twMerge 下 max-w-none 覆盖 kit 默认，宽度全权归外层。 */}
       <Composer className="w-full max-w-none">
+        {/* 容器：paper 面 + rounded-[20px]（用户 2026-10-05：24→20）+ p-2.5 + gap-2 */}
         <ComposerPrimitive.AttachmentDropzone asChild>
-          {/* 容器：paper 面 + rounded-[20px]（用户 2026-10-05：24→20）+ p-2.5 + gap-2 */}
           <ComposerBar>
             {/* 上游 composer.top 贡献槽（hermes-bots 的「等待队友」条挂这里）：
                 输入上方的 banner，无贡献时不渲染。 */}
@@ -936,11 +936,15 @@ export function ComposerWired() {
               </p>
             )}
           </ComposerBar>
-          {/* 会话统计条（DSH StatsPills 的宿主形态，2026-11-27）：挂在输入卡
-              下方（用户：「dsh 的输入框下面的第几轮对话、首吐多久、缓存命中
-              的那个组件能完整移植过来使用吗」）。无数据时组件自己返回 null。 */}
-          <ComposerStatsLine className="mt-1.5" />
         </ComposerPrimitive.AttachmentDropzone>
+        {/* 会话统计条（DSH StatsPills 的宿主形态，2026-11-27）：挂在输入卡
+            下方（用户：「dsh 的输入框下面的第几轮对话、首吐多久、缓存命中
+            的那个组件能完整移植过来使用吗」）。无数据时组件自己返回 null。
+            **必须在 Dropzone 之外**：Dropzone 是 `asChild`（Radix Slot）——
+            只接受单子元素，塞第二个子节点会让整壳抛 "Slot failed to slot
+            onto its children"（2026-11-28 启动崩溃实锤，它曾放在
+            </ComposerBar> 之后、Dropzone 之内）。 */}
+        <ComposerStatsLine className="mt-1.5" />
       </Composer>
     </ComposerPrimitive.Root>
   )

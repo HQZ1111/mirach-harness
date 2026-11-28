@@ -622,7 +622,13 @@ async fn agui_run(
     //   （每柄独立锁——与主柄/其他分栏**并行**，多 run 同时流式）。
     // flush/create 的深递归 future 不能在 tokio worker 栈上 block_on——
     // 16MiB 大栈线程承载（engine 经 Arc 共享）。
-    let is_main_thread = thread == "main";
+    // **主窗线程键 = `main` 或 `main:<id>`**（2026-11-28 实锤修复）：v0.1.7
+    // 起前端主 POST 发的是会话专属键 `main:<piSessionId>`（sessionThreadKey，
+    // 与 SSE 路由键同源），但这里只认精确 `"main"` → 主窗每条发送都被当成
+    // 分栏：`side_open` 撞「该会话已在主窗格打开」→ HTTP 500（用户实报
+    // "发送消息也没反应"）。前缀即主窗语义：事件仍按 resolved 落
+    // `main:<piSessionId>` 桶，分栏键永远不带 `main:` 前缀。
+    let is_main_thread = thread == "main" || thread.starts_with("main:");
     let session_path = if is_main_thread {
         body["sessionPath"].as_str().map(String::from)
     } else {

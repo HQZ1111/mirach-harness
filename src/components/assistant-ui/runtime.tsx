@@ -172,7 +172,12 @@ function getOrCreateActor(key: string, focusKey: string): TurnActor {
     actor = createActor(turnMachine, { input: freshTurnContext() })
     actorRegistry.set(key, actor)
   }
-  if (actor.getSnapshot().status !== 'active') actor.start()
+  // **必须无条件 start()**（xstate v5 的 start() 幂等：已在 Running 直接返回）。
+  // 旧判据 getSnapshot().status !== "active" 是错的——未启动 actor 的公开
+  // status 也是 "active"（内部 _processingStatus 才是 NotStarted），新建 actor
+  // 永不 start → send() 被静默丢弃 → 投影恒空（2026-11-28 实锤：水合写入
+  // 618 条、机器 assign 从未执行——"对话丢失/发送没反应"的最底层根因）。
+  actor.start()
   if (actorRegistry.size > ACTOR_CAP) {
     const candidates = [...actorRegistry.entries()]
       .filter(([k, a]) => k !== focusKey && !a.getSnapshot().matches('streaming'))
@@ -2164,25 +2169,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         mainViewStore.getState().showChat()
         return
       }
-      // 流式中切换（§4.5）：prompt 持锁跨整个 run（RUN_FINISHED/ERROR 才
-      // 释放），不先中断 open_session 会撞锁失败——先 pi_interrupt 再切；
-      // 中断失败保持当前会话（不更新本地态，禁止假装切换成功）。
-      //
-      // **中断必须可见**（2026-11-27 用户：「去掉工作中」）：引擎单 handle
-      // 决定了「切换 = 只能中断」。标记要在下面 hydrate **之后**发（hydrate
-      // 的 assign 会把 interrupted 重置为 false，先发会被清掉），否则切回来
-      // 时 run 已经没了、界面上却没有任何痕迹。
-      let interruptedBySwitch = false
-      if (actorRef.getSnapshot().matches('streaming')) {
-        try {
-          await invoke('pi_interrupt')
-          interruptedBySwitch = true
-          console.info('[pi] run 进行中：已中断当前 run 后切换会话（prompt 持锁跨整个 run）')
-        } catch (e) {
-          console.error('[pi] 中断当前 run 失败，取消切换会话', e)
-          return
-        }
-      }
+      // 流式中切换**不中断**（2026-11-28 实锤修复）：v0.1.7 的单会话路由
+      // 架构（引擎按会话分桶、切走后 run 在 retired 句柄上继续跑）本就
+      // 要求这里不打断——但上一轮只改了注释没删代码，切换仍在 pi_interrupt
+      // 杀 run，"切换回来没有工作中/内容丢"的直接来源。旧块连同从未被消费
+      // 的 interruptedBySwitch 标记一并删除（不再假装有"中断留痕"）。
+      // 真正的不打断语义见下方「切换绝不打断在跑 run」段；用户要停止 =
+      // 点停止钮（显式手势）。
       // 环境跟随（2026-11-25）：打开哪个环境的会话就进入哪个环境——侧栏
       // 作用域/底栏/环境菜单/机器人页选中四处同源。**聚合视图（全部配置
       // 档案）下不跟随**：那是在浏览所有环境，点行不该把浏览态拆掉。

@@ -158,6 +158,18 @@ export const sessionQueue = createStore<SessionQueueState>((set, get) => ({
   setActiveKey: (key) => set({ activeKey: key }),
 }))
 
-/** 焦点会话的排队条目（队列面板 / drain 用） */
+/** 焦点会话的排队条目（队列面板 / drain 用）。
+ *
+ * **选择器必须返回稳定引用**：`?? []` 每次调用都是新数组，useSyncExternalStore
+ * 快照永远变化 → "getSnapshot should be cached" + "Maximum update depth
+ * exceeded"，整个壳被错误边界打掉（2026-11-28 实锤：启动即炸、报错面是
+ * 下游的 Slot/队列组件——"对话丢失"的一部分症状就是它）。空态用模块级常量。 */
+export const EMPTY_QUEUE: QueuedMessage[] = []
+
+export const selectQueueItems = (state: {
+  bySession: Record<string, QueuedMessage[]>
+  activeKey: string
+}): QueuedMessage[] => state.bySession[state.activeKey] ?? EMPTY_QUEUE
+
 export const useSessionQueueItems = (): QueuedMessage[] =>
-  useStore(sessionQueue, (s) => s.bySession[s.activeKey] ?? [])
+  useStore(sessionQueue, selectQueueItems)

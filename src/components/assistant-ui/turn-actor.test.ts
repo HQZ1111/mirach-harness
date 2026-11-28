@@ -703,3 +703,42 @@ describe('tail hydration events', () => {
     expect(actor.getSnapshot().context.messages).toHaveLength(1)
   })
 })
+
+describe('HYDRATE 保留在途乐观消息（2026-11-28 竞态回归锁）', () => {
+  const hist = (id: string): TurnMessage => ({ id, role: 'assistant', content: '' })
+
+  it('水合晚到不抹掉刚提交的 user-* 消息', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    // 用户刚点发送：乐观消息进投影
+    actor.send({ type: 'USER_SUBMIT', text: '刚发的', messageId: 'user-123' })
+    // 切换/重水合晚到：文件页还没有刚落盘的这条
+    actor.send({ type: 'HYDRATE', messages: [hist('a'), hist('b')] })
+    const messages = actor.getSnapshot().context.messages
+    expect(messages.map((m) => m.id)).toEqual(['a', 'b', 'user-123'])
+  })
+
+  it('水合已包含的乐观消息不重复', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'USER_SUBMIT', text: '刚发的', messageId: 'user-9' })
+    // 文件页已带上同 id（落盘后的水合）→ 不重复追加
+    actor.send({
+      type: 'HYDRATE',
+      messages: [
+        { id: 'a', role: 'user', content: 'hi' },
+        { id: 'user-9', role: 'user', content: '刚发的' },
+      ],
+    })
+    const ids = actor.getSnapshot().context.messages.map((m) => m.id)
+    expect(ids).toEqual(['a', 'user-9'])
+  })
+
+  it('历史水合（无 pending）仍全量替换', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'HYDRATE', messages: [hist('x')] })
+    actor.send({ type: 'HYDRATE', messages: [hist('y')] })
+    expect(actor.getSnapshot().context.messages.map((m) => m.id)).toEqual(['y'])
+  })
+})
