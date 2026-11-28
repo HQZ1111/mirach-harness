@@ -310,7 +310,7 @@ export function RoomHeader({ backLabel, children, onBack, onStop, onTitle, stopD
         {trailing}
       </div>
     </div>
-    {children && <div className="mx-auto mt-2 flex w-full max-w-[max(330px,calc(100cqw-176px))] min-w-0 flex-col gap-2">{children}</div>}
+    {children && <div className="mx-auto mt-2 flex w-full max-w-[max(330px,calc(100cqw_-_176px))] min-w-0 flex-col gap-2">{children}</div>}
   </header>
 }
 

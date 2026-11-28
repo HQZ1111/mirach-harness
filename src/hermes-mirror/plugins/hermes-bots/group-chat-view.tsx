@@ -1659,7 +1659,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
         {/* unbreakable code line widened every entry to its own width and the */}
         {/* log scrolled sideways as a whole instead of the code block (#91878). */}
         {/* mt-auto anchors a short room on the composer, like a chat thread. */}
-        <div className="mx-auto mt-auto grid w-full max-w-[max(330px,calc(100cqw-176px))] grid-cols-[minmax(0,1fr)] gap-0.5 py-4">
+        <div className="mx-auto mt-auto grid w-full max-w-[max(330px,calc(100cqw_-_176px))] grid-cols-[minmax(0,1fr)] gap-0.5 py-4">
           {room.log.length
             ? logChildren
             : [
@@ -1695,7 +1695,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
         above={attachmentRow(null)}
         attach={<div className={ROOM_COMPOSER_AREAS.button}>{attachButton(null)}</div>}
         canSend={Boolean(draft.trim() || imagesFor(null).length)}
-        className="mx-auto w-full max-w-[max(330px,calc(100cqw-176px))]"
+        className="mx-auto w-full max-w-[max(330px,calc(100cqw_-_176px))]"
         onSubmit={submit}
         sendLabel={b.group.newThread}>
         <GroupMentionInput
