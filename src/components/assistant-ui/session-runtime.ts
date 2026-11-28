@@ -24,6 +24,7 @@ import {
 import { useActorRef, useSelector } from '@xstate/react'
 
 import { turnMachine, type TurnContext } from './turn-actor'
+import { useAutoSpeakReplies } from './auto-speak'
 import { convertTurnMessage, hydratePiMessages } from './pi-hydrate'
 import { speechAdapter } from './runtime'
 import {
@@ -62,6 +63,10 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
   // 本窗格的 RUN_ERROR（主 runtime 经全局 errorBridge 显示；分栏没有全局
   // 桥，直接在窗格内渲染——失败必须可见，规矩 12）。
   const error = useSelector(actorRef, (s) => s.context.error)
+
+  // 自动朗读回复（hermes use-auto-speak-replies 宿主对偶）：分栏朗读自己
+  // 会话的回复（hermes 瓦片语义）；与主 runtime 共用去重表防双读。
+  useAutoSpeakReplies({ messages, isRunning })
 
   // 水合：按会话文件路径读（真相在 pi；pi_get_session_messages 叶链还原
   // 当前分支）。挂载/路径变化各一次；流式增量走 SSE 不重读。

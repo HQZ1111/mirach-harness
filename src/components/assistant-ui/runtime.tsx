@@ -125,6 +125,7 @@ import {
   BoundarySpeechSynthesisAdapter,
   ensureSpeechSupportLogged,
 } from './speech-adapter'
+import { useAutoSpeakReplies } from './auto-speak'
 import { sessionThreadKey, NEW_CHAT_THREAD_KEY } from './session-thread-key'
 
 /**
@@ -411,6 +412,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const interrupted = useSelector(actorRef, (s) => s.context.interrupted)
   // 提供方自动重试投影（同上：真相在轮次机 context，UI 直接读 state 通道）
   const providerRetry = useSelector(actorRef, (s) => s.context.providerRetry)
+
+  // 自动朗读回复（hermes use-auto-speak-replies 宿主对偶，2026-11-28）：
+  // 主 runtime = 焦点会话；分栏在 session-runtime.ts 各自挂载，同一会话
+  // 两处挂载由模块级去重表（先到先读）兜住。
+  useAutoSpeakReplies({ messages, isRunning })
 
   // ── 审查面板的自动刷新触发（hermes store/review.ts 的模块级订阅对偶）──
   //

@@ -4,11 +4,13 @@
  * 在语言映射表内走 CodePreview（Shiki 高亮 + 行号，超预算诚实降级纯文本），
  * 未知扩展名纯文本 pre（不猜语言）；二进制提示；读失败错误可见。
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { CodePreview } from '@/components/preview/code-preview'
 import { shikiLanguageForFilename } from '@/components/preview/code-language'
+import { WebPreview } from '@/components/assistant-ui/elements/web-preview'
+import { inTauri } from '@/lib/tauri-window'
 import { fsReadDataUrl } from '@/lib/fs'
-import { cn } from '@/lib/utils'
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp'])
 const HTML_EXTS = new Set(['html', 'htm'])
@@ -40,6 +42,8 @@ export function HermesPreviewPane({ filePath }: { filePath: string }) {
   const [state, setState] = useState<
     { kind: 'loading' } | { kind: 'text'; text: string } | { kind: 'image'; url: string } | { kind: 'html'; html: string } | { kind: 'binary' } | { kind: 'error'; message: string }
   >({ kind: 'loading' })
+  /** 刷新计数（WebPreview 的刷新钮 → 重读文件；不换文件重挂 iframe）。 */
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     let dead = false
@@ -77,7 +81,19 @@ export function HermesPreviewPane({ filePath }: { filePath: string }) {
     return () => {
       dead = true
     }
-  }, [filePath, ext])
+  }, [filePath, ext, reloadKey])
+
+  /** html 预览的外开（宿主不装 opener 插件，走 fs_open_url；浏览器直开退 window.open）。 */
+  const openExternal = useCallback(() => {
+    if (!inTauri) {
+      window.open(filePath, '_blank', 'noopener,noreferrer')
+      return
+    }
+    void invoke('fs_open_url', { url: filePath }).catch((e) => {
+      // 规矩 11：打开失败可见
+      console.error('[preview] 外开失败', filePath, e)
+    })
+  }, [filePath])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-(--surface)">
@@ -87,17 +103,37 @@ export function HermesPreviewPane({ filePath }: { filePath: string }) {
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {state.kind === 'loading' && <div className="p-3 text-xs text-(--text-4)">加载中…</div>}
-        {state.kind === 'image' && <img alt={name} className="max-w-full" src={state.url} />}
-        {state.kind === 'html' && (
-          <iframe
-            // 沙箱文档用自己的默认底色（白）——显式给白底是刻意的：
-            // 无样式的用户 HTML 在深色主题下若不铺白底会变成黑底黑字。
-            className="h-full min-h-0 w-full border-0 bg-white"
-            sandbox=""
-            srcDoc={state.html}
-            title={name}
-          />
+        {/* html 预览：外壳用官方 elements/web-preview（跟 aui 上游走）——
+            刷新钮 = 重读文件（reloadKey），地址条显示文件路径，外开走
+            fs_open_url。加载/读错时外壳保持在场（loading 遮罩/错误面）。
+            挂载/形态抄 hermes 右栏 preview-pane 的"chrome 包沙箱 frame"。 */}
+        {HTML_EXTS.has(ext) ? (
+          <WebPreview
+            className="h-full max-w-none rounded-none shadow-none"
+            loading={state.kind === 'loading'}
+            origin={filePath}
+            onOpenExternal={openExternal}
+            onReload={() => setReloadKey((k) => k + 1)}
+          >
+            {state.kind === 'html' && (
+              <iframe
+                // 沙箱文档用自己的默认底色（白）——显式给白底是刻意的：
+                // 无样式的用户 HTML 在深色主题下若不铺白底会变成黑底黑字。
+                className="h-full min-h-0 w-full border-0 bg-white"
+                sandbox=""
+                srcDoc={state.html}
+                title={name}
+              />
+            )}
+            {state.kind === 'error' && (
+              <div className="p-3 text-xs text-destructive">文件读取失败：{state.message}</div>
+            )}
+          </WebPreview>
+        ) : (
+          <>
+            {state.kind === 'loading' && <div className="p-3 text-xs text-(--text-4)">加载中…</div>}
+            {state.kind === 'image' && <img alt={name} className="max-w-full" src={state.url} />}
+          </>
         )}
         {state.kind === 'text' && language !== '' && <CodePreview language={language} text={state.text} />}
         {state.kind === 'text' && language === '' && (
@@ -105,7 +141,8 @@ export function HermesPreviewPane({ filePath }: { filePath: string }) {
             {state.text}
           </pre>
         )}
-        {state.kind === 'error' && (
+        {/* html 的读错在 WebPreview 外壳内渲染（上面分支），这里只兜非 html */}
+        {!HTML_EXTS.has(ext) && state.kind === 'error' && (
           <div className="p-3 text-xs text-destructive">文件读取失败：{state.message}</div>
         )}
         {state.kind === 'binary' && (

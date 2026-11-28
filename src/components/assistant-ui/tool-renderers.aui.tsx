@@ -40,6 +40,7 @@ import { type ReactNode } from "react";
 import { AgentPlan } from "@/components/assistant-ui/elements/agent-plan";
 import { CodeDiff } from "@/components/assistant-ui/elements/code-diff";
 import { DelegationCard, parseDelegationResult } from "@/components/assistant-ui/elements/delegation-card";
+import { ImageGeneration } from "@/components/assistant-ui/elements/image-generation";
 import { SubagentLine } from "@/components/assistant-ui/elements/subagent-line";
 import {
   ToolBody,
@@ -196,12 +197,60 @@ const ParamsBlock: React.FC<{ args: unknown }> = ({ args }) => {
   );
 };
 
+/**
+ * 结果对象归一：裸扁平对象直接取；字符串结果是 JSON 对象时尝试解析
+ * （MCP/天气类工具常把结构化载荷放在 text content 里）。全原语才走键值
+ * 卡——有嵌套对象/数组时如实回落到 JSON pre（不截断、不猜形状）。
+ */
+const structuredResultEntries = (result: unknown): [string, unknown][] | null => {
+  let candidate: unknown = result;
+  if (typeof candidate === "string") {
+    const trimmed = candidate.trim();
+    if (!trimmed.startsWith("{")) return null;
+    try {
+      candidate = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  if (!isPlainRecord(candidate)) return null;
+  const entries = Object.entries(candidate);
+  if (entries.length === 0) return null;
+  return entries.every(([, v]) => v === null || typeof v !== "object")
+    ? entries
+    : null;
+};
+
 const ResultBlock: React.FC<{ result: unknown; failed: boolean }> = ({
   result,
   failed,
 }) => {
   const text = toolResultText(result);
   if (text.length === 0) return null;
+  // 结构化结果卡（"天气卡"类）：扁平键值对用两列 dl，与参数表同形。
+  // 失败结果一律走原文 pre——错误的形状不该被排版成"一张好看的卡"。
+  const entries = failed ? null : structuredResultEntries(result);
+  if (entries) {
+    return (
+      <dl
+        data-slot="aui_tool-result-structured"
+        className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-x-3 gap-y-1 text-xs"
+      >
+        {entries.map(([key, value]) => (
+          <div key={key} className="contents">
+            <dt className="text-muted-foreground min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {key}
+            </dt>
+            <dd className="min-w-0 font-mono whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {typeof value === "string"
+                ? value
+                : (JSON.stringify(value) ?? String(value))}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
   return (
     <pre
       data-slot="aui_tool-result"
@@ -658,6 +707,18 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
       primaryText: label || undefined,
       canToggle: false,
     });
+  }
+
+  // 5g. 图像生成（官方 elements/image-generation）：提示词 + 生成中脉冲占位。
+  // 宿主引擎当前没有内建 generate_image 工具——按 tool-specs 预接线，MCP/
+  // 插件提供该工具名即生效（数据面在引擎侧，前端只是渲染面）。
+  if (toolName === "generate_image") {
+    const prompt = stringArg(args, "prompt", "text") ?? "";
+    return (
+      <div data-slot="aui_tool-image-generation" className="py-1">
+        <ImageGeneration generating={running} prompt={prompt} />
+      </div>
+    );
   }
 
   // 6. 兜底：presentation 动词 + 目标 chip + 参数/结果（ZCode FallbackToolCallBlock）

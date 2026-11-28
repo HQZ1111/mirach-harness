@@ -208,6 +208,26 @@ export const VoiceLiveButton: FC = () => {
     }
   }
 
+  // composer 语音菜单的开合请求（2026-11-28）：菜单只发计数，开合逻辑
+  // 留在本组件（mic 采集/凭据链/停止词接线都在这里）。记已处理序号，
+  // 初次挂载（0）不触发。
+  //
+  // start/stop 经 ref 读最新闭包：订阅只建一次（[]），直接用首帧闭包会
+  // 拿到过期的 busy 状态（双击可能双启会话）。
+  const startRef = useRef(start)
+  startRef.current = start
+  const stopRef = useRef(stop)
+  stopRef.current = stop
+  const handledToggleRef = useRef(voiceLiveStore.getState().callToggleRequest)
+  useEffect(() => {
+    return voiceLiveStore.subscribe((s) => {
+      if (s.callToggleRequest === handledToggleRef.current) return
+      handledToggleRef.current = s.callToggleRequest
+      if (getActiveSession()) stopRef.current()
+      else void startRef.current()
+    })
+  }, [])
+
   return (
     <button
       aria-label={sessionUp ? '结束语音会话' : '开始语音会话'}

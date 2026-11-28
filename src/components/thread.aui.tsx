@@ -74,6 +74,7 @@ import { StoppedRun } from "@/components/assistant-ui/elements/stopped-run";
 import { PiToolUI } from "@/components/assistant-ui/tool-renderers.aui";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
 import { QuoteBlock } from "@/components/assistant-ui/elements/quote.aui";
+import { UserDirectiveText } from "@/components/assistant-ui/directive-text-host";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -2273,6 +2274,13 @@ const UserFilePart: FileMessagePartComponent = (part) => (
   </div>
 );
 
+// 用户文本（assistant-ui 官方 elements/directive-text + 宿主 formatter）：
+// `@name` 渲染成 mention chip（hermes rich-editor 序列化 chip 的最小对偶；
+// 组件本体跟 aui 上游走，glue 见 directive-text-host.tsx）。
+const UserTextPart: TextMessagePartComponent = (part) => (
+  <UserDirectiveText text={part.text} />
+);
+
 // ── 消息级变体切换（retry 语义，官方 message-branches 模板）──────────
 // 挂**user 消息** footer：pi 的分支模型是"从分叉点 user turn 长出的续接
 // 分支"（每条分支以各自的新 user 消息开头——retry_edit 把叶移到该 user
@@ -2358,7 +2366,12 @@ const UserMessage: FC = memo(function UserMessage() {
             border 宽度为 0）。 */}
         <div className={`aui-user-message-content rounded-[24px] ${bubbleOutline ? "border border-(--stroke-soft)" : "border border-transparent"} bg-(--dt-user-bubble) px-[16px] py-[12px] text-[length:var(--conversation-text-font-size)] leading-[1.5] text-foreground wrap-break-word empty:hidden`}>
           <MessagePrimitive.Parts
-            components={{ File: UserFilePart, Image: UserImagePart, Quote: QuoteBlock }}
+            components={{
+              File: UserFilePart,
+              Image: UserImagePart,
+              Quote: QuoteBlock,
+              Text: UserTextPart,
+            }}
           />
         </div>
       </div>

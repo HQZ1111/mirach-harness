@@ -55,6 +55,11 @@ interface VoiceLiveState {
   /** 红显文案（入口钮/字幕条消费——按钮在列头、字幕条在 composer，跨组件
    *  传话走 store，不走 React ref）。null = 无错。 */
   error: null | string
+  /** 语音通话开合请求计数（composer 语音菜单 → 列头 VoiceLiveButton 消费；
+   *  开合逻辑带 mic/凭据链，留在按钮组件里，菜单只发请求——2026-11-28）。
+   *  计数递增让"再点一次"永远触发：订阅方记上一处理的序号。 */
+  callToggleRequest: number
+  requestCallToggle: () => void
   refresh: () => void
   setSessionUp: (up: boolean) => void
   setSpeaking: (speaking: boolean) => void
@@ -113,6 +118,8 @@ export const voiceLiveStore = createStore<VoiceLiveState>((set) => ({
   setPendingDelegation: (d) => set({ pendingDelegation: d }),
   setActiveDelegationId: (id) => set({ activeDelegationId: id }),
   setError: (message) => set({ error: message }),
+  callToggleRequest: 0,
+  requestCallToggle: () => set((s) => ({ callToggleRequest: s.callToggleRequest + 1 })),
 }))
 
 // ── 会话实例注册表（面板持 UI 生命周期，驱动组件经此读会话命令面——

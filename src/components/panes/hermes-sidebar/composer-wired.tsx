@@ -17,9 +17,10 @@ import {
   useAui,
   useAuiState,
   unstable_useComposerInput,
+  unstable_useComposerInputHistory,
 } from '@assistant-ui/react'
 import { useStore } from 'zustand'
-import { CheckIcon, FileText, ImageIcon, Languages, LightbulbIcon, SquareIcon } from 'lucide-react'
+import { CheckIcon, FileText, ImageIcon, Languages, LightbulbIcon, Loader2Icon, MicIcon, PhoneIcon, SquareIcon, Volume2Icon, VolumeXIcon } from 'lucide-react'
 
 import {
   Composer,
@@ -45,10 +46,15 @@ import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
 import { PermissionModeChip } from '@/components/assistant-ui/permission-mode-chip'
 import {
   ContextMenu,
+  ContextMenuCheckboxItem,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/motion/context-menu'
+import { useAutoSpeakRepliesPref, voicePrefsStore } from '@/components/assistant-ui/voice-prefs'
+import { useVoiceLive, voiceLiveStore } from '@/components/assistant-ui/voice-live-store'
+import { ghostButton, inkButton } from '@/components/assistant-ui/elements/surfaces'
 import { ComposerStatusBadge } from '@/components/assistant-ui/composer-status-badge'
 import { ComposerTopSlot } from '@/components/assistant-ui/composer-top-slot'
 import { useThreadSessionId } from '@/components/assistant-ui/thread-session-id'
@@ -254,8 +260,109 @@ function useDictation(onFinal: (text: string) => void) {
   return { active: recording || transcribing, recording, transcribing, seconds, supported, start, stop, cancel }
 }
 
+/**
+ * composer 语音菜单（hermes VoiceMenu 的宿主对偶，2026-11-28）。
+ *
+ * 上游语义（voice-menu.tsx）：**所有语音控制收进一个触发器**——听写、
+ * 朗读回复、语音通话；触发器**报告最响的现场状态**（录音=方形/转写=转圈/
+ * 否则麦克风；任一在活动 = 高亮），收起的菜单永远不会在麦克风开着时装死。
+ *
+ * 宿主差异：唤醒词（"hey hermes" 常听）未移植——WebView2 的连续识别
+ * 不保证可用（未验证），先不做假开关；引擎选择行不在这里（宿主引擎写在
+ * settings.json 的 voice 段，设置 → 语音配置有正经页面，菜单不复制第二个
+ * 入口）；「开始语音通话」经 voiceLiveStore.requestCallToggle 交给列头
+ * VoiceLiveButton（mic/凭据链在那边）。
+ */
+function ComposerVoiceMenu({
+  supported,
+  active,
+  recording,
+  transcribing,
+  onToggleDictation,
+}: {
+  supported: boolean
+  active: boolean
+  recording: boolean
+  transcribing: boolean
+  onToggleDictation: () => void
+}) {
+  const autoSpeak = useAutoSpeakRepliesPref()
+  const sessionUp = useVoiceLive((s) => s.sessionUp)
+  // 任一语音面在活动 → 触发器高亮（hermes `active` 同语义）
+  const lit = active || autoSpeak
+  const label = recording
+    ? '停止语音输入'
+    : transcribing
+      ? '转写中…'
+      : '语音控制（听写 / 朗读回复 / 语音通话）'
+  return (
+    <ContextMenu align="end" anchor="trigger" side="top" sideOffset={6}>
+      <ContextMenuTrigger>
+        <button
+          type="button"
+          aria-label={label}
+          title={label}
+          data-slot="composer-voice-menu-trigger"
+          className={
+            lit
+              ? `${inkButton} pressable-sm flex size-[28px] shrink-0 items-center justify-center rounded-full`
+              : `${ghostButton} pressable-sm size-[28px] shrink-0`
+          }
+        >
+          {recording ? (
+            <SquareIcon className="size-[var(--size-icon-sm)] fill-current" />
+          ) : transcribing ? (
+            <Loader2Icon className="size-[var(--size-icon-sm)] animate-spin" />
+          ) : (
+            <MicIcon className="size-[var(--size-icon-lg)]" />
+          )}
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="min-w-52" ariaLabel="语音控制">
+        <ContextMenuItem
+          onSelect={() => voiceLiveStore.getState().requestCallToggle()}
+        >
+          <PhoneIcon className="size-[var(--size-icon-md)]" />
+          {sessionUp ? '结束语音通话' : '开始语音通话'}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        {/* 复选行（hermes 注释：三项都是"用户要看当前状态"的开关，普通行
+            会把状态折进菜单里）；选中不关菜单——听写是要看着录音状态的
+            模式（hermes `event.preventDefault()` 同款，走 closeOnSelect=false）。 */}
+        {supported && (
+          <ContextMenuCheckboxItem
+            checked={active}
+            closeOnSelect={false}
+            disabled={transcribing}
+            onCheckedChange={() => onToggleDictation()}
+            title={transcribing ? '转写收尾中，稍候再操作' : undefined}
+          >
+            {recording ? '停止听写' : transcribing ? '转写中…' : '语音听写'}
+          </ContextMenuCheckboxItem>
+        )}
+        <ContextMenuCheckboxItem
+          checked={autoSpeak}
+          closeOnSelect={false}
+          onCheckedChange={(v) => voicePrefsStore.getState().setAutoSpeak(v)}
+        >
+          {autoSpeak ? (
+            <Volume2Icon className="size-[var(--size-icon-md)]" />
+          ) : (
+            <VolumeXIcon className="size-[var(--size-icon-md)]" />
+          )}
+          {autoSpeak ? '停止朗读回复' : '朗读回复'}
+        </ContextMenuCheckboxItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
 export function ComposerWired() {
   const input = unstable_useComposerInput()
+  // 终端式输入历史（assistant-ui 原语，2026-11-28）：空草稿时 ↑ 召回最近
+  // 发送的消息、↓ 回退并恢复原草稿；由原语自己避让 slash/@ 菜单（它只看
+  // defaultPrevented 与光标行，宿主只需先跑自己的处理器）。
+  const inputHistory = unstable_useComposerInputHistory()
   const aui = useAui()
   const value = input.value
   const isRunning = useAuiState((s) => s.thread.isRunning)
@@ -657,7 +764,10 @@ export function ComposerWired() {
                 aria-label="消息输入"
                 className="max-h-40 min-h-[40px] w-full resize-none bg-transparent p-0 text-[length:var(--conversation-text-font-size)] leading-[20px] text-(--text) outline-none placeholder:text-(--text-4)"
                 enterKeyHint="send"
-                onKeyDown={onInputKeyDown}
+                onKeyDown={(e) => {
+                  onInputKeyDown(e)
+                  inputHistory.onKeyDown(e)
+                }}
                 placeholder={
                   isRunning ? '继续输入以排队后续修改' : '输入消息，/ 指令，@ 成员…'
                 }
@@ -748,17 +858,21 @@ export function ComposerWired() {
                   size="sm"
                   variant="ghost"
                 />
-                {dictation.supported && (
-                  <ComposerVoiceButton
-                    active={dictation.active}
-                    aria-label={dictation.active ? '停止语音' : '语音输入'}
-                    onClick={() => {
-                      if (dictation.recording) dictation.stop()
-                      else if (dictation.transcribing) dictation.cancel()
-                      else dictation.start()
-                    }}
-                  />
-                )}
+                {/* 语音控制 = 一个菜单（hermes VoiceMenu 同位）：听写 /
+                    朗读回复 / 语音通话。2026-11-28 前是裸听写钮——现在
+                    触发器照旧可见（录音=方形/转写=转圈/活动=高亮），点击
+                    展开全部语音开关（用户："能对应的全部接线"）。 */}
+                <ComposerVoiceMenu
+                  supported={dictation.supported}
+                  active={dictation.active}
+                  recording={dictation.recording}
+                  transcribing={dictation.transcribing}
+                  onToggleDictation={() => {
+                    if (dictation.recording) dictation.stop()
+                    else if (dictation.transcribing) dictation.cancel()
+                    else dictation.start()
+                  }}
+                />
                 {/* 右侧原 Ring 已撤（2026-11-01）：上下文入口统一到模型选择器
                     左侧的明细按钮（同一信息的第二个入口是噪声）。 */}
                 {isRunning ? (

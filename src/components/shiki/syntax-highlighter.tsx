@@ -20,6 +20,7 @@ import { chunkByLines, exceedsHighlightBudget, isLikelyProseCodeBlock } from './
 import { CHUNK_LINES, EST_LINE_PX } from './shiki-config'
 import { PlainShiki } from './shiki-plain'
 import type { CachedShikiBlockProps } from './shiki-block'
+import { MermaidDiagram } from '@/components/assistant-ui/elements/mermaid-diagram'
 
 // shiki（及其背后的多 MB 语言/主题/wasm bundle）是渲染器最重的依赖。
 // shiki-block.tsx 是它唯一的静态 import 者，这个 lazy() 就是把它挡在
@@ -65,6 +66,14 @@ export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }
   // 流式会递来空/未完成的围栏——渲染空操作，不出瞬态空卡。
   if (!content.trim()) {
     return null
+  }
+
+  // mermaid 围栏（2026-11-28 接线）：`\`\`\`mermaid` 渲染成图（beautiful-mermaid
+  // 同步出 SVG，失败原样回退源码 + 注明原因——不静默）。点击可全屏缩放。
+  // streaming 无法从 react-markdown 的 SyntaxHighlighterProps 得知（宿主
+  // 管线只有 language/code）——流式期间增量重渲，未完成的图走失败回退分支。
+  if (language === 'mermaid') {
+    return <MermaidDiagram className="aui-mermaid-block" code={content} />
   }
 
   // prose 判定：像散文的围栏块直接当文本（不上底色卡、不给复制钮）。
