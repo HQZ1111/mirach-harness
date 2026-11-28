@@ -13,8 +13,11 @@
 import { useEffect, useRef, type CSSProperties } from 'react';
 import './ParticleText.css';
 
+/** 图片模式（宿主扩展 2026-11-28）：给 imageSrc 时粒子从图片像素采样
+ *  （启动页 logo 与字标同套粒子特效）；text 被忽略。 */
 export interface ParticleTextProps {
   text?: string;
+  imageSrc?: string;
   particleSize?: number;
   density?: number;
   color?: string;
@@ -41,7 +44,7 @@ export interface ParticleTextProps {
   onComplete?: () => void;
 }
 
-type Settings = Required<Omit<ParticleTextProps, 'className' | 'style' | 'onComplete'>>;
+type Settings = Required<Omit<ParticleTextProps, 'className' | 'style' | 'onComplete' | 'imageSrc'>>;
 type Intro = Settings['intro'];
 type Shape = Settings['shape'];
 type Rgb = { r: number; g: number; b: number };
@@ -111,6 +114,14 @@ const resolveFontSize = (
   return size;
 };
 
+const loadImage = (src: string): Promise<HTMLImageElement> =>
+  new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => reject(new Error(`[particle-text] 图片加载失败: ${src}`))
+    img.src = src
+  })
+
 const waitForFonts = async (font: string): Promise<void> => {
   if (!('fonts' in document)) return;
 
@@ -123,6 +134,7 @@ const waitForFonts = async (font: string): Promise<void> => {
 
 const ParticleText = ({
   text = 'React Bits',
+  imageSrc = '',
   particleSize = 2,
   density = 4,
   color = 'currentColor',
@@ -148,6 +160,9 @@ const ParticleText = ({
   onComplete
 }: ParticleTextProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  /** 图片模式源（独立 ref：Settings 的 Required 形状不含它）。 */
+  const imageSrcRef = useRef('');
+  imageSrcRef.current = imageSrc;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const settingsRef = useRef<Settings | null>(null);
   const wakeRef = useRef<() => void>(() => {});
@@ -599,9 +614,9 @@ const ParticleText = ({
       if (s) {
         const key = layoutKey(s);
         if (key !== sampledKey) {
-          queueSample(s.text !== sampledText);
+          queueSample((s.text + "#" + imageSrcRef.current) !== sampledText);
           sampledKey = key;
-          sampledText = s.text;
+          sampledText = s.text + "#" + imageSrcRef.current;
         }
       }
       const busy = step(now);
@@ -624,7 +639,7 @@ const ParticleText = ({
       const nextHeight = Math.floor(rect.height);
       requestedSize = sizeKey();
       sampledKey = layoutKey(s);
-      sampledText = s.text;
+          sampledText = s.text + "#" + imageSrcRef.current;
 
       if (nextWidth <= 0 || nextHeight <= 0) return;
 
@@ -640,36 +655,59 @@ const ParticleText = ({
       const offCtx = offscreen.getContext('2d', { willReadFrequently: true });
       if (!offCtx) return;
 
-      const content = String(s.text || ' ');
-      const maxTextWidth = nextWidth * 0.92;
-      offCtx.font = font;
-      let metrics = offCtx.measureText(content);
-      const measuredWidth = Math.max(1, metrics.width);
-      if (measuredWidth > maxTextWidth) {
-        resolvedSize = Math.max(18, resolvedSize * (maxTextWidth / measuredWidth));
-        font = `${s.fontWeight} ${resolvedSize}px ${resolvedFamily}`;
-        await waitForFonts(font);
+      const imgSrc = imageSrcRef.current;
+      if (imgSrc) {
+        // ── 图片模式（宿主扩展 2026-11-28）：logo 也用粒子画。图片按 contain
+        // 画进方形离屏画布，像素采样与文本模式共用下面的循环（alpha<40 视为
+        // 空白）。加载失败 = 可见错误（不静默空白）。
+        let img: HTMLImageElement;
+        try {
+          img = await loadImage(imgSrc);
+        } catch (err) {
+          console.error(err);
+          return;
+        }
         if (currentBuild !== buildId || !alive) return;
+        const side = Math.max(1, Math.floor(Math.min(nextWidth, nextHeight) * 0.94));
+        offscreen.width = side;
+        offscreen.height = side;
+        offCtx.clearRect(0, 0, side, side);
+        const scale = Math.min(side / img.naturalWidth, side / img.naturalHeight);
+        const dw = Math.max(1, Math.round(img.naturalWidth * scale));
+        const dh = Math.max(1, Math.round(img.naturalHeight * scale));
+        offCtx.drawImage(img, (side - dw) / 2, (side - dh) / 2, dw, dh);
+      } else {
+        const content = String(s.text || ' ');
+        const maxTextWidth = nextWidth * 0.92;
         offCtx.font = font;
-        metrics = offCtx.measureText(content);
+        let metrics = offCtx.measureText(content);
+        const measuredWidth = Math.max(1, metrics.width);
+        if (measuredWidth > maxTextWidth) {
+          resolvedSize = Math.max(18, resolvedSize * (maxTextWidth / measuredWidth));
+          font = `${s.fontWeight} ${resolvedSize}px ${resolvedFamily}`;
+          await waitForFonts(font);
+          if (currentBuild !== buildId || !alive) return;
+          offCtx.font = font;
+          metrics = offCtx.measureText(content);
+        }
+
+        const left = Math.ceil(metrics.actualBoundingBoxLeft || 0);
+        const right = Math.ceil(metrics.actualBoundingBoxRight || metrics.width);
+        const ascent = Math.ceil(metrics.actualBoundingBoxAscent || resolvedSize * 0.78);
+        const descent = Math.ceil(metrics.actualBoundingBoxDescent || resolvedSize * 0.22);
+        const padding = Math.max(12, Math.ceil(resolvedSize * 0.08));
+        const textWidth = Math.max(1, left + right);
+        const textHeight = Math.max(1, ascent + descent);
+
+        offscreen.width = textWidth + padding * 2;
+        offscreen.height = textHeight + padding * 2;
+        offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
+        offCtx.font = font;
+        offCtx.textAlign = 'left';
+        offCtx.textBaseline = 'alphabetic';
+        offCtx.fillStyle = '#ffffff';
+        offCtx.fillText(content, padding - left, padding + ascent);
       }
-
-      const left = Math.ceil(metrics.actualBoundingBoxLeft || 0);
-      const right = Math.ceil(metrics.actualBoundingBoxRight || metrics.width);
-      const ascent = Math.ceil(metrics.actualBoundingBoxAscent || resolvedSize * 0.78);
-      const descent = Math.ceil(metrics.actualBoundingBoxDescent || resolvedSize * 0.22);
-      const padding = Math.max(12, Math.ceil(resolvedSize * 0.08));
-      const textWidth = Math.max(1, left + right);
-      const textHeight = Math.max(1, ascent + descent);
-
-      offscreen.width = textWidth + padding * 2;
-      offscreen.height = textHeight + padding * 2;
-      offCtx.clearRect(0, 0, offscreen.width, offscreen.height);
-      offCtx.font = font;
-      offCtx.textAlign = 'left';
-      offCtx.textBaseline = 'alphabetic';
-      offCtx.fillStyle = '#ffffff';
-      offCtx.fillText(content, padding - left, padding + ascent);
 
       const imageData = offCtx.getImageData(0, 0, offscreen.width, offscreen.height);
       const targets: Target[] = [];

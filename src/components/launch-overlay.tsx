@@ -68,7 +68,7 @@ export function LaunchOverlay() {
   // 到左上角进入主页"）。粒子聚合约 1.5s + stagger；onComplete 是准信，
   // 2.6s 兜底防 reduce/异常不回调。
   const [textComplete, setTextComplete] = useState(prefersReducedMotion())
-  const logoRef = useRef<HTMLImageElement | null>(null)
+  const logoRef = useRef<HTMLDivElement | null>(null)
   const wordRef = useRef<HTMLSpanElement | null>(null)
   const handoffTimerRef = useRef<number | null>(null)
 
@@ -226,12 +226,24 @@ export function LaunchOverlay() {
         {/* 品牌行：logo 在左、文字在右（用户 2026-11-27 定稿）。
             两个 ref 仍是独立元素——接力 FLIP 逐个量测/平移，与并排布局无关。 */}
         <div className="launch-overlay__brand-row">
-          <div className="launch-overlay__brand">
-            <img
-              alt="Mirach"
-              className="launch-overlay__logo"
-              ref={logoRef}
-              src="/brand/logo.png"
+          {/* logo 也用粒子（2026-11-28 用户："logo 也没用粒子的特效"）：
+              ParticleText 图片模式从 logo 像素采样，与右侧字标同一套
+              gather/glow/repel；盒子高度 = 字标同高（大小/位置对齐）。 */}
+          <div className="launch-overlay__brand" ref={logoRef}>
+            <ParticleText
+              className="launch-overlay__logo-particles"
+              clickBurst={false}
+              density={5}
+              gatherDuration={1500}
+              glow
+              highlightColor="#5aa2ff"
+              idleDrift={0.5}
+              imageSrc="/brand/logo.png"
+              intro="gather"
+              particleSize={2.4}
+              pointerRepel={24}
+              repelRadius={110}
+              stagger={320}
             />
           </div>
 

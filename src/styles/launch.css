@@ -39,18 +39,31 @@
   align-items: center;
   display: flex;
   flex: none;
+  /* 与字标同高（2026-11-28 用户："logo 大小没有和文字对齐"）：粒子 logo 的
+     方形盒子取 word-box 同一条 clamp，二者中线由 brand-row 的 center 对齐。 */
+  height: clamp(96px, 18vh, 190px);
   justify-content: center;
+  width: clamp(96px, 18vh, 190px);
 }
 
+.launch-overlay__logo-particles {
+  /* 粒子基色 = 品牌色（与 MIRACH 字标同一套 currentColor 读取）。 */
+  color: var(--brand);
+  height: 100%;
+  width: 100%;
+}
+
+.launch-overlay--handoff .launch-overlay__logo-particles {
+  opacity: 0;
+}
+
+/* 旧位图 logo 规则保留给降级路径（无 canvas 环境/首帧前）：不再放大，
+   粒子层盖在其上（.launch-overlay__logo-particles）。 */
 .launch-overlay__logo {
   border-radius: 50%;
-  /* 与左栏 `.rail-logo-mark` 同一批令牌：主题色自定义时位图 logo 的
-     hue-rotate/saturate 在启动页与栏内一致，接力不跳色。 */
   filter: hue-rotate(var(--logo-hue-rotate, 0deg)) saturate(var(--logo-saturate, 1));
   height: var(--logo-size);
   object-fit: cover;
-  transform: scale(2.1);
-  transform-origin: center;
   width: var(--logo-size);
 }
 

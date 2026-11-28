@@ -49,6 +49,23 @@ describe('deriveStats', () => {
   })
 
   it('空列表返回全零', () => {
-    expect(deriveStats([])).toEqual({ turns: 0, steps: 0, ttftMs: null })
+    expect(deriveStats([])).toMatchObject({ turns: 0, steps: 0, ttftMs: null })
+  })
+
+  it('工具耗时合计与 run 用时（新增口径）', () => {
+    const s = deriveStats([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', startedAt: 1000, completedAt: 1500 },
+          { type: 'tool-call', startedAt: 2000, completedAt: 2600 },
+          { type: 'text', startedAt: 2600, completedAt: 3000 },
+        ],
+        createdAt: new Date(500),
+        completedAt: 3000,
+      },
+    ])
+    expect(s.toolMs).toBe(1100)
+    expect(s.runWallMs).toBe(2500)
   })
 })
