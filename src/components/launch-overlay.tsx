@@ -68,6 +68,16 @@ export function LaunchOverlay() {
   // 到左上角进入主页"）。粒子聚合约 1.5s + stagger；onComplete 是准信，
   // 2.6s 兜底防 reduce/异常不回调。
   const [textComplete, setTextComplete] = useState(prefersReducedMotion())
+  /** 粒子聚合完成 → 交叉淡入真 logo（用户："粒子最后变成 logo 不是点"）。 */
+  const [logoAssembled, setLogoAssembled] = useState(prefersReducedMotion())
+  /** 字标**墨迹高度**（像素）：logo 盒子按它设方（上下对齐文字上下、中心对齐
+   *  文字中心——用户 2026-11-28）。未量到前用 CSS 兜底 clamp。 */
+  const [wordInkHeight, setWordInkHeight] = useState<number | null>(null)
+  /** 墨迹中线相对字标盒子中线的位移：logo 要**中心对齐文字的中心**（文字
+   *  的墨迹在盒子里偏下——descender 空间）。 */
+  const [logoOffsetY, setLogoOffsetY] = useState(0)
+  /** 位图 logo 淡入完成后的短暂停留：接力前让粒子→logo这一帧被看见。 */
+  const [logoDwell, setLogoDwell] = useState(prefersReducedMotion())
   const logoRef = useRef<HTMLDivElement | null>(null)
   const wordRef = useRef<HTMLSpanElement | null>(null)
   const handoffTimerRef = useRef<number | null>(null)
@@ -77,6 +87,100 @@ export function LaunchOverlay() {
     const id = window.setTimeout(() => setTextComplete(true), 2600)
     return () => window.clearTimeout(id)
   }, [textComplete])
+
+  // 粒子聚合完成 + 盒子已按墨迹高度定尺后才交叉淡入位图 logo（粒子层
+  // 淡出）——最终画面就是 logo 本身；量测失败（-1）也放行（用兜底尺寸）。
+  useEffect(() => {
+    if (logoAssembled || wordInkHeight === null) return
+    const id = window.setTimeout(() => setLogoAssembled(true), 150)
+    return () => window.clearTimeout(id)
+  }, [logoAssembled, wordInkHeight])
+
+  useEffect(() => {
+    if (!logoAssembled || logoDwell) return
+    const id = window.setTimeout(() => setLogoDwell(true), 450)
+    return () => window.clearTimeout(id)
+  }, [logoAssembled, logoDwell])
+
+  // 量测字标 canvas 的墨迹高度（logo 盒子的边长）。粒子画布与文字同盒——
+  // 取 alpha>96 覆盖行的上下界；聚合后量一次即停（粒子在动，bbox 有 1-2px
+  // 抖动，取整即可；阈值滤掉 glow 光环）。
+  useEffect(() => {
+    // 聚合没完成前，粒子还在全画布飞（bbox 会等于整块画布）——必须等
+    // onComplete（textComplete）之后再量。
+    if (!textComplete || wordInkHeight !== null) return
+    let timer: number | null = null
+    let stopped = false
+    const sample = () => {
+      if (stopped) return
+      try {
+        const canvas = document.querySelector<HTMLCanvasElement>(
+          '.launch-overlay__particles canvas',
+        )
+        if (canvas && canvas.width > 0 && canvas.height > 0) {
+          const ctx = canvas.getContext('2d', { willReadFrequently: true })
+          if (ctx) {
+            const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+            let top = -1
+            let bottom = -1
+            for (let y = 0; y < canvas.height && top === -1; y += 1) {
+              for (let x = 0; x < canvas.width; x += 1) {
+                if (data[(y * canvas.width + x) * 4 + 3]! > 96) {
+                  top = y
+                  break
+                }
+              }
+            }
+            if (top !== -1) {
+              for (let y = canvas.height - 1; y >= top && bottom === -1; y -= 1) {
+                for (let x = 0; x < canvas.width; x += 1) {
+                  if (data[(y * canvas.width + x) * 4 + 3]! > 96) {
+                    bottom = y
+                    break
+                  }
+                }
+              }
+            }
+            if (top !== -1 && bottom > top) {
+              const rect = canvas.getBoundingClientRect()
+              const scale = rect.height / canvas.height
+              const inkCss = (bottom - top + 1) * scale
+              if (inkCss >= 24) {
+                stopped = true
+                setWordInkHeight(Math.round(inkCss))
+                // 墨迹中线 − 盒子中线（CSS px）：logo 盒按同高方盒 + 该位移
+                // 才与文字上下同高、中心对齐。
+                const inkCenter = rect.top + ((top + bottom + 1) / 2) * scale
+                // 参照 = **字标盒子**（flex 的 items-center 对齐的是盒子，
+                // 不是画布：画布可能比盒子高，墨迹中心因此偏下）。
+                const wordBox = document
+                  .querySelector('.launch-overlay__word-box')
+                  ?.getBoundingClientRect()
+                const anchorCenter = wordBox ? wordBox.top + wordBox.height / 2 : rect.top + rect.height / 2
+                setLogoOffsetY(Math.round(inkCenter - anchorCenter))
+                return
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // 读像素失败（context 丢失/CSP）：保留 CSS 兜底尺寸，不再轮询。
+        // -1 = 已尝试但失败：接力闸门不能因此永远等（不等于 null 即放行）。
+        console.error('[launch] 字标墨迹量测失败——logo 使用兜底尺寸', e)
+        stopped = true
+        setWordInkHeight(-1)
+        return
+      }
+      timer = window.setTimeout(sample, 250)
+    }
+    sample()
+    return () => {
+      stopped = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+    // textComplete 必须在依赖里：聚合完成前直接 return（粒子还在全画布飞，
+    // bbox 会是整块画布）——漏了它 effect 永远不会在聚合后重启。
+  }, [textComplete, wordInkHeight])
 
   useEffect(() => {
     const id = window.setTimeout(() => setMinElapsed(true), MIN_SHOW_MS)
@@ -196,13 +300,17 @@ export function LaunchOverlay() {
   useEffect(() => {
     if (preview) return
     if (phase !== 'live' || bootPhase !== 'ready' || !minElapsed) return
+    // 墨迹量测未完成时先别接力：FLIP 的 scale 用 offsetWidth 算，盒子随后
+    // 从兜底 120 改成墨迹高会让落点尺寸对不上（量测在聚合后 ~250ms 内完成；
+    // 失败 = -1 也放行）。
+    if (wordInkHeight === null || !logoDwell) return
     if (prefersReducedMotion()) {
       setPhase('gone')
       return
     }
     if (!textComplete) return
     runHandoff()
-  }, [bootPhase, minElapsed, phase, preview, runHandoff, textComplete])
+  }, [bootPhase, minElapsed, phase, preview, runHandoff, textComplete, wordInkHeight, logoDwell])
 
   if (phase === 'gone') return null
 
@@ -215,6 +323,7 @@ export function LaunchOverlay() {
       aria-live="polite"
       className={cn(
         'launch-overlay fixed inset-0 z-(--z-connecting) grid place-items-center',
+        logoAssembled && 'launch-overlay--logo-assembled',
         handoff && 'launch-overlay--handoff',
       )}
       role={failed ? 'alert' : 'status'}
@@ -228,8 +337,23 @@ export function LaunchOverlay() {
         <div className="launch-overlay__brand-row">
           {/* logo 也用粒子（2026-11-28 用户："logo 也没用粒子的特效"）：
               ParticleText 图片模式从 logo 像素采样，与右侧字标同一套
-              gather/glow/repel；盒子高度 = 字标同高（大小/位置对齐）。 */}
-          <div className="launch-overlay__brand" ref={logoRef}>
+              gather/glow/repel。盒子边长 = **字标墨迹高度**（量测值；量到
+              前用 CSS 兜底）——上下与文字同高、中心对齐（brand-row 的
+              items-center 保证中线一致）。聚合完成后粒子淡出、位图 logo
+              淡入（".launch-overlay--logo-assembled"）。 */}
+          <div
+            className="launch-overlay__brand"
+            ref={logoRef}
+            style={
+              wordInkHeight !== null && wordInkHeight > 0
+                ? {
+                    height: wordInkHeight,
+                    width: wordInkHeight,
+                    transform: `translateY(${logoOffsetY}px)`,
+                  }
+                : undefined
+            }
+          >
             <ParticleText
               className="launch-overlay__logo-particles"
               clickBurst={false}
@@ -244,6 +368,13 @@ export function LaunchOverlay() {
               pointerRepel={24}
               repelRadius={110}
               stagger={320}
+            />
+            <img
+              alt=""
+              aria-hidden
+              className="launch-overlay__brand-img"
+              draggable={false}
+              src="/brand/logo.png"
             />
           </div>
 

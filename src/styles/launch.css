@@ -39,22 +39,51 @@
   align-items: center;
   display: flex;
   flex: none;
-  /* 与字标同高（2026-11-28 用户："logo 大小没有和文字对齐"）：粒子 logo 的
-     方形盒子取 word-box 同一条 clamp，二者中线由 brand-row 的 center 对齐。 */
-  height: clamp(96px, 18vh, 190px);
   justify-content: center;
-  width: clamp(96px, 18vh, 190px);
+  position: relative;
+  /* 兜底尺寸（首帧/未量测时）：真正的高度由组件量测**字标墨迹高度**后内联
+     覆盖——用户 2026-11-28："logo 大小，上下对齐文字的上下大小，中心对齐
+     文字的中心"。flex 的 items-center 保证两者中线一致。 */
+  height: clamp(64px, 12vh, 120px);
+  width: clamp(64px, 12vh, 120px);
 }
 
 .launch-overlay__logo-particles {
   /* 粒子基色 = 品牌色（与 MIRACH 字标同一套 currentColor 读取）。 */
   color: var(--brand);
   height: 100%;
+  transition: opacity 420ms ease-out;
   width: 100%;
+}
+
+/* 粒子聚合完成后**变成真 logo**（用户 2026-11-28："粒子最后变成 logo 不是
+   点"）：位图在粒子层上淡入（同盒、同 contain），粒子层淡出。 */
+.launch-overlay__brand-img {
+  border-radius: 50%;
+  filter: hue-rotate(var(--logo-hue-rotate, 0deg)) saturate(var(--logo-saturate, 1));
+  height: 100%;
+  inset: 0;
+  object-fit: contain;
+  opacity: 0;
+  position: absolute;
+  transition: opacity 420ms ease-out;
+  width: 100%;
+}
+
+.launch-overlay--logo-assembled .launch-overlay__brand-img {
+  opacity: 1;
+}
+
+.launch-overlay--logo-assembled .launch-overlay__logo-particles {
+  opacity: 0;
 }
 
 .launch-overlay--handoff .launch-overlay__logo-particles {
   opacity: 0;
+}
+
+.launch-overlay--handoff .launch-overlay__brand-img {
+  opacity: 1;
 }
 
 /* 旧位图 logo 规则保留给降级路径（无 canvas 环境/首帧前）：不再放大，

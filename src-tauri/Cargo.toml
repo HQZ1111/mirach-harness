@@ -1,6 +1,6 @@
 [package]
 name = "mirach-harness"
-version = "0.1.9"
+version = "0.1.10"
 description = "Mirach harness — layout testbed Tauri shell"
 edition = "2021"
 

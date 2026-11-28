@@ -89,6 +89,13 @@ import {
   withoutColumnMorph,
 } from './dockview-column-ops'
 import {
+  applySessionPanels,
+  captureSessionPanels,
+  deleteSessionPanels,
+  loadSessionPanels,
+  saveSessionPanels,
+} from './session-panel-layout'
+import {
   CHAT_MIN_WIDTH,
   leftRailDefaultWidth,
   panelsRailDefaultWidth,
@@ -110,14 +117,30 @@ import { openPagePanel, panelsDropPosition, splitPanelOut } from './open-page-ac
  * 选区后拖动会把面板拖出去（用户 2026-11-27 实报）。有选区 = 用户在做
  * 文字选择，不是拖页签。
  */
-function hasNonCollapsedSelection(): boolean {
-  try {
-    const sel = window.getSelection()
-    return sel !== null && !sel.isCollapsed && sel.toString().trim().length > 0
-  } catch {
-    // 读选区失败不阻断拖拽（非浏览器环境/权限异常）——返回 false 让原生行为生效。
-    return false
-  }
+/**
+ * 当前是否处在「非页签来源」的原生 HTML5 拖拽会话里。
+ *
+ * 为什么需要：dockview 的落点浮层/`onUnhandledDragOver` 只看 dragenter，
+ * **不校验 dataTransfer 里有没有它自己的 payload**——所以在消息正文上拖
+ * 选中的文字（原生 text drag）经过内容区时，照样会冒出「拖拽标签的落点」，
+ * pointer 后端下还会真的把面板拖出去（2026-11-27/28 用户两次实报）。上一
+ * 轮的 `onWillDragPanel` 选区守卫只能拦 pointer 后端的面板拖拽，拦不了原生
+ * 文字拖拽的 dragenter。
+ *
+ * 这里在 document 捕获相按**拖拽源**分类：
+ * - 源元素带 `draggable`（dockview 页签 chip、审查文件树行）→ 放行；
+ * - 其余（多数 = 选中文字）→ 标记 foreign 并直接 `preventDefault()` 取消
+ *   原生拖拽会话（连 ghost 都不产生）；三个落点钩子同时对该标记拒绝，
+ *   双保险（某些情况下 dragstart 的默认行为被外部接管时仍有兜底）。
+ */
+let foreignNativeDrag = false
+
+function isDragFromDraggableSource(target: EventTarget | null): boolean {
+  const el = target as Element | null
+  if (!el || typeof el.closest !== 'function') return false
+  // `.dv-tab` = dockview 页签（draggable=true 会被 React 反射成属性，这里
+  // 直接按属性判就够）；`[draggable="true"]` 覆盖文件树行等应用自有拖拽源。
+  return el.closest('.dv-tab, [draggable="true"]') !== null
 }
 
 const loadLayout = (): SerializedDockview | null => {
@@ -289,6 +312,75 @@ export function DockviewShell() {
   const anchorBusyRef = useRef(false)
   /** 拖出分栏进行中（dockview 重摊期间不能把列宽记成目标宽）。 */
   const splitBusyRef = useRef(false)
+  /** 每会话面板抽屉切换进行中：布局事件不参与锚生命周期（拆除中间态不是
+   *  用户动作；"末签关闭"不能在半拆状态误关栏）。 */
+  const applyingPanelsRef = useRef(false)
+  /** 抽屉归属的会话（activeId 变化的比较基线）。 */
+  const lastPanelSessionRef = useRef<string | null>(sessionCatalog.getState().activeId)
+
+  // 原生拖拽来源分类（见 `foreignNativeDrag` 注释）：document 捕获相登记
+  // 拖拽会话。非 draggable 源（选中文字等）的 dragstart 直接取消；dragend/
+  // drop 无论路径都把标记复位（外部中断/Electron 拖回也不残留）。
+  useEffect(() => {
+    const onDragStart = (event: DragEvent) => {
+      const fromDraggable = isDragFromDraggableSource(event.target)
+      foreignNativeDrag = !fromDraggable
+      if (!fromDraggable) event.preventDefault()
+    }
+    const reset = () => {
+      foreignNativeDrag = false
+    }
+    window.addEventListener('dragstart', onDragStart, true)
+    window.addEventListener('dragend', reset, true)
+    window.addEventListener('drop', reset, true)
+    return () => {
+      window.removeEventListener('dragstart', onDragStart, true)
+      window.removeEventListener('dragend', reset, true)
+      window.removeEventListener('drop', reset, true)
+      foreignNativeDrag = false
+    }
+  }, [])
+
+  // ── 每会话面板抽屉（ZCode side pane / hermes preview tabs 对偶）──
+  // 语义（见 session-panel-layout.ts 头注）：几何/栏宽/开合全局不变，只把
+  // **会话域面板集合**（preview/review/terminal*/subagent/plan-detail/…）
+  // 按会话换。切走先把当前集合记到旧会话名下；切到一个没有记录的会话 =
+  // 空抽屉。首次见到某会话（boot 恢复 / 新会话创建）不是"换"，而是把当前
+  // 集合记成它的抽屉（升级首启不无故关掉用户已开的面板）。
+  const syncPanelDrawer = useCallback((prev: string | null, next: string | null) => {
+    const api = apiRef.current
+    if (!api || prev === next) return
+    if (prev !== null) saveSessionPanels(prev, captureSessionPanels(api))
+    if (next === null) return
+    if (prev === null && loadSessionPanels(next) === null) {
+      saveSessionPanels(next, captureSessionPanels(api))
+      return
+    }
+    applyingPanelsRef.current = true
+    try {
+      applySessionPanels(api, next)
+    } catch (e) {
+      console.error('[panel-layout] 会话面板抽屉切换失败（面板集合保持旧态）', e)
+    } finally {
+      // 布局事件同步 + 微任务下发：下一帧解除静默窗口。
+      requestAnimationFrame(() => {
+        applyingPanelsRef.current = false
+      })
+    }
+  }, [])
+  const syncPanelDrawerRef = useRef(syncPanelDrawer)
+  syncPanelDrawerRef.current = syncPanelDrawer
+
+  useEffect(() => {
+    const unsubscribe = sessionCatalog.subscribe((state) => {
+      const next = state.activeId
+      const prev = lastPanelSessionRef.current
+      if (next === prev) return
+      lastPanelSessionRef.current = next
+      syncPanelDrawerRef.current(prev, next)
+    })
+    return unsubscribe
+  }, [])
 
   // bots 插件关闭 = 机器人栏/例程栏一并移除（用户 2026-11-26："机器人页和
   // 配置档案栏一起消失"）。不能只靠 bundled 插件的 deactivateExtras：
@@ -376,6 +468,8 @@ export function DockviewShell() {
   const handlePanelAdded = useCallback(
     (a: DockviewApi, panelId: string) => {
       if (anchorBusyRef.current) return
+      // 抽屉切换的增删不是用户动作（中间态），锚生命周期与布局持久化都让位。
+      if (applyingPanelsRef.current) return
       // 复位进行中：锚生命周期整个让位（fromJSON 内部 clear+重建的自发
       // 事件不是用户动作——见 dockview-column-ops layoutResetInProgress）
       if (layoutResetInProgress()) return
@@ -399,6 +493,8 @@ export function DockviewShell() {
   const handlePanelRemoved = useCallback(
     (a: DockviewApi, panelId: string) => {
       if (anchorBusyRef.current) return
+      // 抽屉切换的摘签（先摘后补的中间态）不触发"末签关闭 = 关栏"。
+      if (applyingPanelsRef.current) return
       // 复位进行中：末签关闭的重建/anchor 复位是清场中间态，让位；
       // fromJSON 完成即成品树（实锤：不复位护栏会把 addPanel 打进半清树，
       // referencePanel 'workspace' does not exist）
@@ -678,13 +774,23 @@ export function DockviewShell() {
 
   // ── 插件贡献 → 例程面板（见模块级 routinesPaneSync 注释）────────────────
   useEffect(() => {
+    /** 摘签去抖：bot 之间切换时贡献会瞬时 unregister→register，立即摘
+     *  面板会出现"定时任务闪一下"（用户 2026-11-28："点击 bot 定时任务会
+     *  闪现一下"）。hermes 的例程竖标签是常驻折叠件，不会随一次点击闪；
+     *  这里给摘签 500ms 宽限，期间重新 wanted 就取消。 */
+    let removeTimer: ReturnType<typeof setTimeout> | null = null
     const sync = () => {
       const a = apiRef.current
       if (!a) return
       const wanted = registry.getArea('panes').some((c) => c.id === 'hermes-bots:routines')
       if (wanted) routinesContributionSeen = true
       const panel = a.getPanel('routines')
-      if (wanted && !panel) {
+      if (wanted) {
+        if (removeTimer !== null) {
+          clearTimeout(removeTimer)
+          removeTimer = null
+        }
+        if (!panel) {
         try {
           a.addPanel({
             id: 'routines',
@@ -707,21 +813,33 @@ export function DockviewShell() {
         } catch (e) {
           console.error('[plugins] 例程面板创建失败', e)
         }
+        }
       } else if (
         !wanted &&
         panel &&
         (routinesContributionSeen || !botsFeatureDesiredNow()) &&
         a.panels.some((p) => p.id === panel.id)
       ) {
-        // getPanel 可能拿到已 dispose 的陈旧引用（HMR 拆卸 / 面板刚被关），
-        // 直接 removePanel 会抛 "resource already disposed"——先核对活动列表。
-        // **启动早期 `wanted=false` 但贡献还没注册过时不能摘**：那会把用户
-        // 存档里的 routines 分栏当标签重建成普通标签（2026-11-24 实锤）。
-        try {
-          a.removePanel(panel)
-        } catch (e) {
-          console.error('[plugins] 例程面板移除失败', e)
-        }
+        // 摘签**去抖 500ms**（见 removeTimer 注释）：贡献瞬时抖动不闪面板；
+        // 到点时重新 wanted 已被上面的 clearTimeout 取消。
+        if (removeTimer !== null) clearTimeout(removeTimer)
+        removeTimer = setTimeout(() => {
+          removeTimer = null
+          const api = apiRef.current
+          if (!api) return
+          if (registry.getArea('panes').some((c) => c.id === 'hermes-bots:routines')) return
+          const target = api.getPanel('routines')
+          if (!target || !api.panels.some((p) => p.id === target.id)) return
+          // getPanel 可能拿到已 dispose 的陈旧引用（HMR 拆卸 / 面板刚被关），
+          // 直接 removePanel 会抛 "resource already disposed"——先核对活动列表。
+          // **启动早期 `wanted=false` 但贡献还没注册过时不能摘**：那会把用户
+          // 存档里的 routines 分栏当标签重建成普通标签（2026-11-24 实锤）。
+          try {
+            api.removePanel(target)
+          } catch (e) {
+            console.error('[plugins] 例程面板移除失败', e)
+          }
+        }, 500)
       }
     }
     routinesPaneSync = sync
@@ -730,6 +848,7 @@ export function DockviewShell() {
     return () => {
       unsub()
       routinesPaneSync = null
+      if (removeTimer !== null) clearTimeout(removeTimer)
     }
   }, [])
 
@@ -856,11 +975,10 @@ export function DockviewShell() {
       // 宿主，v8.0 生命周期），拖走 = 不经旗标地拆列——整钮拦截。
       a.onWillDragPanel((e) => {
         if (e.panel.id === 'open') e.nativeEvent.preventDefault()
-        // 文字选区守卫（用户 2026-11-27：「选中的文字还是能像拖拽标签一样
-        // 拖拽出来，分栏的框还会出现」）：pointer DnD 后端不区分「拖选中
-        // 的文字」和「拖标签」，在消息正文上按下拖动会把整块面板拖出去。
-        // 有非空选区时一律不启动面板拖拽——拖拽的语义目标只能是页签/条。
-        if (hasNonCollapsedSelection()) e.nativeEvent.preventDefault()
+        // 文字选区守卫已上移到 document 捕获相（foreignNativeDrag）：
+        // 本钩子只在**页签**上 pointerdown 时触发，正文选区拖动根本不经过
+        // 这里（2026-11-27 的守卫因此对实报症状无效，且会在"先选文字再拖
+        // 页签"时误伤合法拖拽）。原生拖拽会话的分类/取消见 `foreignNativeDrag`。
       })
       // 唯一的「非法面」= 内容区中心堆叠进 hideHeader 组：无条组收下第二
       // 个标签后不可见也不可切（隐形标签死结）——onWillShowOverlay（拖拽
@@ -888,11 +1006,15 @@ export function DockviewShell() {
       // 不显示、drop 不生效，标签只能拖回原组（表现为"拖不出来"）。
       // 所以这里要显式接受——除了上面那两条例外。
       a.onUnhandledDragOver((e) => {
+        // foreign 原生拖拽（选中文字/非页签源）：不接受任何内容区落点——
+        // dockview 只看 isAccepted，不辨 payload 来源。
+        if (foreignNativeDrag) return
         if (denyStackIntoHeaderless(e.target, e.position, e.group)) return
         if (isLeftRailGroup(e.group)) return
         e.accept()
       })
       a.onWillShowOverlay((e) => {
+        if (foreignNativeDrag) e.preventDefault()
         if (denyStackIntoHeaderless(e.kind, e.position, e.group)) e.preventDefault()
         if (isLeftRailGroup(e.group)) e.preventDefault()
       })
@@ -905,6 +1027,10 @@ export function DockviewShell() {
       // 阻止 dockview 的默认处理，自己 addPanel 到目标组的分栏位——语义
       // 与「源组有 2+ 面板」时 dockview 自己的行为一致。
       a.onWillDrop((e) => {
+        if (foreignNativeDrag) {
+          e.preventDefault()
+          return
+        }
         if (denyStackIntoHeaderless(e.kind, e.position, e.group)) {
           e.preventDefault()
           return
@@ -1016,6 +1142,12 @@ export function DockviewShell() {
           try {
             saveLayout(a.toJSON() as SerializedDockview)
             persistFlagsColOrder(a)
+            // 每会话抽屉的持续快照（用户在会话里开关面板 → 记到该会话名下；
+            // 抽屉切换进行中跳过，避免把拆除中间态记成目标集合）。
+            const sid = sessionCatalog.getState().activeId
+            if (sid && !applyingPanelsRef.current) {
+              saveSessionPanels(sid, captureSessionPanels(a))
+            }
           } catch (e) {
             console.error('[dv-shell] 布局持久化失败', e)
           }
@@ -1111,6 +1243,15 @@ export function DockviewShell() {
         // 打开页锚重建（隐藏语义交给菜单动词，boot 只保证锚在场）
         restoreOpenAnchor(a)
       })
+      // 每会话面板抽屉的 boot 对齐：activeId 已就绪时有记录 → 换成该会话
+      // 的集合；无记录 → 把 v10 恢复出来的集合记成它的抽屉（升级首启不
+      // 无故关掉用户已开的面板）。activeId 未就绪时由 catalog 订阅在稍后补
+      // （runtime 的启动链会 setActive）。
+      const bootSession = sessionCatalog.getState().activeId
+      if (bootSession) {
+        lastPanelSessionRef.current = bootSession
+        syncPanelDrawerRef.current(null, bootSession)
+      }
       // **只有真的做了旧档迁移才在 boot 落盘**（2026-11-24 实锤：无条件
       // 落盘会把加载中途的临时树固化成正式布局——一次 HMR 重载把好布局写成
       // 只剩左右两栏）。normalizeColumns 返回是否 move 过 routines。

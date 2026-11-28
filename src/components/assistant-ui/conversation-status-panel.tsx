@@ -118,6 +118,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { openPagePanel } from '@/components/layout/open-page-actions'
 import { gitBridge, useGitBridge } from '@/components/assistant-ui/git-store'
 import { flatTasks, todoBridge, useTodoBridge } from '@/components/assistant-ui/todo-store'
+import { sessionThreadKey } from '@/components/assistant-ui/session-thread-key'
 import { jobsBridge, useJobsBridge } from '@/components/assistant-ui/jobs-store'
 import {
   childAgentsBridge,
@@ -1936,11 +1937,12 @@ function ConversationStatusPanelImpl() {
   // 工作流 Stop：rpi 的 dispatch 是轮内工具调用，引擎 per-call 取消链
   // （run abort → 插件 ABI cancel → Control）经由 pi_interrupt 可达——
   // 停的是持有 dispatch 的这一轮；无活动 run 时为诚实的 no-op。
+  // thread = 面板所属的**活动会话**（多会话并存：不误停后台会话的 run）。
   const onCancelWorkflowRun = useCallback(() => {
-    invoke('pi_interrupt').catch((e) =>
+    invoke('pi_interrupt', { thread: sessionThreadKey(activeId) }).catch((e) =>
       console.error('[status-panel] 工作流停止失败', e),
     )
-  }, [])
+  }, [activeId])
 
   // 停止子代理：引擎 host 按 childId 真取消（ChildAgents.stop）；名册随后刷新，
   // 行状态由 failed 行如实反映（错误可见，不假装成功）。

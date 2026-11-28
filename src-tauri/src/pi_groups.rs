@@ -517,8 +517,14 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             let room_id = params.get("room_id").cloned().unwrap_or(Value::Null);
             let since_seq = params.get("since_seq").and_then(common::json_i64).unwrap_or(0);
             let limit = params.get("limit").and_then(common::json_i64).unwrap_or(100);
-            // 多读一条判 has_more（workspace 的分页收敛需要）。
-            let mut events = store::read_events(&conn, &room_id, since_seq, limit.saturating_add(1))
+            if !(1..=store::MAX_LOG_LIMIT as i64).contains(&limit) {
+                return Err(format!("limit must be between 1 and {}", store::MAX_LOG_LIMIT));
+            }
+            // 多读一条判 has_more（workspace 的分页收敛需要）——**探针版**
+            // 允许 limit+1：此前探针直接调 read_events，limit=500 时变 501
+            // 撞存储层 1..=500 的上限校验 → canonical 群聊驱动每轮抛
+            // "limit must be between 1 and 500"（2026-11-28 实锤根因）。
+            let mut events = store::read_events_probe(&conn, &room_id, since_seq, limit + 1)
                 .map_err(|e| e.to_string())?;
             let has_more = events.len() as i64 > limit;
             if has_more {
@@ -645,7 +651,7 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
                 .to_string();
             let room = store::room_state(&conn, &Value::String(room_id.clone()), false)
                 .map_err(|e| e.to_string())?;
-            let events = store::read_events(&conn, &Value::String(room_id.clone()), 0, 100_000)
+            let events = store::read_all_events(&conn, &Value::String(room_id.clone()))
                 .map_err(|e| e.to_string())?;
             let event_rows: Vec<Value> = events
                 .iter()
@@ -800,7 +806,7 @@ fn dispatch_group(method: &str, params: &serde_json::Map<String, Value>) -> Resu
             let room = store::room_state(&conn, &room_id, false).map_err(|e| e.to_string())?;
 
             // grant = 已有 continue 次数 + 1
-            let events = store::read_events(&conn, &room_id, 0, store::MAX_LOG_LIMIT as i64)
+            let events = store::read_all_events(&conn, &room_id)
                 .map_err(|e| e.to_string())?;
             let log_events: Vec<crate::hosted_rooms::router::LogEvent> = events
                 .iter()
@@ -1080,7 +1086,7 @@ pub fn groups_plan(room_id: String) -> Result<Value, String> {
         lead_member_id: context.lead_member_id,
     };
 
-    let events = store::read_events(&conn, &Value::String(room_id.clone()), 0, store::MAX_LOG_LIMIT as i64)
+    let events = store::read_all_events(&conn, &Value::String(room_id.clone()))
         .map_err(|e| e.to_string())?;
     let raw_events: Vec<Value> = events
         .iter()

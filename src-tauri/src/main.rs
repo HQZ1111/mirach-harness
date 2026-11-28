@@ -1102,16 +1102,17 @@ fn pi_set_thinking_level(
     state.engine.set_thinking_level(&level)
 }
 
-/// 中断 run（thread 可选）：缺省 "main"（工作区 run）；会话分栏传自己的
-/// 线程键——side_interrupt 定向 abort 该分栏的 run（不打断主柄/其他分栏）。
+/// 中断 run（thread 可选）：缺省 "main"（焦点会话）；`main:<id>` 只停该
+/// 会话自己的 run（多会话并存：后台会话在跑时不会误停焦点会话）；
+/// 其它键 = 会话分栏（side_interrupt 定向 abort 该分栏的 run）。
 #[tauri::command(async)]
 fn pi_interrupt(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     thread: Option<String>,
 ) -> Result<(), String> {
     let thread = thread.as_deref().unwrap_or("main");
-    if thread == "main" {
-        state.engine.interrupt()
+    if thread == "main" || thread.starts_with("main:") {
+        state.engine.interrupt_thread(thread)
     } else {
         state.engine.side_interrupt(thread)
     }
@@ -1121,8 +1122,8 @@ fn pi_interrupt(
 /// 与队列 drain 前先查，busy 就留在本地队列，避免撞
 /// "Lane main already has an active run operation"。
 ///
-/// v7.4 多柄：thread = 并列窗格的线程键时查该窗格自己的句柄（窗格之间互不
-/// 阻塞）；缺省 "main" = 工作区前台 run。
+/// v7.4 多柄 + 2026-11-28 每会话主柄：thread = `main:<id>` 查该会话自己的
+/// 句柄（后台会话的忙闲与焦点无关）；`main` = 焦点；其它 = 并列窗格。
 #[tauri::command(async)]
 fn pi_lane_busy(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
@@ -1130,21 +1131,37 @@ fn pi_lane_busy(
 ) -> Result<bool, String> {
     match thread.as_deref().unwrap_or("main") {
         "main" => state.engine.lane_busy(),
+        t if t.starts_with("main:") => state.engine.lane_busy_for(t),
         side => state.engine.side_lane_busy(side),
     }
+}
+
+/// 会话统计投影（DSH `sessionStats` 的宿主对偶，2026-11-28）：整条日志
+/// 折叠的轮次/步数/工具数/token/首字延迟/墙钟。`path` 缺省 = 焦点会话
+/// 文件；无会话 = null（New Chat）。统计条（ComposerStatsLine）的数据源。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_session_stats(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    path: Option<String>,
+) -> Result<Option<serde_json::Value>, String> {
+    state.engine.session_stats_projection(path.as_deref())
 }
 
 /// 运行中引导（设置页「行为与工具 → 交互行为 = 引导」）：把用户消息注入
 /// 当前 run 的 steer 队列，引擎在下一次工具调用批后生效（ZCode 同语义）。
 /// 前端仅在 lane busy + UI streaming（真活跃 run）时调用；失败 = Err
-/// （草稿回填 + 可见报错，不假装已发送）。
+/// （草稿回填 + 可见报错，不假装已发送）。thread = 会话键（缺省焦点）。
 #[tauri::command(rename_all = "camelCase", async)]
 fn pi_steer(
     state: tauri::State<std::sync::Arc<agui::AguiState>>,
     text: String,
     images: Option<Vec<agui::AguiImage>>,
+    thread: Option<String>,
 ) -> Result<(), String> {
-    state.engine.steer(&text, images.as_deref().unwrap_or(&[]))
+    let thread = thread.as_deref().unwrap_or("main");
+    state
+        .engine
+        .steer_for_thread(thread, &text, images.as_deref().unwrap_or(&[]))
 }
 
 #[tauri::command(async)]
@@ -1575,6 +1592,25 @@ fn pi_rename_session(
     name: String,
 ) -> Result<(), String> {
     state.engine.rename_session(&name)
+}
+
+/// 会话首条 user 文本（**非活动**会话的自动命名原料；未知会话/无 user
+/// 消息 = null，读取失败如实 Err）。前端 deriveTitle 后调
+/// `pi_session_rename_at_path` 落名（hermes 服务端建会话即命名的宿主对偶：
+/// 启动时给历史未命名会话补标题，侧栏不再留 "New Chat"）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_session_first_user(path: String) -> Result<Option<String>, String> {
+    pi_session::PiEngine::first_user_text_at_path(&path)
+}
+
+/// 按路径重命名非活动会话（活动会话拒绝，见引擎方法注释）。
+#[tauri::command(rename_all = "camelCase", async)]
+fn pi_session_rename_at_path(
+    state: tauri::State<std::sync::Arc<agui::AguiState>>,
+    path: String,
+    name: String,
+) -> Result<(), String> {
+    state.engine.rename_session_at_path(&path, &name)
 }
 
 #[tauri::command(rename_all = "camelCase", async)]
@@ -2316,6 +2352,7 @@ fn main() {
             pi_set_thinking_level,
             pi_interrupt,
             pi_lane_busy,
+            pi_session_stats,
             pi_steer,
             plugin_runtime::plugin_runtime_root,
             plugin_runtime::plugin_runtime_scan,
@@ -2370,6 +2407,8 @@ fn main() {
             pi_ensure_main_session,
             pi_get_session_lineage,
             pi_rename_session,
+            pi_session_first_user,
+            pi_session_rename_at_path,
             pi_delete_session,
             pi_retry_edit,
             pi_mark_checkpoint,

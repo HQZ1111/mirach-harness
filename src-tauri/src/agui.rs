@@ -665,16 +665,13 @@ async fn agui_run(
             .spawn(move || {
                 if is_main_thread {
                     if let Some(path) = &session_path {
-                        // 单写者租约：已在场的同一会话直接复用（每条消息都
-                        // 重新 open 会撞 "writer lease is already held"——
-                        // 前端每次 POST 都带 sessionPath，这是主路径）。
-                        match st_create.engine.is_live_session(path) {
-                            Ok(true) => st_create.engine.live_session_id(),
-                            Ok(false) => st_create
-                                .engine
-                                .open_session(path, Some(st_create.ui_bridge(&thread_bridge))),
-                            Err(e) => Err(e),
-                        }
+                        // 幂等上台（多会话并存 2026-11-28）：焦点就是它 →
+                        // 直接复用；句柄在 mains（后台会话）→ 置焦点；都不在
+                        // 才重建。不再由调用方先查 is_live_session——主路径
+                        // 每条 POST 都走同一条解析。
+                        st_create
+                            .engine
+                            .open_session(path, Some(st_create.ui_bridge(&thread_bridge)))
                     } else {
                         st_create
                             .engine
@@ -772,13 +769,23 @@ async fn agui_run(
                 };
                 // 多柄路由（v7.4）：thread != main → side_prompt（分栏独立柄，
                 // 只锁自己柄——与主柄/其他分栏并行）；thread == main → 主柄
-                // prompt（原路径不变）。无图 = 纯文本原路径；有图 =
+                // prompt（原路径不变）。无图 = 纯文本；有图 =
                 // prompt_with_content（同一锁/on_start/AbortSlot 内核）。
+                // **主线程按路由键寻址**（`main:<piSessionId>` → 该会话自己
+                // 的句柄，多会话并存 2026-11-28）：两个会话的 POST 交错时，
+                // 消息也不会落到"此刻的焦点"上（此前 create 换焦点后 prompt
+                // 再读 live 的串跑竞态）。
                 if is_main_thread {
                     if images.is_empty() {
-                        st2.engine.prompt(&message, on_event, on_start)
+                        st2.engine.prompt_for_thread(&thread2, &message, on_event, on_start)
                     } else {
-                        st2.engine.prompt_with_content(&message, &images, on_event, on_start)
+                        st2.engine.prompt_with_content_for_thread(
+                            &thread2,
+                            &message,
+                            &images,
+                            on_event,
+                            on_start,
+                        )
                     }
                 } else {
                     st2.engine.side_prompt(&thread2, &message, &images, on_event, on_start)

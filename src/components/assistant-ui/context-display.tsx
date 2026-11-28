@@ -1,6 +1,7 @@
 "use client";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/motion/popover";
+import { ContextBreakdown } from "@/components/assistant-ui/elements/context-breakdown";
 import {
   Tooltip,
   TooltipContent,
@@ -465,13 +466,19 @@ const ContextDisplayText: FC<PresetProps> = ({
  * 上下文明细**按钮**（2026-11-01 用户："模型选择的左边加个上下文的按钮，
  * 和zcode一样的"；次日定稿："一个圆圈图标就行"）：挂 composer 动作组
  * 模型选择器左侧。**按钮本体 = 一枚圆环图标**（环的填充度 = 上下文占用，
- * 无用量即空环）——不放文字；点击弹明细卡（getContextSegments：Input /
- * Cached input / Output / Reasoning + %full 进度条）。渲染门槛 = 只看
- * 窗口；无用量是诚实空态（空环 + 弹层说明），不编 0 冒充数据
- * （pi_sessions_usage 的累计值当上下文占用是假语义，不用）；不走
- * ContextDisplayRoot（其 TooltipProvider/Tooltip 是悬停语义，点击卡
- * 不需要）。
+ * 无用量即空环）——点击弹明细卡。**弹层内容 = assistant-ui 上游 Elements
+ * 的 `ContextBreakdown`**（2026-11-28 用户："输入框上下文用这个完整版显示，
+ * 对齐 zcode 的"）：堆叠条 + 图例 + Headroom，替换此前手写的百分比条+行
+ * 列表。宿主扩展只保留两件上游没有的：窗口未知时的就地设置入口（写
+ * models.json 的 contextWindow）与"暂无用量"诚实空态。
  */
+const SEGMENT_TINTS: Record<string, string> = {
+  Input: "bg-foreground/30",
+  "Cached input": "bg-sky-500/70",
+  Output: "bg-blue-500/70",
+  Reasoning: "bg-violet-500/70",
+};
+
 const ContextDisplayBreakdownButton: FC<PresetProps> = ({
   modelContextWindow,
   usage,
@@ -531,52 +538,35 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
           </span>
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-56 p-3 text-xs">
-        {hasUsage ? (
-          <div>
+      <PopoverContent className="w-auto p-0">
+        {hasUsage && windowKnown ? (
+          // 上游 Elements 的 ContextBreakdown（完整版）：堆叠条 + 图例 +
+          // Headroom。paper/圆角/内距压平（twMerge 后者胜出）——弹层自己
+          // 就是那张卡，不再"卡里套卡"。
+          <ContextBreakdown
+            className="bg-transparent! w-[17rem] max-w-none! rounded-none! p-3 shadow-none! dark:bg-transparent!"
+            limit={modelContextWindow}
+            segments={segments.map((segment) => ({
+              label: segment.label,
+              tokens: segment.tokens,
+              tint: SEGMENT_TINTS[segment.label] ?? "bg-foreground/20",
+            }))}
+          />
+        ) : hasUsage ? (
+          <div className="w-56 p-3 text-xs">
             <div className="flex items-baseline justify-between gap-6 whitespace-nowrap">
-              <span className={windowKnown ? getPercentColor(percent) : "text-muted-foreground"}>
-                {windowKnown ? `${Math.round(percent)}% full` : "窗口未知"}
-              </span>
+              <span className="text-muted-foreground">窗口未知</span>
               <span className="font-mono tabular-nums">
-                {formatTokenCount(totalTokens)} /{" "}
-                {windowKnown ? formatTokenCount(modelContextWindow) : "?"}
+                {formatTokenCount(totalTokens)} / ?
               </span>
             </div>
-            <div className="bg-muted mt-2.5 h-1 overflow-hidden rounded-full">
-              <div
-                className={cn(
-                  "h-full w-(--usage-width) rounded-full transition-[width] duration-300",
-                  totalTokens > 0 && "min-w-1",
-                  getBarColor(percent),
-                )}
-                style={{ "--usage-width": `${percent}%` } as React.CSSProperties}
-              />
-            </div>
-            {segments.length > 0 && (
-              <div className="mt-3 grid gap-1.5">
-                {segments.map((segment) => (
-                  <div
-                    key={segment.label}
-                    className="flex items-baseline justify-between gap-6"
-                  >
-                    <span className="text-muted-foreground">{segment.label}</span>
-                    <span className="font-mono tabular-nums">
-                      {formatTokenCount(segment.tokens)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-            {!windowKnown && (
-              <p className="text-muted-foreground/70 mt-2 text-[11px] leading-4">
-                服务商未配置上下文窗口（models.json 的 contextWindow），
-                无法算占用百分比。
-              </p>
-            )}
+            <p className="text-muted-foreground/70 mt-2 text-[11px] leading-4">
+              服务商未配置上下文窗口（models.json 的 contextWindow），
+              无法算占用百分比。
+            </p>
           </div>
         ) : (
-          <div>
+          <div className="w-56 p-3 text-xs">
             <div className="flex items-baseline justify-between gap-6 whitespace-nowrap">
               <span className="text-muted-foreground">暂无用量记录</span>
               <span className="font-mono tabular-nums">
@@ -589,7 +579,7 @@ const ContextDisplayBreakdownButton: FC<PresetProps> = ({
           </div>
         )}
         {!windowKnown && onSetContextWindow ? (
-          <div className="mt-3 border-t pt-2.5">
+          <div className="w-56 border-t px-3 pt-2.5 pb-3">
             <label className="text-muted-foreground block text-[11px] leading-4">
               设置上下文窗口（tokens）
             </label>

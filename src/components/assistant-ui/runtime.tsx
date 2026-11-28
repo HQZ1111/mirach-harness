@@ -58,7 +58,13 @@ import { connectionBridge } from './connection-store'
 import { bootBridge } from '@/lib/boot-store'
 import { errorBridge } from './error-bridge'
 import { clearThreadScroll, threadScrollBridge } from './thread-scroll-store'
+import { deleteSessionPanels } from '@/components/layout/session-panel-layout'
 import { deriveTitle, firstUserMessageText, nextTitleInLineage } from './session-title'
+import {
+  backfillSessionTitles,
+  nameFocusedSessionIfUnnamed,
+  withBackfillBudget,
+} from './session-title-backfill'
 import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
@@ -782,6 +788,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         await refreshThreads()
         if (cancelled) return
         void sweepEmptyBotChats()
+        // 启动恢复到的会话 id（标题回填的排除项；try 外还要用，故放这里）
+        let restoredSessionId: string | null = null
         try {
           let st: { sessionId: string | null } | null = null
           try {
@@ -831,21 +839,18 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
                     path: lastPath,
                   }).then(() => undefined)
                   pendingOpenRef.current = restoreOpen
+                  // 装配提示保留到水合完成（见下方 hydrate 之后的 clear）——
+                  // open 后立刻撤会露出空态开场一帧。失败路径在 catch 里撤
+                  // （2026-11-26 用户："引擎还在准备中这是为什么"——不能残留）。
                   setEngineAttaching(true)
-                  try {
-                    await restoreOpen
-                  } finally {
-                    // 失败也必须撤掉「正在准备会话」——否则红条/错误之后提示
-                    // 永远停在 composer 上方（2026-11-26 用户："引擎还在准备
-                    // 中这是为什么"）。
-                    setEngineAttaching(false)
-                  }
+                  await restoreOpen
                   if (cancelled) return
                   st = await invoke<{ sessionId: string | null }>('pi_get_state')
                 }
               }
             } catch (e) {
               const message = e instanceof Error ? e.message : String(e)
+              setEngineAttaching(false)
               console.error(
                 '[runtime] 恢复上次会话失败（文件被删 / 锁冲突？）——保持新会话空态',
                 e,
@@ -862,12 +867,18 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             }
           }
           if (st?.sessionId) {
+            restoredSessionId = st.sessionId
             const restoreKey = sessionThreadKey(st.sessionId)
             const restoreActor = getOrCreateActor(restoreKey, restoreKey)
             // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
             // **水合 + SEEK 先于 setCurrentThreadId**：焦点效果据此从正确的
             // 游标开流（顺序反了会先从 0 开流，与文件水合竞态）。
-            await hydrateTranscriptTail(restoreActor, st.sessionId)
+            try {
+              await hydrateTranscriptTail(restoreActor, st.sessionId)
+            } finally {
+              // 水合完成/失败都撤装配提示（失败由外层 catch 报错）。
+              setEngineAttaching(false)
+            }
             // 多会话并存：文件水合后把游标拨到该会话缓冲的当前头（缓冲里的
             // 历史已由文件覆盖，只收之后的增量）——焦点效果的 SSE 从这里续放。
             try {
@@ -879,6 +890,19 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             } catch (e) {
               console.error('[pi] 流游标获取失败（不 seek，直接续放）', e)
             }
+            // **标题回填在启动页阶段完成**（用户 2026-11-28："会话名显示
+            // 新会话这个为什么不在启动页加载完，再进主页"）。hermes 的会话
+            // 标题来自网关会话列表（建会话即有名），宿主没有这个服务端面，
+            // 等效做法 = 启动链里先补名、再开前台流（流 onopen 才让启动页
+            // 退场）——进主页时侧栏已经是真名。带预算：超时放行走后台续跑。
+            await withBackfillBudget(nameFocusedSessionIfUnnamed(st.sessionId), 3000).catch(
+              (e) => console.error('[session-title] 焦点会话标题补齐失败', e),
+            )
+            await withBackfillBudget(
+              backfillSessionTitles({ excludeIds: [st.sessionId] }),
+              4000,
+            ).catch((e) => console.error('[session-title] 历史会话标题回填失败', e))
+            await refreshThreads()
             setCurrentThreadId(st.sessionId)
             // 滚动位置恢复请求（挂载水合成功路径）：视口（thread.aui 侧）
             // 消费后按持久化位置恢复阅读位
@@ -889,7 +913,13 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           } else {
             // 无恢复会话（New Chat 启动）没有 ES onopen 信号：启动页在这里
             // 退场（端点 + 目录都就绪 = 引擎可用；恢复会话的 ready 由焦点流
-            // onopen 补）。
+            // onopen 补）。补名先跑一轮（带预算）——新主页第一帧就应该是
+            // 历史会话的真名，不是成片 "New Chat"。
+            await withBackfillBudget(backfillSessionTitles(), 4000).catch((e) =>
+              console.error('[session-title] 历史会话标题回填失败', e),
+            )
+            await refreshThreads()
+            setEngineAttaching(false)
             bootBridge.getState().setReady()
           }
         } catch (e) {
@@ -902,6 +932,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           .getState()
           .refresh()
           .catch((err) => console.error('[pi] 审批列表拉取失败', err))
+        // 历史会话标题回填已上移到启动页阶段（恢复分支/New Chat 分支各自
+        // await 带预算）——进主页前侧栏已是真名，这里不再补第二轮。
       } catch (e) {
         // 端点已发现、后续水合/列表失败：可见但不谎报启动失败（引擎可用，
         // 只是首屏数据没齐）——启动页由 SSE onopen 决定退场。
@@ -928,6 +960,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   // - 空闲且非焦点：流关掉（省连接——空闲会话没有增量可收）。
   // 连接数量上限 = actorRegistry.size ≤ ACTOR_CAP(12)。
   const streamsRef = useRef(new Map<string, EventSource>())
+  /** lane_busy 查询失败过的键（每键只 console 一次，避免 2s 轮询刷屏）。 */
+  const busyWarnedRef = useRef(new Set<string>())
   const endpointRefForStreams = useRef(endpoint)
   endpointRefForStreams.current = endpoint
 
@@ -1032,12 +1066,27 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     if (!endpoint) return
     const timer = window.setInterval(() => {
       reconcileStreams()
-      // 引擎 lane 忙闲（进程级单 lane）：busy 判据的第二源（hermes session.info 对偶）
-      invoke<boolean>('pi_lane_busy')
-        .then((b) => sessionWork.getState().setLaneBusy(b))
-        .catch(() => {
-          /* 查询失败不翻状态（下一次周期再试） */
-        })
+      // 引擎 lane 忙闲（**每会话**，2026-11-28 起引擎每会话独立句柄）：
+      // busy 判据的第二源（hermes session.info 对偶）。键 = 焦点会话 +
+      // 所有在册 actor（后台 streaming 的会话也要有自己的忙闲位）。
+      const pollKeys = new Set<string>(actorRegistry.keys())
+      const focusId = currentThreadIdRef.current
+      pollKeys.delete(NEW_CHAT_THREAD_KEY) // 哨兵键没有引擎句柄（查询必失败）
+      pollKeys.add(focusId ? sessionThreadKey(focusId) : 'main')
+      for (const key of pollKeys) {
+        invoke<boolean>('pi_lane_busy', { thread: key })
+          .then((busy) => sessionWork.getState().setLaneBusy(key, busy))
+          .catch((e) => {
+            // 句柄被驱逐/从未打开（冷 actor、`main:__new__` 哨兵）——不是
+            // 错误路径；每键只记一次，状态按"不忙"回落（真正的忙由 RUN_ERROR
+            // 与 actor 状态可见）。
+            if (!busyWarnedRef.current.has(key)) {
+              busyWarnedRef.current.add(key)
+              console.error(`[pi] lane_busy(${key}) 查询失败——该会话按 actor 状态判断`, e)
+            }
+            sessionWork.getState().setLaneBusy(key, false)
+          })
+      }
       // 后台 drain：所有空闲且有排队消息的会话都续发（hermes background
       // drain 同语义——"drains even when no composer is mounted"）。
       const state = sessionQueue.getState()
@@ -1293,7 +1342,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const interruptIfRunning = useCallback(async (): Promise<boolean> => {
     if (!actorRef.getSnapshot().matches('streaming')) return true
     try {
-      await invoke('pi_interrupt')
+      // 目标 = **焦点会话自己的** run（多会话并存：后台会话在跑时不会误停）
+      await invoke('pi_interrupt', {
+        thread: sessionThreadKey(currentThreadIdRef.current),
+      })
       console.info('[pi] run 进行中：已中断当前 run 后继续（prompt 持锁跨整个 run）')
       return true
     } catch (e) {
@@ -2041,7 +2093,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       for (let attempt = 0; attempt < 60; attempt += 1) {
         busy = false
         try {
-          busy = await invoke<boolean>('pi_lane_busy')
+          busy = await invoke<boolean>('pi_lane_busy', { thread: drainKey })
         } catch (e) {
           // 查询失败不阻止发送：真正的 busy 会以 RUN_ERROR 可见（不静默）
           console.error('[queue] lane_busy 查询失败——按空闲继续', e)
@@ -2323,6 +2375,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             threadScrollBridge.getState().requestRestore(id)
             branchBridge.getState().requestRefresh()
             sessionResume.getState().noteSuccess(id)
+            // 未命名会话的标题补齐（hermes「打开即命名」语义；原料取文件头
+            // 首条 user 消息，尾页模式也正确）——成功再刷一次目录。
+            void nameFocusedSessionIfUnnamed(id)
+              .then((ok) => (ok ? refreshThreads() : undefined))
+              .catch((err) => console.error('[session-title] 打开会话后标题补齐失败', err))
             return
           }
           // **冷会话（首次打开）**：引擎 pi_open_session 对巨文件要整树
@@ -2350,19 +2407,24 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           if (!openSettled) setEngineAttaching(true)
           try {
             await openPromise
+            if (openError) throw openError
+            // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
+            // 返回值 = 是否真的写入（false = 已被更新的切换取代，本会话不再
+            // 是该请求的归属者——后续副作用一律跳过，避免搞乱别人的会话）。
+            // **装配提示保留到水合完成**（2026-11-28 用户："切换会话会先出
+            // 开场标识一下"）：open 之后就撤会让"消息还是空的"窗口露出
+            // 空态开场（MIRACH 粒子）；水合落盘即再无该窗口。
+            const hydrated = await hydrateTranscriptTail(targetActor, id)
+            if (!hydrated) return
+            if (sessionCatalog.getState().activeId !== id) return // 已切走
           } finally {
-            setEngineAttaching(false)
+            // 只撤自己这次的装配提示：被更新的切换取代时（activeId 已换），
+            // 那是新切换的窗口，不能替它撤旗标（否则又露一次空态开场）。
+            if (sessionCatalog.getState().activeId === id) setEngineAttaching(false)
           }
-          if (openError) throw openError
           // 成功切换 = 上一条"无法打开会话"红条过期，清掉（run 错误会被
           // 下一次 RUN_STARTED 的归约自然覆盖）。
           errorBridge.getState().setError(null)
-          // 首屏只拉分支尾部一页（hermes tail hydration），「显示更早」按需补页
-          // 返回值 = 是否真的写入（false = 已被更新的切换取代，本会话不再
-          // 是该请求的归属者——后续副作用一律跳过，避免搞乱别人的会话）。
-          const hydrated = await hydrateTranscriptTail(targetActor, id)
-          if (!hydrated) return
-          if (sessionCatalog.getState().activeId !== id) return // 已切走
           // 多会话并存：文件水合后把游标拨到该会话缓冲的当前头（缓冲历史
           // 已由文件覆盖，只收之后的增量），并标记为热会话（下次切换走热路）。
           try {
@@ -2388,6 +2450,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           threadScrollBridge.getState().requestRestore(id)
           // 活动会话已换——分支条/fork 点随新会话刷新（防上一会话的投影残留）
           branchBridge.getState().requestRefresh()
+          // 未命名会话的标题补齐（同热路径：原料 = 文件头首条 user 消息）
+          void nameFocusedSessionIfUnnamed(id)
+            .then((ok) => (ok ? refreshThreads() : undefined))
+            .catch((err) => console.error('[session-title] 打开会话后标题补齐失败', err))
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : String(e)
           console.error(`[pi] 会话 ${id} 打开失败（已回滚选中态）`, e)
@@ -2636,6 +2702,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         clearComposerDraft(id)
         // 删除成功清该会话的滚动位置记忆（内存 + 持久化）
         clearThreadScroll(id)
+        // 每会话面板抽屉记录一并清掉（session-panel-layout 的 LRU 存档）
+        deleteSessionPanels(id)
         await refreshThreads()
       } catch (e) {
         console.error(`[pi] 会话 ${id} 删除失败（已回滚侧栏行）`, e)
@@ -2731,7 +2799,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 用户实报）。队列消息不进轮次投影；run 收尾后由 drainQueue 发出。
       let laneBusy = false
       try {
-        laneBusy = await invoke<boolean>('pi_lane_busy')
+        // 焦点会话自己的 lane（多会话并存：后台会话忙不影响本次发送判断）
+        laneBusy = await invoke<boolean>('pi_lane_busy', {
+          thread: sessionThreadKey(currentThreadIdRef.current),
+        })
       } catch (e) {
         // 查询失败不吞：记录后按 actor 状态判断；真正的 busy 由 RUN_ERROR 可见
         console.error('[pi] lane_busy 查询失败——按 actor 状态判断', e)
@@ -2747,6 +2818,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           try {
             await invoke('pi_steer', {
               text: submission,
+              thread: sessionThreadKey(currentThreadIdRef.current),
               ...(plan.images.length > 0 ? { images: plan.images } : {}),
             })
           } catch (e) {
@@ -2825,7 +2897,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     onCancel: async () => {
       // §4.5：abort 是控制操作走 IPC；阻塞中的 prompt 观察 abort 信号收尾
       try {
-        await invoke('pi_interrupt')
+        // 停的是**焦点会话**的 run（多会话并存：不误停后台会话）
+        await invoke('pi_interrupt', {
+          thread: sessionThreadKey(currentThreadIdRef.current),
+        })
         // 中断成功置标记：run 收尾后 StoppedRun 展示中断态（新 run 开始清）
         actorRef.send({ type: 'CANCEL_MARK' })
       } catch (e) {

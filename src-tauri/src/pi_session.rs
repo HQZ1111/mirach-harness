@@ -579,6 +579,11 @@ pub(crate) fn peek_session_tail(path: &str, limit: usize) -> Result<serde_json::
 /// 邮箱；被逐的句柄释放租约，对应 run 的后台继续跑即终止）。
 const RETIRED_HARNESS_CAP: usize = 12;
 
+/// 主路径常驻句柄上限（与前端 ACTOR_CAP=12 对齐；每会话一棵 harness 含
+/// 会话内存态，必须封顶）。驱逐跳过 busy（在跑 run 的句柄不能杀）——全部
+/// busy 时允许暂时超限并 console 可见。
+const MAIN_HARNESS_CAP: usize = 12;
+
 /// 退役会话表：`HashMap` + 进入顺序。
 ///
 /// 淘汰必须 **显式 release writer lease 再 drop**：rpi 的 JSONL storage
@@ -647,6 +652,26 @@ pub(crate) struct EngineShared {
     /// 宿主内存无界增长（实测 25 分钟 39MB→87MB 私有）。被淘汰的会话再次
     /// 打开时走正常重建路径（lease 已释放，不会撞 already held）。
     retired: Mutex<RetiredSessions>,
+    /// 主路径每会话句柄表（key = pi session id；hermes `_sessions` 的宿主
+    /// 对偶，2026-11-28）：
+    ///
+    /// 之前主路径只有**一个** `live` 槽——切会话把旧句柄推进 retired（靠
+    /// "顺带保租约"让后台 run 继续跑）。两个真实缺陷：
+    /// 1. 任一 `main:<id>` POST（含后台 drain）都会 `open_session` 抢 `live`
+    ///    槽，随后另一个会话的 prompt 线程再读 `live()` 就可能读到**别人**
+    ///    的句柄（A 的消息跑进 B）；
+    /// 2. `pi_lane_busy` / `pi_interrupt` 无 key 时只能打到"当前 live"，
+    ///    与前端以为的焦点会话不保证一致。
+    ///
+    /// 现在：句柄按会话 id 常驻本表（cap `MAIN_HARNESS_CAP`，驱逐跳 busy），
+    /// `live` 退化为**焦点镜像**（last-activated，供既有 `live()` 调用面
+    /// 零改动），prompt/interrupt/busy 走 `*_for_thread("main:<id>")` 精确
+    /// 寻址。retired 继续服务旧路径（夹缝兜底），不再是主路径的依赖。
+    mains: Mutex<HashMap<String, Arc<HarnessLive>>>,
+    /// mains 的进入顺序（驱逐候选序）。
+    mains_order: Mutex<std::collections::VecDeque<String>>,
+    /// 焦点主会话 id（`live` 槽的键；None = New Chat/未开）。
+    focused_main: Mutex<Option<String>>,
     /// 并列窗格会话表（hermes `_sessions` 多会话对偶）：窗格线程键 →
     /// 独立 harness 句柄。每个窗格一棵会话、各自 lane/锁/事件流，所以两个
     /// 窗格可以在同一进程内**并行收发**；与前台 `live` 互斥同一个会话文件
@@ -661,6 +686,8 @@ pub(crate) struct EngineShared {
     session_facts_cache: Mutex<HashMap<PathBuf, SessionFactsCache>>,
     /// 活动会话 stat → SessionStats 缓存（`state()` 高频调用；文件不变即复用）。
     stats_cache: Mutex<Option<(PathBuf, u64, u64, SessionStats)>>,
+    /// 会话统计投影缓存（展示面，见 `session_stats_projection`；stat 校验）。
+    stats_projection_cache: Mutex<Option<(PathBuf, u64, u64, serde_json::Value)>>,
     /// 当前活动环境（profile）名（`pi_profiles`；None = 本体）。
     ///
     /// 写入面只有 `pi_set_active_profile`（用户切换环境时）；读面 = 新会话
@@ -1008,12 +1035,16 @@ impl PiEngine {
                 cwd: default_workspace(),
                 live: Mutex::new(None),
                 retired: Mutex::new(RetiredSessions::default()),
+                mains: Mutex::new(HashMap::new()),
+                mains_order: Mutex::new(std::collections::VecDeque::new()),
+                focused_main: Mutex::new(None),
                 side: Mutex::new(HashMap::new()),
                 model_line: Mutex::new("引擎待启动".into()),
                 messages_cache: Mutex::new(None),
                 markers_cache: Mutex::new(None),
                 session_facts_cache: Mutex::new(HashMap::new()),
                 stats_cache: Mutex::new(None),
+                stats_projection_cache: Mutex::new(None),
                 active_profile: Mutex::new(None),
                 pending_approval_mode: Mutex::new(None),
                 pending_plan_mode: Mutex::new(false),
@@ -1261,6 +1292,180 @@ impl PiEngine {
         })
     }
 
+    /// `main:<id>` 线程键 → 会话 id；`main`/非主键 → None。
+    pub(crate) fn main_session_key(thread: &str) -> Option<&str> {
+        thread.strip_prefix("main:").filter(|s| !s.is_empty())
+    }
+
+    /// 该 handle 的 lane 是否有活动 run（驱逐判据；读失败按 busy 处理——
+    /// 宁可超限也不杀在跑的会话）。
+    fn handle_is_busy(&self, handle: &HarnessLive) -> bool {
+        match self.shared.rt.block_on(handle.harness.snapshot()) {
+            Ok(snapshot) => snapshot.active.is_some(),
+            Err(_) => true,
+        }
+    }
+
+    /// 句柄入 mains（幂等替换；超 cap 时驱逐非焦点、非 busy 的最老句柄——
+    /// release 租约后再丢）。全部 busy 时超限保留（console 可见；后台 run
+    /// 优先于内存封顶）。busy 探测在**锁外**做（snapshot 会 block_on，
+    /// 不能持有 mains 锁）。
+    fn park_main(&self, id: &str, handle: Arc<HarnessLive>) -> Result<(), String> {
+        {
+            let mut mains = self
+                .shared
+                .mains
+                .lock()
+                .map_err(|_| "主会话表锁中毒".to_string())?;
+            if let Some(old) = mains.insert(id.to_string(), handle) {
+                // 同 id 替换（理论上不该发生：一个 id 一棵 harness）——
+                // 旧句柄显式释放租约。
+                release_retired_harness(&old);
+            }
+            let mut order = self
+                .shared
+                .mains_order
+                .lock()
+                .map_err(|_| "主会话表序锁中毒".to_string())?;
+            order.retain(|k| k != id);
+            order.push_back(id.to_string());
+            while let Some(front) = order.front() {
+                if mains.contains_key(front) {
+                    break;
+                }
+                order.pop_front();
+            }
+        }
+        // 驱逐轮：候选快照（锁内）→ busy 探测（锁外）→ 驱逐（锁内）。
+        for _ in 0..(MAIN_HARNESS_CAP + 4) {
+            let focused = self
+                .shared
+                .focused_main
+                .lock()
+                .map_err(|_| "焦点表锁中毒".to_string())?
+                .clone();
+            let candidates: Vec<(String, Arc<HarnessLive>)> = {
+                let mains = self
+                    .shared
+                    .mains
+                    .lock()
+                    .map_err(|_| "主会话表锁中毒".to_string())?;
+                if mains.len() <= MAIN_HARNESS_CAP {
+                    return Ok(());
+                }
+                let order = self
+                    .shared
+                    .mains_order
+                    .lock()
+                    .map_err(|_| "主会话表序锁中毒".to_string())?;
+                order
+                    .iter()
+                    .filter(|k| Some(k.as_str()) != focused.as_deref())
+                    .filter_map(|k| mains.get(k).map(|h| (k.clone(), Arc::clone(h))))
+                    .collect()
+            };
+            if candidates.is_empty() {
+                eprintln!(
+                    "[pi] 主会话句柄超限（> {}）但只有焦点会话——保留超限",
+                    MAIN_HARNESS_CAP
+                );
+                return Ok(());
+            }
+            let victim = candidates
+                .iter()
+                .find(|(_, h)| !self.handle_is_busy(h))
+                .map(|(victim_id, _)| victim_id.clone());
+            let Some(victim) = victim else {
+                eprintln!(
+                    "[pi] 主会话句柄超限（> {}）但全部 busy——保留超限（后台 run 优先）",
+                    MAIN_HARNESS_CAP
+                );
+                return Ok(());
+            };
+            {
+                let mut mains = self
+                    .shared
+                    .mains
+                    .lock()
+                    .map_err(|_| "主会话表锁中毒".to_string())?;
+                if let Some(old) = mains.remove(&victim) {
+                    release_retired_harness(&old);
+                }
+                let mut order = self
+                    .shared
+                    .mains_order
+                    .lock()
+                    .map_err(|_| "主会话表序锁中毒".to_string())?;
+                order.retain(|k| k != &victim);
+            }
+        }
+        Ok(())
+    }
+
+    /// 把在场句柄置为**焦点**（live 槽）：旧焦点留在 mains（后台 run 继续
+    /// 跑，不再 retire），新句柄入表。返回会话 id。
+    fn focus_handle(&self, handle: Arc<HarnessLive>) -> Result<String, String> {
+        let id = self.session_id_of(&handle)?;
+        let previous = self
+            .shared
+            .live
+            .lock()
+            .map_err(|_| "锁中毒".to_string())?
+            .replace(Arc::clone(&handle));
+        if let Some(prev) = previous {
+            if !Arc::ptr_eq(&prev, &handle) {
+                let prev_id = self.session_id_of(&prev)?;
+                if prev_id != id {
+                    self.park_main(&prev_id, prev)?;
+                }
+            }
+        }
+        self.park_main(&id, handle)?;
+        *self
+            .shared
+            .focused_main
+            .lock()
+            .map_err(|_| "焦点表锁中毒".to_string())? = Some(id.clone());
+        Ok(id)
+    }
+
+    /// 焦点主会话句柄（`main` 线程键的解析目标）。
+    fn focused_handle(&self) -> Result<Arc<HarnessLive>, String> {
+        match self
+            .shared
+            .focused_main
+            .lock()
+            .map_err(|_| "焦点表锁中毒".to_string())?
+            .clone()
+        {
+            Some(id) => self
+                .shared
+                .mains
+                .lock()
+                .map_err(|_| "主会话表锁中毒".to_string())?
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| format!("焦点会话 {id} 的句柄不在场（内部不一致）")),
+            None => self.live(),
+        }
+    }
+
+    /// 线程键 → 句柄：`main:<id>` 精确寻址 mains；`main` = 焦点；其余 =
+    /// 报错（分栏走 side_prompt 等专线）。
+    fn handle_for_thread(&self, thread: &str) -> Result<Arc<HarnessLive>, String> {
+        match Self::main_session_key(thread) {
+            Some(id) => self
+                .shared
+                .mains
+                .lock()
+                .map_err(|_| "主会话表锁中毒".to_string())?
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("会话 {id} 的主句柄不在场（请先打开该会话）")),
+            None => self.focused_handle(),
+        }
+    }
+
     /// 当前主柄会话 id（无 live = None）。
     fn current_session_id(&self) -> Result<Option<String>, String> {
         match self.live_opt()? {
@@ -1417,13 +1622,10 @@ impl PiEngine {
         // 订阅挂在 bus 上、生命周期跟随 bus（会话被 retire 时 bus 也随之
         // 消亡，不会泄漏到下一个会话）。
         self.bridge_compaction(Arc::clone(&installed));
-        let previous = self
-            .shared
-            .live
-            .lock()
-            .map_err(|_| "锁中毒".to_string())?
-            .replace(installed);
-        self.retire_previous(previous)?;
+        // 焦点上台（多会话并存 2026-11-28）：**不 retire 旧句柄**——旧焦点
+        // 留在 mains 表（租约/事件流/插件邮箱全在），它的 run 在后台继续；
+        // 再打开时直接复用。retired 仅剩旧路径（side/兜底）在用。
+        self.focus_handle(installed)?;
         // Arm the plugin-side completion bridge for this session: while armed,
         // the goal worker withholds its settled-boundary continuation until the
         // host reports a verdict (`_verify-start`/`_verify-result`). Idempotent;
@@ -1710,6 +1912,34 @@ impl PiEngine {
         // 之前切走/丢弃的同一会话：重新激活缓存的在场态（lease 仍在我们
         // 手里，重建会撞 "writer lease is already held"——见 retired 注释）。
         let target_key = session_cache_key(Path::new(path));
+        // **主句柄表已有该路径**（后台会话/上一焦点，多会话并存 2026-11-28）：
+        // 直接置焦点，不重建、不腾挪——它的 run 在自己的句柄上继续跑。
+        let in_mains = {
+            let mains = self
+                .shared
+                .mains
+                .lock()
+                .map_err(|_| "主会话表锁中毒".to_string())?;
+            mains
+                .values()
+                .find(|handle| {
+                    handle
+                        .session_path
+                        .as_ref()
+                        .is_some_and(|p| session_cache_key(p) == target_key)
+                })
+                .cloned()
+        };
+        if let Some(handle) = in_mains {
+            let line = format!("{}/{}", handle.provider, handle.model_id);
+            let id = self.focus_handle(handle)?;
+            *self
+                .shared
+                .model_line
+                .lock()
+                .map_err(|_| "锁中毒".to_string())? = line;
+            return Ok(id);
+        }
         // 并列窗格里开着的同一会话：直接上台复用（不能重建出第二个写者）。
         // 窗格键随句柄一起交出，句柄离开窗格表后窗格侧下次 side_open 会重
         // 新按路径复用同一祖先句柄的替身——这里只取走句柄本身。
@@ -1739,30 +1969,15 @@ impl PiEngine {
                 .take(&target_key),
         };
         if let Some(cached) = cached {
-            let id = self.shared.rt.block_on(async {
-                cached
-                    .harness
-                    .session()
-                    .get_metadata()
-                    .await
-                    .map(|m| m.id)
-                    .map_err(|e| format!("会话元数据读取失败: {e}"))
-            })?;
+            let line = format!("{}/{}", cached.provider, cached.model_id);
+            // 置焦点：旧焦点留在 mains（**不再 retire**——后台 run 继续，
+            // 租约/邮箱不丢；这正是"切换不打断"的内核）。
+            let id = self.focus_handle(cached)?;
             *self
                 .shared
                 .model_line
                 .lock()
-                .map_err(|_| "锁中毒".to_string())? =
-                format!("{}/{}", cached.provider, cached.model_id);
-            // 当前活动会话也要进 retired——否则它被直接 drop，lease 泄漏，
-            // 下次切回它必撞 "already held"（实测切换链 A→B→A→B）。
-            let previous = self
-                .shared
-                .live
-                .lock()
-                .map_err(|_| "锁中毒".to_string())?
-                .replace(cached);
-            self.retire_previous(previous)?;
+                .map_err(|_| "锁中毒".to_string())? = line;
             // 不 cleanup（多会话并存：后台会话的审批/ask 保留）
             return Ok(id);
         }
@@ -1798,7 +2013,7 @@ impl PiEngine {
         Ok(id)
     }
 
-    /// New Chat 语义（§7-3 保持）：丢柄（会话文件已持久化在 rpi 侧）。
+    /// New Chat 语义（§7-3 保持）：清焦点（会话文件已持久化在 rpi 侧）。
     pub fn discard_session(&self) -> Result<(), String> {
         let previous = self
             .shared
@@ -1806,9 +2021,23 @@ impl PiEngine {
             .lock()
             .map_err(|_| "锁中毒".to_string())?
             .take();
-        // 不 drop：同进程内再次打开该会话必须复用（lease 释放在引擎侧不可
-        // 达），见 EngineShared::retired。
-        self.retire_previous(previous)?;
+        // **句柄留在 mains**（多会话并存 2026-11-28）：discard 只是离开前台
+        // ——在跑 run 继续、再打开该会话直接复用（不再靠 retired 兜底）。
+        if let Some(prev) = previous {
+            match self.session_id_of(&prev) {
+                Ok(id) => self.park_main(&id, prev)?,
+                Err(e) => {
+                    // 读不到 id 无法入表（重建会撞租约）——显式释放后丢弃。
+                    eprintln!("[pi] discard：会话 id 读取失败，释放句柄租约（{e}）");
+                    release_retired_harness(&prev);
+                }
+            }
+        }
+        *self
+            .shared
+            .focused_main
+            .lock()
+            .map_err(|_| "焦点表锁中毒".to_string())? = None;
         // New Chat 的审批暂存随旧会话一起丢弃：下一个真实会话重新按默认/
         // 持久化值落 pin，不继承上一个会话的 full access。
         if let Ok(mut pending) = self.shared.pending_approval_mode.lock() {
@@ -1904,6 +2133,19 @@ impl PiEngine {
         self.prompt_inner(text, Vec::new(), on_event, on_start)
     }
 
+    /// 按线程键发一轮（多会话并存：`main:<id>` = 精确落该会话句柄；`main`
+    /// = 焦点句柄）。同句柄的并发 prompt 仍被 rpi lane 拒绝（前端按
+    /// `lane_busy_for` 排队）。
+    pub fn prompt_for_thread(
+        &self,
+        thread: &str,
+        text: &str,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+        on_start: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        self.prompt_inner_for_thread(thread, text, Vec::new(), on_event, on_start)
+    }
+
     /// 带图发一轮（AguiImage → rpi ImageContent；prompt_text 内部把
     /// text+images 组成 UserContent::Blocks）。
     pub fn prompt_with_content(
@@ -1913,15 +2155,30 @@ impl PiEngine {
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
         on_start: Box<dyn FnOnce() + Send>,
     ) -> Result<(), String> {
-        let converted: Vec<ImageContent> = images
+        self.prompt_inner(text, Self::convert_images(images), on_event, on_start)
+    }
+
+    /// 带图 + 线程键（agui 主路径；见 `prompt_for_thread`）。
+    pub fn prompt_with_content_for_thread(
+        &self,
+        thread: &str,
+        text: &str,
+        images: &[AguiImage],
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+        on_start: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        self.prompt_inner_for_thread(thread, text, Self::convert_images(images), on_event, on_start)
+    }
+
+    fn convert_images(images: &[AguiImage]) -> Vec<ImageContent> {
+        images
             .iter()
             .map(|img| ImageContent {
                 kind: Default::default(),
                 data: std::sync::Arc::from(img.data.as_str()),
                 mime_type: img.mime_type.clone(),
             })
-            .collect();
-        self.prompt_inner(text, converted, on_event, on_start)
+            .collect()
     }
 
 fn prompt_inner(
@@ -1931,7 +2188,19 @@ fn prompt_inner(
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
         on_start: Box<dyn FnOnce() + Send>,
     ) -> Result<(), String> {
-        let live = self.live()?;
+        self.prompt_inner_for_thread("main", text, images, on_event, on_start)
+    }
+
+    /// 线程键 → 句柄解析后的 run（多会话并存内核；句柄各自独立 lane）。
+    fn prompt_inner_for_thread(
+        &self,
+        thread: &str,
+        text: &str,
+        images: Vec<ImageContent>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+        on_start: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        let live = self.handle_for_thread(thread)?;
         self.run_prompt_on(live, text.to_owned(), images, on_event, on_start)
     }
 
@@ -2009,7 +2278,13 @@ fn prompt_inner(
 
     /// 中断当前 run（AgentLane::abort——rpi 无 AbortHandle，&self 可调）。
     pub fn interrupt(&self) -> Result<(), String> {
-        let live = self.live()?;
+        self.interrupt_thread("main")
+    }
+
+    /// 按线程键中断（`main:<id>` 只停该会话的 run——多会话并存下"在 B 点
+    /// 停止不影响 A"）。
+    pub fn interrupt_thread(&self, thread: &str) -> Result<(), String> {
+        let live = self.handle_for_thread(thread)?;
         self.shared.rt.block_on(async {
             AgentLane::abort(live.harness.as_ref())
                 .await
@@ -2027,6 +2302,16 @@ fn prompt_inner(
     /// 无活动会话/无活跃 run 时上游返回错误——原样传播（前端只在 lane
     /// busy + streaming 时调用；错误即错误，不吞）。
     pub fn steer(&self, text: &str, images: &[AguiImage]) -> Result<(), String> {
+        self.steer_for_thread("main", text, images)
+    }
+
+    /// 按线程键注入引导（`main:<id>` 只进该会话的 steer 队列）。
+    pub fn steer_for_thread(
+        &self,
+        thread: &str,
+        text: &str,
+        images: &[AguiImage],
+    ) -> Result<(), String> {
         let text = text.trim();
         if text.is_empty() && images.is_empty() {
             return Err("steer: text 与 images 不能同时为空".into());
@@ -2052,7 +2337,7 @@ fn prompt_inner(
             content,
             chrono::Utc::now().timestamp_millis(),
         ));
-        let live = self.live()?;
+        let live = self.handle_for_thread(thread)?;
         self.shared.rt.block_on(async {
             AgentLane::steer(live.harness.as_ref(), message)
                 .await
@@ -2069,11 +2354,23 @@ fn prompt_inner(
     /// 查这个（`AgentHarness::snapshot().active`），把消息留在本地队列，
     /// 等 lane 真正空闲再发。
     pub fn lane_busy(&self) -> Result<bool, String> {
+        self.lane_busy_for("main")
+    }
+
+    /// 按线程键查 lane 忙闲（`main:<id>`：该会话自己的句柄——多会话并存下
+    /// 每个会话的忙闲独立；未知 id = Err，让调用方看到地址错误，不假装空闲）。
+    pub fn lane_busy_for(&self, thread: &str) -> Result<bool, String> {
         // 无活动会话 = 没有 lane 可忙（New Chat 首条消息前）——这不是
         // 错误降级，是"没有运行"的定义；真正的 harness 错误仍传播。
-        let live = match self.live() {
+        let live = match self.handle_for_thread(thread) {
             Ok(live) => live,
-            Err(_) => return Ok(false),
+            Err(e) => {
+                // 焦点会话不存在（New Chat/未开）按空闲；显式 id 未知 = Err。
+                if Self::main_session_key(thread).is_some() {
+                    return Err(e);
+                }
+                return Ok(false);
+            }
         };
         self.shared.rt.block_on(async {
             let snapshot = live
@@ -2674,6 +2971,145 @@ fn prompt_inner(
         })
     }
 
+    /// 按路径读取会话首条 user 文本（**非活动会话**的标题回填原料；
+    /// `Session::set_name` 只能作用于 live 柄，所以命名前的读也按文件走，
+    /// 与前端 `firstUserMessageText` 同一判据：只认 `kind=entry` /
+    /// `type=message` / `role=user` 的行；string content 原样，parts 形态
+    /// 拼 text 部件。读到首条即停；上限 20000 行 / 4MB——超出只是停止扫描
+    /// （返回 None），不是文件损坏。
+    pub fn first_user_text_at_path(path: &str) -> Result<Option<String>, String> {
+        use std::io::BufRead;
+        let file = std::fs::File::open(path)
+            .map_err(|e| format!("会话文件无法打开（{path}）：{e}"))?;
+        let reader = std::io::BufReader::new(file);
+        let mut total = 0usize;
+        for (index, line) in reader.lines().enumerate() {
+            if index >= 20_000 {
+                return Ok(None);
+            }
+            let line = line.map_err(|e| format!("会话文件读取失败（{path}）：{e}"))?;
+            total += line.len();
+            if total > 4 * 1024 * 1024 {
+                return Ok(None);
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue; // 非 JSON 行（撕裂尾/修复标记）跳过，与前端重放同语义
+            };
+            if value.get("kind").and_then(|v| v.as_str()) != Some("entry") {
+                continue;
+            }
+            if value.get("type").and_then(|v| v.as_str()) != Some("message") {
+                continue;
+            }
+            let Some(message) = value.get("message") else { continue };
+            if message.get("role").and_then(|v| v.as_str()) != Some("user") {
+                continue;
+            }
+            let text = match message.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Array(items)) => {
+                    let mut out = String::new();
+                    for item in items {
+                        if item.get("type").and_then(|v| v.as_str()) != Some("text") {
+                            continue;
+                        }
+                        if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                            out.push_str(t);
+                        }
+                    }
+                    out
+                }
+                _ => String::new(),
+            };
+            return Ok(if text.is_empty() { None } else { Some(text) });
+        }
+        Ok(None)
+    }
+
+    /// 按路径重命名**非活动**会话（标题回填；`rename_session` 只作用于
+    /// live 柄）。走 `JsonlSessionStorage::load`（claim writer lease 的可写
+    /// 重放——`read_snapshot` 的 InMemory 面写不回原文件），与删除同语义：
+    /// 活动会话拒绝（先切走）。名字为空串 = 拒绝（清名请走现有重命名面，
+    /// 不在这里开第二条路径）。
+    pub fn rename_session_at_path(&self, path: &str, name: &str) -> Result<(), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("会话名不能为空".into());
+        }
+        let active_is_target = self
+            .shared
+            .live
+            .lock()
+            .map_err(|_| "锁中毒".to_string())?
+            .as_ref()
+            .and_then(|l| l.session_path.as_ref())
+            .map(|p| p.to_string_lossy() == path)
+            .unwrap_or(false);
+        if active_is_target {
+            return Err("活动会话请用重命名菜单（先切走再回填）".into());
+        }
+        // 句柄在场的会话（mains 后台 / 窗格 / retired）：writer lease 已被
+        // 本进程另一实例持有——`load` 会撞 "writer lease is already held"，
+        // 这里提前给出可读错误（调用方把标题落显示层即可）。
+        {
+            let occupied = {
+                let mains = self
+                    .shared
+                    .mains
+                    .lock()
+                    .map_err(|_| "主会话表锁中毒".to_string())?;
+                mains.values().any(|handle| {
+                    handle
+                        .session_path
+                        .as_ref()
+                        .is_some_and(|p| p.to_string_lossy() == path)
+                })
+            } || {
+                let side = self
+                    .shared
+                    .side
+                    .lock()
+                    .map_err(|_| "窗格会话表锁中毒".to_string())?;
+                side.values().any(|handle| {
+                    handle
+                        .session_path
+                        .as_ref()
+                        .is_some_and(|p| p.to_string_lossy() == path)
+                })
+            };
+            if occupied {
+                return Err("该会话句柄在场（后台/窗格）——请先切到该会话再重命名".into());
+            }
+        }
+        let cwd = self.shared.cwd.clone();
+        let path = path.to_string();
+        let name = trimmed.to_string();
+        self.shared.rt.block_on(async move {
+            let fs: Arc<dyn rpi_tools::FileSystem> =
+                Arc::new(rpi_tools::os_env::OsExecutionEnv::with_cwd(cwd));
+            let storage = JsonlSessionStorage::load(
+                fs,
+                &path,
+                Arc::new(SystemClock),
+                Arc::new(DefaultIdGenerator::new()),
+            )
+            .await
+            .map_err(|e| format!("会话重放失败（无法命名）：{e}"))?;
+            let session = Session::new(
+                Arc::new(storage) as Arc<dyn rpi_harness::session::types::SessionStorage>,
+                None,
+            );
+            session
+                .set_name(Some(&name))
+                .await
+                .map_err(|e| format!("会话名写盘失败：{e}"))
+        })
+    }
+
     /// 删除会话文件（活动会话拒绝——与旧语义一致：先切走再删）。
     pub fn delete_session(&self, path: &str) -> Result<(), String> {
         let active_is_target = self
@@ -2705,6 +3141,51 @@ fn prompt_inner(
             });
         if side_is_target {
             return Err("该会话正在窗格中打开（先关闭窗格）".into());
+        }
+        // 主句柄表里的后台句柄：删除 = 该会话确实不存在了——摘出并释放租约
+        // （握着 lease 继续写一个已删的文件只会留下脏数据）。
+        {
+            let victim = {
+                let mains = self
+                    .shared
+                    .mains
+                    .lock()
+                    .map_err(|_| "主会话表锁中毒".to_string())?;
+                mains
+                    .iter()
+                    .find(|(_, handle)| {
+                        handle
+                            .session_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy() == path)
+                            .unwrap_or(false)
+                    })
+                    .map(|(id, _)| id.clone())
+            };
+            if let Some(victim) = victim {
+                let removed = self
+                    .shared
+                    .mains
+                    .lock()
+                    .map_err(|_| "主会话表锁中毒".to_string())?
+                    .remove(&victim);
+                if let Some(old) = removed {
+                    release_retired_harness(&old);
+                }
+                self.shared
+                    .mains_order
+                    .lock()
+                    .map_err(|_| "主会话表序锁中毒".to_string())?
+                    .retain(|k| k != &victim);
+                let mut focused = self
+                    .shared
+                    .focused_main
+                    .lock()
+                    .map_err(|_| "焦点表锁中毒".to_string())?;
+                if focused.as_deref() == Some(victim.as_str()) {
+                    *focused = None;
+                }
+            }
         }
         std::fs::remove_file(path).map_err(|e| format!("删除失败: {e}"))?;
         // rpi 会话带两个伴生文件：`<path>.lock` 与 `<path>.progress.jsonl`。
@@ -3827,6 +4308,160 @@ fn prompt_inner(
         Ok(stats)
     }
 
+    /// 会话统计**投影**（DSH `sessionStats` 的宿主对偶，2026-11-28）：
+    /// 整条日志折叠的展示面统计——轮次/步数/工具调用数/provider 上报的
+    /// token 用量（input/output/cacheRead/cacheWrite/reasoning）/首字延迟
+    /// 均值/会话墙钟跨度。比 `snapshot_stats`（rpi SessionStats 的只读
+    /// 复制）多出轮次、步数、工具数与首字延迟，**数据源是同一份 JSONL**
+    /// ——usage 本来就逐条落盘（实测 deepseek-v4.1-flash 会话每步都带
+    /// `usage.input/output/cacheRead`），所以统计条不必停在"屏幕这一屏"。
+    ///
+    /// path = None → 焦点会话文件；无会话 = Ok(None)（New Chat 的诚实态）。
+    /// stat 校验缓存（append-only：文件不变即复用）。
+    pub fn session_stats_projection(
+        &self,
+        path: Option<&str>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let path = match path {
+            Some(p) => PathBuf::from(p),
+            None => match self.live_session_path() {
+                Some(p) => p,
+                None => return Ok(None),
+            },
+        };
+        let (len, mtime_ms) = file_stamp(&path)?;
+        {
+            let cache = self
+                .shared
+                .stats_projection_cache
+                .lock()
+                .map_err(|_| "会话统计投影缓存锁中毒".to_string())?;
+            if let Some((cached_path, cached_len, cached_mtime, value)) = cache.as_ref() {
+                if *cached_path == path && *cached_len == len && *cached_mtime == mtime_ms {
+                    return Ok(Some(value.clone()));
+                }
+            }
+        }
+        let value = self.fold_stats_projection(&path)?;
+        *self
+            .shared
+            .stats_projection_cache
+            .lock()
+            .map_err(|_| "会话统计投影缓存锁中毒".to_string())? =
+            Some((path, len, mtime_ms, value.clone()));
+        Ok(Some(value))
+    }
+
+    /// `session_stats_projection` 的纯折叠体（无缓存；规则集中在
+    /// `session_stats_projection` 的注释里）。
+    fn fold_stats_projection(&self, path: &Path) -> Result<serde_json::Value, String> {
+        let display = path.display();
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("会话文件读取失败（{display}）：{e}"))?;
+        let mut turns = 0u64;
+        let mut steps = 0u64;
+        let mut tool_calls = 0u64;
+        let mut input = 0u64;
+        let mut output = 0u64;
+        let mut cached = 0u64;
+        let mut cache_write = 0u64;
+        let mut reasoning = 0u64;
+        let mut cost_total = 0f64;
+        let mut first_ts: Option<u64> = None;
+        let mut last_ts: Option<u64> = None;
+        let mut run_start: Option<u64> = None;
+        let mut run_first_assistant_seen = false;
+        let mut ttft_sum = 0u64;
+        let mut ttft_samples = 0u64;
+        // 半行/撕裂缝容错：只跳过无法解析的行（append-only 日志的合法尾部）。
+        for line in raw.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let kind = v.get("kind").and_then(|k| k.as_str());
+            let record_type = v.get("type").and_then(|t| t.as_str());
+            let ts = v.get("timestamp").and_then(|t| t.as_u64());
+            if kind == Some("record") && record_type == Some("operation_started") {
+                run_start = ts;
+                run_first_assistant_seen = false;
+                if let Some(ts) = ts {
+                    first_ts.get_or_insert(ts);
+                    last_ts = Some(last_ts.map_or(ts, |prev| prev.max(ts)));
+                }
+                continue;
+            }
+            if kind != Some("entry") || record_type != Some("message") {
+                continue;
+            }
+            let Some(msg) = v.get("message") else { continue };
+            let role = msg.get("role").and_then(|r| r.as_str());
+            if let Some(ts) = ts {
+                first_ts.get_or_insert(ts);
+                last_ts = Some(last_ts.map_or(ts, |prev| prev.max(ts)));
+            }
+            match role {
+                Some("user") => turns += 1,
+                Some("assistant") => {
+                    steps += 1;
+                    // 首字延迟：本轮 operation_started → 本轮第一条 assistant
+                    // 条目的时间差（无 operation_started 的旧文件不计样本）。
+                    if !run_first_assistant_seen {
+                        if let (Some(start), Some(ts)) = (run_start, ts) {
+                            if ts >= start {
+                                ttft_sum += ts - start;
+                                ttft_samples += 1;
+                                run_first_assistant_seen = true;
+                            }
+                        }
+                    }
+                    if let Some(usage) = msg.get("usage") {
+                        let num = |key: &str| {
+                            usage.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
+                        };
+                        input += num("input");
+                        output += num("output");
+                        cached += num("cacheRead");
+                        cache_write += num("cacheWrite");
+                        reasoning += num("reasoning");
+                        cost_total += usage
+                            .get("cost")
+                            .and_then(|c| c.get("total"))
+                            .and_then(|t| t.as_f64())
+                            .unwrap_or(0.0);
+                    }
+                    if let Some(parts) = msg.get("content").and_then(|c| c.as_array()) {
+                        tool_calls += parts
+                            .iter()
+                            .filter(|p| {
+                                p.get("type").and_then(|t| t.as_str()) == Some("toolCall")
+                            })
+                            .count() as u64;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let wall_ms = match (first_ts, last_ts) {
+            (Some(a), Some(b)) if b >= a => Some(b - a),
+            _ => None,
+        };
+        Ok(serde_json::json!({
+            "path": path.to_string_lossy(),
+            "turns": turns,
+            "steps": steps,
+            "toolCalls": tool_calls,
+            "inputTokens": input,
+            "outputTokens": output,
+            "cachedTokens": cached,
+            "cacheWriteTokens": cache_write,
+            "reasoningTokens": reasoning,
+            "totalTokens": input + output,
+            "costTotal": cost_total,
+            "ttftMs": if ttft_samples > 0 { Some(ttft_sum / ttft_samples) } else { None },
+            "wallMs": wall_ms,
+        }))
+    }
+
     /// 导出会话为独立 HTML 文档（旧 wire = **完整 HTML 文本**，落盘由前端
     /// save 对话框 + fs_write_text_file 完成）。
     ///
@@ -4200,8 +4835,8 @@ fn prompt_inner(
             .model_line
             .lock()
             .map_err(|_| "锁中毒".to_string())? = format!("{}/{}", live.provider, live.model_id);
-        // 走 install_live：旧活动会话进 retired（保住 writer lease），
-        // 否则 bot 会话建立后切回旧会话必撞 lease。
+        // 走 install_live：旧焦点句柄留在 mains（多会话并存——租约/邮箱
+        // 不丢，后台 run 继续），bot 会话建立后切回旧会话直接复用。
         self.install_live(live)?;
         Ok(id)
     }
@@ -4210,9 +4845,10 @@ fn prompt_inner(
     //
     // 每个窗格一棵**独立会话句柄**（自己的 harness / lane / writer lease /
     // 事件流），prompt 只锁自己的句柄——两个窗格可以在同一进程里并行收发。
-    // 单写者约束：同一会话文件同一时刻只允许一个句柄，由 `live` / `side` /
-    // `retired` 三张表的归属检查兜住（重建一个已在场的会话必撞
-    // "writer lease is already held"）。
+    // 单写者约束：同一会话文件同一时刻只允许一个句柄，由 `live`+`mains` /
+    // `side` / `retired` 这张归属检查兜住（重建一个已在场的会话必撞
+    // "writer lease is already held"）。主窗看过的会话常驻 mains——窗格侧
+    // 走"句柄移交"（不能重建第二个写者）。
 
     /// 取/建并列窗格的会话句柄。同一窗格键 + 同一路径 = 幂等复用；
     /// 换会话（同窗格键、不同路径）→ 旧句柄退役（保租约）后新建。
@@ -4253,12 +4889,53 @@ fn prompt_inner(
             }
         }
         // 之前退役的同一会话：直接复活（lease 仍归我们，重建必撞 already held）。
-        let cached = self
-            .shared
-            .retired
-            .lock()
-            .map_err(|_| "retired 会话表锁中毒".to_string())?
-            .take(&target);
+        // **主句柄表里的同一会话同样只能复用不能重建**（多会话并存 2026-11-28：
+        // 之前在主窗看过的会话常驻 mains）——句柄移交窗格；若它正是焦点，
+        // live 槽与焦点指针一并清（句柄的所有权转移，主路径不能再碰）。
+        let from_mains = {
+            let mut mains = self
+                .shared
+                .mains
+                .lock()
+                .map_err(|_| "主会话表锁中毒".to_string())?;
+            let hit = mains
+                .iter()
+                .find(|(_, handle)| {
+                    handle
+                        .session_path
+                        .as_ref()
+                        .map(|p| session_cache_key(p))
+                        .as_ref()
+                        == Some(&target)
+                })
+                .map(|(id, _)| id.clone());
+            hit.and_then(|id| {
+                let handle = mains.remove(&id);
+                if handle.is_some() {
+                    if let Ok(mut order) = self.shared.mains_order.lock() {
+                        order.retain(|k| k != &id);
+                    }
+                    if let Ok(mut focused) = self.shared.focused_main.lock() {
+                        if focused.as_deref() == Some(id.as_str()) {
+                            *focused = None;
+                            if let Ok(mut live) = self.shared.live.lock() {
+                                live.take();
+                            }
+                        }
+                    }
+                }
+                handle
+            })
+        };
+        let cached = match from_mains {
+            Some(handle) => Some(handle),
+            None => self
+                .shared
+                .retired
+                .lock()
+                .map_err(|_| "retired 会话表锁中毒".to_string())?
+                .take(&target),
+        };
         let handle = match cached {
             Some(handle) => handle,
             None => {

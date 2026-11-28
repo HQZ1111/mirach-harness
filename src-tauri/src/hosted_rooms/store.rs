@@ -746,8 +746,35 @@ pub fn room_state(conn: &Connection, room_id: &Value, include_disbanded: bool) -
 
 /// 上游 `read_events`：按 seq 升序读一页日志。
 pub fn read_events(conn: &Connection, room_id: &Value, after_seq: i64, limit: i64) -> RoomResult<Vec<RoomEvent>> {
+    read_events_capped(conn, room_id, after_seq, limit, MAX_LOG_LIMIT as i64)
+}
+
+/// `groups.log` 的 **has_more 探针**版：允许多读一条（`limit + 1`）。
+///
+/// 为什么单列：分页判断要读 `limit + 1` 条才知道"还有没有下一页"，而外部
+/// 请求面的上限是 `MAX_LOG_LIMIT`（500）。此前探针直接调 `read_events`，
+/// 调用方传 500 时探针变 501 → 撞 "limit must be between 1 and 500" ——
+/// canonical 群聊驱动（`pendingDeferredGeneration` 的 limit: 500）因此每轮
+/// 都抛错，房间永远停在"驱动失败"（2026-11-28 实锤：toast 原文
+/// "limit must be between 1 and 500"）。外部契约不变（请求仍 ≤500）。
+pub fn read_events_probe(
+    conn: &Connection,
+    room_id: &Value,
+    after_seq: i64,
+    limit: i64,
+) -> RoomResult<Vec<RoomEvent>> {
+    read_events_capped(conn, room_id, after_seq, limit, MAX_LOG_LIMIT as i64 + 1)
+}
+
+fn read_events_capped(
+    conn: &Connection,
+    room_id: &Value,
+    after_seq: i64,
+    limit: i64,
+    cap: i64,
+) -> RoomResult<Vec<RoomEvent>> {
     let room_id = validate_room_id(room_id)?;
-    if !(1..=MAX_LOG_LIMIT as i64).contains(&limit) {
+    if !(1..=cap).contains(&limit) {
         return fail(format!("limit must be between 1 and {MAX_LOG_LIMIT}"));
     }
     if after_seq < 0 {
@@ -759,6 +786,33 @@ pub fn read_events(conn: &Connection, room_id: &Value, after_seq: i64, limit: i6
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params![room_id, after_seq, limit], read_event_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// 全量事件（分页读取，块大小 = `MAX_LOG_LIMIT`）。
+///
+/// 判据/路由/复制需要**完整**日志——只读首页 500 条会让长房间的决策看着
+/// 一段被截断的历史（2026-11-28 审计：`groups.replicate` 此前直接请求
+/// 100_000 条，撞上限校验永远失败；driver_continue 与 plan 只读前 500 条）。
+/// 硬上限 100 000 条：超过即 Err（如实报"日志过大"，不静默截断）。
+pub fn read_all_events(conn: &Connection, room_id: &Value) -> RoomResult<Vec<RoomEvent>> {
+    const HARD_CAP: usize = 100_000;
+    let mut all: Vec<RoomEvent> = Vec::new();
+    let mut after_seq = 0i64;
+    loop {
+        let page = read_events(conn, room_id, after_seq, MAX_LOG_LIMIT as i64)?;
+        let short = page.len() < MAX_LOG_LIMIT;
+        if let Some(last) = page.last() {
+            after_seq = last.seq;
+        }
+        all.extend(page);
+        if all.len() > HARD_CAP {
+            return fail("room log exceeds 100000 events");
+        }
+        if short {
+            break;
+        }
+    }
+    Ok(all)
 }
 
 /// 上游 `rename_room`：改名并记一条 `room.renamed` 系统事件。

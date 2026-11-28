@@ -5,7 +5,9 @@
  * 单一真相：某会话"在跑"的判据不再只有 actor 的 `streaming`（SSE 断流/
  * 终态帧丢失会让它永远 streaming 或提前 idle），而是双源：
  *  - `actorStreaming`：轮次机状态（事件驱动）；
- *  - `laneBusy`：引擎侧 `pi_lane_busy` 轮询（进程级单 lane）。
+ *  - `laneBusy`：引擎侧 `pi_lane_busy({thread:'main:<id>'})` 轮询。2026-11-28
+ *    起引擎是**每会话独立句柄**（mains 表），忙闲必须按会话记——此前是
+ *    进程级单布尔，后台会话起跑会把焦点会话画成"在跑"（或反之）。
  * `busy = actorStreaming || laneBusy`；`lastEventAt` 记录该会话最后一次
  * 收到 SSE 事件的时刻，用于：
  *  - 停浪探针（stalled）：actor 说 streaming 但 N 秒无事件 → console 可见
@@ -20,25 +22,25 @@ export const STALL_MS = 90_000
 
 interface WorkEntry {
   actorStreaming: boolean
+  /** 该会话自己的 lane 忙闲（引擎按 `main:<id>` 精确报告）。 */
+  laneBusy: boolean
   lastEventAt: number
   lastStallLoggedAt: number
 }
 
 export interface SessionWorkState {
   byKey: Record<string, WorkEntry>
-  laneBusy: boolean
   markEvent: (key: string) => void
   setActorStreaming: (key: string, streaming: boolean) => void
-  setLaneBusy: (busy: boolean) => void
+  setLaneBusy: (key: string, busy: boolean) => void
   clearKey: (key: string) => void
 }
 
 const touch = (s: SessionWorkState, key: string): WorkEntry =>
-  s.byKey[key] ?? { actorStreaming: false, lastEventAt: 0, lastStallLoggedAt: 0 }
+  s.byKey[key] ?? { actorStreaming: false, laneBusy: false, lastEventAt: 0, lastStallLoggedAt: 0 }
 
 export const sessionWork = createStore<SessionWorkState>()((set, get) => ({
   byKey: {},
-  laneBusy: false,
   markEvent: (key) => {
     const cur = touch(get(), key)
     set({ byKey: { ...get().byKey, [key]: { ...cur, lastEventAt: Date.now() } } })
@@ -48,9 +50,10 @@ export const sessionWork = createStore<SessionWorkState>()((set, get) => ({
     if (cur.actorStreaming === streaming) return
     set({ byKey: { ...get().byKey, [key]: { ...cur, actorStreaming: streaming } } })
   },
-  setLaneBusy: (busy) => {
-    if (get().laneBusy === busy) return
-    set({ laneBusy: busy })
+  setLaneBusy: (key, busy) => {
+    const cur = touch(get(), key)
+    if (cur.laneBusy === busy) return
+    set({ byKey: { ...get().byKey, [key]: { ...cur, laneBusy: busy } } })
   },
   clearKey: (key) => {
     const cur = get().byKey
@@ -61,10 +64,10 @@ export const sessionWork = createStore<SessionWorkState>()((set, get) => ({
   },
 }))
 
-/** busy = actor streaming 或引擎 lane 忙（双源，hermes 同语义）。 */
+/** busy = actor streaming 或该会话自己的引擎 lane 忙（双源，hermes 同语义）。 */
 export const isSessionBusy = (key: string): boolean => {
-  const s = sessionWork.getState()
-  return (s.byKey[key]?.actorStreaming ?? false) || s.laneBusy
+  const e = sessionWork.getState().byKey[key]
+  return (e?.actorStreaming ?? false) || (e?.laneBusy ?? false)
 }
 
 /**
@@ -90,9 +93,12 @@ export const noteStallIfAny = (key: string, now = Date.now()): boolean => {
 }
 
 export const useSessionBusy = (key: string): boolean =>
-  useStore(sessionWork, (s) => (s.byKey[key]?.actorStreaming ?? false) || s.laneBusy)
+  useStore(
+    sessionWork,
+    (s) => (s.byKey[key]?.actorStreaming ?? false) || (s.byKey[key]?.laneBusy ?? false),
+  )
 
 /** 测试隔离。 */
 export function resetSessionWorkForTests(): void {
-  sessionWork.setState({ byKey: {}, laneBusy: false })
+  sessionWork.setState({ byKey: {} })
 }

@@ -1346,6 +1346,9 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
   // Welcome 默认 = 官方 empty-state 元素（Greeting + 起步建议 + 罐头
   // composer）；消费者仍可经 ThreadComponents.Welcome 整体替换
   const { Welcome = EmptyStateWelcome } = useContext(ThreadComponentsContext);
+  /** 引擎装配/水合在途（多会话并存的切换窗口；见下方开场闸门）。 */
+  const engineAttaching = useEngineAttaching();
+  const messagesEmpty = useAuiState((s) => s.thread.messages.length === 0);
 
   // ── 滚动位置按会话持久化（hermes thread-scroll 对标，runtime 代理建店）──
   // 恢复：runtime 在水合/切会话成功后投递 restoreRequest（seq 版一次性），
@@ -1487,9 +1490,17 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
           )}
           data-column-shift={statusPanelShift.offset ? "wide" : undefined}
         >
-          <AuiIf condition={isNewChatView}>
-            <ChatEmptyBody Welcome={Welcome} />
-          </AuiIf>
+          {/* 切换/装配窗口：消息还是空的但引擎在载入（多会话并存的水合
+              期间）——显示历史骨架，**不露空态开场**（用户 2026-11-28：
+              "切换会话会先出开场标识一下"）。hermes 同语义：加载中显示
+              skeleton，只有真正空的会话才显示 welcome。 */}
+          {engineAttaching && messagesEmpty ? (
+            <ThreadHistorySkeleton />
+          ) : (
+            <AuiIf condition={isNewChatView}>
+              <ChatEmptyBody Welcome={Welcome} />
+            </AuiIf>
+          )}
           <AuiIf condition={isHistoryLoadingView}>
             <ThreadHistorySkeleton />
           </AuiIf>
@@ -1544,7 +1555,7 @@ const ThreadRoot: FC<{ isEmpty: boolean; autoFocus: boolean; scoped: boolean }> 
             {/* footer 本身撑满整栏（它的空间也让整栏宽）；里面的
                 status / composer 仍按对话内容列宽居中，输入框宽度不跟着
                 变宽（用户："输入框的宽度怎么跟着变了"）。 */}
-            <div className="mx-auto flex w-full max-w-(--dsh-chat-content-width) flex-col gap-4 px-4">
+            <div className="relative mx-auto flex w-full max-w-(--dsh-chat-content-width) flex-col gap-4 px-4">
             <ThreadScrollToBottom />
             <ThreadFollowupSuggestions />
             {/* 运行状态（2026-11-15 用户定稿）：ZCode 的「工作中 N」挂在
@@ -1751,7 +1762,13 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Scroll to bottom"
         variant="outline"
-        className="aui-thread-scroll-to-bottom dark:border-border dark:bg-background dark:hover:bg-accent absolute -top-12 z-10 self-center rounded-full p-4 disabled:invisible"
+        // 位置 = **输入框的右上角**（用户 2026-11-28："参考一下 dsh 的代码，
+        // 它就是放在输入框的右上角，不是中间"）。DSH 的 `toBottomSlot` 是
+        // 滚动列表末端的 sticky 槽：`justify-content: flex-end` +
+        // `padding-right: (100% − 对话内容宽)/2`，再抬到输入卡上方——
+        // 等价于此处的 `right-4`（footer 内层是 px-4 的内容列）+ `-top-12`
+        // （输入卡上方 12 单位）。此前是 `self-center`（中间）。
+        className="aui-thread-scroll-to-bottom dark:border-border dark:bg-background dark:hover:bg-accent absolute -top-12 right-4 z-10 rounded-full p-4 disabled:invisible"
       >
         <ArrowDownIcon />
       </TooltipIconButton>

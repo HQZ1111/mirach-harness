@@ -491,7 +491,12 @@ const useThreadDisplay = (searchQuery: string) => {
           needsInput: m.id === needsInputThreadId,
           running:
             m.id === runningThreadId ||
-            (workByKey[sessionThreadKey(m.id)]?.actorStreaming ?? false),
+            // 工作点双源（hermes $workingSessionIds 对偶）：actor streaming
+            // **或**该会话自己的 lane 忙（引擎 mains 表按会话报告）。
+            (() => {
+              const w = workByKey[sessionThreadKey(m.id)]
+              return (w?.actorStreaming ?? false) || (w?.laneBusy ?? false)
+            })(),
           unread: isRowUnread({ id: m.id, messageCount: m.messageCount ?? 0 }, seen, markers),
           draft: !m.messageCount,
         }),

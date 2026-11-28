@@ -5681,3 +5681,111 @@ ellipsis），已被本节的逐段移植替换。
 - owner 路由（多连接 dispatcher；宿主单引擎，风险低排后）。
 - 滚动位接线验证（thread-scroll-store 恢复请求的视口消费者）。
 - aui 0.15.38 升级 + 表情反应等 WIP 仍在 stash（`wip-after-0105`）。
+
+## 2026-11-28（二十六）v0.1.10：标题回填 / 拖拽护栏 / 每会话面板抽屉 / 每会话句柄并行 run / 统计投影（当前有效）
+
+用户四条（"刚打开侧栏会话名还是新会话 / 选中文字还能拖出来 / 表情反应是干什么的 /
+统计条数据源能不能补"）+ 两个研究课题（右侧面板跟随会话、并行 run）落地。
+
+### 1. 启动侧栏 "新会话" = 历史未命名会话标题回填（hermes「建会话即命名」对偶）
+
+- 事实：pi 的会话名只有 `set_name` 写过才有；宿主自动命名（maybeAutoNameSession）
+  只在 **POST 成功**后触发、尾页水合（hasMore）还主动跳过——所以大量历史会话在
+  侧栏回落 `New Chat`（`sessionDisplayName` = piName ?? derivedTitle ?? 'New Chat'，
+  而 derivedTitle 只对**焦点会话**算）。
+- 新 IPC：`pi_session_first_user(path)`（Rust 扫 JSONL 头部，只认
+  `kind=entry/type=message/role=user`，string content 或 text parts 拼接；
+  上限 20000 行 / 4MB——超出只是停扫返回 None）+ `pi_session_rename_at_path(path, name)`
+  （**非活动**会话按路径写名：`JsonlSessionStorage::load` 可写重放；
+  活动会话 / 句柄在场（mains/side）拒绝——lease 会撞）。
+- 前端 `session-title-backfill.ts`：启动链末尾（refreshThreads 之后）对
+  **未命名**（piName 空）非活动会话按最近修改序补 ≤12 条（`MAX_PER_RUN`）：
+  读首条 user 文本 → `deriveTitle` → `nextTitleInLineage` → 先落显示层
+  `setDerivedTitle`（rename 失败也不停 New Chat）→ 落名；成功 >0 再 refreshThreads。
+  失败逐条 console.error、下次启动重试（attempted 只记本次运行）。
+- **"Bot Chat"/档案名污染不改名**（只处理空名）：Bot Chat 是管道会话的隐藏锚，
+  改名会让它露进侧栏；那两个由 `sessionDisplayName` 降级显示。
+- `isPlaceholderSessionName` 逻辑没动；hermes 旧改名语境不同的地方（服务端建会话
+  即命名）现在由本回填补齐。
+
+### 2. 选中文字拖拽 + 落点浮层 = document 捕获相 foreign-drag 护栏
+
+- 根因（上一轮 `onWillDragPanel` 选区守卫无效的实锤）：dockview 的落点浮层
+  与 `onUnhandledDragOver` **只看 dragenter，不校验 dataTransfer 里有没有它自己的
+  payload**；文字选区拖拽是**原生 HTML5 drag**，根本不经过 dockview 的页签
+  pointerdown → `onWillDragPanel` 永远不触发（而且它还会在"先选文字再拖页签"时误伤）。
+- 修复（`dockview-shell.tsx`）：document 捕获相 `dragstart` 按**拖拽源**分类——
+  `closest('.dv-tab, [draggable="true"]')`（dockview 页签 / 审查文件树行）放行，
+  其余（选中文字/图片等原生拖拽）`preventDefault()` 直接取消拖拽会话；
+  `foreignNativeDrag` 标记同步进 `onWillShowOverlay` / `onUnhandledDragOver` /
+  `onWillDrop` 三处拒绝（双保险）。dragend/drop 复位。
+- 验收判据：消息正文选区拖动不出现幽灵、不出现落点框；页签拖出分栏仍然工作。
+
+### 3. 每会话右侧面板抽屉（ZCode side pane / hermes preview tabs 对偶）
+
+- 研究事实：ZCode side pane tab 带 owner 戳、可见性按会话过滤（tab 集合是
+  workspace 内存池，折叠/完整视图按 owner）；hermes `$visiblePreviewTabs` 只渲染
+  焦点会话的签（"a session switch swaps the drawer; hidden tabs stay"），
+  `PreviewTab.sessionId + pinned`，**栏几何/开合是全局**（paneStates）。
+- 实现 `session-panel-layout.ts`（localStorage `mirach.harness.panelLayout.v1`，
+  LRU 50，单会话 ≤32KB）：
+  - **会话域面板** = preview*/review/terminal*/subagent/plan-detail/agent-directory/
+    workflow-run*（切会话换）；**全局** = files/routines/radio/bots 栏/open 锚/
+    plugin-workspace（不动）。对象参数（payload）或 >8KB 的面板**不持久化**
+    （console.info 可见地跳过，面板本身不关）。
+  - `captureSessionPanels`（写入端）+ `applySessionPanels`（**差量手术**：
+    先补开、后摘旧、恢复 active 签、锚生命周期；不用 fromJSON——几何属全局）。
+- `dockview-shell.tsx` 接线：订阅 `sessionCatalog.activeId`——切走先 capture 到
+  旧会话，再 apply 新会话；**无记录 = 空抽屉**；首次见到某会话（boot/新会话创建）
+  是 **seed**（把当前集合记成它的抽屉），升级首启不无故关掉用户已开的面板。
+  apply 期间 `applyingPanelsRef` 静默（handlePanelAdded/Removed 跳过——避免
+  "末签关闭=关栏"在拆除中间态误关栏）；`onDidLayoutChange` 的 debounce 里
+  持续 capture（跳过 apply 窗口）；删除会话 → `deleteSessionPanels`。
+- 栏宽/列序/开合仍全局（与 hermes 一致）。
+
+### 4. 并行 run = 引擎主路径每会话句柄表（mains）+ 前端按会话键寻址
+
+- 研究事实：切会话不打断其实**已可用**（旧句柄进 retired 保租约），但有三个真
+  缺口：① 任一 `main:<id>` POST（含后台 drain）都抢 `live` 槽 → 两个 POST
+  交错时 A 的 prompt 可能读到 B 的句柄（串跑竞态）；② `pi_lane_busy`/`pi_interrupt`
+  只认精确 "main"（传键会静默落到 side 分支）；③ retired 驱逐会 release 在跑
+  run 的租约。
+- Rust（`pi_session.rs`）：
+  - `EngineShared` 新增 `mains: HashMap<id, Arc<HarnessLive>>` + `mains_order`
+    + `focused_main`；**`live` 退化为焦点镜像**（既有 `live()` 调用面零改动）。
+  - `focus_handle`（置焦点，旧焦点**留 mains 不 retire**）/ `park_main`
+    （入表 + **cap 12 驱逐，跳过 busy**——busy 探测在锁外；全 busy 允超限并
+    console 可见）/ `handle_for_thread`（`main:<id>` → mains 精确寻址；
+    `main` → 焦点）。
+  - `install_live` / `open_session`（先查 mains，命中直接置焦点）/ `discard_session`
+    （只清焦点，句柄留表）/ `side_open`（**句柄移交**给窗格，不再重建）/
+    `delete_session`（摘 mains + release 租约）。
+  - 新面：`prompt_for_thread` / `prompt_with_content_for_thread` /
+    `interrupt_thread` / `steer_for_thread` / `lane_busy_for`（旧无键版本
+    全部保留并转调 "main"）。
+- agui.rs：主线程 create 步统一 `open_session`（幂等上台）；prompt 步走
+  `prompt_for_thread(&route_thread)` —— **A 的 prompt 永远落 A 的句柄**。
+- main.rs：`pi_lane_busy` / `pi_interrupt` 三分支（main / main:<id> / side）；
+  `pi_steer` 加 `thread`。
+- 前端：`session-work-store` 的 `laneBusy` 全局单布尔 → **按会话**（`setLaneBusy(key, busy)`）；
+  2s 轮询遍历（焦点键 + actor 注册表键）逐个 `pi_lane_busy({thread})`（失败每键只记一次）；
+  焦点发送判断 / drainQueue / steer / 停止钮 / 状态面板 Stop 全部带
+  `sessionThreadKey(...)`；侧栏工作点 = actorStreaming **或** laneBusy。
+
+### 5. DSH 统计条数据源 = `pi_session_stats` 持久投影
+
+- 事实：session JSONL **本来就逐步落 usage**（assistant 条目 `usage.input/output/
+  cacheRead/cacheWrite/reasoning`，实测 BBT/deepseek 会话每步都有）→ DSH
+  `sessionStats` 的宿主对偶可以做真数据源。
+- Rust `session_stats_projection(path?)`（stat 校验缓存）：折叠整条日志
+  ——turns（user 条数）/ steps（assistant 条数）/ toolCalls / 各 token /
+  `ttftMs`（operation_started → 本轮首条 assistant 的平均）/ `wallMs`
+  （首末 timestamp 跨度）/ costTotal。无会话 = `Ok(None)`。
+- `ComposerStatsLine`：投影优先（口径注明"会话日志全量投影"），缺席退回屏幕
+  折叠（DSH deriveStats 兜底，口径注明）；**输出速度仍是本轮 run 口径**
+  （投影没有逐 run 时长，不冒充整会话平均）；缓存写入/推理/成本有真值才显示。
+
+### 顺带
+- `session-work-store.test` 更新（按会话独立）；`thread-list` 工作点双源。
+- 死代码：`hasNonCollapsedSelection` 删除（换成 `foreignNativeDrag` 分类）；
+  `retire_previous` 仅剩 side/兜底路径。

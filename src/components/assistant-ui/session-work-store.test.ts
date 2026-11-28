@@ -22,14 +22,19 @@ afterEach(() => {
 })
 
 describe('sessionWork', () => {
-  it('busy = actorStreaming 或 laneBusy（双源）', () => {
+  it('busy = actorStreaming 或 laneBusy（双源，且按会话独立）', () => {
+    const other = 'main:s2'
     expect(isSessionBusy(key)).toBe(false)
     sessionWork.getState().setActorStreaming(key, true)
     expect(isSessionBusy(key)).toBe(true)
     sessionWork.getState().setActorStreaming(key, false)
     expect(isSessionBusy(key)).toBe(false)
-    sessionWork.getState().setLaneBusy(true)
+    sessionWork.getState().setLaneBusy(key, true)
     expect(isSessionBusy(key)).toBe(true)
+    // 每会话独立：s1 忙不把 s2 画成忙（引擎 mains 表按会话报告）
+    expect(isSessionBusy(other)).toBe(false)
+    sessionWork.getState().setLaneBusy(key, false)
+    expect(isSessionBusy(key)).toBe(false)
   })
 
   it('markEvent 刷新 lastEventAt', () => {

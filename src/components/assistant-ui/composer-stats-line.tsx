@@ -4,27 +4,50 @@
  * 来源：`G:/deepseek-harness-master/packages/client/ui-chat/src/client/chat/
  * StatsPills.tsx`——DSH 是**两个 pill**：仪表（轮次/步数/输出速度 → 时间与
  * 速度明细弹层）+ 数据库（总 token/缓存命中 → token 明细弹层）。本文件与
- * 该形状对齐（v1 只做了裸文字行，用户："这个没有移植完整啊"）。
+ * 该形状对齐。
  *
- * ## 与 DSH 的差异（数据面事实，不是简化）
+ * ## 数据源（2026-11-28 补齐）
  *
  * DSH 的会话统计来自 `sessionStats` 持久投影（整条日志折叠，跨分页/压缩
- * 都正确）。宿主**没有这个投影**，所以每一格都标注真实口径：
- *   · 轮次/步数/首字/工具耗时：按**当前已加载消息**现场折叠（"屏幕这一屏"，
- *     = DSH deriveStats 兜底语义）；
- *   · 输出速度：本轮 run 的输出 token ÷ 本轮用时（最后一条 assistant 段的
- *     createdAt→completedAt，run 级同口径）；run 未结束或无 token 不显示；
- *   · 总 token/缓存命中：usage 桥（provider 上报的**本轮**用量）。
+ * 都正确）。宿主现在有对偶了：**`pi_session_stats`（Rust 折叠整条 JSONL）**
+ * ——usage 本来就逐条落盘（每步 assistant 条目带 `usage.input/output/
+ * cacheRead/cacheWrite/reasoning`），所以轮次/步数/工具数/token/首字延迟/
+ * 墙钟都能给**整会话**口径，不再停在"屏幕这一屏"。
  *
- * 不编造缺数据：某项没有真值就不渲染该项（不显示 0 冒充）。
+ * 展示优先级与降级（都不编造）：
+ *   · 优先 = 投影（持久口径）；投影缺席（无会话/读取失败）→ 屏幕折叠
+ *     （DSH deriveStats 兜底语义）并如实标注口径；
+ *   · 输出速度始终是**本轮 run** 的速度（输出 token ÷ 本轮用时）——投影里
+ *     没有逐 run 时长，标注清楚，不冒充整会话平均；
+ *   · 某项没有真值就不渲染该项（不显示 0 冒充）。
  */
-import { FC, useMemo, useState, type ReactNode } from 'react'
+import { FC, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { GaugeIcon, DatabaseIcon } from 'lucide-react'
 import { useAuiState } from '@assistant-ui/react'
+import { invoke } from '@tauri-apps/api/core'
+import { useStore } from 'zustand'
 
+import { sessionCatalog } from '@/components/panes/session-manage/session-catalog'
 import { useUsageBridge } from '@/components/assistant-ui/usage-bridge'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/motion/popover'
 import { cn } from '@/lib/utils'
+
+/** `pi_session_stats` 的 wire 形状（Rust `session_stats_projection`）。 */
+export interface SessionStatsProjection {
+  path: string
+  turns: number
+  steps: number
+  toolCalls: number
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+  totalTokens: number
+  costTotal: number
+  ttftMs: number | null
+  wallMs: number | null
+}
 
 /** 紧凑 token 数（1.2k / 3.4M）。 */
 function formatTokens(n: number): string {
@@ -156,25 +179,59 @@ export const ComposerStatsLine: FC<{ className?: string }> = ({ className }) => 
   const { usage } = useUsageBridge()
   const messages = useAuiState((s) => s.thread.messages)
   const isRunning = useAuiState((s) => s.thread.isRunning)
+  const activeId = useStore(sessionCatalog, (s) => s.activeId)
+  const [projection, setProjection] = useState<SessionStatsProjection | null>(null)
 
-  const stats = useMemo(() => deriveStats(messages), [messages])
+  // 持久投影拉取：会话变化 / 消息数变化 / run 收尾都重拉（Rust 侧 stat 缓存，
+  // append-only 文件不变即复用）。失败 = console 可见并退回屏幕口径（不编造）。
+  const messageCount = messages.length
+  useEffect(() => {
+    let cancelled = false
+    const path = activeId ? sessionCatalog.getState().entries[activeId]?.path : undefined
+    if (activeId && !path) {
+      // 目录还没就绪（行缺 path）：等下一次 catalog/messages 变化再拉。
+      setProjection(null)
+      return
+    }
+    invoke<SessionStatsProjection | null>('pi_session_stats', path ? { path } : {})
+      .then((value) => {
+        if (!cancelled) setProjection(value ?? null)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setProjection(null)
+        console.error('[stats] 会话统计投影读取失败——退回屏幕折叠口径', e)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeId, messageCount, isRunning])
 
-  const inputTokens = usage?.inputTokens ?? 0
-  const outputTokens = usage?.outputTokens ?? 0
-  const cachedTokens = usage?.cachedInputTokens ?? 0
-  const totalTokens = usage?.totalTokens ?? inputTokens + outputTokens
+  const screen = useMemo(() => deriveStats(messages), [messages])
+
+  // 投影优先（整会话持久口径）；缺席退回屏幕折叠（DSH deriveStats 兜底）。
+  const turns = projection?.turns ?? screen.turns
+  const steps = projection?.steps ?? screen.steps
+  const inputTokens = projection?.inputTokens ?? usage?.inputTokens ?? 0
+  const outputTokens = projection?.outputTokens ?? usage?.outputTokens ?? 0
+  const cachedTokens = projection?.cachedTokens ?? usage?.cachedInputTokens ?? 0
+  const totalTokens = projection
+    ? projection.totalTokens
+    : (usage?.totalTokens ?? inputTokens + outputTokens)
   const cacheHit =
     inputTokens > 0 && cachedTokens > 0
       ? Math.min(100, Math.round((cachedTokens / inputTokens) * 100))
       : null
-  // 输出速度（tok/s）：run 级同口径——本轮输出 token ÷ 本轮用时。
+  // 输出速度（tok/s）：**本轮 run** 同口径——本轮输出 token ÷ 本轮用时
+  // （投影没有逐 run 时长，整会话平均不在这里冒充）。
   const tps =
-    outputTokens > 0 && stats.runWallMs !== null && stats.runWallMs > 0
-      ? Math.round((outputTokens / stats.runWallMs) * 1000)
+    outputTokens > 0 && screen.runWallMs !== null && screen.runWallMs > 0
+      ? Math.round((outputTokens / screen.runWallMs) * 1000)
       : null
+  const ttftMs = projection?.ttftMs ?? screen.ttftMs
 
   // 一条数据都没有时不渲染（空会话不占位）。
-  const hasAny = stats.turns > 0 || totalTokens > 0
+  const hasAny = turns > 0 || totalTokens > 0
   if (!hasAny) return null
 
   return (
@@ -185,23 +242,33 @@ export const ComposerStatsLine: FC<{ className?: string }> = ({ className }) => 
         className,
       )}
     >
-      {stats.turns > 0 && (
+      {turns > 0 && (
         <StatPill
           icon={<GaugeIcon className="size-[var(--size-icon-sm)]" />}
           summary={
             <span data-slot="composer-stats-turns">
-              第 {stats.turns} 轮 · {stats.steps} 步{tps !== null ? ` · ${tps} tok/s` : ''}
+              第 {turns} 轮 · {steps} 步{tps !== null ? ` · ${tps} tok/s` : ''}
             </span>
           }
           title="时间与速度（点击看明细）"
         >
-          <StatRow label="轮次 / 步数" value={`${stats.turns} / ${stats.steps}`} />
-          {stats.ttftMs !== null && <StatRow label="首字延迟（均）" value={formatMs(stats.ttftMs)} />}
-          {stats.toolMs !== null && <StatRow label="工具耗时合计" value={formatMs(stats.toolMs)} />}
-          {stats.runWallMs !== null && <StatRow label="本轮用时" value={formatMs(stats.runWallMs)} />}
-          {tps !== null && <StatRow label="输出速度" value={`${tps} tok/s`} />}
+          <StatRow label="轮次 / 步数" value={`${turns} / ${steps}`} />
+          {projection && projection.toolCalls > 0 && (
+            <StatRow label="工具调用" value={projection.toolCalls} />
+          )}
+          {ttftMs !== null && <StatRow label="首字延迟（均）" value={formatMs(ttftMs)} />}
+          {projection?.wallMs != null && projection.wallMs > 0 && (
+            <StatRow label="会话跨度" value={formatMs(projection.wallMs)} />
+          )}
+          {!projection && screen.toolMs !== null && (
+            <StatRow label="工具耗时合计" value={formatMs(screen.toolMs)} />
+          )}
+          {screen.runWallMs !== null && <StatRow label="本轮用时" value={formatMs(screen.runWallMs)} />}
+          {tps !== null && <StatRow label="输出速度（本轮）" value={`${tps} tok/s`} />}
           <p className="text-(--text-4) mt-1 text-[10.5px] leading-snug">
-            口径：屏幕已加载的这一屏（DSH deriveStats 兜底语义）；无持久会话投影。
+            {projection
+              ? '口径：会话日志全量投影（pi_session_stats——轮次/步数/工具数/token/首字延迟跨分页与压缩累计）。'
+              : '口径：屏幕已加载的这一屏（DSH deriveStats 兜底；统计投影暂不可读）。'}
           </p>
         </StatPill>
       )}
@@ -217,11 +284,22 @@ export const ComposerStatsLine: FC<{ className?: string }> = ({ className }) => 
         >
           <StatRow label="输入" value={formatTokens(inputTokens)} />
           {cachedTokens > 0 && <StatRow label="缓存命中" value={formatTokens(cachedTokens)} />}
+          {projection && projection.cacheWriteTokens > 0 && (
+            <StatRow label="缓存写入" value={formatTokens(projection.cacheWriteTokens)} />
+          )}
           <StatRow label="输出" value={formatTokens(outputTokens)} />
+          {projection && projection.reasoningTokens > 0 && (
+            <StatRow label="推理" value={formatTokens(projection.reasoningTokens)} />
+          )}
           <StatRow label="合计" value={formatTokens(totalTokens)} />
           {cacheHit !== null && <StatRow label="命中率" value={`${cacheHit}%`} />}
+          {projection && projection.costTotal > 0 && (
+            <StatRow label="成本" value={`$${projection.costTotal.toFixed(4)}`} />
+          )}
           <p className="text-(--text-4) mt-1 text-[10.5px] leading-snug">
-            口径：provider 上报的本轮 run 用量（usage 桥）。
+            {projection
+              ? '口径：会话日志里逐步 provider 上报的 usage 累计（pi_session_stats）。'
+              : '口径：provider 上报的本轮 run 用量（usage 桥）。'}
           </p>
         </StatPill>
       )}

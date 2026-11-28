@@ -310,7 +310,7 @@ export function RoomHeader({ backLabel, children, onBack, onStop, onTitle, stopD
         {trailing}
       </div>
     </div>
-    {children && <div className="mx-auto mt-2 flex w-full max-w-3xl min-w-0 flex-col gap-2">{children}</div>}
+    {children && <div className="mx-auto mt-2 flex w-full max-w-[max(330px,calc(100cqw-176px))] min-w-0 flex-col gap-2">{children}</div>}
   </header>
 }
 
@@ -338,14 +338,14 @@ export function RoomComposer({ above, aboveSurface, attach, canSend, children, o
    *  它放在 surface 的 reply 行，宿主按用户口径移到卡外（与轮次状态同层）。 */
   aboveSurface?: ReactNode
 } & Omit<ComponentProps<'form'>, 'onSubmit'>) {
-  return <form {...form} className={cn('pb-3 pt-1', form.className)} onSubmit={(event: FormEvent) => { event.preventDefault(); onSubmit() }}>
+  return <form {...form} className={cn('pb-0 pt-0', form.className)} onSubmit={(event: FormEvent) => { event.preventDefault(); onSubmit() }}>
     {/* 轮次状态（已结束/进行中）在输入卡**上面**——用户 2026-11-23：
         "群聊的输入框里面有个已结束，这个提示应该在输入框的上面"。 */}
     {status}
     {aboveSurface ? <div className="min-w-0 px-2 pb-1.5">{aboveSurface}</div> : null}
     <ComposerBar>
       {above ? <div className="min-w-0">{above}</div> : null}
-      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-2 [grid-template-areas:'files_files_files''input_input_input''attach_._send']">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1.5 [grid-template-areas:'files_files_files''input_input_input''attach_._send']">
         {attach}
         <div className="min-w-0 [grid-area:input]">{children}</div>
         <Tip label={sendLabel}>

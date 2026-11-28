@@ -674,7 +674,7 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack, onReplace
 
   const canSend = canSendNow({ restored, busy, stopping, uploading, pending: !!pending, draft, attachments: attachments.length, driver: !!driver })
 
-  return <section className="flex h-full min-h-0">
+  return <section className="@container flex h-full min-h-0">
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <CanonicalGroupHeader binding={binding} busy={busy} canDisband={offersGroupMethod(methods, 'groups.disband')} canRename={offersGroupMethod(methods, 'groups.rename')}
         canStop={!!driver && offersGroupSafetyMethod(methods, 'groups.stop')} detailsOpen={detailsOpen} driver={driver} methods={methods} onBack={onBack}
@@ -686,7 +686,7 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack, onReplace
         readError={readError} unavailable={Boolean(state && !driver)} />
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4" ref={scroller} role="log">
         {/* Anchored to the composer like a chat thread: a short room sits at the bottom, not the top. */}
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-end gap-0.5 py-4">
+        <div className="mx-auto flex min-h-full w-full max-w-[max(330px,calc(100cqw-176px))] flex-col justify-end gap-0.5 py-4">
           <CanonicalGroupHistory avatarFor={avatarFor} binding={binding} disabled={!visible} downloads={offersGroupMethod(methods, 'groups.attachment.download')} events={events} members={members} onReply={replyTo}
             pause={{ busy, maxContinues: driver?.max_continues, onContinue: continueDiscussion, onStop: stop, stopping }} />
           <CanonicalGroupTyping labels={labels} members={members} statuses={statuses} />
@@ -716,7 +716,7 @@ function CanonicalRoomView({ binding: initialBinding, visible, onBack, onReplace
           onCancel={() => { draftThread.current = undefined; setReply(null) }} quote={reply.quote} />}
         attach={<CanonicalGroupAttachments attachments={attachments} binding={binding} disabled={composerLocked} downloads={offersGroupMethod(methods, 'groups.attachment.download')} onChange={setAttachments} onUploadingChange={setUploading} ref={uploader} uploads={offersGroupMethod(methods, 'groups.attachment.upload')} />}
         canSend={canSend}
-        className="mx-auto w-full max-w-3xl"
+        className="mx-auto w-full max-w-[max(330px,calc(100cqw-176px))]"
         onDragOver={event => { if (event.dataTransfer.types.includes('Files')) {event.preventDefault()} }}
         onDrop={event => attachTransfer(event, event.dataTransfer)}
         onPaste={event => attachTransfer(event, event.clipboardData)}
