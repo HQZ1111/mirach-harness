@@ -75,6 +75,7 @@ import { PiToolUI } from "@/components/assistant-ui/tool-renderers.aui";
 import { UserMessageAttachments } from "@/components/assistant-ui/elements/attachment.aui";
 import { QuoteBlock } from "@/components/assistant-ui/elements/quote.aui";
 import { UserDirectiveText } from "@/components/assistant-ui/directive-text-host";
+import { ReactionControl, useTapbackDoubleClick } from "@/components/assistant-ui/message-reactions";
 import { File } from "@/components/file";
 import { ThreadFollowupSuggestions } from "@/components/assistant-ui/elements/follow-up-suggestions.aui";
 import { Image } from "@/components/image";
@@ -1952,6 +1953,9 @@ const AssistantMessage: FC = () => {
     isLastContentAssistantOfTurn(s.thread.messages, s.message.index),
   );
   const hasParts = useAuiState((s) => s.message.parts.length > 0);
+  // 双击点心（hermes tapback 对偶；挂消息根，手势判定自己避让链接/按钮/
+  // 代码块/选区）。
+  const tapback = useTapbackDoubleClick();
 
   const ACTION_BAR_PT = "pt-1.5";
   // Keep the action bar inside the contained root's paint box, then cancel its reserved space in flow.
@@ -1961,6 +1965,7 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
+      onDoubleClick={tapback}
       className={cn(
         "fade-in slide-in-from-bottom-1 animate-in relative duration-150",
         // 只有挂操作条的（轮尾）消息才为 footer 预留 30px——不预留会让
@@ -2046,6 +2051,8 @@ const AssistantMessage: FC = () => {
             readAloudOpen={readAloudOpen}
             onReadAloudToggle={() => setReadAloudOpen((o) => !o)}
           />
+          {/* 表情反应（hermes 完整移植）：徽章 + 添加反应触发器 */}
+          <ReactionControl />
         </AuiIf>
       </div>
 
@@ -2339,11 +2346,13 @@ const UserImagePart: ImageMessagePartComponent = (part) => (
 const UserMessage: FC = memo(function UserMessage() {
   const userIdentity = useUserIdentityName()
   const bubbleOutline = useStore(appearanceStore, (s) => s.bubbleOutline)
+  const tapback = useTapbackDoubleClick()
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
       className="group/user-row fade-in slide-in-from-bottom-1 animate-in grid auto-rows-auto grid-cols-[minmax(72px,1fr)_minmax(0,auto)_auto] content-start gap-x-2 gap-y-2 duration-150 [&:where(>*)]:col-start-2"
       data-role="user"
+      onDoubleClick={tapback}
     >
       {/* 身份行：名字与内容同边（右对齐到气泡右缘），头像在**外面**（更右），
           两者中线对齐（h-[40px] + items-center，头像 40px）。用户 2026-11-23：
@@ -2383,8 +2392,9 @@ const UserMessage: FC = memo(function UserMessage() {
           -translate-x-full`），鼠标要先移到气泡左边才找得到，与 ZCode 不符。 */}
       <div
         data-slot="aui_user-action-bar"
-        className="col-start-2 mt-1 flex justify-end"
+        className="col-start-2 mt-1 flex items-center justify-end gap-1"
       >
+        <ReactionControl align="end" />
         <UserActionBar />
       </div>
 

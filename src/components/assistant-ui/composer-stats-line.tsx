@@ -64,7 +64,14 @@ export interface ConversationStats {
 /**
  * 从当前消息列表现场折叠统计（只用真实存在的部件时间戳，缺则为 0/不显示）。
  */
-export function deriveStats(messages: readonly { role: string; content: unknown }[]): ConversationStats {
+export function deriveStats(
+  messages: readonly {
+    role: string
+    content: unknown
+    createdAt?: unknown
+    completedAt?: unknown
+  }[],
+): ConversationStats {
   let turns = 0
   let steps = 0
   let ttftSum = 0
@@ -76,7 +83,7 @@ export function deriveStats(messages: readonly { role: string; content: unknown 
     if (m.role !== 'assistant') continue
     steps += 1
     turns += 1
-    const msg = m as { createdAt?: unknown; completedAt?: unknown }
+    const msg = m
     if (msg.createdAt instanceof Date && typeof msg.completedAt === 'number') {
       runWallMs = Math.max(0, msg.completedAt - msg.createdAt.getTime())
     }
