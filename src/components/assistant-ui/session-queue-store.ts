@@ -108,6 +108,12 @@ function persist(bySession: Record<string, QueuedMessage[]>): void {
 interface SessionQueueState {
   /** 会话键 → 排队条目（键 = sessionThreadKey(id)；含 New Chat 哨兵键） */
   bySession: Record<string, QueuedMessage[]>
+  /** drain 失败预算（hermes MAX_AUTO_DRAIN_ATTEMPTS 对偶）：达到上限该会话
+   *  停放（不再自动重试），错误 console 可见；新入队或手动重置后清零。
+   *  内存态（不持久化，重启从零计数——重启本身就是一次新的尝试机会）。 */
+  drainFailures: Record<string, number>
+  noteDrainFailure: (key: string, error: unknown) => void
+  resetDrainFailures: (key: string) => void
   /** 焦点会话键（runtime 随 currentThreadId 同步；面板/drain 按它读写） */
   activeKey: string
   enqueue: (key: string, item: QueuedMessage) => void
@@ -156,6 +162,20 @@ export const sessionQueue = createStore<SessionQueueState>((set, get) => ({
       return { bySession }
     }),
   setActiveKey: (key) => set({ activeKey: key }),
+  drainFailures: {},
+  noteDrainFailure: (key, error) => {
+    const count = (get().drainFailures[key] ?? 0) + 1
+    console.error(
+      `[queue] ${key} drain 失败第 ${count} 次（上限 ${MAX_DRAIN_FAILURES}）`,
+      error,
+    )
+    set({ drainFailures: { ...get().drainFailures, [key]: count } })
+  },
+  resetDrainFailures: (key) => {
+    if ((get().drainFailures[key] ?? 0) === 0) return
+    const drainFailures = { ...get().drainFailures, [key]: 0 }
+    set({ drainFailures })
+  },
 }))
 
 /** 焦点会话的排队条目（队列面板 / drain 用）。
@@ -165,6 +185,13 @@ export const sessionQueue = createStore<SessionQueueState>((set, get) => ({
  * exceeded"，整个壳被错误边界打掉（2026-11-28 实锤：启动即炸、报错面是
  * 下游的 Slot/队列组件——"对话丢失"的一部分症状就是它）。空态用模块级常量。 */
 export const EMPTY_QUEUE: QueuedMessage[] = []
+
+/** 自动 drain 失败上限（hermes MAX_AUTO_DRAIN_ATTEMPTS 同值）。 */
+export const MAX_DRAIN_FAILURES = 4
+
+/** 该会话是否已停放（失败耗尽，不再自动重试）。 */
+export const isQueueParked = (key: string): boolean =>
+  (sessionQueue.getState().drainFailures[key] ?? 0) >= MAX_DRAIN_FAILURES
 
 export const selectQueueItems = (state: {
   bySession: Record<string, QueuedMessage[]>

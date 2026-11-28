@@ -62,7 +62,7 @@ import { deriveTitle, firstUserMessageText, nextTitleInLineage } from './session
 import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
-import { sessionQueue } from './session-queue-store'
+import { isQueueParked, sessionQueue } from './session-queue-store'
 import { sendOutbox } from './send-outbox'
 import { isSessionBusy, noteStallIfAny, sessionWork } from './session-work-store'
 import { resumeBackoffMs, sessionResume } from './session-resume-state'
@@ -1043,6 +1043,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       const state = sessionQueue.getState()
       for (const [key, items] of Object.entries(state.bySession)) {
         if (items.length === 0) continue
+        if (isQueueParked(key)) continue // 失败预算耗尽：停放，不自动重试
         if (key === state.activeKey) continue // 焦点 drain 由收尾边沿触发
         const actor = actorRegistry.get(key)
         if (!actor || actor.getSnapshot().matches('streaming')) continue
@@ -1086,8 +1087,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           .then((res) => {
             if (!res.ok) throw new Error(`POST /ag-ui 失败: ${res.status}`)
             sendOutbox.getState().retireSend(key, next.id)
+            sessionQueue.getState().resetDrainFailures(key)
           })
-          .catch((e) => console.error('[queue] 后台 drain POST 失败', e))
+          .catch((e) => sessionQueue.getState().noteDrainFailure(key, e))
         void refreshThreads()
       }
     }, 2000)
@@ -1218,7 +1220,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         errorBridge.getState().setError(msg, false)
         throw new Error(msg)
       }
-      // POST 成功 = 发送落定：发件箱条目退场（发送丢词恢复面不再提示重发）。
+      // POST 成功 = 发送落定：发件箱条目退场 + drain 失败预算归零。
+      sessionQueue.getState().resetDrainFailures(sessionThreadKey(currentThreadIdRef.current))
       if (submissionId) {
         sendOutbox.getState().retireSend(sessionThreadKey(currentThreadIdRef.current), submissionId)
       }
@@ -1229,6 +1232,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       await maybeAutoNameSession()
     })().catch((e) => {
       console.error('[agui] POST 失败', e)
+      // drain 失败预算（hermes 同款）：连续失败达上限则该会话停放自动重试
+      sessionQueue.getState().noteDrainFailure(sessionThreadKey(currentThreadIdRef.current), e)
       // 网络层失败（fetch 直接 reject）也要可见——错误条是用户唯一的
       // 反馈面（乐观消息已经进投影，不能让用户以为消息在跑）。
       if (!errorBridge.getState().error) {
@@ -1538,6 +1543,20 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // **退出聚合视图**——侧栏回到「只看当前环境」（$showAllProfiles=false
       // 的对偶）。复位放这里，任何切换入口（设置页/菜单/插件）都走同一条。
       sidebarViewStore.getState().setShowAllProfiles(false)
+      // 环境切换 = 旧环境的会话投影/流/工作态整体作废（hermes
+      // wipeSessionListsForGatewaySwitch 的最小对偶）：非焦点 actor 停掉并
+      // 从注册表删除（键是旧 home 的会话 id，新环境里不会再出现）；工作态
+      // 与 resume latch 清空；后台流由 2s 对账收敛（actor 没了自然关流）。
+      for (const [key, actor] of [...actorRegistry.entries()]) {
+        if (key === focusedThreadKey) continue
+        actor.stop()
+        actorRegistry.delete(key)
+        hydratedKeys.delete(key)
+        sessionWork.getState().clearKey(key)
+        closeStream(key)
+      }
+      sessionResume.getState().byId = {}
+      setEngineAttaching(false)
       // 显式切环境 = 作废上一份 bot 新聊天草稿归属。
       pendingBotChatStore.getState().set(null)
       await teardownToNewChat()
@@ -2013,6 +2032,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       // 队列（后台会话的队列在切回焦点且空闲时续发）。
       const drainKey = sessionThreadKey(currentThreadIdRef.current)
       if ((sessionQueue.getState().bySession[drainKey] ?? []).length === 0) return
+      if (isQueueParked(drainKey)) {
+        // 失败预算耗尽：停放（不自动重试）；用户新发一条成功即重新武装。
+        console.error(`[queue] ${drainKey} 已停放（drain 连续失败达上限）——发一条新消息或删除该会话`)
+        return
+      }
       let busy = true
       for (let attempt = 0; attempt < 60; attempt += 1) {
         busy = false
@@ -2370,6 +2394,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
           // resume 状态机（hermes use-route-resume 对偶）：自动退避重试，
           // 最多 4 次；耗尽 → latch + 可见"点会话行手动重试"。
           const entry = sessionResume.getState().noteFailure(id, errMsg)
+          // not-found = 终态（文件已删/移走）：退避重试没有意义——直接给
+          // 手动重试指引（hermes session-gone-latch 只对 not_found latch）。
+          const notFound = /os error 2|找不到指定的文件|not found|no such file/i.test(errMsg)
+          if (notFound) {
+            errorBridge.getState().setError(
+              `无法打开会话：文件不存在（可能已被删除或移动）——刷新侧栏后重试`,
+              false,
+            )
+            return
+          }
           if (!entry.exhausted) {
             const delay = resumeBackoffMs(entry.attempts)
             const prev = resumeRetryTimers.get(id)
@@ -2574,6 +2608,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       const snapshot = threadsRef.current.slice()
       const evicted = snapshot.filter((t) => t.id !== id)
       setThreads(evicted)
+      // 删除 tombstone（hermes session-removal 对偶）：删除在途期间的任何
+      // refreshThreads/旧列表页都不能把这行复活（60s TTL；失败时显式清除）。
+      sessionCatalog.getState().markRemoved(id)
       try {
         if (id === currentThreadId) {
           // 当前活跃会话：pi 持有该会话 handle（jsonl 打开中），直接
@@ -2603,7 +2640,9 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       } catch (e) {
         console.error(`[pi] 会话 ${id} 删除失败（已回滚侧栏行）`, e)
         // 回滚：按删除前快照复原整表（乐观剔除已改过 setThreads）；再拉
-        // 一次真值以免快照之外的状态漂移。
+        // 一次真值以免快照之外的状态漂移。tombstone 一并清除，否则 60s
+        // 内这行会被 ingest 过滤掉（失败却隐藏 = 静默）。
+        sessionCatalog.getState().restoreRemoved(id)
         setThreads(snapshot)
         await refreshThreads().catch(() => undefined)
         errorBridge.getState().setError(

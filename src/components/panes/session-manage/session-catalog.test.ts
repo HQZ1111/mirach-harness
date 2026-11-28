@@ -295,3 +295,22 @@ describe('旧五键 → 统一键一次性迁移（模块加载时执行——�
     expect(merged.groupsCollapsed).toEqual({ pinned: true })
   })
 })
+
+describe('删除 tombstone（2026-11-28，防刷新复活）', () => {
+  it('markRemoved 后 ingest 不再复活该行；restoreRemoved 恢复', () => {
+    sessionCatalog.getState().markRemoved('x')
+    sessionCatalog.getState().ingest([row('x', 3)], null)
+    expect(sessionCatalog.getState().entries['x']).toBeUndefined()
+    // 失败回滚：清 tombstone 后 ingest 正常收行
+    sessionCatalog.getState().restoreRemoved('x')
+    sessionCatalog.getState().ingest([row('x', 3)], null)
+    expect(sessionCatalog.getState().entries['x']).toBeDefined()
+  })
+
+  it('tombstone 不影响其它行', () => {
+    sessionCatalog.getState().markRemoved('x')
+    sessionCatalog.getState().ingest([row('x', 1), row('y', 2)], null)
+    expect(sessionCatalog.getState().entries['y']).toBeDefined()
+    sessionCatalog.getState().restoreRemoved('x') // 单例不跨用例泄漏
+  })
+})

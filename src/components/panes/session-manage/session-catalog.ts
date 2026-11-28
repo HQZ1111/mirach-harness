@@ -354,6 +354,10 @@ export interface SessionCatalogState {
    *  pi_list_sessions，错误在此可见）。 */
   sessionsIndexError: string | null
   // ── 目录动作（runtime 唯一写入） ──
+  /** 删除 tombstone（id → 标记时刻）：删除在途期间 ingest 不得把行拉回。 */
+  removed: Record<string, number>
+  markRemoved(id: string): void
+  restoreRemoved(id: string): void
   ingest(rows: readonly SessionCatalogRow[], activeId: string | null): void
   setActive(id: string | null): void
   setDerivedTitle(id: string, title: string | undefined): void
@@ -604,6 +608,15 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
   piOrder: [],
   activeId: null,
   pendingCwd: null,
+  removed: {},
+  markRemoved: (id) => set({ removed: { ...get().removed, [id]: Date.now() } }),
+  restoreRemoved: (id) => {
+    const cur = get().removed
+    if (!(id in cur)) return
+    const removed = { ...cur }
+    delete removed[id]
+    set({ removed })
+  },
   pinned: [],
   manualOrder: {},
   archived: [],
@@ -618,6 +631,16 @@ export const sessionCatalog = createStore<SessionCatalogState>((set, get) => ({
   sessionsIndexError: null,
 
   ingest: (rows, activeId) => {
+    // 删除 tombstone（hermes session-removal.ts 对偶）：删除在途时旧列表页
+    // 返回也复活不了行（60s TTL 之后不再拦——删除成功后文件已不在）。
+    const removedAt = get().removed
+    const now = Date.now()
+    const isRemoved = (id: string): boolean => {
+      const at = removedAt[id]
+      return at !== undefined && now - at < 60_000
+    }
+    const liveRows = rows.filter((row) => !isRemoved(row.id))
+    rows = liveRows
     const prev = get().entries
     const entries: Record<string, SessionCatalogEntry> = {}
     const piOrder: string[] = []
