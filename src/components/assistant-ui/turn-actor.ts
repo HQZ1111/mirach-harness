@@ -528,6 +528,12 @@ export const turnMachine = setup({
     appendUser: assign({
       messages: ({ context, event }) => {
         if (event.type !== 'USER_SUBMIT') return context.messages
+        // **按 submission id 幂等**（2026-11-28）：队列 drain 重试、切换竞态、
+        // 重放都可能重发同一条 USER_SUBMIT——同 id 已在本投影就不重复追加
+        // （hermes admitted-submissions 的宿主最小对偶）。
+        if (context.messages.some((m) => m.id === event.messageId)) {
+          return context.messages
+        }
         // 带图片附件时 content 摊成 parts（text + image data URL，
         // 经 convertMessage 原样透传给 ThreadMessageLike 渲染）；纯文本
         // 保持 string 形状不变
@@ -576,28 +582,35 @@ export const turnMachine = setup({
     })),
     hydrate: assign(({ context, event }) => {
       if (event.type !== 'HYDRATE') return {}
-      // **保留在途消息**（2026-11-28 实锤竞态）：水合晚到（切换/重水合与
-      // "用户刚点发送 / run 已起跑"赛跑）时，文件页还没有刚落盘的内容——
-      // 直接全量替换会把它们从视图里抹掉（"发了消息，界面上的没了"，
-      // 文件里其实有）。actor 按会话分键，context 里的未在 incoming 中的：
+      // **水合×live 对账**（2026-11-28；hermes reconciliation.ts 的对偶子集）：
+      // 文件页是权威，但"文件还没落盘的实时行"不能被全量替换抹掉。actor 按
+      // 会话分键，context 里未出现在 incoming（按 durable id = pi entryId）
+      // 的行按三类保留：
       //  - 'user-' 开头 = 乐观提交（长会话冷开慢时最常撞，必留）；
-      //  - currentRunId 非空（run 在途）时的 assistant 段 = 流式中的回复
-      //    （RUN_STARTED 只来一次，抹掉后增量会无处落）。
-      const inFlight =
-        context.currentRunId !== null
-          ? (m: TurnMessage) =>
-              m.id.startsWith('user-') ||
-              (m.role === 'assistant' && !event.messages.some((x) => x.id === m.id))
-          : (m: TurnMessage) => m.id.startsWith('user-')
-      const pending = context.messages.filter(
-        (m) => inFlight(m) && !event.messages.some((x) => x.id === m.id),
-      )
-      // 在途 run 的游标保住：本 run 自己的 assistant 段被留 = run 还没收尾，
-      // currentRunId 归零会让后续增量（message-write 事件）被"run 外丢弃"
-      // 规则吞掉——视图停在半句（长会话慢开时最常撞）。run 真正结束时
-      // RUN_FINISHED 事件照常收尾（isRunEnd 与 currentRunId 无关）。
+      //  - currentRunId 非空（run 在途）= 本 run 段（流式回复/工具行，
+      //    RUN_STARTED 只来一次，抹掉后增量无处落）；
+      //  - 其余：createdAt 晚于文件页最后一行 = 实时追加但尚未 flush 到文件
+      //    （时钟同机，pi timestamp 与本地 Date.now() 同基准）。
+      // 分支切换/旧分支残留行的 createdAt 早于新页尾 → 不保留（文件是真相）。
+      const lastIncomingAt = event.messages.reduce((acc, m) => {
+        const t = m.createdAt instanceof Date ? m.createdAt.getTime() : 0
+        return t > acc ? t : acc
+      }, 0)
+      const incomingIds = new Set(event.messages.map((m) => m.id))
+      const pending = context.messages.filter((m) => {
+        if (incomingIds.has(m.id)) return false
+        if (m.id.startsWith('user-')) return true
+        if (context.currentRunId !== null) return true
+        const t = m.createdAt instanceof Date ? m.createdAt.getTime() : 0
+        return lastIncomingAt > 0 && t > lastIncomingAt
+      })
+      // 在途 run 的游标保住：run 还没收尾时 currentRunId 归零会让后续增量
+      // （message-write 事件）被「run 外丢弃」规则吞掉——视图停在半句。
+      // run 真正结束时 RUN_FINISHED 照常收尾（isRunEnd 与 currentRunId 无关）。
       const keptRun =
-        context.currentRunId !== null && pending.some((m) => m.id === context.currentRunId)
+        context.currentRunId !== null &&
+        (pending.some((m) => m.id === context.currentRunId) ||
+          event.messages.some((m) => m.id === context.currentRunId))
       // 历史会话的用量 = pi 最后一条 assistant 的 usage（runtime 用
       // usageFromPiMessages 提取；provider 未回传时为 null）。
       return {

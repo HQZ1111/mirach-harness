@@ -40,6 +40,8 @@ import {
 import { useContributions } from '@/hermes-shim/contrib/react/use-contributions'
 import { COMPOSER_AT_COMPLETIONS_AREA } from '@/hermes-shim/contrib/composer-middleware'
 import { getComposerDraft, setComposerDraft } from '@/components/assistant-ui/composer-draft-store'
+import { lastPendingSend, sendOutbox } from '@/components/assistant-ui/send-outbox'
+import { sessionThreadKey } from '@/components/assistant-ui/session-thread-key'
 import { ComposerAttachments as ComposerAttachmentsRow } from '@/components/assistant-ui/elements/attachment.aui'
 import { branchBridge } from '@/components/assistant-ui/branch-store'
 import { ContextDisplay } from '@/components/assistant-ui/context-display.aui'
@@ -392,7 +394,23 @@ export function ComposerWired() {
   useEffect(() => {
     if (lastDraftKeyRef.current !== threadId) {
       lastDraftKeyRef.current = threadId
-      setText(getComposerDraft(threadId))
+      const draft = getComposerDraft(threadId)
+      if (draft) {
+        setText(draft)
+        return
+      }
+      // 发件箱恢复（hermes composer-outbox 对偶）：发送在打日志/关窗/刷新
+      // 瞬间断了（POST 未成功 retire）→ 该会话的未退场条目恢复成草稿文本
+      // （**不自动重发**，防双发）。恢复即 retire——文本已进 composer，
+      // 之后的去留交给草稿持久化。
+      const key = sessionThreadKey(threadId)
+      const pending = lastPendingSend(key)
+      if (pending) {
+        setText(pending.text)
+        sendOutbox.getState().retireSend(key, pending.id)
+        return
+      }
+      setText('')
       return
     }
     const timer = window.setTimeout(() => setComposerDraft(threadId, value), 400)

@@ -63,6 +63,9 @@ import { usageBridge, type UsageState } from './usage-bridge'
 import { checkpointBridge, type RewindRequest } from './checkpoint-store'
 import { costBridge } from './cost-bridge'
 import { sessionQueue } from './session-queue-store'
+import { sendOutbox } from './send-outbox'
+import { isSessionBusy, noteStallIfAny, sessionWork } from './session-work-store'
+import { resumeBackoffMs, sessionResume } from './session-resume-state'
 import { clearComposerDraft } from './composer-draft-store'
 import { conversationDisplayStore } from './conversation-display-store'
 import { timelineMarkerBridge } from './timeline-marker-store'
@@ -180,7 +183,10 @@ function getOrCreateActor(key: string, focusKey: string): TurnActor {
   actor.start()
   if (actorRegistry.size > ACTOR_CAP) {
     const candidates = [...actorRegistry.entries()]
-      .filter(([k, a]) => k !== focusKey && !a.getSnapshot().matches('streaming'))
+      .filter(
+        ([k, a]) =>
+          k !== focusKey && !a.getSnapshot().matches('streaming') && !isSessionBusy(k),
+      )
       .sort((a, b) => a[1].getSnapshot().context.lastEventId - b[1].getSnapshot().context.lastEventId)
     for (const [k, a] of candidates) {
       if (actorRegistry.size <= ACTOR_CAP) break
@@ -254,6 +260,8 @@ export const speechAdapter: SpeechSynthesisAdapter | undefined =
 
 /** 排队消息 id 序列（同毫秒双提交不得撞 id） */
 let queuedSeq = 0
+/** resume 自动重试定时器（按会话 id；用户手动切换会清掉）。 */
+const resumeRetryTimers = new Map<string, number>()
 
 /** titling.auto_title 配置门（pi Config TitlingSettings，config.rs:434-440；
  * settings.json 落盘 snake_case `auto_title`，读取侧 pi 另收 autoTitle/auto
@@ -417,6 +425,11 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
   const interrupted = useSelector(actorRef, (s) => s.context.interrupted)
   // 提供方自动重试投影（同上：真相在轮次机 context，UI 直接读 state 通道）
   const providerRetry = useSelector(actorRef, (s) => s.context.providerRetry)
+  // 焦点 actor 的 streaming 状态同步进工作态 store（后台 actor 由 2s 对账同步）
+  useEffect(() => {
+    sessionWork.getState().setActorStreaming(focusedThreadKey, isRunning)
+    if (isRunning) noteStallIfAny(focusedThreadKey)
+  }, [focusedThreadKey, isRunning])
 
   // 自动朗读回复（hermes use-auto-speak-replies 宿主对偶，2026-11-28）：
   // 主 runtime = 焦点会话；分栏在 session-runtime.ts 各自挂载，同一会话
@@ -929,6 +942,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       const es = new EventSource(url)
       es.onmessage = (e: MessageEvent) => {
         try {
+          // 工作态心跳（单一真相源）：任何事件到达都刷新 lastEventAt
+          sessionWork.getState().markEvent(key)
           const parsed = JSON.parse(e.data)
           if (parsed?.type === 'CUSTOM' && parsed?.name === 'extension_ui_request') {
             approvalBridge
@@ -993,13 +1008,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     if (focusedThreadKeyForStream !== NEW_CHAT_THREAD_KEY && focusActor) {
       openStream(focusedThreadKeyForStream, focusActor)
     }
-    // 后台 streaming 保流；空闲非焦点关流
+    // 后台 busy（actor streaming 或 lane 忙）保流；空闲非焦点关流
     for (const [key, actor] of actorRegistry.entries()) {
       const streaming = actor.getSnapshot().matches('streaming')
+      sessionWork.getState().setActorStreaming(key, streaming)
       const has = streamsRef.current.has(key)
       if (key === focusedThreadKeyForStream) continue // 焦点流已开
-      if (streaming && !has) openStream(key, actor)
-      if (!streaming && has) closeStream(key)
+      const busy = streaming || isSessionBusy(key)
+      if (busy && !has) openStream(key, actor)
+      if (!busy && has) closeStream(key)
+      if (streaming) noteStallIfAny(key)
     }
   }, [focusedThreadKeyForStream, openStream, closeStream])
 
@@ -1014,6 +1032,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     if (!endpoint) return
     const timer = window.setInterval(() => {
       reconcileStreams()
+      // 引擎 lane 忙闲（进程级单 lane）：busy 判据的第二源（hermes session.info 对偶）
+      invoke<boolean>('pi_lane_busy')
+        .then((b) => sessionWork.getState().setLaneBusy(b))
+        .catch(() => {
+          /* 查询失败不翻状态（下一次周期再试） */
+        })
       // 后台 drain：所有空闲且有排队消息的会话都续发（hermes background
       // drain 同语义——"drains even when no composer is mounted"）。
       const state = sessionQueue.getState()
@@ -1028,11 +1052,20 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         actor.send({
           type: 'USER_SUBMIT',
           text: next.text,
-          messageId: `user-bg-${Date.now()}`,
+          // 稳定提交 id = 队列条目 id（重试沿用同 id → appendUser 幂等门挡重复）
+          messageId: next.id,
           ...(next.imageDataUrls && next.imageDataUrls.length > 0
             ? { images: next.imageDataUrls }
             : {}),
           ...(next.files && next.files.length > 0 ? { files: next.files } : {}),
+        })
+        // 发件箱：出队即落盘，POST 成功才 retire（发送丢词可恢复，hermes
+        // composer-outbox 对偶）
+        sendOutbox.getState().journalSend(key, {
+          id: next.id,
+          text: next.text,
+          submission: next.submission ?? next.text,
+          createdAt: Date.now(),
         })
         // postRun 的 sessionPath 需要按该会话的 catalog path 取——postRun
         // 用 currentThreadIdRef（焦点），后台 drain 需要按 key 发。这里
@@ -1049,7 +1082,12 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             ...(path ? { sessionPath: path } : {}),
             ...(next.images && next.images.length > 0 ? { images: next.images } : {}),
           }),
-        }).catch((e) => console.error('[queue] 后台 drain POST 失败', e))
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error(`POST /ag-ui 失败: ${res.status}`)
+            sendOutbox.getState().retireSend(key, next.id)
+          })
+          .catch((e) => console.error('[queue] 后台 drain POST 失败', e))
         void refreshThreads()
       }
     }, 2000)
@@ -1126,7 +1164,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     }
   }, [actorRef, refreshThreads])
 
-  const postRun = useCallback((message: string, images?: PiImagePayload[]) => {
+  const postRun = useCallback((message: string, images?: PiImagePayload[], submissionId?: string) => {
     const ep = endpointRef.current
     if (!ep) return
     void (async () => {
@@ -1179,6 +1217,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             : `消息发送失败：${detail}`
         errorBridge.getState().setError(msg, false)
         throw new Error(msg)
+      }
+      // POST 成功 = 发送落定：发件箱条目退场（发送丢词恢复面不再提示重发）。
+      if (submissionId) {
+        sendOutbox.getState().retireSend(sessionThreadKey(currentThreadIdRef.current), submissionId)
       }
       // POST 成功即触发自动命名（maybeAutoNameSession 内部全 try/catch，
       // 不向外抛——外层 catch 仍只服务 POST 本身的失败）。同时清掉上一次
@@ -2000,13 +2042,21 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       actorRef.send({
         type: 'USER_SUBMIT',
         text: next.text,
-        messageId: `user-q-${Date.now()}`,
+        // 稳定提交 id = 队列条目 id（重试沿用同 id → appendUser 幂等门挡重复）
+        messageId: next.id,
         ...(next.imageDataUrls && next.imageDataUrls.length > 0
           ? { images: next.imageDataUrls }
           : {}),
         ...(next.files && next.files.length > 0 ? { files: next.files } : {}),
       })
-      postRun(next.submission ?? next.text, next.images)
+      // 发件箱：出队即落盘，POST 成功才 retire（postRun 内按 submissionId 收口）
+      sendOutbox.getState().journalSend(drainKey, {
+        id: next.id,
+        text: next.text,
+        submission: next.submission ?? next.text,
+        createdAt: Date.now(),
+      })
+      postRun(next.submission ?? next.text, next.images, next.id)
       void refreshThreads()
     } finally {
       drainInFlightRef.current = false
@@ -2157,6 +2207,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     [interruptIfRunning, lastUserMessage, postRun, refreshThreads],
   )
 
+  // 自动重试要回调到最新闭包（catch 在回调体内，不能直接自引用）
+  const switchToThreadPathRef = useRef<
+    ((id: string, path: string, force?: boolean) => Promise<void>) | null
+  >(null)
   const switchToThreadPath = useCallback(
     async (id: string, path: string, force = false) => {
       // 已是当前会话 = 无操作（hermes openSession 的 focusOpenSession 命中
@@ -2168,6 +2222,16 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       if (id === currentThreadIdRef.current && !force) {
         mainViewStore.getState().showChat()
         return
+      }
+      if (!force) {
+        // 用户显式重试（点会话行/插件 openSession）：清 exhausted latch，
+        // 失败计数从第 1 次重来（hermes resume-latches：只有显式请求能清）。
+        sessionResume.getState().reset(id)
+        const pending = resumeRetryTimers.get(id)
+        if (pending !== undefined) {
+          window.clearTimeout(pending)
+          resumeRetryTimers.delete(id)
+        }
       }
       // 流式中切换**不中断**（2026-11-28 实锤修复）：v0.1.7 的单会话路由
       // 架构（引擎按会话分桶、切走后 run 在 retired 句柄上继续跑）本就
@@ -2234,6 +2298,7 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             resetSessionScopedBridges(id)
             threadScrollBridge.getState().requestRestore(id)
             branchBridge.getState().requestRefresh()
+            sessionResume.getState().noteSuccess(id)
             return
           }
           // **冷会话（首次打开）**：引擎 pi_open_session 对巨文件要整树
@@ -2293,13 +2358,40 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
             console.error('[pi] 切换后会话目录刷新失败（侧栏行统计可能偏高）', e),
           )
           resetSessionScopedBridges(id)
+          sessionResume.getState().noteSuccess(id)
           // 滚动位置恢复请求（打开会话成功路径）：视口按该会话的持久化
           // 位置恢复阅读位
           threadScrollBridge.getState().requestRestore(id)
           // 活动会话已换——分支条/fork 点随新会话刷新（防上一会话的投影残留）
           branchBridge.getState().requestRefresh()
         } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e)
           console.error(`[pi] 会话 ${id} 打开失败（已回滚选中态）`, e)
+          // resume 状态机（hermes use-route-resume 对偶）：自动退避重试，
+          // 最多 4 次；耗尽 → latch + 可见"点会话行手动重试"。
+          const entry = sessionResume.getState().noteFailure(id, errMsg)
+          if (!entry.exhausted) {
+            const delay = resumeBackoffMs(entry.attempts)
+            const prev = resumeRetryTimers.get(id)
+            if (prev !== undefined) window.clearTimeout(prev)
+            const timer = window.setTimeout(() => {
+              resumeRetryTimers.delete(id)
+              void switchToThreadPathRef.current?.(id, path, true)
+            }, delay)
+            resumeRetryTimers.set(id, timer)
+            console.error(
+              `[pi] 会话 ${id} 第 ${entry.attempts} 次打开失败——${Math.round(delay / 1000)}s 后自动重试`,
+            )
+            errorBridge.getState().setError(
+              `无法打开会话（第 ${entry.attempts} 次，将自动重试）：${errMsg}`,
+              false,
+            )
+          } else {
+            errorBridge.getState().setError(
+              `无法打开会话（已重试 ${entry.attempts} 次）：${errMsg}——点会话行手动重试`,
+              false,
+            )
+          }
           // 乐观高亮已把选中态切过去，失败必须纠正回引擎真值，否则侧栏
           // 高亮一行、聊天区却是上一个会话——比不亮更误导。
           sessionCatalog.getState().setActive(prevThreadId)
@@ -2313,6 +2405,8 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
     },
     [hydrateTranscriptTail, pruneEmptyCurrentSession, refreshThreads, resetSessionScopedBridges],
   )
+
+  switchToThreadPathRef.current = switchToThreadPath
 
   const switchToThread = useCallback(
     async (id: string) => {
@@ -2498,8 +2592,10 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
         await invoke('pi_delete_session', { path })
         // 删除成功：登记表同步移除，否则 refreshThreads 会把这行补回来。
         workspaceSessionIndex.getState().remove(id)
-        // 该会话的队列/草稿一并清掉（用户删除 = 意图明确，不是切换）。
+        // 该会话的队列/草稿/发件箱一并清掉（用户删除 = 意图明确，不是切换）。
         sessionQueue.getState().clearSession(sessionThreadKey(id))
+        sendOutbox.getState().clearSession(sessionThreadKey(id))
+        sessionWork.getState().clearKey(sessionThreadKey(id))
         clearComposerDraft(id)
         // 删除成功清该会话的滚动位置记忆（内存 + 持久化）
         clearThreadScroll(id)
@@ -2664,14 +2760,24 @@ export function AssistantRuntime({ children }: { children: ReactNode }) {
       const sendSessionId = currentThreadIdRef.current
       if (!sendSessionId) throw new MessageNotSentError('[pi] 会话创建失败——消息未发送')
       const sendKey = sessionThreadKey(sendSessionId)
+      // 稳定提交 id（发件箱 + USER_SUBMIT 同 id：续期/重试不双气泡）
+      const submissionId = `user-${Date.now()}-${++queuedSeq}`
+      // 发件箱：Enter 提交点**同步落盘**（关窗/崩溃也不丢词，下次打开该
+      // 会话恢复为草稿；POST 成功即 retire——hermes composer-outbox 对偶）
+      sendOutbox.getState().journalSend(sendKey, {
+        id: submissionId,
+        text,
+        submission,
+        createdAt: Date.now(),
+      })
       getOrCreateActor(sendKey, sendKey).send({
         type: 'USER_SUBMIT',
         text,
-        messageId: `user-${Date.now()}`,
+        messageId: submissionId,
         ...(plan.imageDataUrls.length > 0 ? { images: plan.imageDataUrls } : {}),
         ...(plan.files.length > 0 ? { files: plan.files } : {}),
       })
-      postRun(submission, plan.images)
+      postRun(submission, plan.images, submissionId)
       // 首条消息触发会话创建 → 线程列表出现当前会话
       void refreshThreads()
     },

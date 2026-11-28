@@ -5625,3 +5625,53 @@ ellipsis），已被本节的逐段移植替换。
   的 `NSIS_HOOK_POSTINSTALL` 无条件 `CreateOrUpdateDesktopShortcut`（幂等，
   保留 AUMID），并在 `tauri.conf.json` 的 `bundle.windows.nsis.installerHooks`
   挂上。默认安装目录（currentUser）= `%LOCALAPPDATA%\Mirach Harness`。
+
+## 2026-11-28（二十五）v0.1.8：对话丢失四根因 + 会话层 P0 对齐（当前有效）
+
+用户："我这老是丢会话，各种问题"。v0.1.7 的多会话改造**只过了单测、没实机
+验证**，实装是坏的。逐层挖出并修复：
+
+### 四个真根因（1e12cbd，实机验收过）
+1. **actor 永不启动（最底层）**：`getOrCreateActor` 的启动判据
+   `getSnapshot().status !== 'active'` 是错的——xstate v5 里未启动 actor 的
+   公开 status 也是 `'active'`（内部 `_processingStatus` 才是 NotStarted）→
+   所有 `send()` 被静默丢弃 → 投影恒空。改**无条件 `actor.start()`**（v5
+   幂等）。以后不许可回退这个判据。
+2. **队列选择器无限循环**：`useSessionQueueItems` 返回新 `[]` →
+   `getSnapshot should be cached` → Maximum update depth → 整壳被错误边界
+   打掉。改模块级 `EMPTY_QUEUE` + `selectQueueItems` + 回归测试。
+   **任何 zustand/useSyncExternalStore 选择器都不允许返回新对象/数组**。
+3. **统计条塞进 asChild**：`ComposerStatsLine` 在 `AttachmentDropzone asChild`
+   内（Radix Slot 只收单子元素）→ 启动即崩。已移出。**asChild 内只放单元素**。
+4. **发送路由 500**：前端发 `threadId: "main:<id>"`，`agui.rs` 只认精确
+   `"main"` → 主窗发送被当分栏、`side_open` 撞主柄 → HTTP 500。Rust 改
+   `main` / `main:` 前缀归主柄；`side_open` 拒绝 `main:` 前缀。
+
+### 切换与长会话（8f21037 + 本批）
+- `switchToThreadPath` 里遗留的 `pi_interrupt` 块**真正删除**（v0.1.7 只改
+  注释没删代码）；`interruptedBySwitch` 死变量一并清。
+- HYDRATE 对账（hermes reconciliation 的最小对偶）：保留 incoming 缺的
+  ① `user-*` 乐观消息 ② run 在途时的本 run 段（且保住 `currentRunId`，
+  否则后续增量被"run 外丢弃"规则吞掉）③ createdAt 晚于文件页尾的实时行。
+- `appendUser` 按 `submissionId` 幂等（drain 重试/重放不双气泡）。
+
+### P0 会话层落地（本批，hermes 研究对照表见 docs/HANDOFF 附记）
+- **`send-outbox.ts`**：Enter 提交点同步落盘（journalSend）→ POST 成功
+  retire；切回该会话时未退场条目恢复为草稿文本（不自动重发）。POST
+  失败保留 → 恢复面。删除会话清键。
+- **`session-work-store.ts`**：busy 双源（actor streaming + `pi_lane_busy`
+  2s 轮询）；`lastEventAt` 心跳；停浪 90s console 可见（节流）；流对账改
+  "busy 保流"；actor 淘汰谓词加 `!isSessionBusy`（busy 永不驱逐）。
+- **`session-resume-state.ts`**：打开失败自动退避重试（1s→2s→4s→8s，4 次），
+  耗尽 latch + 错误条"点会话行手动重试"；手动点行清 latch 重计数（hermes
+  resume-latches 语义：只有显式请求能清）。
+
+### 还没做（下一批，按 hermes 对照清单排序）
+- 删除/归档 tombstone + generation（防刷新复活）；`session-catalog` 落点。
+- 水合带 `lastEventId` 水位裁剪 + entryId 持久身份进 `pi-hydrate`
+  （本轮只在 turn-actor 层按 id/时间戳对账）。
+- per-session 状态灯（working/attention/unread 合并优先级）统一 sidebar/tab。
+- 队列 drain 失败预算 / paused-replies；not-found 结构化错误码（Rust）；
+  多窗单写者（Web Locks，若启用多窗）；profile 切换 wipe；owner 路由。
+- aui 0.15.38 升级 + 表情反应等 WIP 仍在 stash（`wip-after-0105`），
+  独立批次处理。
