@@ -55,6 +55,9 @@ import {
   summaryFileLeafName,
 } from "@/components/assistant-ui/work-summary";
 import { parsePlanSteps, planReviewState } from "@/components/assistant-ui/plan-parse";
+import { TodoList } from "@/components/assistant-ui/elements/todo-list";
+import { parseTodoList } from "@/components/assistant-ui/todo-store";
+import { toAuiTodoItems } from "@/components/assistant-ui/panel-adapters";
 import { openFileFromToolPath } from "@/components/assistant-ui/open-file";
 import { useConversationDisplay } from "@/components/assistant-ui/conversation-display-store";
 import {
@@ -286,6 +289,26 @@ export function parseAskAnswers(
   });
 }
 
+/**
+ * 从 todo 工具结果取 TaskList 卡片用的 items（null = 形状不符/还没结果）。
+ *
+ * 形状 = `ToolOutput.details = { schema: 'todo_list.v1', list: { phases:[{tasks}] } }`
+ *（todo.rs:556）；复用 tool-sidecar 同一份解析器（`parseTodoList`）与状态
+ * 映射（`toAuiTodoItems`），不另建一套真相。
+ */
+export function todoItemsFromResult(result: unknown) {
+  if (!isToolOutputLike(result)) return null;
+  const details = result.details;
+  if (!isPlainRecord(details)) return null;
+  if (details.schema !== "todo_list.v1") return null;
+  const projection = parseTodoList(details.list);
+  if (projection === null) return null;
+  // 多 phase 压成一列：phase 名作分组线不在此处（ZCode 行内也是平铺）
+  const tasks = projection.phases.flatMap((p) => p.tasks);
+  if (tasks.length === 0) return null;
+  return toAuiTodoItems(tasks);
+}
+
 // ── 分流 ────────────────────────────────────────────────────────────
 
 export const PiToolUI: ToolCallMessagePartComponent = (part) => {
@@ -323,9 +346,30 @@ export const PiToolUI: ToolCallMessagePartComponent = (part) => {
     }
   }
 
-  // 4. todo 工具默认不在消息流渲染（状态面板有待办分区；「显示待办」打开
-  //    时落到下方普通摘要行）
-  if (toolName === "todo" && !showTodos) return null;
+  // 4. todo 工具 → 任务清单卡片（ZCode `todo_list.v1` 的行内投影）。
+  //    2026-11-27 用户：「对话区的显示组件缺失，比如说任务清单，对话中并没有
+  //    显示」——此前这里 `if (toolName === "todo" && !showTodos) return null`，
+  //    而 showTodos 默认 false（ZCode 同款），于是列表**只能**在侧栏活动面板看
+  //    到，对话流里什么都没有。现在 todo 结果总是渲染成 TodoList 卡片（与
+  //    ZCode 状态面板同一份数据源：tool-sidecar 归约的 todo_list.v1），
+  //    「显示待办」开关只控制**是否额外保留下方的普通摘要行**。
+  //    2026-11-28 用户："之前的待办清单，我的对话就不显示"——**运行中（无
+  //    result）也显示**：退回摘要行的路径不再被 showTodos 门杀掉（用户看得
+  //    见"agent 正在写待办"这件事本身）。
+  if (toolName === "todo") {
+    const items = todoItemsFromResult(result);
+    if (items !== null) {
+      return (
+        <TodoList
+          data-slot="aui_todo-call"
+          items={items}
+          className="mt-1"
+        />
+      );
+    }
+    // 结果形状不符（还在跑 / 引擎换了输出）：退回摘要行——不再被 showTodos
+    // 门杀掉（运行中的 todo 调用也要可见，禁止静默消失）。
+  }
 
   const kind = KIND_LABELS[toolName];
   const pres = describeToolCall({
