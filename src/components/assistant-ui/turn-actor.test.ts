@@ -742,3 +742,22 @@ describe('HYDRATE 保留在途乐观消息（2026-11-28 竞态回归锁）', () 
     expect(actor.getSnapshot().context.messages.map((m) => m.id)).toEqual(['y'])
   })
 })
+
+describe('HYDRATE 与在途 run（长会话慢开竞态）', () => {
+  it('run 在途时水合保留流式 assistant 段与 currentRunId', () => {
+    const actor = createActor(turnMachine, { input: ctx() })
+    actor.start()
+    actor.send({ type: 'USER_SUBMIT', text: '问题', messageId: 'user-1' })
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'RUN_STARTED', runId: 'r1' }, id: 1 })
+    // 水合晚到：文件页还没有 in-flight 段
+    actor.send({ type: 'HYDRATE', messages: [{ id: 'a', role: 'user', content: '旧' }] })
+    const snap = actor.getSnapshot().context
+    expect(snap.messages.map((m) => m.id)).toEqual(['a', 'user-1', 'r1'])
+    // run 游标保住：后续增量不会被"run 外丢弃"规则吞掉
+    expect(snap.currentRunId).toBe('r1')
+    actor.send({ type: 'AGUI_EVENT', event: { type: 'TEXT_MESSAGE_CONTENT', delta: '继续写' }, id: 2 })
+    const last = actor.getSnapshot().context.messages.at(-1)
+    expect(last?.role).toBe('assistant')
+    expect(last?.content).toBe('继续写')
+  })
+})

@@ -576,19 +576,33 @@ export const turnMachine = setup({
     })),
     hydrate: assign(({ context, event }) => {
       if (event.type !== 'HYDRATE') return {}
-      // **保留在途乐观消息**（2026-11-28 实锤竞态）：水合晚到（切换/重水合
-      // 与"用户刚点发送"赛跑）时，文件页还没有刚落盘的那条用户消息——直接
-      // 全量替换会把用户刚发的话从视图里抹掉（"发了消息，界面上的没了"，
-      // 文件里其实有）。actor 按会话分键，context 里的 'user-' 开头消息
-      // 必属本会话的未落盘/乐观段：把 incoming 里没有的并到尾部。
+      // **保留在途消息**（2026-11-28 实锤竞态）：水合晚到（切换/重水合与
+      // "用户刚点发送 / run 已起跑"赛跑）时，文件页还没有刚落盘的内容——
+      // 直接全量替换会把它们从视图里抹掉（"发了消息，界面上的没了"，
+      // 文件里其实有）。actor 按会话分键，context 里的未在 incoming 中的：
+      //  - 'user-' 开头 = 乐观提交（长会话冷开慢时最常撞，必留）；
+      //  - currentRunId 非空（run 在途）时的 assistant 段 = 流式中的回复
+      //    （RUN_STARTED 只来一次，抹掉后增量会无处落）。
+      const inFlight =
+        context.currentRunId !== null
+          ? (m: TurnMessage) =>
+              m.id.startsWith('user-') ||
+              (m.role === 'assistant' && !event.messages.some((x) => x.id === m.id))
+          : (m: TurnMessage) => m.id.startsWith('user-')
       const pending = context.messages.filter(
-        (m) => m.id.startsWith('user-') && !event.messages.some((x) => x.id === m.id),
+        (m) => inFlight(m) && !event.messages.some((x) => x.id === m.id),
       )
+      // 在途 run 的游标保住：本 run 自己的 assistant 段被留 = run 还没收尾，
+      // currentRunId 归零会让后续增量（message-write 事件）被"run 外丢弃"
+      // 规则吞掉——视图停在半句（长会话慢开时最常撞）。run 真正结束时
+      // RUN_FINISHED 事件照常收尾（isRunEnd 与 currentRunId 无关）。
+      const keptRun =
+        context.currentRunId !== null && pending.some((m) => m.id === context.currentRunId)
       // 历史会话的用量 = pi 最后一条 assistant 的 usage（runtime 用
       // usageFromPiMessages 提取；provider 未回传时为 null）。
       return {
         messages: pending.length > 0 ? [...event.messages, ...pending] : event.messages,
-        currentRunId: null,
+        currentRunId: keptRun ? context.currentRunId : null,
         error: null,
         usage: event.usage ?? null,
         compaction: null,
