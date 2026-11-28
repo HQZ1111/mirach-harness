@@ -114,6 +114,8 @@ import {
   THREAD_TIME_LABELS,
 } from "@/components/panes/session-manage/session-time";
 import { sessionUsageStore, useSessionUsage } from "@/components/panes/session-manage/session-usage";
+import { sessionWork } from '@/components/assistant-ui/session-work-store';
+import { sessionThreadKey } from '@/components/assistant-ui/session-thread-key';
 import {
   sessionStatusBucket,
   STATUS_BUCKET_LABELS,
@@ -475,6 +477,9 @@ const useThreadDisplay = (searchQuery: string) => {
   const seen = useSessionUnread((s) => s.seen);
   const markers = useSessionUnread((s) => s.markers);
   const runningThreadId = isRunning ? mainThreadId : null;
+  // 会话级工作态（hermes $workingSessionIds 对偶）：后台 streaming 的会话
+  // 也点亮 working（此前只亮当前活跃会话——切走后侧栏看不到谁在跑）
+  const workByKey = useStore(sessionWork, (s) => s.byKey);
   const needsInputThreadId = hasPendingApprovals ? mainThreadId : null;
 
   const statusBuckets = useMemo(() => {
@@ -484,14 +489,16 @@ const useThreadDisplay = (searchQuery: string) => {
         m.id,
         sessionStatusBucket({
           needsInput: m.id === needsInputThreadId,
-          running: m.id === runningThreadId,
+          running:
+            m.id === runningThreadId ||
+            (workByKey[sessionThreadKey(m.id)]?.actorStreaming ?? false),
           unread: isRowUnread({ id: m.id, messageCount: m.messageCount ?? 0 }, seen, markers),
           draft: !m.messageCount,
         }),
       );
     }
     return map;
-  }, [metas, needsInputThreadId, runningThreadId, seen, markers]);
+  }, [metas, needsInputThreadId, runningThreadId, seen, markers, workByKey]);
 
   // 状态筛选（hermes Filters>Status：五桶多选，空 = 不过滤）。
   const statusFilter = useSidebarView((s) => s.statusFilter);
