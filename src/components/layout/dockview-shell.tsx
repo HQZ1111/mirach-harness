@@ -103,6 +103,23 @@ import { openPagePanel, panelsDropPosition, splitPanelOut } from './open-page-ac
 // factoryLayout / LAYOUT_KEY 在 dockview-column-ops.ts（2026-10-16：「默认
 // 布局」复位动词 = 第二消费方，单源防漂移）——本文件只消费：boot 灌布局 +
 // 出厂双轨钉宽 300 + 持久化读写。栏宽口径见 rail-metrics.ts。
+/**
+ * 当前是否有非空文字选区。
+ *
+ * 用在 panel/组拖拽的准入拦截：pointer DnD 后端不看选区，用户在消息/代码上
+ * 选区后拖动会把面板拖出去（用户 2026-11-27 实报）。有选区 = 用户在做
+ * 文字选择，不是拖页签。
+ */
+function hasNonCollapsedSelection(): boolean {
+  try {
+    const sel = window.getSelection()
+    return sel !== null && !sel.isCollapsed && sel.toString().trim().length > 0
+  } catch {
+    // 读选区失败不阻断拖拽（非浏览器环境/权限异常）——返回 false 让原生行为生效。
+    return false
+  }
+}
+
 const loadLayout = (): SerializedDockview | null => {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY)
@@ -839,6 +856,11 @@ export function DockviewShell() {
       // 宿主，v8.0 生命周期），拖走 = 不经旗标地拆列——整钮拦截。
       a.onWillDragPanel((e) => {
         if (e.panel.id === 'open') e.nativeEvent.preventDefault()
+        // 文字选区守卫（用户 2026-11-27：「选中的文字还是能像拖拽标签一样
+        // 拖拽出来，分栏的框还会出现」）：pointer DnD 后端不区分「拖选中
+        // 的文字」和「拖标签」，在消息正文上按下拖动会把整块面板拖出去。
+        // 有非空选区时一律不启动面板拖拽——拖拽的语义目标只能是页签/条。
+        if (hasNonCollapsedSelection()) e.nativeEvent.preventDefault()
       })
       // 唯一的「非法面」= 内容区中心堆叠进 hideHeader 组：无条组收下第二
       // 个标签后不可见也不可切（隐形标签死结）——onWillShowOverlay（拖拽

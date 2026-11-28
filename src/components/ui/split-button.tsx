@@ -4,8 +4,8 @@
  * 主按钮 + 尾巴菜单（VS Code 的 Commit / Commit & Push）。主按钮跑 `value`；
  * 菜单项跑它并把它变成新默认——用户怎么用，控件就怎么记，不需要额外设置项。
  *
- * 上游用 Radix DropdownMenu；宿主统一到 beui 的 ContextMenu（`anchor='trigger'`
- * 从触发钮长出，与全应用弹层同一套 goo 动效——AGENTS.md「弹层动效：只有一个
+ * 上游用 Radix DropdownMenu；宿主统一到 motion ContextMenu（`anchor='trigger'`
+ * 从触发钮长出，与全应用弹层同一套动效——AGENTS.md「弹层动效：只有一个
  * 来源」）。行为等价：点主钮跑当前值、点尾巴开菜单、选项写入默认。
  */
 

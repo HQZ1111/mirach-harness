@@ -15,9 +15,9 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { CheckIcon, ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCommandState } from "cmdk";
-// 2026-10-16 换 beUI goo 弹层（用户定稿"所有 panel 型浮层"）——原 Radix
-// ui/popover 的 API 面对位：方位/间距/圆角是 goo **根属性**（不是 content
-// 属性），子组件从 context 读；content 支持 onOpenAutoFocus（键盘焦点契约）。
+// 弹层用宿主自有的 motion Popover（2026-10-16 替代原 Radix ui/popover）：
+// 方位/间距/圆角是 **Popover 根属性**（不是 content 属性），子组件从 context
+// 读；content 支持 onOpenAutoFocus（键盘焦点契约）。
 import {
   Popover,
   PopoverContent,
@@ -185,11 +185,11 @@ export type ModelSelectorRootProps = {
   open?: boolean;
   defaultOpen?: boolean;
   onOpenChange?: (open: boolean) => void;
-  /** 面板方位（goo 根属性——2026-10-16 换 beUI goo 弹层时从 content 上提）。 */
+  /** 面板方位（Popover 根属性——2026-10-16 从 content 上提）。 */
   side?: "top" | "bottom";
   /** 面板沿触发边对齐（同上）。 */
   align?: "start" | "center" | "end";
-  /** 触发边与面板的间距 px（goo 的"脖子"长度；同上）。 */
+  /** 触发边与面板的间距 px（同上）。 */
   sideOffset?: number;
   children: ReactNode;
 };
@@ -254,8 +254,8 @@ function ModelSelectorRoot({
 
   return (
     <ModelSelectorContext.Provider value={contextValue}>
-      {/* 方位/对齐/间距（beUI API；content 侧不再接受）。
-          goo 已退役（2026-11-22）：弹层 = 默认 fade+zoom 的独立圆角矩形
+      {/* 方位/对齐/间距（Popover 根属性；content 侧不再接受）。
+          2026-11-22 起弹层 = 默认 fade+zoom 的独立圆角矩形
           + 投影，触发钮（输入框下方的模型胶囊）不再有副本/脖子/投影。 */}
       <Popover
         align={align ?? "start"}
@@ -311,7 +311,7 @@ function ModelSelectorTrigger({
 }: ModelSelectorTriggerProps) {
   const { setOpen } = useModelSelectorContext();
 
-  // goo PopoverTrigger 吃**单个元素子节点**（克隆载体）——子元素 = 裸
+  // PopoverTrigger 吃**单个元素子节点**（克隆载体）——子元素 = 裸
   // 按钮壳，属性全走 PopoverTrigger 的 rest 合并（clone 里 cn("relative
   // z-0", childProps.className, rest.className) 与 ...rest 展开）。
   // 对位 Radix asChild 语义（原版直接塞多子节点，此处显式收进一个按钮）。
@@ -457,7 +457,7 @@ function ModelSelectorContent({
     <PopoverContent
       data-slot="model-selector-content"
       className={cn(
-        // 宽度对位旧 Radix 版（w-72）；宽度变量退路保留（goo 无
+        // 宽度对位旧 Radix 版（w-72）；宽度变量退路保留（Popover 无
         // --radix-popover-trigger-width，回退 18rem）。
         "bg-popover w-72 overflow-hidden rounded-xl p-0",
         className,
@@ -817,7 +817,7 @@ export type ModelSelectorProps = Omit<ModelSelectorRootProps, "children"> &
     /** Render a search input above the model list. */
     searchable?: boolean;
     /** Alignment of the dropdown relative to the trigger. Use `"end"` when the
-     * trigger sits at the right edge of its container.（goo 的 align 是根属性
+     * trigger sits at the right edge of its container.（align 是 Popover 根属性
      * ——ModelSelectorImpl 透传给 Root） */
     align?: ModelSelectorRootProps["align"];
     className?: string;

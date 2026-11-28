@@ -110,10 +110,6 @@ export interface PopoverProps {
   sideOffset?: number;
   /** Corner radius of the open panel, in px. Default 16. */
   panelRadius?: number;
-  /** 保留 prop（历史 goo 滤镜参数，2026-11-22 起无效果）。 */
-  gooStrength?: number;
-  /** 保留 prop（历史 goo 粘性合并开关，2026-11-22 起无效果）。 */
-  goo?: boolean;
   className?: string;
 }
 
@@ -127,8 +123,6 @@ export function Popover({
   align = "center",
   sideOffset = 14,
   panelRadius = 16,
-  gooStrength = 8,
-  goo = false,
   className,
 }: PopoverProps) {
   const reduce = useReducedMotion() ?? false;
@@ -354,7 +348,7 @@ export const PopoverTrigger = forwardRef<HTMLElement, PopoverTriggerProps>(
               node;
         },
       ),
-      // Above the goo layer (z-[-1]) so the neck reads behind it.
+      // 触发钮自身建立的层叠上下文底（面板经 portal 挂 body）。
       className: cn(
         "relative z-0",
         childProps.className as string | undefined,
@@ -427,7 +421,7 @@ export function PopoverContent({
   // harness 扩展（2026-10-16）：视口翻转/钳位——beUI 原版无碰撞处理
   // （放不下就出屏）。对位 Radix 的 collision 行为：首选 side 装不下且
   // 另一侧更宽裕 → 翻转；水平方向钳在 gutter 内。composer 的模型选择器
-  // 触发钮在窗口底部，依赖此逻辑自动翻到上方（换 goo 前由 Radix 提供）。
+  // 触发钮在窗口底部，依赖此逻辑自动翻到上方。
   const gutter = 12;
   const resolvedSide: Side = (() => {
     if (!layout) return side;

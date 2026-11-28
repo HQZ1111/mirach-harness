@@ -13,6 +13,26 @@ import { cn } from '@/lib/utils'
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp'])
 const HTML_EXTS = new Set(['html', 'htm'])
 
+/**
+ * 把 `data:<mime>;base64,<payload>` 解成 UTF-8 文本（不经 fetch）。
+ *
+ * 非 base64 的 data URL（`data:text/plain,hello`）直接取逗号后原文的
+ * percent-decode 结果，保证两种形态都能读。
+ */
+function decodeDataUrlText(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+  if (comma < 0) throw new Error('不是合法的 data URL')
+  const meta = dataUrl.slice(0, comma)
+  const payload = dataUrl.slice(comma + 1)
+  if (!/;base64$/i.test(meta)) {
+    return decodeURIComponent(payload)
+  }
+  const binary = atob(payload)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return new TextDecoder('utf-8').decode(bytes)
+}
+
 export function HermesPreviewPane({ filePath }: { filePath: string }) {
   const name = filePath.split('/').pop() ?? filePath
   const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : ''
@@ -31,15 +51,21 @@ export function HermesPreviewPane({ filePath }: { filePath: string }) {
         if (dead) return
         if (IMAGE_EXTS.has(ext)) {
           setState({ kind: 'image', url: dataUrl })
-        } else if (HTML_EXTS.has(ext)) {
-          const res = await fetch(dataUrl)
-          setState({ kind: 'html', html: await res.text() })
         } else {
-          const res = await fetch(dataUrl)
-          const text = await res.text()
+          // 文本一律从 data URL **本地解码**，不走 `fetch(dataUrl)`。
+          // 2026-11-27 用户实报「点文件后面板显示文件读取失败：Failed to fetch」：
+          // WebView2 对 data: URL 的 fetch 在部分长度/编码下直接 reject
+          // （CSP 与 URL 解析都可能参与），而这里的数据本来就已经在手上了，
+          // 再绕一圈网络栈只会多一个失败点。
+          const text = decodeDataUrlText(dataUrl)
           if (dead) return
-          if (text.includes('\u0000')) setState({ kind: 'binary' })
-          else setState({ kind: 'text', text })
+          if (HTML_EXTS.has(ext)) {
+            setState({ kind: 'html', html: text })
+          } else if (text.includes('\u0000')) {
+            setState({ kind: 'binary' })
+          } else {
+            setState({ kind: 'text', text })
+          }
         }
       } catch (error) {
         // 禁止兜底：读失败 ≠ 二进制，错误原文可见（此前误标成"二进制文件"）。
@@ -65,6 +91,8 @@ export function HermesPreviewPane({ filePath }: { filePath: string }) {
         {state.kind === 'image' && <img alt={name} className="max-w-full" src={state.url} />}
         {state.kind === 'html' && (
           <iframe
+            // 沙箱文档用自己的默认底色（白）——显式给白底是刻意的：
+            // 无样式的用户 HTML 在深色主题下若不铺白底会变成黑底黑字。
             className="h-full min-h-0 w-full border-0 bg-white"
             sandbox=""
             srcDoc={state.html}

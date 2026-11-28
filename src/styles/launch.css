@@ -23,11 +23,22 @@
   opacity: 0;
 }
 
+/* 品牌行（用户 2026-11-27：logo 放在文字左边）：logo 与粒子字标同排居中。
+   word-box 是粒子画布的宿主，横向要给足宽度（字标是 canvas 自适应宽度）。 */
+.launch-overlay__brand-row {
+  align-items: center;
+  display: flex;
+  gap: clamp(6px, 1.2vw, 14px);
+  justify-content: center;
+  width: 100%;
+}
+
 /* 品牌基座 = 左栏真实品牌几何：logo 与文字在接力末态与 `.rail-logo-mark` /
    `.rail-logo-word` 完全重合（字号/字重/字距/颜色逐项取同一批令牌）。 */
 .launch-overlay__brand {
   align-items: center;
   display: flex;
+  flex: none;
   justify-content: center;
 }
 
@@ -46,10 +57,12 @@
 .launch-overlay__word-box {
   align-items: center;
   display: flex;
-  height: clamp(180px, 30vh, 300px);
+  /* 并排后宽度由 brand-row 分配；高度只做上下限，不再吃满整块。 */
+  height: clamp(96px, 18vh, 190px);
   justify-content: center;
+  min-width: 0;
   position: relative;
-  width: 100%;
+  width: min(560px, 72vw);
 }
 
 .launch-overlay__particles {

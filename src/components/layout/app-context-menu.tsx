@@ -42,8 +42,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { supportsMultipleWindows } from '@tauri-apps/api/app'
 import { createStore, useStore } from 'zustand'
 
-// beui ContextMenu（2026-10-26 统一弹层）：右键菜单不再用 Radix DropdownMenu
-// + CSS 缩放，改用与模型选择器同源的 beui 组件族（goo morph 观感一致）。
+// motion ContextMenu（2026-10-26 统一弹层）：右键菜单不再用 Radix DropdownMenu
+// + CSS 缩放，改用与模型选择器同源的 motion 组件族。
 import {
   ContextMenu,
   ContextMenuContent,
@@ -542,8 +542,8 @@ const SettingsHost: FC = () => {
 // 视觉 = 工程现役菜单族（thread-list.aui.tsx VIEW_MENU_* 同令牌）：w-56 是
 // hermes app 菜单的内容宽（app-context-menu.tsx:704）。
 // 去描边（用户 2026-10-14 全局去描边）：菜单不留描边线，层次由 shadow-(--shadow-pop) 承担。
-// **进出场动画由 beui ContextMenu 自带**（goo morph，2026-10-26 换组件后
-// 这里不再需要 tw-animate 的 animate-in/zoom-in 类——那套只是 CSS 缩放，
+// **进出场动画由 motion ContextMenu 自带**（tw-animate 默认 fade+zoom，2026-10-26
+// 换组件后这里不再需要自己写 animate-in/zoom-in 类——那套只是 CSS 缩放，
 // 与输入框模型选择器的观感不一致，用户："右键弹窗的效果完全不一样"）。
 const APP_MENU_CONTENT_CLASS = 'w-56'
 const APP_MENU_ITEM_CLASS = 'gap-2'
@@ -676,11 +676,11 @@ export function AppContextMenu() {
   // ── beui ContextMenu（2026-10-26）────────────────────────────────
   //
   // 用户："为什么不能用 beui 的组件，做成令牌，统一调用，而是要一个一个的改"。
-  // 正确做法 = **用树里已有的 beui ContextMenu**
+  // 正确做法 = **用树里已有的 motion ContextMenu**
   // （`@/components/motion/context-menu`，含 Trigger/Content/Item/Separator
   // 全套），它天生为右键设计：`openAt(point, modality)` 直接接受鼠标坐标，
-  // 自带 goo morph、viewport 钳制、键盘导航与 typeahead——与模型选择器
-  // （beui Popover）同一套观感。
+  // 自带 viewport 钳制、键盘导航与 typeahead——与模型选择器
+  // （motion Popover）同一套观感。
   //
   // 受控语义：`open` 由 store 驱动；关闭走 `onOpenChange(false)`。
   // 落点由 store 的 x/y 提供（main.tsx 的 capture 监听解析后写入）。

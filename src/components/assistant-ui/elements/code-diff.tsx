@@ -40,7 +40,13 @@ export function CodeDiff({
       data-slot="code-diff"
       className={cn(
         paper,
-        "w-full max-w-md overflow-hidden rounded-2xl font-mono text-xs",
+        // 2026-11-27 用户：「现在对话中显示的代码修改，Reviewable diff 等高亮的
+        // 卡片组件不舒服，和 ass 的不太一样」。对齐 ass 官方 code-diff：
+        //   · 宽度不再卡 max-w-md（512px）——长行在窄卡里被挤成横滚条；
+        //     改成与消息正文同宽（max-w-none + w-full）；
+        //   · 圆角 2xl → xl（与官方卡片一致，不再“胶囊感”）；
+        //   · 去掉逐行 animationDelay 递增（长 diff 会逐行闪现，观感跳）。
+        "w-full max-w-none overflow-hidden rounded-xl font-mono text-xs",
         className,
       )}
 
@@ -61,14 +67,13 @@ export function CodeDiff({
             <div
               key={`${cycle}-${i}-${line.text}`}
               className={cn(
-                "fade-in animate-in fill-mode-both flex px-4 py-0.5 leading-relaxed whitespace-pre duration-300",
+                "flex px-4 py-0.5 leading-relaxed whitespace-pre",
                 line.kind === "context" && "text-foreground/45",
                 line.kind === "added" &&
                   "bg-emerald-500/10 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
                 line.kind === "removed" &&
                   "bg-red-500/10 text-red-700 dark:text-red-300",
               )}
-              style={{ animationDelay: `${i * 60}ms` }}
             >
               <span className="w-4 shrink-0 select-none">
                 {GUTTER[line.kind]}

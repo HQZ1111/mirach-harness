@@ -15,6 +15,7 @@ const ctx = (): TurnContext => ({
   error: null,
   usage: null,
   compaction: null,
+  providerRetry: null,
   interrupted: false,
 })
 
@@ -448,6 +449,59 @@ describe('compaction banner state (CUSTOM name=compaction)', () => {
   it('compaction non-object value is ignored', () => {
     const c = send(ctx(), 'CUSTOM', { name: 'compaction', value: 'reset' })
     expect(c.compaction).toBeNull()
+  })
+})
+
+describe('provider retry state (CUSTOM name=provider_retry)', () => {
+  it('records attempt / maxRetries / delayMs / error on a retry event', () => {
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'CUSTOM', {
+      name: 'provider_retry',
+      value: { attempt: 2, maxRetries: 10, delayMs: 4000, error: '502 Bad Gateway' },
+    })
+    expect(c.providerRetry).toMatchObject({
+      attempt: 2,
+      maxRetries: 10,
+      delayMs: 4000,
+      error: '502 Bad Gateway',
+    })
+    // scheduledAt 是收到事件的本机时刻（UI 倒计时的基准）
+    expect(typeof c.providerRetry?.scheduledAt).toBe('number')
+  })
+
+  it('is cleared when the run finishes (no stale "retrying" row in the next run)', () => {
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'CUSTOM', {
+      name: 'provider_retry',
+      value: { attempt: 1, maxRetries: 3, delayMs: 1000, error: 'overloaded' },
+    })
+    expect(c.providerRetry).not.toBeNull()
+    c = send(c, 'RUN_FINISHED', { runId: 'r1', usage: null })
+    expect(c.providerRetry).toBeNull()
+  })
+
+  it('is cleared when the run errors', () => {
+    let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+    c = send(c, 'CUSTOM', {
+      name: 'provider_retry',
+      value: { attempt: 1, maxRetries: 3, delayMs: 1000, error: 'overloaded' },
+    })
+    c = send(c, 'RUN_ERROR', { message: '502 Bad Gateway' })
+    expect(c.providerRetry).toBeNull()
+    expect(c.error).toBe('502 Bad Gateway')
+  })
+
+  it('a malformed event is dropped with a visible error (fail loud)', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      let c = send(ctx(), 'RUN_STARTED', { runId: 'r1' })
+      const before = c.providerRetry
+      c = send(c, 'CUSTOM', { name: 'provider_retry', value: { attempt: 1 } })
+      expect(c.providerRetry).toBe(before)
+      expect(err).toHaveBeenCalled()
+    } finally {
+      err.mockRestore()
+    }
   })
 })
 

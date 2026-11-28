@@ -553,8 +553,8 @@ const useThreadDisplay = (searchQuery: string) => {
 // ── 侧栏选项钮（hermes SidebarFilterMenu 对齐：段头 + 右侧的常驻视图
 //    选项菜单——只搬数据面支持的选项；其余 hermes 选项的取舍见交接报告）──
 
-/** 侧栏选项菜单的外壳类：底色/圆角/投影/进出场**全部由 beui
- *  ContextMenu 的 goo 表面提供**（2026-10-26 归拢——与右键菜单、会话行
+/** 侧栏选项菜单的外壳类：底色/圆角/投影/进出场**全部由 motion
+ *  ContextMenu 表面提供**（2026-10-26 归拢——与右键菜单、会话行
  *  ⋯ 菜单、模型选择器同一套动效），这里只留最小宽度。 */
 const VIEW_MENU_CONTENT_CLASS = "min-w-52";
 
@@ -1689,8 +1689,8 @@ function disarmMarquee(event: ReactPointerEvent<HTMLElement>) {
   delete event.currentTarget.dataset.marquee;
 }
 
-// 会话行菜单（⋯ 与右键共用一份）：底色/圆角/投影/进出场**全部由 beui
-// ContextMenu 的 goo 表面提供**（2026-10-26 归拢——与全局右键菜单、模型
+// 会话行菜单（⋯ 与右键共用一份）：底色/圆角/投影/进出场**全部由 motion
+// ContextMenu 表面提供**（2026-10-26 归拢——与全局右键菜单、模型
 // 选择器同一套动效），这里只留宽度与项文字色。
 const MENU_CONTENT_CLASS = "w-40";
 

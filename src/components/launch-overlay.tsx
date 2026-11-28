@@ -223,16 +223,19 @@ export function LaunchOverlay() {
       <div className="launch-overlay__bg" />
 
       <div className="relative flex w-[min(760px,86vw)] flex-col items-center gap-2">
-        <div className="launch-overlay__brand">
-          <img
-            alt="Mirach"
-            className="launch-overlay__logo"
-            ref={logoRef}
-            src="/brand/logo.png"
-          />
-        </div>
+        {/* 品牌行：logo 在左、文字在右（用户 2026-11-27 定稿）。
+            两个 ref 仍是独立元素——接力 FLIP 逐个量测/平移，与并排布局无关。 */}
+        <div className="launch-overlay__brand-row">
+          <div className="launch-overlay__brand">
+            <img
+              alt="Mirach"
+              className="launch-overlay__logo"
+              ref={logoRef}
+              src="/brand/logo.png"
+            />
+          </div>
 
-        <div className="launch-overlay__word-box">
+          <div className="launch-overlay__word-box">
           <div className="launch-overlay__particles">
             <ParticleText
               clickBurst={false}
@@ -261,6 +264,7 @@ export function LaunchOverlay() {
           <span className="launch-overlay__word" ref={wordRef}>
             Mirach
           </span>
+          </div>
         </div>
 
         {failed ? (

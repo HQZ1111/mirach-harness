@@ -109,9 +109,14 @@ export function applyMention(value: string, name: string): string {
   return value.replace(/@[\w]*$/, `@${name} `);
 }
 
-export function Composer({ className, ...props }: ComponentProps<"div">) {
+export function Composer({ className, ...props }: ComponentProps<"form">) {
   return (
-    <div
+    // 必须是 `<form>`：assistant-ui 的 ComposerPrimitive.Input 在 Enter 提交时
+    // 走 `textarea.closest('form').requestSubmit()`（ComposerInput.tsx）。
+    // 此前这里渲染 `<div>`，`asChild` 把 form 的 props 合并到 div 上→DOM 里
+    // 没有 form → `closest('form')` 返回 null → **回车静默不发送**
+    // （2026-11-27 用户实报「输入框的发送按钮点击回车键不能直接发送」）。
+    <form
       data-slot="composer"
       /* 宽度容器（2026-11-15）：ZCode `chat-composer-region` 同款
          `@container/composer`——工具栏的折叠断点查询的是**输入卡片自己的

@@ -74,9 +74,9 @@ export const TabOverviewButton: FC<IDockviewHeaderActionsProps> = (props) => {
   const activeId = props.activePanel?.id
 
   return (
-    // 2026-10-16 换 beUI goo 弹层（用户定稿"所有 panel 型浮层"）——原
-    // Radix Popover 的 API 面对位：align/side/sideOffset 是 goo 根属性；
-    // 进出场动画由 goo 的弹簧 morph 自带（不再需要 animate-in 类）。
+    // 2026-10-16 换 motion Popover 弹层（用户定稿"所有 panel 型浮层"）——
+    // align/side/sideOffset 是 Popover 根属性；
+    // 进出场动画由 tw-animate 默认 fade+zoom 自带（不再需要 animate-in 类）。
     //
     // **`align="end"`**（2026-11-01 二次修正，用户："弹窗的位置怎么不在
     // 按钮上"）。
@@ -89,7 +89,7 @@ export const TabOverviewButton: FC<IDockviewHeaderActionsProps> = (props) => {
     // `end` = 面板**右缘**对齐按钮右缘、向左展开——按钮在屏幕右侧区域时
     // 这是唯一不越界的方向，且视觉上"从按钮长出来"的锚点感更强。
     //
-    // goo 已退役（2026-11-22）：面板 = 默认 fade+zoom 的独立圆角矩形 +
+    // 2026-11-22 起：面板 = 默认 fade+zoom 的独立圆角矩形 +
     // 投影，按钮保持原样（无副本、无脖子、无阴影）。
     <Popover
       align="end"

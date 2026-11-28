@@ -36,7 +36,7 @@ const NEW_TAB_OPTIONS: readonly { kind: OpenPageKind; label: string; icon: typeo
   { kind: 'radio', label: '电台', icon: RadioIcon },
 ]
 
-// 菜单观感由 beui ContextMenu 的 goo 表面提供（2026-10-26 归拢），这里只留宽度。
+// 菜单观感由 motion ContextMenu 提供（2026-10-26 归拢），这里只留宽度。
 const MENU_CONTENT_CLASS = 'min-w-36'
 
 export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
@@ -49,7 +49,7 @@ export const TabStripNewButton: FC<IDockviewHeaderActionsProps> = (props) => {
   const options = radioEnabled ? NEW_TAB_OPTIONS : NEW_TAB_OPTIONS.filter((option) => option.kind !== 'radio')
 
   return (
-    // goo 已退役（2026-11-22）：面板 = 默认 fade+zoom 的独立圆角矩形 +
+    // 2026-11-22 起：面板 = 默认 fade+zoom 的独立圆角矩形 +
     // 投影，触发钮不再有副本/脖子/阴影。
     <ContextMenu align="start" anchor="trigger" side="bottom" sideOffset={6}>
       {/* 悬停提示 = beUI Tooltip（2026-10-16：原生 title= 无动画——用户点名

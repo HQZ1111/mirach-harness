@@ -476,16 +476,20 @@ function ReasoningText({
         // ZCode 实测：内容容器 pt-3、正文 14/21（text-ui-base 继承行高）；
         // 旧值 leading-relaxed（22.75px）+ pt-2/pb-2 比 ZCode 松。
         "aui-reasoning-text relative z-0 max-h-[240px] overflow-y-auto pe-1 ps-6 pt-3 text-[14px] leading-[21px] text-pretty",
-        "transform-gpu transition-[transform,opacity] ease-[cubic-bezier(0.32,0.72,0,1)]",
         "motion-reduce:animate-none",
+        // 开合动效（2026-11-27 用户：「折叠的时候内容会从右边跳闪，收起的
+        // 时候也会跳一下，思考内容也会从右边跳闪」）。
+        //
+        // 旧实现同时叠了 slide + blur：
+        //   · `blur-in/out-[2px]` —— 在滚动容器里逐帧重算滤镜，重绘闪烁；
+        //   · `slide-in/out-from/to-top-4` —— 容器是 `overflow-y-auto`，
+        //     位移会把内容顶出/拽入视口，表现为“跳一下”。
+        // 两者留一个就够：只保留纯 opacity 淡入淡出（不位移、不滤镜），
+        // 折叠观感与全应用其它弹层一致，也不会在滚动容器里抖动。
         "group-data-open/collapsible-content:animate-in",
         "group-data-closed/collapsible-content:animate-out",
         "group-data-open/collapsible-content:fade-in-0",
         "group-data-closed/collapsible-content:fade-out-0",
-        "group-data-open/collapsible-content:slide-in-from-top-4",
-        "group-data-closed/collapsible-content:slide-out-to-top-4",
-        "group-data-open/collapsible-content:blur-in-[2px]",
-        "group-data-closed/collapsible-content:blur-out-[2px]",
         "group-data-open/collapsible-content:animation-duration-(--animation-duration)",
         "group-data-closed/collapsible-content:animation-duration-(--animation-duration)",
         className,

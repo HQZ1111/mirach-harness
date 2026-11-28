@@ -50,11 +50,13 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
       error: null,
       usage: null,
       compaction: null,
+      providerRetry: null,
       interrupted: false,
     } as TurnContext,
   })
   const compaction = useSelector(actorRef, (s) => s.context.compaction)
   const interrupted = useSelector(actorRef, (s) => s.context.interrupted)
+  const providerRetry = useSelector(actorRef, (s) => s.context.providerRetry)
   const messages = useSelector(actorRef, (s) => s.context.messages)
   const isRunning = useSelector(actorRef, (s) => s.matches('streaming'))
   // 本窗格的 RUN_ERROR（主 runtime 经全局 errorBridge 显示；分栏没有全局
@@ -215,7 +217,7 @@ export function useThreadChatRuntime({ threadId, sessionPath }: ThreadChatRuntim
       ...(speechAdapter ? { speech: speechAdapter } : {}),
     },
     convertMessage: convertTurnMessage,
-    state: { compaction, interrupted },
+    state: { compaction, interrupted, providerRetry },
     messages,
     isRunning,
     onNew: onNew as (m: AppendMessage) => Promise<void>,

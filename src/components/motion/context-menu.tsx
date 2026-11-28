@@ -79,9 +79,6 @@ interface ContextMenuContextValue {
   align: Align;
   sideOffset: number;
   panelRadius: number;
-  gooStrength: number;
-  /** 保留字段（历史 goo 粘性合并开关，2026-11-22 起无效果）。 */
-  goo: boolean;
   triggerRef: React.MutableRefObject<HTMLElement | null>;
   contentRef: React.MutableRefObject<HTMLDivElement | null>;
   /**
@@ -89,7 +86,7 @@ interface ContextMenuContextValue {
    *
    * 每次开菜单时重新量一次并写进 state —— 布局可能已经变了（侧栏滚动、
    * 窗口 resize），用 ref 读会让几何停在旧值。`trigger` 形态下这个矩形就是
-   * goo 的锚点。
+   * 面板的锚点。
    */
   triggerRect: { left: number; top: number; width: number; height: number };
   activeId: string | null;
@@ -168,14 +165,10 @@ export interface ContextMenuProps {
   side?: Side;
   /** 沿锚点边的对齐。默认 start。 */
   align?: Align;
-  /** 锚点与面板之间的间隙（= goo 脖子的长度）。默认 6。 */
+  /** 锚点与面板之间的间隙（触发钮与面板的距离）。默认 6。 */
   sideOffset?: number;
   /** 面板圆角。默认 12。 */
   panelRadius?: number;
-  /** 保留 prop（历史 goo 滤镜参数，2026-11-22 起无效果）。 */
-  gooStrength?: number;
-  /** 保留 prop（历史 goo 粘性合并开关，2026-11-22 起无效果）。 */
-  goo?: boolean;
   /** 祖先菜单 id 链（子菜单内部用，宿主不必传）。 */
   ancestorIds?: string[];
   /** 根菜单关闭入口（子菜单内部用，宿主不必传）。 */
@@ -202,8 +195,6 @@ export function ContextMenu({
   align = "start",
   sideOffset = 6,
   panelRadius = 12,
-  gooStrength = 8,
-  goo = false,
   ancestorIds = [],
   anchorEl = null,
   rootClose: rootCloseProp,
@@ -388,8 +379,6 @@ export function ContextMenu({
       align,
       sideOffset,
       panelRadius,
-      gooStrength,
-      goo,
       triggerRef,
       contentRef,
       triggerRect,
@@ -415,8 +404,6 @@ export function ContextMenu({
       align,
       sideOffset,
       panelRadius,
-      gooStrength,
-      goo,
       triggerRect,
       activeId,
       openSubmenuId,
@@ -439,7 +426,7 @@ export interface ContextMenuTriggerProps {
 }
 
 /**
- * 锚点登记器（本地扩展，2026-10-26）：把触发元素登记为 goo 锚点 + 接管
+ * 锚点登记器（本地扩展，2026-10-26）：把触发元素登记为面板锚点 + 接管
  * 左键开合。
  *
  * 为什么需要它：`ContextMenuTrigger` 靠 `cloneElement` 往子元素上挂
@@ -1075,7 +1062,7 @@ export interface ContextMenuSubContentProps {
 }
 
 /**
- * 子菜单面板：一个**独立的** goo 菜单，锚点 = 父菜单里那一行 SubTrigger。
+ * 子菜单面板：一个**独立的**菜单，锚点 = 父菜单里那一行 SubTrigger。
  *
  * 复用 `ContextMenu`（anchor='trigger'）而不是另写一套渲染——这样三层
  * 菜单与右键菜单永远是同一份动效代码。父菜单的 `menuId` 进 `ancestorIds`，

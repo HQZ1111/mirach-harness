@@ -96,18 +96,47 @@ export interface TranscriptHydrator {
 /** 当前 runtime 的 actor 注册表（thread.aui 的「显示更早」经此提交补页）。 */
 let registeredActor: TranscriptHydrator | null = null
 
+/**
+ * 最近一次**发起**水合的目标会话（不是“已写入”的那个）。
+ *
+ * 为什么需要单独一个字段：`transcriptTailStore.sessionId` 是在 hydrate **写
+ * 完之后**才更新的，拿它做在途校验永远成立（它还没被改）——挡不住竞态。
+ *
+ * 竞态场景（2026-11-27 用户实报「切换会话后内容就没了，丢会话内容，切换
+ * 后又出现一部分」）：
+ *   1. 点会话 A → pi_open_session(A) 完成 → 发起 hydrateTranscriptTail(A)
+ *   2. 用户又点 B → pi_open_session(B) 插队执行（引擎单 handle）
+ *   3. A 的 pi_get_messages_page 返回时，引擎已经切到 B：拿到的其实是 **B 的
+ *      尾页**，却按 A 写进 actor → 新会话内容被旧请求覆盖/掺混。
+ *
+ * 守卫：每次发起时记下（会话 id + 序号），返回后比对——不是最新一次就把
+ * 结果丢掉，不写 actor、不写 store。
+ */
+let hydratingFor: { sessionId: string | null; seq: number } | null = null
+let hydrateSeq = 0
+
 export function registerTranscriptActor(actor: TranscriptHydrator): void {
   registeredActor = actor
 }
 
-/** 最新一页 -> actor HYDRATE（会话打开 / 分支切换 / fork 后重水合共用）。 */
+/** 最新一页 -> actor HYDRATE（会话打开 / 分支切换 / fork 后重水合共用）。
+ *
+ * 返回是否**真的写入**（false = 已被更新的切换取代，结果已丢弃）——调用方
+ * 据此决定要不要继续做后续动作（如滚动恢复），避免替别人的会话设滚动位。 */
 export async function hydrateTranscriptTail(
   actor: TranscriptHydrator,
   sessionId: string | null,
-): Promise<void> {
+): Promise<boolean> {
+  const mySeq = ++hydrateSeq
+  hydratingFor = { sessionId, seq: mySeq }
   const page = await invoke<MessagesPageWire>('pi_get_messages_page', {
     limit: TRANSCRIPT_PAGE_SIZE,
   })
+  // 在途期间又发起了新的切换 → 本次结果作废（不写 actor / 不写 store）。
+  // 注意：这是**正常**的取消路径（用户快速连点会话），不报错。
+  if (hydratingFor?.seq !== mySeq) {
+    return false
+  }
   const wire = Array.isArray(page?.messages) ? page.messages : []
   const messages = hydratePiMessages(wire, page?.entryIds)
   actor.send({
@@ -123,6 +152,7 @@ export async function hydrateTranscriptTail(
     pages: [{ messages: messages.length, firstEntryId: page?.entryIds?.[0] ?? null }],
     engineAttaching: false,
   })
+  return true
 }
 
 /** 组件订阅：引擎装配是否在途（composer 上方提示）。 */

@@ -16,7 +16,7 @@
  * voice-live-conversation.tsx（provider 内常驻），两个传输共用。
  */
 import { FC, useEffect, useRef, useState } from 'react'
-import { MicIcon, MicOffIcon, PhoneIcon, PhoneOffIcon, SquareIcon } from 'lucide-react'
+import { CircleAlertIcon, MicIcon, MicOffIcon, PhoneIcon, PhoneOffIcon, SquareIcon } from 'lucide-react'
 import { useAui } from '@assistant-ui/react'
 
 import { MossLiveSession } from '@/lib/moss-live'
@@ -249,15 +249,25 @@ export const VoiceLivePanel: FC = () => {
   }, [captions.length])
 
   if (!sessionUp) {
+    // 语音错误 = 卡片式错误面（用户 2026-11-27：「语音通话的错误提示能否也
+    // 按卡片的方式出现，不要出现在输入框的上面」）。
+    // 与全应用的 ErrorState 同一壳体（圆角卡片 + 图标 + 标题 + 详情 + 操作），
+    // 不再是贴着输入框的裸红条（旧实现 `data-stub="true"` 的细边 alert）。
     return error ? (
       <div
-        className="text-rose-600 dark:text-rose-400 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs dark:border-rose-800 dark:bg-rose-950/30"
-        data-stub="true"
+        data-slot="voice-live-error-card"
         role="alert"
+        className="border-destructive/30 bg-destructive/[0.06] flex w-full items-start gap-2.5 rounded-2xl border px-4 py-3 text-sm dark:bg-destructive/10"
       >
-        {error}
+        <CircleAlertIcon className="text-destructive/80 mt-0.5 size-[var(--size-icon-lg)] shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-destructive font-medium">语音通话失败</p>
+          <p className="text-destructive/70 mt-0.5 text-[13px] leading-snug wrap-anywhere">
+            {error}
+          </p>
+        </div>
         <button
-          className="ml-2 underline"
+          className="text-destructive hover:bg-destructive/10 shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors"
           onClick={() => voiceLiveStore.getState().setError(null)}
           type="button"
         >

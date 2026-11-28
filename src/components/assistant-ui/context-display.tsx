@@ -333,8 +333,29 @@ function RingVisual() {
 }
 
 function RingPercentLabel() {
-  const { percent } = useContextDisplay();
-  return <span className="font-mono tabular-nums">{Math.round(percent)}%</span>;
+  const { percent, usage } = useContextDisplay();
+  // 缓存命中率（2026-11-27 用户：「上下文按钮…连缓存命中率都没有，可以参考
+  // ZCode 补齐」）。口径：cachedInputTokens / inputTokens。两家 provider 对
+  // “cached 是否含于 input”定义不一，这里按 provider 报的原值相除（不做归一），
+  // 并在 tooltip 里把两个绝对值都写清楚。无数据时不编造。
+  const cached = usage?.cachedInputTokens ?? 0;
+  const input = usage?.inputTokens ?? 0;
+  const hitRate =
+    input > 0 && cached > 0 ? Math.min(100, Math.round((cached / input) * 100)) : null;
+  return (
+    <span className="flex items-baseline gap-1.5 font-mono tabular-nums">
+      <span>{Math.round(percent)}%</span>
+      {hitRate !== null && (
+        <span
+          data-slot="context-display-cache-rate"
+          className="text-muted-foreground/60"
+          title={`缓存命中 ${cached.toLocaleString()} / 输入 ${input.toLocaleString()} tokens`}
+        >
+          缓存 {hitRate}%
+        </span>
+      )}
+    </span>
+  );
 }
 const ContextDisplayRing: FC<PresetProps> = ({
   modelContextWindow,

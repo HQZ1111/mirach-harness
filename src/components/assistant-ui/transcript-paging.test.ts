@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 import {
+  hydrateTranscriptTail,
   loadOlderTranscript,
   registerTranscriptActor,
   releaseTranscriptHistory,
@@ -123,5 +124,62 @@ describe('transcript-paging retention', () => {
     expect(ok).toBe(false)
     expect(transcriptTailStore.getState().hasMore).toBe(false)
     error.mockRestore()
+  })
+})
+// ── 切换会话的 hydrate 归属守卫（2026-11-27 内容“丢失”回归）─────────────
+// 竞态：点 A → open(A) → hydrate(A) 发起；又点 B → 引擎切到 B；A 的响应回来
+// 时数据其实属于 B。旧实现会按 A 写进 actor，表现为「切换会话后内容错乱/
+// 丢失，再切一次又出来一部分」。
+describe('hydrateTranscriptTail 会话归属守卫', () => {
+  beforeEach(() => {
+    invokeMock.mockReset()
+    transcriptTailStore.setState({ sessionId: null, hasMore: false, loading: false })
+  })
+
+  it('被更新的切换取代时丢弃结果（不写 actor）', async () => {
+    const sends: unknown[] = []
+    const actor = {
+      send: (e: unknown) => sends.push(e),
+    } as unknown as Parameters<typeof hydrateTranscriptTail>[0]
+
+    // 第一次 hydrate 的 IPC 挂起，模拟"在途时用户又切了会话"
+    let releaseFirst: (v: unknown) => void = () => {}
+    const firstPending = new Promise((resolve) => {
+      releaseFirst = resolve
+    })
+    invokeMock.mockImplementationOnce(() => firstPending)
+
+    const firstCall = hydrateTranscriptTail(actor, 'session-A')
+
+    // 第二次 hydrate（更新的切换）先完成
+    invokeMock.mockImplementationOnce(async () => wirePage(1, ['e1'], false))
+    const secondOk = await hydrateTranscriptTail(actor, 'session-B')
+
+    // 迟到的第一次响应回来 → 必须被判定为过期
+    releaseFirst(wirePage(9, ['x1'], false))
+    const firstOk = await firstCall
+
+    expect(secondOk).toBe(true)
+    expect(firstOk).toBe(false) // 过期 → 丢弃
+    // actor 只应收到第二次那次 HYDRATE（一次，不是两次）
+    const hydrates = sends.filter(
+      (e) => (e as { type?: string }).type === 'HYDRATE',
+    )
+    expect(hydrates).toHaveLength(1)
+    // store 的 sessionId 属于最后一次切换
+    expect(transcriptTailStore.getState().sessionId).toBe('session-B')
+  })
+
+  it('没有并发切换时正常写入并返回 true', async () => {
+    const sends: unknown[] = []
+    const actor = {
+      send: (e: unknown) => sends.push(e),
+    } as unknown as Parameters<typeof hydrateTranscriptTail>[0]
+    invokeMock.mockImplementationOnce(async () => wirePage(2, ['a1', 'a2'], false))
+
+    const ok = await hydrateTranscriptTail(actor, 'session-1')
+    expect(ok).toBe(true)
+    expect(transcriptTailStore.getState().sessionId).toBe('session-1')
+    expect(sends.filter((e) => (e as { type?: string }).type === 'HYDRATE')).toHaveLength(1)
   })
 })

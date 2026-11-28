@@ -1988,3 +1988,31 @@ html:not([data-maximized='true']) .aui-width-handle {
   opacity: 0.8;
   width: 24px;
 }
+
+/* ── 思考区上下渐隐（2026-11-27 用户实报「思考上方遮罩在其他主题背景下还是
+   白色」）────────────────────────────────────────────────────────────
+   elements/reasoning.tsx 的 overlay 用 `var(--color-background)`（= tailwind
+   的 `--background`）。该令牌只在 `.dark` 时才翻成深色；用户切换**皮肤/主题
+   色**（applyHostTheme 写的是 `--surface-base` 体系）时它仍是 `#fff`，于是
+   渐隐层在有色背景下显出一条白边。
+
+   这里让渐隐层改用宿主真正的面板底色：`--surface-base` 跟随皮肤、也跟随
+   暗色，语义与对话区实际背景一致。上游组件不改，只覆盖颜色。
+   用 `!important` 压过 Tailwind 的 `bg-[linear-gradient(...)]` 工具类
+   （两者同为单类特异性，而工具类在 tailwind.css 中更晚注入）。 */
+.aui-reasoning-fade {
+  background: linear-gradient(
+    to bottom,
+    var(--surface-base, var(--color-background)),
+    transparent
+  ) !important;
+}
+
+/* 面板在容器底部的那一支（reasoning.tsx 的 side="bottom"）向上渐隐。 */
+.aui-reasoning-fade.absolute.bottom-0 {
+  background: linear-gradient(
+    to top,
+    var(--surface-base, var(--color-background)),
+    transparent
+  ) !important;
+}
