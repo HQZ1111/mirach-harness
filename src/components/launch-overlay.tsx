@@ -111,6 +111,11 @@ export function LaunchOverlay() {
     if (!textComplete || wordInkHeight !== null) return
     let timer: number | null = null
     let stopped = false
+    // 量测**预算**：最多尝试 10 次（~2.5s）。canvas 一直量不到墨迹（GPU
+    // 丢了 2D 上下文 / 画布被其它层替换 / 极小窗）也必须放行——测量失败设
+    // -1，接力闸门按兜底尺寸继续，**绝不能让启动页等不到闸门**（那才是
+    // "软件卡在启动页"）。同理：一直量不到 inkCss>=24 也算失败。
+    let attempts = 0
     const sample = () => {
       if (stopped) return
       try {
@@ -167,6 +172,16 @@ export function LaunchOverlay() {
         // 读像素失败（context 丢失/CSP）：保留 CSS 兜底尺寸，不再轮询。
         // -1 = 已尝试但失败：接力闸门不能因此永远等（不等于 null 即放行）。
         console.error('[launch] 字标墨迹量测失败——logo 使用兜底尺寸', e)
+        stopped = true
+        setWordInkHeight(-1)
+        return
+      }
+      attempts += 1
+      if (attempts >= 10) {
+        // 量测预算：canvas 一直量不到墨迹（GPU 丢了 2D 上下文 / 画布尺寸
+        // 为 0 / 极小窗）也必须放行——-1 = 已尝试但失败，接力闸门按兜底
+        // 尺寸继续，**绝不能让启动页等不到闸门**（那才是"软件卡在启动页"）。
+        console.error('[launch] 字标墨迹量测超预算（10 次未得）——使用兜底尺寸放行')
         stopped = true
         setWordInkHeight(-1)
         return

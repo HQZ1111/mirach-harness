@@ -16,10 +16,19 @@
 //
 // 旧的 shiki-block.tsx 缓存/分块管线不再参与聊天代码块（文件保留：预览
 // 面板等调用方仍可复用）；宿主不再维护第二套高亮实现。
-import { type FC, useMemo } from 'react'
+import { type FC, lazy, Suspense, useMemo } from 'react'
 import type { SyntaxHighlighterProps } from '@assistant-ui/react-markdown'
 
-import { SyntaxHighlighter as AuiSyntaxHighlighter } from '@/components/assistant-ui/elements/shiki-highlighter'
+// **懒加载**（2026-11-28 实锤：elements 的 shiki-highlighter 模块级
+//  会把全部语言语法 + 主题
+// 打进主包，首屏多解析数 MB、基线内存抬高——"启动卡"的观感来源之一）。
+// lazy 后这个 chunk 只有第一个围栏代码块出现才加载；加载期间用与高亮输出
+// 几何同高的纯文本上画（不闪空白）。
+const AuiSyntaxHighlighter = lazy(() =>
+  import('@/components/assistant-ui/elements/shiki-highlighter').then((m) => ({
+    default: m.SyntaxHighlighter,
+  })),
+)
 import { MermaidDiagram } from '@/components/assistant-ui/elements/mermaid-diagram'
 import { CodeCard, CodeCardBody, CodeCopyButton } from './code-card'
 import { ExpandableBlock } from './expandable-block'
@@ -83,11 +92,13 @@ export const SyntaxHighlighter: FC<SyntaxHighlighterProps> = ({ language, code }
             // （CodeCard/CodeCardBody 的令牌面），这里用 twMerge 把它压回
             // 透明（同名变体后者胜出）：代码块在消息里读作一块底色板，
             // 不是"卡里再套一张卡"。
-            <AuiSyntaxHighlighter
-              className="[&_pre]:m-0! [&_pre]:rounded-none! [&_pre]:border-0! [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:text-[length:var(--code-font-size)]!"
-              code={content}
-              language={language || 'text'}
-            />
+            <Suspense fallback={<PlainCode code={content} />}>
+              <AuiSyntaxHighlighter
+                className="[&_pre]:m-0! [&_pre]:rounded-none! [&_pre]:border-0! [&_pre]:bg-transparent! [&_pre]:p-3 [&_pre]:text-[length:var(--code-font-size)]!"
+                code={content}
+                language={language || 'text'}
+              />
+            </Suspense>
           )}
         </ExpandableBlock>
       </CodeCardBody>
