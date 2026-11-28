@@ -5666,12 +5666,18 @@ ellipsis），已被本节的逐段移植替换。
   耗尽 latch + 错误条"点会话行手动重试"；手动点行清 latch 重计数（hermes
   resume-latches 语义：只有显式请求能清）。
 
+### 0.1.9 追加（aa9a366，同批全做完）
+- 删除 tombstone（session-catalog，60s TTL + 失败回滚）✅
+- drain 失败预算（MAX 4，停放 + 成功重新武装）✅
+- not-found 快速失败（不空转退避重试）✅
+- profile 切换清理（非焦点 actor/流/工作态作废）✅
+
 ### 还没做（下一批，按 hermes 对照清单排序）
-- 删除/归档 tombstone + generation（防刷新复活）；`session-catalog` 落点。
-- 水合带 `lastEventId` 水位裁剪 + entryId 持久身份进 `pi-hydrate`
-  （本轮只在 turn-actor 层按 id/时间戳对账）。
-- per-session 状态灯（working/attention/unread 合并优先级）统一 sidebar/tab。
-- 队列 drain 失败预算 / paused-replies；not-found 结构化错误码（Rust）；
-  多窗单写者（Web Locks，若启用多窗）；profile 切换 wipe；owner 路由。
-- aui 0.15.38 升级 + 表情反应等 WIP 仍在 stash（`wip-after-0105`），
-  独立批次处理。
+- 水合 `lastEventId` 水位裁剪（entryId 持久身份本轮已生效：TurnMessage.id
+  = pi entryId；turn-actor 按 id/时间戳对账）。
+- per-session 状态灯（needs-input 优先级）——需 per-session 审批注册表，
+  与"后台审批"同批。
+- 多窗单写者（Web Locks；宿主当前只开设置窗，聊天多窗未启用）。
+- owner 路由（多连接 dispatcher；宿主单引擎，风险低排后）。
+- 滚动位接线验证（thread-scroll-store 恢复请求的视口消费者）。
+- aui 0.15.38 升级 + 表情反应等 WIP 仍在 stash（`wip-after-0105`）。
