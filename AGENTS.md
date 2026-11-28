@@ -5789,3 +5789,11 @@ ellipsis），已被本节的逐段移植替换。
 - `session-work-store.test` 更新（按会话独立）；`thread-list` 工作点双源。
 - 死代码：`hasNonCollapsedSelection` 删除（换成 `foreignNativeDrag` 分类）；
   `retire_previous` 仅剩 side/兜底路径。
+
+### 补记：Tailwind 任意值里的 calc（2026-11-28 实锤）
+
+- `max-w-[max(330px,calc(100cqw-176px))]` 是**无效 CSS**（calc 的减号两侧
+  必须有空格），浏览器整条声明丢弃 → 群聊宽度约束静默消失（用户"左右间距
+  限制也没有"的成因之一）。Tailwind 任意值写法 = 下划线代空格：
+  `calc(100cqw_-_176px)`。同类值改完记得在 dist CSS 里 grep 一次确认规则
+  真的产出。
